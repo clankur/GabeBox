@@ -31,6 +31,7 @@
 #include "pipe-protocol.h"
 #include "SteamSdlSurface.h"
 #include "SteamCloudRestore.h"
+#include "steam-session-cache-policy.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -528,10 +529,14 @@ struct SteamSignInHandles {
     DownloadRetry downloadRetry = DownloadRetry::NotAttempted;
     std::uint64_t launchCall = 0;
 
-    void PumpCallbacks() const {
+    void PumpCallbacks(bool *credentialRejected = nullptr) const {
         for (unsigned i = 0; i < 32; ++i) {
             SteamCallback event{};
             if (!getCallback(pipe, &event)) break;
+            if (credentialRejected && steam_session_cache::credentialRejected(
+                    user, event.user, event.message, event.data, event.length)) {
+                *credentialRejected = true;
+            }
             freeCallback(pipe);
         }
     }
@@ -694,10 +699,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     auto idText = winrt::to_string(accountId);
     std::uint64_t requestedId = 0;
     auto parsed = std::from_chars(idText.data(), idText.data() + idText.size(), requestedId);
-    if (parsed.ec != std::errc{} || parsed.ptr != idText.data() + idText.size() || !requestedId ||
-            account.empty() || account.size() > 64 || approval.empty() || approval.size() > 8192 ||
-            !(co_await IsPinnedSteamImage())) {
+    const bool invalidApproval = parsed.ec != std::errc{} || parsed.ptr != idText.data() + idText.size() ||
+        !requestedId || account.empty() || account.size() > 64 || approval.empty() || approval.size() > 8192;
+    if (invalidApproval || !(co_await IsPinnedSteamImage())) {
         report += L"steam_signin=input-or-image-error\r\n";
+        if (restoring && invalidApproval) co_await ForgetSteamSession();
         co_await save(complete);
         co_return winrt::hstring{};
     }
@@ -772,9 +778,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     ULONGLONG deadline = GetTickCount64() + (restoring ? 20000 : 60000);
     bool identityMatches = false;
     bool wrongAccount = false;
+    bool credentialRejected = false;
     std::int32_t count = 0;
     while (GetTickCount64() < deadline) {
-        handles.PumpCallbacks();
+        handles.PumpCallbacks(&credentialRejected);
+        if (credentialRejected) break;
         if (loggedOn(clientUser) && connected(clientUser)) {
             std::uint64_t actualId = 0;
             reinterpret_cast<SteamGetId>(methods[10])(clientUser, &actualId);
@@ -783,6 +791,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
                 break;
             }
             if (actualId == requestedId) {
+                // A fresh QR approval now owns this session. Even when the new
+                // user declines Remember or title metadata later times out,
+                // a future launch must not restore the previous QR approval.
+                if (!restoring && !identityMatches && !(co_await ForgetSteamSession())) {
+                    report += L"steam_session_cache=clear-unconfirmed\r\n";
+                    co_await save(complete);
+                    co_return winrt::hstring{};
+                }
                 identityMatches = true;
                 count = reinterpret_cast<SteamListApps>(methods[183])(
                     clientUser, apps.data(), static_cast<std::int32_t>(apps.size()), true);
@@ -793,8 +809,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         co_await caller;
     }
 
-    if (wrongAccount) {
-        report += L"steam_signin=account-mismatch\r\n";
+    if (wrongAccount || credentialRejected) {
+        report += wrongAccount ? L"steam_signin=account-mismatch\r\n" : L"steam_signin=credential-rejected\r\n";
+        if (restoring) co_await ForgetSteamSession();
     } else if (identityMatches) {
         report += L"steam_signin=authenticated\r\nsteam_library_count=" + std::to_wstring(count) + L"\r\n";
         const bool verified = count > 0 && count < static_cast<std::int32_t>(apps.size());
@@ -802,7 +819,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     } else {
         report += L"steam_signin=timeout\r\n";
     }
-    if (wrongAccount || !identityMatches || count <= 0 || count >= static_cast<std::int32_t>(apps.size())) {
+    if (wrongAccount || credentialRejected || !identityMatches || count <= 0 || count >= static_cast<std::int32_t>(apps.size())) {
         co_await save(complete);
         co_return winrt::hstring{};
     }
@@ -885,6 +902,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSi
     using namespace winrt::Windows::Storage;
     using namespace winrt::Windows::Storage::Streams;
     bool optedIn = false;
+    bool recordLoaded = false;
+    bool invalidRecord = false;
     try {
         auto data = ApplicationData::Current();
         auto values = data.LocalSettings().Values();
@@ -925,11 +944,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSi
             account = winrt::hstring(nextField());
             approval = winrt::hstring(fields);
         }
+        recordLoaded = true;
         auto payload = co_await SteamSignIn(reportFile, prefix, std::move(account), std::move(approval),
             std::move(accountId), false, 0, true);
         if (!payload.empty()) co_return payload;
-    } catch (winrt::hresult_error const&) {}
-    if (optedIn) co_await ForgetSteamSession();
+    } catch (winrt::hresult_error const& error) {
+        invalidRecord = steam_session_cache::invalidRecordRead(recordLoaded, static_cast<std::uint32_t>(error.code().value));
+    }
+    // Authenticated Steam sessions can time out while their catalog downloads.
+    // QR remains available and the next cold start can retry the same credential.
+    if (optedIn && invalidRecord) co_await ForgetSteamSession();
     co_return winrt::hstring(L"fallback");
 }
 
