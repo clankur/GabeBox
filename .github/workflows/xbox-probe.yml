@@ -75,6 +75,15 @@ jobs:
             probe/ProbeNative.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/ProbeNative.lib" `
             /EXPORT:DllGetActivationFactory=ProbeGetActivationFactory /EXPORT:DllCanUnloadNow=ProbeCanUnloadNow
 
+          $mesaJni = New-Item -ItemType Directory (Join-Path $work 'mesa-jni')
+          $jni = Join-Path $env:JAVA_HOME 'include'
+          $mesaLibrary = Join-Path $mesaJni.FullName 'mesa-jni-control.dll'
+          & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+            "/I$jni" "/I$jni\win32" "/Fo$work\mesa-jni-control.obj" "/Fe$mesaLibrary" `
+            probe/mesa-jni-control.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/mesa-jni-control.lib"
+          $mesaHash = (Get-FileHash $mesaLibrary -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path $mesaJni.FullName 'SHA256SUMS'), "$mesaHash  mesa-jni-control.dll`n")
+
           $targets = @(
             @{ Source = 'child-process'; Extension = 'dll'; Flags = @('/dll', '/noentry') }
           )
@@ -180,4 +189,9 @@ jobs:
         with:
           name: xbox-steam-core-template
           path: ${{ runner.temp }}/xbox-probe/steam-artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-mesa-jni-control
+          path: ${{ runner.temp }}/xbox-probe/mesa-jni/
           if-no-files-found: error

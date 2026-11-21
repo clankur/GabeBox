@@ -25,7 +25,7 @@ UWP_FRAMEWORK = 'Microsoft.VCLibs.140.00'
 MICROSOFT = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
 
 
-def stage_mesa(layout, archive, license_file, framework):
+def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, slay_mesa_jni=None):
     release = RELEASES.get(hashlib.sha256(archive.read_bytes()).hexdigest())
     if release is None:
         raise ValueError('Use a pinned, unchanged Mesa UWP release archive.')
@@ -40,10 +40,23 @@ def stage_mesa(layout, archive, license_file, framework):
     if (identity is None or identity.get('Name') != 'XboxPortabilityProbe.ChildProcess.SteamCore'
             or identity.get('ProcessorArchitecture') != 'x64'):
         raise ValueError('Use an x64 Steam Core diagnostic layout.')
+    target = []
     if (layout / 'steamclient64.dll').exists():
         target = (layout / 'steam-launch-app.txt').read_text(encoding='ascii').splitlines()
         if not target or target[0] not in ('413150', '646570'):
             raise ValueError('Scope this Mesa game trial to Stardew Valley or Slay the Spire.')
+    if sdl_surfaceless and (target[:1] != ['413150'] or 'repeat' not in target
+                            or not (layout / 'StardewStartupDiagnostic.dll').is_file()):
+        raise ValueError('Use the repeatable Stardew Valley managed diagnostic for the SDL surfaceless trial.')
+    jni_name = 'mesa-jni-control.dll'
+    if slay_mesa_jni is not None:
+        if (target[:1] != ['646570'] or 'repeat' not in target or not all(
+                (layout / filename).is_file() for filename in ('SlayConsoleDiagnostic.class', 'slay-working-directory.dll'))):
+            raise ValueError('Use the repeatable Slay the Spire console diagnostic for the Mesa JNI test.')
+        jni_library = (slay_mesa_jni / jni_name).read_bytes()
+        expected = f'{hashlib.sha256(jni_library).hexdigest()}  {jni_name}'
+        if (slay_mesa_jni / 'SHA256SUMS').read_text(encoding='ascii').strip() != expected:
+            raise ValueError('Use the verified Mesa JNI control workflow artifact.')
     if (manifest.count(b'</Dependencies>') != 1 or f'Name="{UWP_FRAMEWORK}"'.encode() in manifest
             or any((layout / name).exists() for name in (*libraries, 'LICENSE.mesa-uwp', 'mesa-uwp-source.txt'))):
         raise ValueError('Use a fresh diagnostic layout so the trial cannot overwrite an existing runtime.')
@@ -67,6 +80,11 @@ def stage_mesa(layout, archive, license_file, framework):
     manifest_file.write_bytes(manifest.replace(b'</Dependencies>', dependency.encode('ascii') + b'</Dependencies>'))
     (layout / 'LICENSE.mesa-uwp').write_bytes(license_data)
     (layout / 'mesa-uwp-source.txt').write_text(source + '\n', encoding='ascii')
+    if sdl_surfaceless:
+        (layout / 'stardew-sdl-surfaceless.txt').touch(exist_ok=False)
+    if slay_mesa_jni is not None:
+        with (layout / jni_name).open('xb') as output:
+            output.write(jni_library)
 
 
 def main():
@@ -75,8 +93,10 @@ def main():
     parser.add_argument('--archive', required=True, type=Path)
     parser.add_argument('--license', required=True, type=Path)
     parser.add_argument('--framework', required=True, type=Path)
+    parser.add_argument('--sdl-surfaceless', action='store_true', help='enable the SDL offscreen context trial')
+    parser.add_argument('--slay-mesa-jni', type=Path, help='verified Mesa JNI control workflow artifact')
     args = parser.parse_args()
-    stage_mesa(args.layout, args.archive, args.license, args.framework)
+    stage_mesa(args.layout, args.archive, args.license, args.framework, args.sdl_surfaceless, args.slay_mesa_jni)
     print('Staged the pinned Mesa UWP runtime and framework dependency.')
 
 
