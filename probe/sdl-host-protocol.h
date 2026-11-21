@@ -12,7 +12,10 @@ enum {
     SDL_HOST_WRITING,
     SDL_HOST_READY,
     SDL_HOST_READING,
-    SDL_HOST_POINTER_MAX = 4095
+    SDL_HOST_POINTER_MAX = 4095,
+    SDL_HOST_PAD_BUTTONS = 15,
+    SDL_HOST_PAD_AXES = 6,
+    SDL_HOST_PAD_CONNECTED = 1 << 16
 };
 
 typedef struct SdlHostFrame {
@@ -22,6 +25,14 @@ typedef struct SdlHostFrame {
     uint32_t input_ack;
     uint32_t input_events;
 } SdlHostFrame;
+
+/* SDL_GameController ordering. Virtual trigger axes rest at -32768. */
+typedef struct SdlHostGamepad {
+    volatile LONG serial;
+    volatile LONG buttons;
+    volatile LONG axes[SDL_HOST_PAD_AXES];
+    volatile LONG ack;
+} SdlHostGamepad;
 
 typedef struct SdlHostMailbox {
     volatile LONG magic;
@@ -35,6 +46,7 @@ typedef struct SdlHostMailbox {
     volatile LONG quit;
     SdlHostFrame frame;
     uint8_t pixels[SDL_HOST_MAX_WIDTH * SDL_HOST_MAX_HEIGHT * 4];
+    SdlHostGamepad gamepad;
 } SdlHostMailbox;
 
 static inline LONG SdlHostLoad(volatile LONG *word)

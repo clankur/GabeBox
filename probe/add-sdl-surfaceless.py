@@ -47,6 +47,19 @@ def add_surfaceless(tree):
         if (offscreen) {
             XboxSdlTrace("sdl_offscreen_helper_window=skipped\\n");
         } else if (SDL_HelperWindowCreate() < 0) {''')
+    old = '    /* Clear the error message */'
+    source = replace_once(source, old, '''    if (SDL_GetHintBoolean("XBOX_SDL_HOST_GAMEPAD", SDL_FALSE)) {
+        /* The host supplies the controller. Avoid desktop discovery and haptics. */
+        flags &= ~SDL_INIT_HAPTIC;
+        SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
+        SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "0");
+        SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+        SDL_SetHint(SDL_HINT_JOYSTICK_WGI, "0");
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    }
+
+''' + old)
     main.write_text(source, encoding='utf-8')
 
     window_header = offscreen / 'SDL_offscreenwindow.h'

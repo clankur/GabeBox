@@ -4,9 +4,14 @@
 #include "../events/SDL_mouse_c.h"
 #include "../events/SDL_events_c.h"
 #include "SDL_timer.h"
+#include "SDL_gamecontroller.h"
+#include <stddef.h>
 
 static SdlHostMailbox *xbox_host_mailbox;
 static Uint32 xbox_host_window;
+static SDL_bool xbox_host_has_gamepad;
+static SDL_Joystick *xbox_host_gamepad;
+static SDL_JoystickID xbox_host_gamepad_id = -1;
 
 static void XboxSdlOpenHost(void)
 {
@@ -27,6 +32,10 @@ static void XboxSdlOpenHost(void)
     mapping = CreateFileMappingFromApp(file, NULL, PAGE_READWRITE, 0, NULL);
     if (mapping) {
         xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, sizeof(SdlHostMailbox));
+        xbox_host_has_gamepad = xbox_host_mailbox != NULL;
+        if (!xbox_host_mailbox) {
+            xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, offsetof(SdlHostMailbox, gamepad));
+        }
         CloseHandle(mapping);
     }
     CloseHandle(file);
@@ -35,6 +44,59 @@ static void XboxSdlOpenHost(void)
         xbox_host_mailbox = NULL;
     }
     XboxSdlTrace(xbox_host_mailbox ? "sdl_host=mapped\n" : "sdl_host=map-error\n");
+}
+
+static void XboxSdlDetachGamepad(void)
+{
+    if (xbox_host_gamepad) SDL_JoystickClose(xbox_host_gamepad);
+    xbox_host_gamepad = NULL;
+    for (int device = 0; xbox_host_gamepad_id >= 0 && device < SDL_NumJoysticks(); ++device) {
+        if (SDL_JoystickGetDeviceInstanceID(device) == xbox_host_gamepad_id) {
+            SDL_JoystickDetachVirtual(device);
+            break;
+        }
+    }
+    xbox_host_gamepad_id = -1;
+}
+
+static void XboxSdlPollHostGamepad(SdlHostGamepad *pad)
+{
+    LONG serial = SdlHostLoad(&pad->serial);
+    if (!serial || (serial & 1) || serial == SdlHostLoad(&pad->ack) || !SDL_WasInit(SDL_INIT_JOYSTICK)) return;
+    LONG buttons = SdlHostLoad(&pad->buttons);
+    Sint16 axes[SDL_HOST_PAD_AXES];
+    for (int i = 0; i < SDL_HOST_PAD_AXES; ++i) axes[i] = (Sint16)SdlHostLoad(&pad->axes[i]);
+    if (serial != SdlHostLoad(&pad->serial)) return;
+    if (!(buttons & SDL_HOST_PAD_CONNECTED)) {
+        XboxSdlDetachGamepad();
+    } else {
+        if (!xbox_host_gamepad) {
+            SDL_VirtualJoystickDesc desc;
+            SDL_zero(desc);
+            desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+            desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+            desc.naxes = SDL_HOST_PAD_AXES;
+            desc.nbuttons = SDL_HOST_PAD_BUTTONS;
+            desc.axis_mask = (1 << SDL_HOST_PAD_AXES) - 1;
+            desc.button_mask = (1 << SDL_HOST_PAD_BUTTONS) - 1;
+            desc.name = "Xbox Controller";
+            int device = SDL_JoystickAttachVirtualEx(&desc);
+            if (device < 0) return;
+            xbox_host_gamepad_id = SDL_JoystickGetDeviceInstanceID(device);
+            xbox_host_gamepad = SDL_JoystickOpen(device);
+            if (!xbox_host_gamepad) {
+                XboxSdlDetachGamepad();
+                return;
+            }
+            XboxSdlTrace("sdl_host_gamepad=attached\n");
+        }
+        for (int i = 0; i < SDL_HOST_PAD_AXES; ++i) SDL_JoystickSetVirtualAxis(xbox_host_gamepad, i, axes[i]);
+        for (int i = 0; i < SDL_HOST_PAD_BUTTONS; ++i) SDL_JoystickSetVirtualButton(xbox_host_gamepad, i, (buttons >> i) & 1);
+        SDL_JoystickUpdate();
+        for (int i = 0; i < SDL_HOST_PAD_AXES; ++i) if (SDL_JoystickGetAxis(xbox_host_gamepad, i) != axes[i]) return;
+        for (int i = 0; i < SDL_HOST_PAD_BUTTONS; ++i) if (SDL_JoystickGetButton(xbox_host_gamepad, i) != ((buttons >> i) & 1)) return;
+    }
+    InterlockedExchange(&pad->ack, serial);
 }
 
 Uint8 *XboxSdlBeginHostFrame(SDL_Window *window, int width, int height)
@@ -101,8 +163,11 @@ void XboxSdlPollHostInput(void)
     if (!mailbox) return;
     if (!requested_quit && SdlHostLoad(&mailbox->quit)) {
         requested_quit = SDL_TRUE;
+        if (xbox_host_has_gamepad && SDL_WasInit(SDL_INIT_JOYSTICK)) XboxSdlDetachGamepad();
         SDL_SendQuit();
     }
+    if (requested_quit) return;
+    if (xbox_host_has_gamepad) XboxSdlPollHostGamepad(&mailbox->gamepad);
     serial = SdlHostLoad(&mailbox->input_serial);
     if (serial == last_serial || (serial & 1)) return;
     window = SDL_GetWindowFromID(xbox_host_window);
