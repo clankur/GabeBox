@@ -63,6 +63,7 @@ def add_startup_trace(tree):
     source_root = tree / 'src'
     shutil.copyfile(Path(__file__).with_name('sdl-startup-trace.h'), source_root / 'sdl-startup-trace.h')
     shutil.copyfile(Path(__file__).with_name('sdl-local-preferences.h'), source_root / 'sdl-local-preferences.h')
+    shutil.copyfile(Path(__file__).with_name('sdl-software-frame.h'), source_root / 'sdl-software-frame.h')
     for filename, hooks in HOOKS.items():
         file = source_root / filename
         source = file.read_text(encoding='utf-8')
@@ -78,6 +79,12 @@ def add_startup_trace(tree):
                                     '\n    XboxSdlSetWorkingDirectory();', source, flags=re.MULTILINE)
             if count != 1:
                 raise ValueError('Expected the SDL2 main entrypoint in the pinned source.')
+        if filename == 'render/SDL_render.c':
+            declaration = r'^(void\s+SDL_RenderPresent\(SDL_Renderer \*\s*renderer\)\s*\{)'
+            source, count = re.subn(declaration, '#include "../sdl-software-frame.h"\n\n'
+                                    r'\1' '\n    XboxSdlCaptureSoftwareFrame(renderer);', source, flags=re.MULTILINE)
+            if count != 1:
+                raise ValueError('Expected the SDL renderer present entrypoint in the pinned source.')
         suffix = ''
         if filename == 'filesystem/windows/SDL_sysfilesystem.c':
             # SDL 2.26.2 also has unused Xbox filesystem stubs in this file.

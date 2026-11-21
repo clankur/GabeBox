@@ -195,6 +195,25 @@ def read_game_file(portal, package, folder, filename, limit):
     return data
 
 
+def read_sdl_frame(portal, app, report, destination):
+    run = re.search(r'^steam_(launch_sdl|stardew_managed)_run=([0-9]{1,20})\r?$', report, re.MULTILINE)
+    if not run:
+        raise ValueError('The current console report has no SDL frame trial.')
+    name = f'sdl-startup-{run[2]}.bmp' if run[1] == 'launch_sdl' else f'stardew-managed-{run[2]}.sdl.bmp'
+    data = read_game_file(portal, app, r'\LocalState', name, 4096 * 4096 * 4 + 1024)
+    if not data or len(data) < 54 or data[:2] != b'BM':
+        raise ValueError('The latest SDL trial has no captured BMP frame.')
+    size, offset = unpack_from('<I4xI', data, 2)
+    width, height, planes, bits = unpack_from('<iiHH', data, 18)
+    stride = (width * bits + 31) // 32 * 4
+    if (size != len(data) or not 54 <= offset < size or not 1 <= width <= 4096 or not 1 <= abs(height) <= 4096
+            or planes != 1 or bits not in (24, 32) or size - offset < stride * abs(height)):
+        raise ValueError('The SDL frame was incomplete or had an unexpected bitmap layout.')
+    with destination.open('xb') as output:
+        output.write(data)
+    print(f'Saved SDL frame ({width} by {abs(height)}) to {destination}.')
+
+
 def pe_summary(header):
     if len(header) < 64 or header[:2] != b'MZ':
         return {'pe_header': 'unavailable'}
@@ -482,6 +501,7 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -554,6 +574,9 @@ def main():
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
+        if args.sdl_frame is not None:
+            read_sdl_frame(portal, app, report, args.sdl_frame)
+            return
         print(report, end='')
         return
     if args.command == 'inspect-game':

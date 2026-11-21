@@ -8,6 +8,7 @@ on:
       - 'probe/add-sdl-surfaceless.py'
       - 'probe/sdl-startup-trace.h'
       - 'probe/sdl-local-preferences.h'
+      - 'probe/sdl-software-frame.h'
       - 'probe/sdl-surfaceless-framebuffer.h'
   workflow_dispatch:
 
