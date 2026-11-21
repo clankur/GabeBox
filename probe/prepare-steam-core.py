@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tarfile
@@ -188,10 +189,17 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
                    startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
-                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None):
+                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None, stardew_sdl_runtime=None):
     if (fhd_presenter is None) != (fhd_presenter_checksum is None):
         raise ValueError('Supply the presenter artifact directory and its checksum together.')
     presenter = presenter_payload(fhd_presenter, fhd_presenter_checksum) if fhd_presenter else {}
+    if stardew_sdl_runtime:
+        if not stardew_sdl_host:
+            raise ValueError('The Stardew SDL runtime requires its managed host.')
+        deploy = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.py'))
+        stardew_sdl = deploy['load_sdl_artifact'](stardew_sdl_runtime, 413150)
+        if slay_sdl_host and stardew_sdl != (slay_sdl_host / 'SDL2.dll').read_bytes():
+            raise ValueError('Use the same shared SDL 2.30.9 build for both hosted profiles.')
     imports = {}
     for binary in inspect_binaries:
         for module, symbols in system_imports(objdump, binary).items():
@@ -335,6 +343,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'steam-sdl-host-975370.txt').touch()
         if stardew_sdl_host:
             shutil.copyfile(stardew_sdl_host, layout / 'StardewStartupDiagnostic.dll')
+            if stardew_sdl_runtime:
+                (layout / 'SDL2.dll').write_bytes(stardew_sdl)
+                shutil.copyfile(stardew_sdl_runtime / 'LICENSE.txt', layout / 'LICENSE.SDL2')
             for name in ('steam-sdl-host-413150.txt', 'stardew-game-directory.txt', 'stardew-low-memory.txt'):
                 (layout / name).touch()
         if slay_sdl_host:
@@ -420,6 +431,8 @@ def main():
     parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
     parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
                         help='enable the hosted Stardew Valley SDL profile with its built startup hook')
+    parser.add_argument('--stardew-sdl-runtime', type=Path, metavar='ARTIFACT_DIR',
+                        help='stage the version-matched SDL 2.30.9 CI artifact for hosted MonoGame')
     parser.add_argument('--measure-sdl-frames', action='store_true',
                         help='measure presented frames during a hosted game trial')
     parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
@@ -510,7 +523,7 @@ def main():
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
                    stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
                    measure_sdl_frames=args.measure_sdl_frames, fhd_presenter=args.fhd_presenter,
-                   fhd_presenter_checksum=args.fhd_presenter_checksum)
+                   fhd_presenter_checksum=args.fhd_presenter_checksum, stardew_sdl_runtime=args.stardew_sdl_runtime)
 
 
 if __name__ == '__main__':

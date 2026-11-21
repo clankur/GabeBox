@@ -19,6 +19,13 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Build the hosted MonoGame adapter
+        run: dotnet build probe/stardew-diagnostic/StardewStartupDiagnostic.csproj --configuration Release --output "${{ runner.temp }}/hosted-monogame"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-hosted-monogame
+          path: ${{ runner.temp }}/hosted-monogame/StardewStartupDiagnostic.dll
+          if-no-files-found: error
       - uses: actions/download-artifact@v4
         with:
           name: xbox-fhd-present-x64
