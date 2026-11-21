@@ -1,6 +1,6 @@
 # Valve Steam client on Xbox Series X Developer Mode
 
-**Result, 21 November 2026.** We found no buildable native Xbox port of Valve’s desktop Steam client in the public materials examined. The Windows client already has an x64 executable. Its operating-system dependencies, Steam’s closed client implementation, and the execution environment for downloaded PC games are the obstacles to an installable port. This repository contains a reproducible static audit. There is no Xbox installation package or on-console gameplay result.
+**Result, 21 November 2026.** We found no buildable native Xbox port of Valve’s desktop Steam client in the public materials examined. The Windows client already has an x64 executable. Its operating-system dependencies, Steam’s closed client implementation, and the execution environment for downloaded PC games are the obstacles to an installable port. The repository contains the reproducible audit and a separate Xbox diagnostic. A native Steam client package and on-console gameplay remain unverified.
 
 ## What REA measured
 
@@ -26,6 +26,10 @@ An import establishes a binary dependency. It cannot tell us whether Steam exerc
 ## Xbox workflow investigation
 
 The [workflow report](analysis/xbox-workflows.md) maps the observed desktop dependencies to Xbox Developer Mode and partner GDK APIs. It covers WebView2, prerequisites, package updates, Steam depot downloads and game activation.
+
+## Native translation tests
+
+The [porting investigation](analysis/native-port-path.md) records which measured Steam imports link against Microsoft’s UWP SDK, what still needs an Xbox runtime test, and how to interpret a successful result. The [packaged process test](probe/README.md) runs a single controlled experiment on a Series X in Developer Mode.
 
 ## Reproduce the audit
 

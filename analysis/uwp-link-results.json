@@ -1,0 +1,94 @@
+{
+  "sdk_x64": "10.0.26100.8249",
+  "sdk_sha256": "dba411916afdd47c99fecdf7d5558df7679d291dc338746590ae9adf5fd0511b",
+  "results": [
+    {
+      "function": "CreateServiceW",
+      "components": [
+        "bin/SteamService.exe"
+      ],
+      "desktop_import_dll": "ADVAPI32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "OpenSCManagerW",
+      "components": [
+        "SteamUI.dll",
+        "bin/SteamService.exe",
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "ADVAPI32.dll",
+      "windowsapp_import_dll": "api-ms-win-service-management-l1-1-0.dll"
+    },
+    {
+      "function": "StartServiceCtrlDispatcherW",
+      "components": [
+        "bin/SteamService.exe"
+      ],
+      "desktop_import_dll": "ADVAPI32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "StartServiceW",
+      "components": [
+        "SteamUI.dll",
+        "bin/SteamService.exe",
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "ADVAPI32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "CreateProcessA",
+      "components": [
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "KERNEL32.dll",
+      "windowsapp_import_dll": "api-ms-win-core-processthreads-l1-1-0.dll"
+    },
+    {
+      "function": "CreateProcessW",
+      "components": [
+        "bin/SteamService.exe",
+        "steam.exe",
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "KERNEL32.dll",
+      "windowsapp_import_dll": "api-ms-win-core-processthreads-l1-1-0.dll"
+    },
+    {
+      "function": "ShellExecuteExW",
+      "components": [
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "SHELL32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "CreateDesktopW",
+      "components": [
+        "bin/cef/cef.win64/steamwebhelper.exe"
+      ],
+      "desktop_import_dll": "USER32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "CreateWindowExW",
+      "components": [
+        "steam.exe"
+      ],
+      "desktop_import_dll": "USER32.dll",
+      "windowsapp_import_dll": null
+    },
+    {
+      "function": "RegisterClassExW",
+      "components": [
+        "SteamUI.dll",
+        "steam.exe",
+        "steamclient64.dll"
+      ],
+      "desktop_import_dll": "USER32.dll",
+      "windowsapp_import_dll": null
+    }
+  ]
+}
