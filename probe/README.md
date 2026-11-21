@@ -4,7 +4,7 @@ This x64 UWP diagnostic answers one question: can this console start a second ex
 
 ## Test on a Series X in Developer Mode
 
-1. Download the prerelease APPX from the [diagnostic release](https://github.com/clankur/steam-xbox-devmode/releases/tag/process-probe-v0.1.0) on your setup computer. The adjacent CER file is the public development signing certificate. The SHA256SUMS file identifies the exact release files.
+1. From your signed-in GitHub account on your setup computer, open the [signed APPX](downloads/PackagedProcessProbe-x64.appx) and select **Download raw file**. The adjacent CER file is the public development signing certificate. The SHA256SUMS file identifies the exact release files.
 2. In Xbox Dev Home, use the Device Portal address displayed by your console. In the apps manager, choose **Add / Deploy**, select the APPX, and install it. The diagnostic has no external framework package dependencies. If the Portal requests the signing certificate for this deployment, use the accompanying CER. Record the deployment error code if the package is rejected. [Microsoft deployment guide](https://learn.microsoft.com/en-us/windows/uwp/apps-for-xbox/development-options)
 3. Launch **Packaged process test** on the Xbox. It performs one test, writes its result and exits. In Device Portal’s **File explorer**, open **LocalAppData**, find the probe package, open **LocalState**, and download `probe-report.txt`. Check its modification time after each run.
 4. Report the console OS version, whether you ran in Developer Mode, and the reported result or exact error. A deployment or startup failure, or a missing report, is inconclusive about child execution.
