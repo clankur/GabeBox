@@ -88,9 +88,16 @@ jobs:
               "/out:$layout/$source.$($target.Extension)" "$work/$source.obj" $lib
           }
 
-          & cl.exe /nologo /c /O2 /GS- /Zl /TC "/Fo$work\child.obj" probe/child.c
-          & link.exe /nologo /machine:x64 /subsystem:windows /appcontainer /dynamicbase /nxcompat /highentropyva `
-            /nodefaultlib /entry:ChildEntry /manifest:embed /manifestuac:no "/out:$layout\child.exe" "$work\child.obj" $lib
+          $helpers = @(
+            @{ Source = 'child'; Entry = 'ChildEntry' },
+            @{ Source = 'pipe-child'; Entry = 'PipeChildEntry' }
+          )
+          foreach ($helper in $helpers) {
+            $source = $helper.Source
+            & cl.exe /nologo /c /O2 /GS- /Zl /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP "/Fo$work\$source.obj" "probe/$source.c"
+            & link.exe /nologo /machine:x64 /subsystem:windows /appcontainer /dynamicbase /nxcompat /highentropyva `
+              /nodefaultlib "/entry:$($helper.Entry)" /manifest:embed /manifestuac:no "/out:$layout\$source.exe" "$work\$source.obj" $lib
+          }
 
           $controlLayout = Join-Path $work 'control-layout'
           $controlArtifacts = Join-Path $work 'control-artifacts'
@@ -103,7 +110,7 @@ jobs:
           $control.Package.RemoveChild($control.Package.Extensions) | Out-Null
           $control.Save("$controlLayout/AppxManifest.xml")
           Remove-Item -LiteralPath "$controlLayout/ProbeNative.dll", "$controlLayout/XboxProbe.Native.winmd",
-            "$controlLayout/child.exe", "$controlLayout/child-process.dll"
+            "$controlLayout/child.exe", "$controlLayout/pipe-child.exe", "$controlLayout/child-process.dll"
 
           function Write-ProbePackage($packageLayout, $outputDir, $cert) {
             & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $packageLayout /of "$packageLayout/resources.pri"
@@ -122,7 +129,7 @@ jobs:
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
-            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe"
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe" "$layout/pipe-child.exe"
             Write-ProbePackage $layout $artifacts $cert
             Write-ProbePackage $controlLayout $controlArtifacts $cert
           } finally {
