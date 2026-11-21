@@ -1,6 +1,6 @@
 # Series X Big Picture reliability
 
-No production build through `1.0.230.18` has passed the repeated-launch checks. The player saw the original Library on TV on one `.15` cold start. Two foreground WebView2 captures show the populated original Library on the second `.17` cold start. These captures came from the same running instance. No complete game round trip has been verified on either build.
+The second cold start of `1.0.230.19` produced a raw 1920×1080 Xbox output capture of the populated Valve Library. The first cold start exited before showing it. No production build in this ledger has passed the repeated-launch and game-return checks.
 
 ## Release checks
 
@@ -35,6 +35,17 @@ Across these 14 controlled attempts, the Library has one direct TV confirmation 
 
 Earlier retained observations predate the controlled ledger. Integrated builds `.1` and `.3` failed during startup, `.5` showed first-time setup, and `.7` exited after setup. `series-9` showed setup followed by a failed native view restart, `series-10` showed a startup timeout, and `series-11` returned to Xbox Dev Home. None yielded a raw unobscured Library frame. Their historical attempt counts are incomplete. The regular FHD and direct-launch QA packages exercised other entry points. [Earlier console observations](big-picture.md)
 
+### Build 1.0.230.19
+
+Signed APPX SHA-256 `b7b6d4f80f00f5fd705d0f75917cb22c26b367f3e2975ea40a8767093b6479ee`. The operator recorded each activation before launching. Both attempts began with zero matching package processes.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-19-175915 | c799c37f-b908-48d1-abac-1e018f33e217 | Failed. The original popup was empty when the host and browser exited. |
+| tour-19-180057 | 9c17f75d-1936-455d-944c-02c00c5ed7f2 | Passed. The Xbox showed a centered Welcome prompt, Valve's game details, then the unobscured Library with its selected tile and both footer corners visible. |
+
+This yields 1/2 confirmed Library starts, with one consecutive success. Later observations of the live window within this same session count toward its interaction history.
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -53,5 +64,10 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `original-valve-library-17-1795301263.png`, initial Library | 2880×1620 | `d09b824b316ff732395b08a058e77319ad22cd65f6f42d8d096bb9e91d726040` |
 | `original-valve-library-17-1795301352.png`, scrolled Library | 2880×1620 | `afb8ae3801bc3a5ff79ec22a6777ca5ade808a835ece0bf4cb0ee3a312fadf09` |
 | `screen-36.png`, earlier .12 whole-output Welcome capture | 1920×1080 | `0856113e24840b9027d8dfabb7e1bbe58b07e10b7ee6f1bb029439dd91ba18fe` |
+| `welcome.png`, .19 whole-output centered tour | 1920×1080 | `8ea2371933cf51a18f6087394098dd03874f0b7e2a044fdcce09e0c9e9424091` |
+| `physical-tv-1795302175230899000.png`, .19 whole-output game details | 1920×1080 | `094fafc7ca951f3c1d7e5081f668b8560eb526d23b84661c14fbf5bbcaf58d09` |
+| `physical-tv-1795302202507642000.png`, .19 whole-output stock Library | 1920×1080 | `b5b301247cc09624cbf48fc1ad2d2b954b11ec9a7a0c715c952eff3856e021ad` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
+
+For `.19`, the operator fetched the raw PNG from Xbox Device Portal's `/ext/screenshot` endpoint. The Welcome heading spans x=806–1114, centered at x=960. The prompt block spans approximately y=512–575 on a 1080-pixel-high output. The later Library PNG includes the top search field, centered tab strip, clock, populated grid and complete bottom controls. Both source images remain uncropped.
