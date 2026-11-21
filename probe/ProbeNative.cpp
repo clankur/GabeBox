@@ -1274,6 +1274,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
     std::uint32_t launchOption = 0;
     bool snapshotRequested = false;
+    bool waitOnly = false;
     bool dummyVideo = false;
     bool sdlWorkingDirectory = false;
     std::wstring diagnosticRenderer;
@@ -1282,6 +1283,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
         if (snapshotRequested) {
+            waitOnly = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-startup-wait-only-" + std::to_wstring(app) + L".txt")));
             dummyVideo = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                 L"steam-startup-sdl-dummy-video-" + std::to_wstring(app) + L".txt")));
             sdlWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -1673,6 +1676,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             report += DescribeProcessWait(process.handle.get(), 0, L"steam_launch_snapshot_initial");
             co_await checkpoint(L"captured-process");
             co_await winrt::resume_background();
+            if (waitOnly) {
+                for (int sample = 1; sample <= 12; ++sample) {
+                    const auto field = L"steam_launch_wait_sample_" + std::to_wstring(sample);
+                    report += DescribeProcessWait(process.handle.get(), 500, field.c_str());
+                    try {
+                        report += field + L"_memory_usage=" + std::to_wstring(MemoryManager::AppMemoryUsage()) + L"\r\n";
+                        report += field + L"_memory_limit=" + std::to_wstring(MemoryManager::AppMemoryUsageLimit()) + L"\r\n";
+                    } catch (winrt::hresult_error const&) {}
+                    co_await checkpoint(L"waiting-on-process-handle");
+                    if (WaitForSingleObject(process.handle.get(), 0) == WAIT_OBJECT_0) break;
+                }
+                report += process.Report();
+                report += L"steam_launch=process-wait-complete\r\n";
+                co_await caller;
+                {
+                    std::lock_guard lock(steamSessionMutex);
+                    if (liveSteamSession && liveSteamSession->launchCall == call) liveSteamSession->launchCall = 0;
+                }
+                co_return winrt::hstring(report);
+            }
             report += DescribeProcessWait(process.handle.get(), 1000, L"steam_launch_snapshot_followup");
             co_await checkpoint(L"sampled-process");
             co_await caller;

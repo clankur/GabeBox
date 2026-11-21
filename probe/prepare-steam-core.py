@@ -127,7 +127,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
                    launch_options=(), startup_snapshot=False, startup_sdl_renderer=None, startup_sdl_dummy_video=False,
-                   startup_sdl_working_directory=False):
+                   startup_sdl_working_directory=False, startup_wait_only=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
@@ -189,6 +189,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / f'steam-launch-option-{app_id}.txt').write_text(str(index), encoding='ascii')
         if startup_snapshot:
             (layout / f'steam-startup-snapshot-{launch_app_id}.txt').touch()
+        if startup_wait_only:
+            (layout / f'steam-startup-wait-only-{launch_app_id}.txt').touch()
         if startup_sdl_renderer:
             (layout / f'steam-startup-sdl-renderer-{launch_app_id}.txt').write_text(startup_sdl_renderer, encoding='ascii')
         if startup_sdl_dummy_video:
@@ -241,6 +243,8 @@ def main():
                         help='run the launch test again each time the probe starts from a fresh process')
     parser.add_argument('--startup-snapshot', action='store_true',
                         help='sample the configured game process before polling Steam for a ready window')
+    parser.add_argument('--startup-wait-only', action='store_true',
+                        help='observe the captured process without asking Steam to find a window')
     parser.add_argument('--startup-sdl-renderer', choices=('software', 'direct3d11'),
                         help='request an SDL renderer for the configured startup trial')
     parser.add_argument('--startup-sdl-dummy-video', action='store_true',
@@ -282,6 +286,8 @@ def main():
         parser.error('--repeat-launch requires --launch-app-id')
     if args.startup_snapshot and (not args.launch_app_id or (args.xcom_dos_runtime and args.launch_app_id == 7760)):
         parser.error('--startup-snapshot requires --launch-app-id with a native Steam Play target')
+    if args.startup_wait_only and not args.startup_snapshot:
+        parser.error('--startup-wait-only requires --startup-snapshot')
     if args.startup_sdl_renderer and not args.startup_snapshot:
         parser.error('--startup-sdl-renderer requires --startup-snapshot')
     if args.startup_sdl_dummy_video and not args.startup_snapshot:
@@ -303,7 +309,8 @@ def main():
                    launch_options=title_options, startup_snapshot=args.startup_snapshot,
                    startup_sdl_renderer=args.startup_sdl_renderer,
                    startup_sdl_dummy_video=args.startup_sdl_dummy_video,
-                   startup_sdl_working_directory=args.startup_sdl_working_directory)
+                   startup_sdl_working_directory=args.startup_sdl_working_directory,
+                   startup_wait_only=args.startup_wait_only)
 
 
 if __name__ == '__main__':
