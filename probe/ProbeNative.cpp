@@ -1238,6 +1238,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
 enum class GameBackend { SteamPlay, DosBox, SdlHost };
 static constexpr std::uint32_t xcomDosAppId = 7760;
 static constexpr std::uint32_t dwarfFortressAppId = 975370;
+static constexpr std::uint32_t stardewValleyAppId = 413150;
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix,
@@ -1252,7 +1253,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
     }
     const bool hostedSdl = backend == GameBackend::SdlHost;
-    if (hostedSdl && app != dwarfFortressAppId) {
+    const bool hostedStardew = hostedSdl && app == stardewValleyAppId;
+    if (hostedSdl && app != dwarfFortressAppId && !hostedStardew) {
         co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
     }
     if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"steam_launch=busy\r\n");
@@ -1288,7 +1290,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::wstring diagnosticRenderer;
     if (backend != GameBackend::DosBox) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
-        if (hostedSdl && !co_await packageFolder.TryGetItemAsync(L"steam-sdl-host-975370.txt")) {
+        if (hostedSdl && !co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-sdl-host-" + std::to_wstring(app) + L".txt"))) {
             co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
         }
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -1323,8 +1326,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 diagnosticRenderer = choice.c_str();
             }
         }
-        if (hostedSdl && (!snapshotRequested || !dummyVideo || diagnosticRenderer != L"software" ||
+        if (hostedSdl && !hostedStardew && (!snapshotRequested || !dummyVideo || diagnosticRenderer != L"software" ||
                           !sdlWorkingDirectory || sdlPreferencesPath.empty())) {
+            co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
+        }
+        if (hostedStardew && (!co_await packageFolder.TryGetItemAsync(L"StardewStartupDiagnostic.dll") ||
+                              !co_await packageFolder.TryGetItemAsync(L"stardew-sdl-surfaceless.txt") ||
+                              !co_await packageFolder.TryGetItemAsync(L"dxil.dll"))) {
             co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
         }
         auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -1528,7 +1536,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     } rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
       gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
-      frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"};
+      frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"},
+      managedHook{L"DOTNET_STARTUP_HOOKS"}, managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHeap{L"DOTNET_GCHeapHardLimit"};
     std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
     if (snapshotRequested) {
         co_await winrt::resume_background();
@@ -1538,7 +1547,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     }
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
-    if (backend == GameBackend::DosBox && !co_await HasCompletedSteamManifest(folder, app)) {
+    if ((backend == GameBackend::DosBox || hostedStardew) && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
     {
@@ -1567,6 +1576,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
         }
+        if (hostedStardew && CompareStringOrdinal(gameDirectory.c_str(), -1,
+                (libraryRoot + L"\\steamapps\\common\\Stardew Valley").c_str(), -1, TRUE) != CSTR_EQUAL) {
+            co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
+        }
         if (reinterpret_cast<GameQuery>(session->userMethods[67])(session->clientUser, &gameId)) {
             co_return winrt::hstring(report + L"steam_launch=already-running\r\n");
         }
@@ -1586,6 +1599,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         GetSystemTimeAsFileTime(&launchTime);
+        if (hostedStardew) {
+            const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                launchTime.dwLowDateTime);
+            if (!managedLog.Set((dataRoot + L"\\stardew-managed-" + id + L".log").c_str()) ||
+                    !managedHook.Set((packageRoot + L"\\StardewStartupDiagnostic.dll").c_str()) ||
+                    !managedHeap.Set(L"10000000")) {
+                co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
+            }
+            report += L"steam_stardew_managed_run=" + id + L"\r\n";
+        }
         if (snapshotRequested) {
             const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
                 launchTime.dwLowDateTime);

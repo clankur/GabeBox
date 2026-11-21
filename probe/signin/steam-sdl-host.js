@@ -16,6 +16,7 @@
     };
     var keys = { 27: 32, 32: 64, 143: 32, 196: 32 };
     var clickCodes = { 13: true, 142: true, 195: true };
+    var titles = { 975370: "Dwarf Fortress", 413150: "Stardew Valley" };
 
     function start(runner, appId, attempt) {
         var previous = document.activeElement;
@@ -189,7 +190,7 @@
 
         screen.hidden = false;
         library.hidden = true;
-        status.textContent = "Starting Dwarf Fortress…";
+        status.textContent = "Starting " + titles[appId] + "…";
         exit.disabled = true;
         exit.addEventListener("click", quit);
         canvas.addEventListener("keydown", setKey);
@@ -216,5 +217,7 @@
         return finished;
     }
 
-    window.steamSdlRuntime = { appId: 975370, backend: "sdl-host", launch: start };
+    var apps = document.getElementById("steam-sdl-profiles").getAttribute("data-apps").split(" ");
+    window.steamSdlRuntimes = apps.map(Number).filter(function (appId) { return !!titles[appId]; })
+        .map(function (appId) { return { appId: appId, backend: "sdl-host", launch: start }; });
 }());

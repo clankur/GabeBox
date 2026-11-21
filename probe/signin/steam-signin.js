@@ -35,7 +35,7 @@
         },
         start: window.xcomDosRuntime.start
     }] : [];
-    if (window.steamSdlRuntime) hostedGames.push(window.steamSdlRuntime);
+    if (window.steamSdlRuntimes) hostedGames = hostedGames.concat(window.steamSdlRuntimes);
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
