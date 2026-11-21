@@ -340,12 +340,35 @@
 
         return packageInfo.installedLocation.tryGetItemAsync("steam-cloud-preview.txt").then(function (preview) {
             if (preview) {
-                return XboxProbe.Native.ProbeRunner.restoreSteamCloud(646570, true).then(function (result) {
+                return runCloudRestore(646570, true).then(function (result) {
                     return save("steam_cloud_preview=" + result + "\r\n" + complete);
                 });
             }
             return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(runConfiguredTrial);
         }).then(null, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
+    }
+
+    function runCloudRestore(appId, preview) {
+        var storage = Windows.Storage;
+        var prefix = "steam_cloud_run_id=" + Date.now() + "\r\nsteam_cloud_app_id=" + appId + "\r\n";
+        var report;
+        function write(checkpoint) {
+            if (!report) return Promise.resolve();
+            return Promise.resolve(storage.FileIO.writeTextAsync(report,
+                prefix + "steam_cloud_status=" + checkpoint + "\r\n")).then(null, function () {});
+        }
+        return Promise.resolve(storage.ApplicationData.current.localFolder.createFileAsync(
+            "steam-cloud-report.txt", storage.CreationCollisionOption.replaceExisting
+        )).then(function (file) {
+            report = file;
+            return write("checking");
+        }, function () {}).then(function () {
+            return XboxProbe.Native.ProbeRunner.restoreSteamCloud(appId, preview);
+        }).then(function (result) {
+            return write(result).then(function () { return result; });
+        }, function () {
+            return write("failed").then(function () { return "failed"; });
+        });
     }
 
     function saveLibraryInventory() {
@@ -746,7 +769,7 @@
                 play.focus();
             }
         }
-        XboxProbe.Native.ProbeRunner.restoreSteamCloud(entry.id, false).done(done, function () { done("failed"); });
+        runCloudRestore(entry.id, false).then(done, function () { done("failed"); });
     });
     signOut.addEventListener("click", function () {
         if (restoring) return;

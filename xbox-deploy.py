@@ -366,6 +366,8 @@ def main():
     report_variant = report_command.add_mutually_exclusive_group()
     report_variant.add_argument('--download', dest='report_file', action='store_const',
                                 const='steam-download-report.txt', help='read the Steam download checkpoint')
+    report_variant.add_argument('--steam-cloud', dest='report_file', action='store_const',
+                                const='steam-cloud-report.txt', help='read the Steam Cloud restore checkpoint')
     report_variant.add_argument('--artwork', dest='report_file', action='store_const',
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',

@@ -1289,7 +1289,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
                 if (!sameAccount) {
                     result = L"sign-in";
                 } else if (preview) {
-                    result = winrt::hstring(L"verified:" + std::to_wstring(files.Size()));
+                    auto restored = co_await PreviewSlayCloudRestore(stage, files);
+                    result = winrt::hstring(L"verified:" + std::to_wstring(files.Size()) +
+                        L":preview-installed:" + std::to_wstring(restored));
                 } else {
                     RollBackSlayCloud(std::wstring(title.Path()), std::wstring(game.Path()));
                     auto restored = co_await RestoreSlayCloudFiles(title, stage, game, files);

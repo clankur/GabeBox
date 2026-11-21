@@ -162,3 +162,27 @@ static winrt::Windows::Foundation::IAsyncOperation<std::uint32_t> RestoreSlayClo
     }
     co_return count;
 }
+
+static winrt::Windows::Foundation::IAsyncOperation<std::uint32_t> PreviewSlayCloudRestore(
+        winrt::Windows::Storage::StorageFolder stage, winrt::Windows::Data::Json::JsonArray manifest) {
+    using namespace winrt::Windows::Storage;
+    auto sandbox = co_await stage.CreateFolderAsync(L"preview-game");
+    auto journal = co_await stage.CreateFolderAsync(L"preview-journal");
+    auto preferences = co_await sandbox.CreateFolderAsync(L"preferences");
+    constexpr auto control = L"XboxCloudLocalControl.txt";
+    auto local = co_await preferences.CreateFileAsync(control);
+    co_await FileIO::WriteTextAsync(local, L"Preserve an unrelated local file.");
+    auto count = co_await RestoreSlayCloudFiles(journal, stage, sandbox, manifest);
+    if (!count) co_return 0;
+    auto archives = co_await journal.GetFoldersAsync();
+    if (archives.Size() != 1 || !std::wstring_view(archives.GetAt(0).Name()).starts_with(L"backup-"))
+        throw winrt::hresult_invalid_argument();
+    auto backup = co_await archives.GetAt(0).GetFolderAsync(L"backup");
+    auto backedPreferences = co_await backup.GetFolderAsync(L"preferences");
+    auto backedFile = co_await backedPreferences.GetFileAsync(control);
+    auto activePreferences = co_await sandbox.GetFolderAsync(L"preferences");
+    auto retained = co_await activePreferences.GetFileAsync(control);
+    if ((co_await FileIO::ReadTextAsync(backedFile)) != (co_await FileIO::ReadTextAsync(retained)))
+        throw winrt::hresult_invalid_argument();
+    co_return count;
+}
