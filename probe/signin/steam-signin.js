@@ -17,12 +17,17 @@
     var signOut = document.getElementById("sign-out");
     var play = document.getElementById("play");
     var download = document.getElementById("download");
+    var cloudSaves = document.getElementById("cloud-saves");
+    var cloudPanel = document.getElementById("cloud-saves-panel");
+    var cloudRestore = document.getElementById("cloud-saves-open");
+    var cloudStatus = document.getElementById("cloud-saves-status");
     var downloadStatus = document.getElementById("download-status");
     var current;
     var entries = [];
     var selected;
     var transfer;
     var launching = false;
+    var restoring = false;
     var manifestFolder;
     // Only packaged adapters can be selected. Steam library metadata supplies the AppID.
     var hostedGames = window.xcomDosRuntime ? [{
@@ -35,6 +40,7 @@
         },
         start: window.xcomDosRuntime.start
     }] : [];
+    if (window.steamSdlRuntimes) hostedGames = hostedGames.concat(window.steamSdlRuntimes);
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -106,22 +112,26 @@
 
     function showCode(url) {
         if (!/^https:\/\/s\.team\/q\/[a-zA-Z0-9/_-]+$/.test(url)) throw new Error("Invalid Valve code");
+        drawCode(canvas, url);
+        canvas.hidden = false;
+    }
+
+    function drawCode(target, url) {
         var qr = qrcode(0, "M");
         qr.addData(url);
         qr.make();
         var size = qr.getModuleCount();
         var scale = 12;
-        canvas.width = canvas.height = (size + 8) * scale;
-        var context = canvas.getContext("2d");
+        target.width = target.height = (size + 8) * scale;
+        var context = target.getContext("2d");
         context.fillStyle = "#fff";
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillRect(0, 0, target.width, target.height);
         context.fillStyle = "#000";
         for (var y = 0; y < size; y++) {
             for (var x = 0; x < size; x++) {
                 if (qr.isDark(y, x)) context.fillRect((x + 4) * scale, (y + 4) * scale, scale, scale);
             }
         }
-        canvas.hidden = false;
     }
 
     function clearCode() {
@@ -163,6 +173,7 @@
 
     function select(button) {
         if (selected) selected.setAttribute("aria-pressed", "false");
+        if (selected !== button) closeCloudSaves();
         selected = button;
         if (button) button.setAttribute("aria-pressed", "true");
         entryName.textContent = button ? button.entry.name : "";
@@ -170,15 +181,29 @@
         if (button && button.entry.game) checkLocalInstall(button.entry);
     }
 
+    function closeCloudSaves() {
+        cloudPanel.hidden = true;
+        cloudSaves.setAttribute("aria-expanded", "false");
+        cloudStatus.textContent = "";
+    }
+
     function updateActions() {
         var focused = document.activeElement;
         var entry = selected && selected.entry;
         play.hidden = !entry || !entry.game || !entry.installed;
         download.hidden = !entry || !entry.game || !!entry.installed;
-        play.disabled = download.disabled = launching || !!transfer;
-        if ((focused === play || focused === download) && (focused.hidden || focused.disabled)) {
+        cloudSaves.hidden = !entry || !entry.game || !entry.installed || !steamCloud.supported(entry.id);
+        play.disabled = download.disabled = cloudSaves.disabled = launching || restoring || !!transfer;
+        cloudRestore.disabled = cloudSaves.disabled;
+        if (cloudSaves.hidden || launching || transfer) closeCloudSaves();
+        if (((focused === play || focused === download || focused === cloudSaves) &&
+             (focused.hidden || focused.disabled)) || (focused === cloudRestore && cloudPanel.hidden)) {
             (selected || search).focus();
         }
+    }
+
+    function primaryAction() {
+        return play.hidden ? download : play;
     }
 
     function checkLocalInstall(entry) {
@@ -210,8 +235,11 @@
         entries.forEach(function (entry) {
             if (filter && entry.name.toLowerCase().indexOf(filter) < 0) return;
             var button = document.createElement("button");
+            var name = document.createElement("span");
             button.type = "button";
-            button.textContent = entry.name;
+            name.className = "tile-name";
+            name.textContent = entry.name;
+            button.appendChild(name);
             button.entry = entry;
             libraryArt.decorate(button, entry);
             button.setAttribute("aria-pressed", "false");
@@ -226,7 +254,7 @@
     }
 
     function runGameLaunch(attempt, entry, automaticTrial) {
-        if (transfer || launching) return;
+        if (transfer || launching || restoring) return;
         var fileIO = Windows.Storage.FileIO;
         var complete = "status=steam-core-complete\r\n";
         var launch = steamGameLaunch.forGame(XboxProbe.Native.ProbeRunner, entry.id, hostedGames);
@@ -244,10 +272,12 @@
             var message = " launch could not be confirmed.";
             if (result.indexOf("steam_launch=window-ready\r\n") >= 0) message = " started.";
             if (result.indexOf("steam_dos=guest-started\r\n") >= 0) message = " started in DOSBox.";
+            if (result.indexOf("steam_sdl_host_frame=presented\r\n") >= 0) message = " started.";
             if (result.indexOf("steam_launch=not-installed\r\n") >= 0) {
                 message = " is on disk, but Steam could not reopen its install.";
             }
             if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            if (result.indexOf("steam_launch=save-recovery-error\r\n") >= 0) message = " needs save recovery before it can start.";
             if (/steam_launch=(?:dependency-install-rejected|dependency-install-incomplete)\r\n/.test(result) ||
                     result.indexOf("steam_launch_client_reason=dependency-not-ready\r\n") >= 0) {
                 message = " is waiting for a required Steam component.";
@@ -281,7 +311,7 @@
             return storage.FileIO.writeTextAsync(attempt.file, attempt.libraryReport + checkpoint);
         }
 
-        return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
+        function runConfiguredTrial(file) {
             if (!file) return save(complete);
             return storage.FileIO.readTextAsync(file).then(function (text) {
                 var config = steamGameLaunch.parseTrial(text);
@@ -306,7 +336,39 @@
                     return runGameLaunch(attempt, game, true);
                 });
             });
-        }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
+        }
+
+        return packageInfo.installedLocation.tryGetItemAsync("steam-cloud-preview.txt").then(function (preview) {
+            if (preview) {
+                return runCloudRestore(646570, true).then(function (result) {
+                    return save("steam_cloud_preview=" + result + "\r\n" + complete);
+                });
+            }
+            return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(runConfiguredTrial);
+        }).then(null, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
+    }
+
+    function runCloudRestore(appId, preview) {
+        var storage = Windows.Storage;
+        var prefix = "steam_cloud_run_id=" + Date.now() + "\r\nsteam_cloud_app_id=" + appId + "\r\n";
+        var report;
+        function write(checkpoint) {
+            if (!report) return Promise.resolve();
+            return Promise.resolve(storage.FileIO.writeTextAsync(report,
+                prefix + "steam_cloud_status=" + checkpoint + "\r\n")).then(null, function () {});
+        }
+        return Promise.resolve(storage.ApplicationData.current.localFolder.createFileAsync(
+            "steam-cloud-report.txt", storage.CreationCollisionOption.replaceExisting
+        )).then(function (file) {
+            report = file;
+            return write("checking");
+        }, function () {}).then(function () {
+            return XboxProbe.Native.ProbeRunner.restoreSteamCloud(appId, preview);
+        }).then(function (result) {
+            return write(result).then(function () { return result; });
+        }, function () {
+            return write("failed").then(function () { return "failed"; });
+        });
     }
 
     function saveLibraryInventory() {
@@ -445,7 +507,7 @@
     }
 
     function startDownload(entry) {
-        if (transfer || launching) return Promise.resolve("busy");
+        if (transfer || launching || restoring) return Promise.resolve("busy");
         if (!entry || !entry.game) return Promise.resolve("game-unavailable");
         if (entry.installed) return Promise.resolve("already-installed");
         var job = { entry: entry, id: Date.now() };
@@ -558,7 +620,11 @@
         if (event.target.entry) select(event.target);
     });
     list.addEventListener("click", function (event) {
-        if (event.target.entry) select(event.target);
+        var button = event.target.entry ? event.target : event.target.parentElement;
+        if (!button || !button.entry) return;
+        select(button);
+        var action = primaryAction();
+        if (!action.hidden && !action.disabled) action.focus();
     });
     var originalInputMode = navigator.gamepadInputEmulation;
     // EdgeHTML can emit arrow keys, Navigation keys, or gamepad virtual keys.
@@ -581,7 +647,12 @@
         var next;
         if (key === 27 || key === 143 || key === 196) {
             if (target === search) return;
-            next = target.entry ? search : (selected || search);
+            if (!cloudPanel.hidden && (target === cloudRestore || target === cloudSaves) && !restoring) {
+                closeCloudSaves();
+                next = cloudSaves;
+            } else {
+                next = target.entry ? search : (selected || search);
+            }
         } else if (!direction) {
             return;
         } else if (target === search) {
@@ -591,12 +662,19 @@
         } else if (target === signOut) {
             if (direction === "down" || direction === "left") next = search;
         } else if (target.entry) {
-            if (direction === "up") next = target.previousElementSibling || search;
-            if (direction === "down") next = target.nextElementSibling;
-            if (direction === "right") next = play.hidden ? download : play;
+            next = libraryNavigation.adjacent(list.children, target, direction);
+            if (!next && direction === "up") next = search;
+            if (!next && direction === "right") next = primaryAction();
         } else if (target === play || target === download) {
             if (direction === "left") next = selected;
             if (direction === "up") next = signOut;
+            if (direction === "down") next = cloudSaves;
+        } else if (target === cloudSaves) {
+            if (direction === "left") next = selected;
+            if (direction === "up") next = primaryAction();
+            if (direction === "down" && !cloudPanel.hidden) next = cloudRestore;
+        } else if (target === cloudRestore) {
+            if (direction === "left" || direction === "up") next = cloudSaves;
         } else {
             return;
         }
@@ -609,7 +687,36 @@
     play.addEventListener("click", function () {
         if (selected && selected.entry.installed) runGameLaunch(current, selected.entry);
     });
+    cloudSaves.addEventListener("click", function () {
+        if (cloudSaves.disabled) return;
+        if (!cloudPanel.hidden) {
+            closeCloudSaves();
+            return;
+        }
+        cloudPanel.hidden = false;
+        cloudSaves.setAttribute("aria-expanded", "true");
+        cloudRestore.focus();
+    });
+    cloudRestore.addEventListener("click", function () {
+        var entry = selected && selected.entry;
+        if (!entry || cloudPanel.hidden || cloudRestore.disabled) return;
+        restoring = true;
+        signOut.disabled = true;
+        cloudStatus.textContent = "Downloading Steam Cloud saves…";
+        updateActions();
+        function done(result) {
+            restoring = false;
+            signOut.disabled = false;
+            updateActions();
+            if (selected && selected.entry === entry && !cloudPanel.hidden) {
+                cloudStatus.textContent = steamCloud.message(result);
+                play.focus();
+            }
+        }
+        runCloudRestore(entry.id, false).then(done, function () { done("failed"); });
+    });
     signOut.addEventListener("click", function () {
+        if (restoring) return;
         if (transfer) updateDownload(transfer, "interrupted");
         launching = true;
         signOut.disabled = true;

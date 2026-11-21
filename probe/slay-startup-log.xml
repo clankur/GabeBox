@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+  <Appenders>
+    <RollingFile name="Startup" fileName="${sys:xbox.slay.log}" filePattern="${sys:xbox.slay.log}.%i"
+                 append="false" immediateFlush="true">
+      <PatternLayout header="slay_run=${sys:xbox.slay.run}%n" pattern="%d{HH:mm:ss.SSS} %p %c %m%n%ex{12}"/>
+      <Policies><SizeBasedTriggeringPolicy size="1 MB"/></Policies>
+      <DefaultRolloverStrategy max="1"/>
+    </RollingFile>
+  </Appenders>
+  <Loggers>
+    <Root level="info">
+      <AppenderRef ref="Startup"/>
+    </Root>
+  </Loggers>
+</Configuration>
