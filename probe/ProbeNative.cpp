@@ -28,6 +28,7 @@
 
 #include "angle-control.h"
 #include "child-process.h"
+#include "mesa-control.h"
 #include "pipe-protocol.h"
 
 static std::wstring Hex(DWORD value) {
@@ -218,6 +219,17 @@ static std::wstring AngleResult() {
 static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstring const& inventory) {
     if (GetFileAttributesW((packagePath + L"angle-control.dll").c_str()) != INVALID_FILE_ATTRIBUTES) {
         return AngleResult() + L"status=steam-core-complete\r\n";
+    }
+    if (GetFileAttributesW((packagePath + L"mesa-uwp-source.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+        const auto result = RunMesaControl();
+        const bool green = result.stage == 8 && result.eglError == 0x3000;
+        return std::wstring(L"mesa_control=") + (green ? L"green-pixel" : L"failed") +
+            L"\r\nmesa_stage=" + std::to_wstring(result.stage) + L"\r\nmesa_win32_error=" + Hex(result.loadError) +
+            L"\r\nmesa_egl_error=" + Hex(result.eglError) + L"\r\nmesa_gl_error=" + Hex(result.glError) +
+            L"\r\nmesa_egl_version=" + std::to_wstring(result.eglMajor) + L"." + std::to_wstring(result.eglMinor) +
+            L"\r\nmesa_rgba=" + std::to_wstring(result.pixel[0]) + L"," + std::to_wstring(result.pixel[1]) +
+            L"," + std::to_wstring(result.pixel[2]) + L"," + std::to_wstring(result.pixel[3]) +
+            L"\r\nstatus=steam-core-complete\r\n";
     }
     std::wstring result;
     HMODULE control = LoadPackagedLibrary(PROBE_CHILD_MODULE, 0);
