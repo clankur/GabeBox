@@ -1,0 +1,29 @@
+name: Check the standalone Steam core on Windows
+
+on:
+  push:
+    paths:
+      - 'analysis/steam-core-control.ps1'
+      - '.github/workflows/steam-core-runtime-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-control:
+    runs-on: windows-2025
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the pinned core without a desktop Steam process
+        shell: pwsh
+        run: |
+          ./analysis/steam-core-control.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-core-control"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-core-runtime-control
+          path: ${{ runner.temp }}/steam-core-control/evidence.json
+          if-no-files-found: error

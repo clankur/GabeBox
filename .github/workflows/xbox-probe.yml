@@ -135,6 +135,12 @@ jobs:
             $steamArtifacts = Join-Path $work 'steam-artifacts'
             Copy-Item -Recurse $layout $steamLayout
             New-Item -ItemType Directory -Path $steamArtifacts | Out-Null
+            $jni = Join-Path $env:JAVA_HOME 'include'
+            & cl.exe /nologo /c /O2 /GS- /Zl /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+              "/I$jni" "/I$jni\win32" "/Fo$work\slay-working-directory.obj" probe/slay-working-directory.c
+            & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
+              "/out:$steamLayout\slay-working-directory.dll" "/implib:$work\slay-working-directory.lib" `
+              "$work\slay-working-directory.obj" $lib
             $user32 = "$sdk\Lib\$sdkVersion\um\x64\User32.lib"
             foreach ($variant in @('ansi', 'wide')) {
               $defines = @(if ($variant -eq 'wide') { '/DPROBE_WIDE_IMPORT' })
@@ -144,12 +150,42 @@ jobs:
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
             }
+            Copy-Item probe/signin/* $steamLayout
+            $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
+            Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive
+            if ((Get-FileHash $qrArchive).Hash -ne 'ab6ed47d378877441deae95972e07b2716c26545a735a23aa6b9d442b33026ed') {
+              throw 'Unexpected QR renderer digest.'
+            }
+            & tar.exe -xf $qrArchive -C $work package/qrcode.js
+            Copy-Item "$work/package/qrcode.js" $steamLayout
             [xml]$steam = Get-Content "$steamLayout/AppxManifest.xml"
             $steam.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.SteamCore')
+            $internet = $steam.CreateElement('Capability', $ns)
+            $internet.SetAttribute('Name', 'internetClient')
+            $steam.Package.SelectSingleNode("*[local-name()='Capabilities']").AppendChild($internet) | Out-Null
             $steam.Package.Properties.DisplayName = 'Steam Core Loader Probe'
             $steam.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Steam Core Loader Probe')
             $steam.Save("$steamLayout/AppxManifest.xml")
             Write-ProbePackage $steamLayout $steamArtifacts $cert
+            $lifetimeLayout = Join-Path $work 'lifetime-layout'
+            $lifetimeArtifacts = Join-Path $work 'lifetime-artifacts'
+            Copy-Item -Recurse $layout $lifetimeLayout
+            New-Item -ItemType Directory -Path $lifetimeArtifacts | Out-Null
+            [xml]$lifetime = Get-Content "$lifetimeLayout/AppxManifest.xml"
+            $lifetime.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Lifetime')
+            $lifetime.Package.Properties.DisplayName = 'Packaged process lifetime test'
+            $lifetime.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process lifetime test')
+            $lifetimeApp = $lifetime.Package.Applications.Application
+            $appExtensions = $lifetime.CreateElement('Extensions', $ns)
+            $uriExtension = $lifetime.CreateElement('uap', 'Extension', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
+            $uriExtension.SetAttribute('Category', 'windows.protocol')
+            $protocol = $lifetime.CreateElement('uap', 'Protocol', $uriExtension.NamespaceURI)
+            $protocol.SetAttribute('Name', 'xbox-portability-probe-return')
+            $uriExtension.AppendChild($protocol) | Out-Null
+            $appExtensions.AppendChild($uriExtension) | Out-Null
+            $lifetimeApp.AppendChild($appExtensions) | Out-Null
+            $lifetime.Save("$lifetimeLayout/AppxManifest.xml")
+            Write-ProbePackage $lifetimeLayout $lifetimeArtifacts $cert
             Write-ProbePackage $layout $artifacts $cert
             Write-ProbePackage $controlLayout $controlArtifacts $cert
           } finally {
@@ -169,4 +205,9 @@ jobs:
         with:
           name: xbox-steam-core-template
           path: ${{ runner.temp }}/xbox-probe/steam-artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-lifetime
+          path: ${{ runner.temp }}/xbox-probe/lifetime-artifacts/
           if-no-files-found: error
