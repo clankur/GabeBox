@@ -7,11 +7,14 @@
 #include <winrt/Windows.Storage.h>
 #include <winrt/XboxProbe.Native.h>
 #include <array>
+#include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "child-process.h"
 #include "pipe-protocol.h"
@@ -228,10 +231,12 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> IsPinnedSteamImage() {
 }
 
 // These RVAs describe the audited Valve build 1794536281 after its one-byte import adaptation.
-static std::wstring ProbeSignedOutSteamUser(HMODULE image, SteamFactory factory, std::int32_t user, std::int32_t pipe) {
+using SteamQuery = bool (__cdecl *)(void *);
+using SteamListApps = std::int32_t (__cdecl *)(void *, std::uint32_t *, std::int32_t, bool);
+
+static std::uintptr_t const *FindPinnedSteamUser(HMODULE image, SteamFactory factory,
+        std::int32_t user, std::int32_t pipe, void *&clientUser, std::wstring &report) {
     using GetUser = void *(__cdecl *)(void *, std::int32_t, std::int32_t);
-    using Query = bool (__cdecl *)(void *);
-    using ListApps = std::int32_t (__cdecl *)(void *, std::uint32_t *, std::int32_t, bool);
     const auto base = reinterpret_cast<std::uintptr_t>(image);
     auto table = [](void *object) {
         return object ? *static_cast<std::uintptr_t const **>(object) : nullptr;
@@ -241,25 +246,36 @@ static std::wstring ProbeSignedOutSteamUser(HMODULE image, SteamFactory factory,
     auto engineMethods = table(engine);
     if (code != 0 || reinterpret_cast<std::uintptr_t>(engineMethods) != base + 0x138f580 ||
             engineMethods[8] != base + 0x9aa4b0) {
-        return L"steam_session_abi=engine-mismatch\r\n";
+        report += L"steam_session_abi=engine-mismatch\r\n";
+        return nullptr;
     }
 
-    auto clientUser = reinterpret_cast<GetUser>(engineMethods[8])(engine, user, pipe);
+    clientUser = reinterpret_cast<GetUser>(engineMethods[8])(engine, user, pipe);
     auto userMethods = table(clientUser);
     if (reinterpret_cast<std::uintptr_t>(userMethods) != base + 0x1357d28 ||
             userMethods[1] != base + 0x8772a0 || userMethods[4] != base + 0x75e0e0 ||
-            userMethods[6] != base + 0x7513f0 || userMethods[56] != base + 0x8a0450 ||
+            userMethods[3] != base + 0x876fe0 || userMethods[6] != base + 0x7513f0 ||
+            userMethods[10] != base + 0x7b8ea0 || userMethods[56] != base + 0x8a0450 ||
             userMethods[183] != base + 0x7ba890) {
-        return L"steam_session_abi=user-mismatch\r\n";
+        report += L"steam_session_abi=user-mismatch\r\n";
+        return nullptr;
     }
 
-    bool loggedOn = reinterpret_cast<Query>(userMethods[4])(clientUser);
-    bool connected = reinterpret_cast<Query>(userMethods[6])(clientUser);
-    std::wstring report = L"steam_session_abi=verified\r\n";
+    report += L"steam_session_abi=verified\r\n";
+    return userMethods;
+}
+
+static std::wstring ProbeSignedOutSteamUser(HMODULE image, SteamFactory factory, std::int32_t user, std::int32_t pipe) {
+    std::wstring report;
+    void *clientUser = nullptr;
+    auto userMethods = FindPinnedSteamUser(image, factory, user, pipe, clientUser, report);
+    if (!userMethods) return report;
+    bool loggedOn = reinterpret_cast<SteamQuery>(userMethods[4])(clientUser);
+    bool connected = reinterpret_cast<SteamQuery>(userMethods[6])(clientUser);
     report += std::wstring(L"steam_client_connected=") + (connected ? L"yes\r\n" : L"no\r\n");
     if (!loggedOn) {
         std::array<std::uint32_t, 64> apps{};
-        auto count = reinterpret_cast<ListApps>(userMethods[183])(
+        auto count = reinterpret_cast<SteamListApps>(userMethods[183])(
             clientUser, apps.data(), static_cast<std::int32_t>(apps.size()), true);
         report += L"steam_signed_out_subscriptions=" + std::to_wstring(count) + L"\r\n";
     }
@@ -364,6 +380,157 @@ static winrt::Windows::Foundation::IAsyncAction SteamRuntime(
     co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
 }
 
+struct SteamSignInHandles {
+    using ReleasePipe = bool (__cdecl *)(std::int32_t);
+    using ReleaseUser = void (__cdecl *)(std::int32_t, std::int32_t);
+    ReleasePipe releasePipe;
+    ReleaseUser releaseUser;
+    std::int32_t pipe = 0;
+    std::int32_t user = 0;
+
+    ~SteamSignInHandles() {
+        if (pipe > 0) {
+            if (user > 0) releaseUser(pipe, user);
+            releasePipe(pipe);
+        }
+    }
+};
+
+static winrt::Windows::Foundation::IAsyncAction SteamSignIn(
+        winrt::Windows::Storage::StorageFile file, winrt::hstring prefix, winrt::hstring account,
+        winrt::hstring approval, winrt::hstring accountId) {
+    using winrt::Windows::Storage::FileIO;
+    using CreateUser = std::int32_t (__cdecl *)(std::int32_t *);
+    using SetToken = void (__cdecl *)(void *, const char *, const char *);
+    using LogOn = std::int32_t (__cdecl *)(void *, std::uint64_t);
+    using LogOff = void (__cdecl *)(void *);
+    using GetId = std::uint64_t *(__cdecl *)(void *, std::uint64_t *);
+    struct Callback {
+        std::int32_t user;
+        std::int32_t message;
+        const void *data;
+        std::int32_t length;
+    };
+    using GetCallback = bool (__cdecl *)(std::int32_t, Callback *);
+    using FreeCallback = void (__cdecl *)(std::int32_t);
+    constexpr auto complete = L"status=steam-core-complete\r\n";
+    std::wstring report(prefix);
+    auto save = [&](const wchar_t *suffix) {
+        return FileIO::WriteTextAsync(file, winrt::hstring(report + suffix));
+    };
+
+    auto idText = winrt::to_string(accountId);
+    std::uint64_t requestedId = 0;
+    auto parsed = std::from_chars(idText.data(), idText.data() + idText.size(), requestedId);
+    if (parsed.ec != std::errc{} || parsed.ptr != idText.data() + idText.size() || !requestedId ||
+            account.empty() || account.size() > 64 || approval.empty() || approval.size() > 8192 ||
+            !(co_await IsPinnedSteamImage())) {
+        report += L"steam_signin=input-or-image-error\r\n";
+        co_await save(complete);
+        co_return;
+    }
+
+    co_await save(L"status=steam-native-signin-starting\r\n");
+    std::unique_ptr<std::remove_pointer_t<HMODULE>, decltype(&FreeLibrary)> module(
+        LoadPackagedLibrary(L"steamclient64.dll", 0), FreeLibrary);
+    if (!module) {
+        report += L"steam_signin=load-error\r\nsteam_signin_error=" + Hex(GetLastError()) + L"\r\n";
+        co_await save(complete);
+        co_return;
+    }
+
+    auto factory = reinterpret_cast<SteamFactory>(GetProcAddress(module.get(), "CreateInterface"));
+    auto create = reinterpret_cast<CreateUser>(GetProcAddress(module.get(), "Steam_CreateGlobalUser"));
+    auto getCallback = reinterpret_cast<GetCallback>(GetProcAddress(module.get(), "Steam_BGetCallback"));
+    auto freeCallback = reinterpret_cast<FreeCallback>(GetProcAddress(module.get(), "Steam_FreeLastCallback"));
+    SteamSignInHandles handles{
+        reinterpret_cast<SteamSignInHandles::ReleasePipe>(GetProcAddress(module.get(), "Steam_BReleaseSteamPipe")),
+        reinterpret_cast<SteamSignInHandles::ReleaseUser>(GetProcAddress(module.get(), "Steam_ReleaseUser"))};
+    if (!factory || !create || !handles.releasePipe || !handles.releaseUser || !getCallback || !freeCallback) {
+        report += L"steam_signin=export-error\r\n";
+        co_await save(complete);
+        co_return;
+    }
+
+    handles.user = create(&handles.pipe);
+    if (handles.user <= 0 || handles.pipe <= 0) {
+        report += L"steam_signin=bootstrap-error\r\n";
+        co_await save(complete);
+        co_return;
+    }
+    void *clientUser = nullptr;
+    auto methods = FindPinnedSteamUser(module.get(), factory, handles.user, handles.pipe, clientUser, report);
+    if (!methods) {
+        report += L"steam_signin=interface-error\r\n";
+        co_await save(complete);
+        co_return;
+    }
+    auto loggedOn = reinterpret_cast<SteamQuery>(methods[4]);
+    auto connected = reinterpret_cast<SteamQuery>(methods[6]);
+    if (loggedOn(clientUser)) {
+        report += L"steam_signin=existing-session\r\n";
+        co_await save(complete);
+        co_return;
+    }
+
+    auto token = winrt::to_string(approval);
+    approval.clear();
+    auto name = winrt::to_string(account);
+    reinterpret_cast<SetToken>(methods[56])(clientUser, token.c_str(), name.c_str());
+    SecureZeroMemory(token.data(), token.size());
+    const auto started = reinterpret_cast<LogOn>(methods[1])(clientUser, requestedId);
+    report += L"steam_logon_start=" + std::to_wstring(started) + L"\r\n";
+    if (started != 1) {
+        report += L"steam_signin=logon-rejected\r\n";
+        co_await save(complete);
+        co_return;
+    }
+    co_await save(L"status=steam-awaiting-authenticated-library\r\n");
+
+    winrt::apartment_context caller;
+    std::vector<std::uint32_t> apps(65536);
+    ULONGLONG deadline = GetTickCount64() + 60000;
+    bool identityMatches = false;
+    bool wrongAccount = false;
+    std::int32_t count = 0;
+    while (GetTickCount64() < deadline) {
+        for (unsigned i = 0; i < 32; ++i) {
+            Callback event{};
+            if (!getCallback(handles.pipe, &event)) break;
+            freeCallback(handles.pipe);
+        }
+
+        if (loggedOn(clientUser) && connected(clientUser)) {
+            std::uint64_t actualId = 0;
+            reinterpret_cast<GetId>(methods[10])(clientUser, &actualId);
+            if (actualId && actualId != requestedId) {
+                wrongAccount = true;
+                break;
+            }
+            if (actualId == requestedId) {
+                identityMatches = true;
+                count = reinterpret_cast<SteamListApps>(methods[183])(
+                    clientUser, apps.data(), static_cast<std::int32_t>(apps.size()), true);
+                if (count > 0 && count < static_cast<std::int32_t>(apps.size())) break;
+            }
+        }
+        co_await winrt::resume_after(std::chrono::milliseconds(250));
+        co_await caller;
+    }
+
+    reinterpret_cast<LogOff>(methods[3])(clientUser);
+    if (wrongAccount) {
+        report += L"steam_signin=account-mismatch\r\n";
+    } else if (identityMatches) {
+        report += L"steam_signin=authenticated\r\nsteam_library_count=" + std::to_wstring(count) + L"\r\n";
+        bool verified = count > 0 && count < static_cast<std::int32_t>(apps.size());
+        report += std::wstring(L"steam_library=") + (verified ? L"verified\r\n" : L"unconfirmed\r\n");
+    } else {
+        report += L"steam_signin=timeout\r\n";
+    }
+    co_await save(complete);
+}
+
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
                                         winrt::XboxProbe::Native::IProbeRunnerStatics> {
     winrt::Windows::Foundation::IInspectable ActivateInstance() {
@@ -384,6 +551,12 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     winrt::Windows::Foundation::IAsyncAction RunSteamRuntime(
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
         return SteamRuntime(file, prefix);
+    }
+
+    winrt::Windows::Foundation::IAsyncAction RunSteamSignIn(
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix,
+            winrt::hstring const& account, winrt::hstring const& approval, winrt::hstring const& accountId) {
+        return SteamSignIn(file, prefix, account, approval, accountId);
     }
 };
 

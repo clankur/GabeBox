@@ -144,6 +144,14 @@ jobs:
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
             }
+            Copy-Item probe/signin/* $steamLayout
+            $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
+            Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive
+            if ((Get-FileHash $qrArchive).Hash -ne 'ab6ed47d378877441deae95972e07b2716c26545a735a23aa6b9d442b33026ed') {
+              throw 'Unexpected QR renderer digest.'
+            }
+            & tar.exe -xf $qrArchive -C $work package/qrcode.js
+            Copy-Item "$work/package/qrcode.js" $steamLayout
             [xml]$steam = Get-Content "$steamLayout/AppxManifest.xml"
             $steam.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.SteamCore')
             $internet = $steam.CreateElement('Capability', $ns)
