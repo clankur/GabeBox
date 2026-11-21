@@ -190,10 +190,29 @@ def slay_log_summary(report, raw):
     if 'com.megacrit.cardcrawl.desktop.DesktopLauncher' in text:
         result.append('slay_desktop_launcher=logged')
     # Keep account names, local paths and arbitrary application messages out of the CLI report.
+    return '\n'.join(result + slay_exception_types(text))
+
+
+def slay_exception_types(text):
     errors = re.findall(r'\b(?:[a-zA-Z_$][\w$]*\.)+(?:[A-Z][\w$]*)?(?:Error|Exception)\b', text)
-    for error in dict.fromkeys(errors):
-        result.append('slay_logged_exception=' + error)
-    return '\n'.join(result)
+    return ['slay_logged_exception=' + error for error in dict.fromkeys(errors)]
+
+
+def slay_console_summary(raw):
+    if not raw:
+        return 'slay_console=no-output'
+    text = raw.decode('utf-8', errors='replace')
+    result = re.findall(r'^slay_console=(?:helper-started|create-error|running-at-timeout|exit--?\d+)\r?$', text, re.M)
+    if not result or result[0] != 'slay_console=helper-started':
+        return 'slay_console=unrecognized-output'
+    stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
+              ('Could not create the Java Virtual Machine', 'vm-creation'),
+              ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),
+              ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation')]
+    for marker, stage in stages:
+        if marker in text:
+            result.append('slay_console_observed=' + stage)
+    return '\n'.join(result + slay_exception_types(text))
 
 
 def read_game_file(portal, package, folder, filename, limit):
@@ -390,6 +409,8 @@ def main():
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
     report_variant.add_argument('--slay-log', dest='report_file', action='store_const',
                                 const='slay-startup.log', help='summarize the current Slay the Spire diagnostic log')
+    report_variant.add_argument('--slay-console', dest='report_file', action='store_const',
+                                const='slay-console', help='summarize the publisher console diagnostic for this launch')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -451,6 +472,15 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.report_file == 'slay-console':
+            _, launch = portal.request('GET', probe_report_path(app))
+            run = re.search(r'^steam_slay_console_run=([0-9]{1,20})\r?$', decode_report(launch), re.MULTILINE)
+            if not run:
+                print('slay_console=not-requested-for-this-launch')
+                return
+            raw = read_game_file(portal, app, r'\LocalState', f'slay-console-{run[1]}.log', 1024 * 1024)
+            print(slay_console_summary(raw))
+            return
         if args.report_file == 'slay-startup.log':
             _, launch = portal.request('GET', probe_report_path(app))
             raw = read_game_file(portal, app, r'\LocalState', args.report_file, 65536)

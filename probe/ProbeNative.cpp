@@ -1210,6 +1210,57 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
     co_return winrt::hstring(L"steam_java_probe=exited\r\nsteam_java_probe_exit=" + Hex(exitCode) + L"\r\n");
 }
 
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RunSlayConsoleDiagnostic(
+        winrt::Windows::Storage::StorageFolder library, std::wstring packageRoot, std::wstring log) {
+    constexpr std::uint32_t app = 646570;
+    const std::uint64_t gameId = app;
+    if (!co_await HasCompletedSteamManifest(library, app)) co_return winrt::hstring(L"steam_slay_console=not-installed\r\n");
+    const auto game = std::wstring(library.Path()) + L"\\steamapps\\common\\SlayTheSpire";
+    const auto java = game + L"\\jre\\bin\\java.exe";
+    auto command = L"\"" + java + L"\" -Xmx32m -cp \"" + packageRoot +
+        L"\" SlayConsoleDiagnostic \"" + log + L"\" \"" + game + L"\"";
+    PROCESS_INFORMATION child{};
+    {
+        std::lock_guard lock(steamSessionMutex);
+        auto session = liveSteamSession;
+        if (!session || !session->OwnsSession() || session->downloadApp || session->launchCall) {
+            co_return winrt::hstring(L"steam_slay_console=session-unavailable\r\n");
+        }
+        auto methods = FindSteamAppManager(*session);
+        const auto base = reinterpret_cast<std::uintptr_t>(session->module);
+        if (!methods || session->userMethods[182] != base + 0x75d640 || session->userMethods[67] != base + 0x75a320) {
+            co_return winrt::hstring(L"steam_slay_console=interface-error\r\n");
+        }
+        using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
+        using GameQuery = bool (__cdecl *)(void *, const std::uint64_t *);
+        auto manager = session->appManager;
+        if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
+                !reinterpret_cast<IsSubscribed>(session->userMethods[182])(session->clientUser, app) ||
+                reinterpret_cast<GameQuery>(session->userMethods[67])(session->clientUser, &gameId) ||
+                (reinterpret_cast<SteamAppValue>(methods[4])(manager, app) & 0x7000a6) != 4) {
+            co_return winrt::hstring(L"steam_slay_console=not-ready\r\n");
+        }
+        auto installed = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (CompareStringOrdinal(installed.c_str(), -1, game.c_str(), -1, TRUE) != CSTR_EQUAL) {
+            co_return winrt::hstring(L"steam_slay_console=install-path-error\r\n");
+        }
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        if (!CreateProcessW(java.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, game.c_str(), &startup, &child)) {
+            co_return winrt::hstring(L"steam_slay_console=create-error\r\nsteam_slay_console_error=" + Hex(GetLastError()) + L"\r\n");
+        }
+    }
+    winrt::handle process(child.hProcess), thread(child.hThread);
+    co_await winrt::resume_background();
+    if (WaitForSingleObject(process.get(), 35000) != WAIT_OBJECT_0) {
+        co_return winrt::hstring(L"steam_slay_console=helper-wait-incomplete\r\n");
+    }
+    DWORD code = 0;
+    if (!GetExitCodeProcess(process.get(), &code)) co_return winrt::hstring(L"steam_slay_console=helper-exit-unavailable\r\n");
+    co_return winrt::hstring(L"steam_slay_console=helper-exited\r\nsteam_slay_console_helper_exit=" + Hex(code) + L"\r\n");
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix) {
     using namespace winrt::Windows::Storage;
@@ -1581,6 +1632,17 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     if (app == 646570 && verdict == std::wstring_view(L"exited-during-startup")) {
         try {
             auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+            DWORD code = 0;
+            if (accepted && process.handle && WaitForSingleObject(process.handle.get(), 0) == WAIT_OBJECT_0 &&
+                    GetExitCodeProcess(process.handle.get(), &code) && code == 1 &&
+                    co_await package.TryGetItemAsync(L"SlayConsoleDiagnostic.class")) {
+                const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                    launchTime.dwLowDateTime);
+                report += L"steam_slay_console_run=" + id + L"\r\n";
+                co_await checkpoint(L"collecting-slay-console");
+                report += (co_await RunSlayConsoleDiagnostic(folder, packageRoot,
+                    dataRoot + L"\\slay-console-" + id + L".log")).c_str();
+            }
             if (co_await package.TryGetItemAsync(L"steam-java-probe.txt")) {
                 const auto javaReport = co_await ProbeJavaVersion(gameDirectory);
                 report += javaReport.c_str();
