@@ -15,7 +15,7 @@ def add_surfaceless(tree):
     context = offscreen / 'SDL_offscreenopengles.c'
     source = context.read_text(encoding='utf-8')
     old = '#include "SDL_offscreenwindow.h"'
-    source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "../../sdl-startup-trace.h"')
+    source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "SDL_opengl.h"\n#include "../../sdl-startup-trace.h"')
     old = '    int ret = SDL_EGL_LoadLibraryOnly(_this, path);'
     source = replace_once(source, old, '''    int ret;
     if (SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
