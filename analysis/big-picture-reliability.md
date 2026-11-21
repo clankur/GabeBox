@@ -71,6 +71,16 @@ Signed APPX SHA-256 `46775d5011227204fd7b63b83864d3d30265d5ec9962f00e46ea24a9d34
 
 Three of three consecutive app activations produced the original Library. Two of the three had strictly empty package-process preflights. The durable first and second captures are `production-230-21/steam-big-picture-library-1920x1080.png` and `production-230-21/steam-big-picture-library-controller-1920x1080.png`.
 
+### Build 1.0.230.22
+
+Production APPX SHA-256 `246874ba556f2c3a6691f95be78e5c40a702d650fb7ea18540d5deb3134ba347`. All 1,175 original Valve assets match the previous signed build byte for byte.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-22-183719 | cc3da6fe-67cf-4b3c-b8b1-c0ae24d7b235 | Passed from an empty package-process baseline. The TV shows All Games 134, Installed 8, game art and controller footer. |
+
+The durable original is `production-230-22/steam-big-picture-library-controller-1920x1080.png`.
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -81,6 +91,7 @@ Three of three consecutive app activations produced the original Library. Two of
 | 1.0.230.20 · tour-20-182012 | Stardew Valley | Original game details led to a matched Stardew Valley game process. | Console output reached a white startup frame containing a pixel cursor and two icons. The title menu was unverified. | No matched 30-second presentation sample or visible return before the game and host processes disappeared. |
 | 1.0.230.21 · tour-21-182442 | Slay the Spire | The operator activated the original green Play button. The expected game process appeared. | The first native frame was hidden and no Xbox capture established the game title. | The game process disappeared. No visible return or matched 30-second presentation sample. |
 | 1.0.230.21 · tour-21-182817 | Dwarf Fortress | The operator activated the original green Play button and the matching game process appeared. | The raw Xbox frame shows the title menu, including About DF, Settings and Quit. | 1,797 distinct presented frames in 30.013570 s (59.87 FPS). The operator terminated the game process, then used Back from game details to reach the Library. A normal exit and return remain unverified. |
+| 1.0.230.22 · tour-22-183719 | Slay the Spire | The original game details were captured and the matching JVM started. | No recognizable title frame was established by the foreground sample. | The primary media presenter advanced by two frames over 30.031600 s (0.067 FPS), reaching three total. The producer sequence remained at three across four later reads. A normal exit and return remain unverified. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -107,6 +118,7 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `valve-937.png`, .21 third application start whole-output Library | 1920×1080 | `e5609a5f21db9e2d1316610f65b9af70ef9ab1291f0bf383544b3fb5e7ae4dae` |
 | `physical-tv-1795303954859752000.png`, .21 Dwarf Fortress title and menu | 1920×1080 | `ef5b70058a6c36ae82c83fcc2f57b4b374d87a5fa901b8d1ea0d8fdc81f83c1d` |
 | `physical-tv-1795304092607387000.png`, .21 Library after assisted return | 1920×1080 | `58c0f1ea182e1f1ec02c051750c6c575030059c9b0342909679b93c76da9a5e5` |
+| `valve-846.png`, .22 first cold start whole-output Library | 1920×1080 | `5cb377878cf552832c82154e9d6234fea7b4ae8a42a42daf3b0aaca8f057de47` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
@@ -128,3 +140,5 @@ The independent source audit found these limitations on the tested build:
 Fourteen local broker, startup and preference tests passed with isolated identities. A hardware account-switch check must confirm that the previous owner's titles disappear, that the new owner sees only their own catalog, and that unowned titles cannot launch. A first-install check must start with the test package's prior session and UI storage absent and proceed through actual QR authorization. No credentials or account identifiers are required in the resulting public receipt. [Broker tests](../tests/steam-big-picture-broker.test.js) · [Startup tests](../probe/big-picture-webview/core-startup.test.js) · [Preference tests](../probe/big-picture-webview/services.test.js)
 
 Valve documents `LicensesUpdated_t` as a change notification for owned packages. It carries no payload. The documentation does not establish that it fires on an initial empty account or that all application metadata has arrived. The original Valve client also defines a typed CM license-list response with a result and license list. The current native callback reader does not receive that response. The Web API for owned games requires a key and depends on game-detail visibility. A successful connection or an elapsed timeout therefore cannot certify an empty private catalog through the existing native reader. [ISteamUser callbacks](https://partner.steamgames.com/doc/api/ISteamUser#LicensesUpdated_t) · [IPlayerService.GetOwnedGames](https://partner.steamgames.com/doc/webapi/IPlayerService#GetOwnedGames)
+
+Build `.22` contains the stock sign-out binding and the CI-built native credential fix. Its Windows DLL SHA-256 is `75fe5ff246780b562023f44169b717c599f685a0077dcb5822ffd0ba917b23c3`. The first recorded production launch used the existing account. A separately signed fixture package with identity `XboxPortabilityProbe.SteamFresh23022` has SHA-256 `26696eef0163dbadd78acfb8a8ec98437c9c0ef33095b968481caedd9b8e842b`. The identity and two display labels are its only manifest changes, and all application payloads match production. Its distinct sandbox permits a first-install test without modifying the production account's data. Building this package alone supplies no evidence of fresh QR authorization.
