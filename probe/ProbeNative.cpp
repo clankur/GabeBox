@@ -1049,6 +1049,61 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManife
     co_return value != view.npos && view.substr(value, 3) == L"\"4\"";
 }
 
+struct SteamGameProcess {
+    winrt::handle handle;
+    std::wstring_view checkpoint = L"not-reported";
+    DWORD error = ERROR_SUCCESS;
+
+    void Observe(void *clientUser, std::uintptr_t const *methods, std::uint64_t gameId,
+            std::wstring const& gameDirectory) {
+        if (handle) return;
+        using GameCount = std::uint32_t (__cdecl *)(void *);
+        using GetGameID = std::uint64_t * (__cdecl *)(void *, std::uint64_t *, std::uint32_t);
+        using GetGamePID = DWORD (__cdecl *)(void *, std::uint32_t);
+        const auto count = std::min(reinterpret_cast<GameCount>(methods[132])(clientUser), 16u);
+        for (std::uint32_t index = 0; index < count; ++index) {
+            std::uint64_t runningId = 0;
+            reinterpret_cast<GetGameID>(methods[133])(clientUser, &runningId, index);
+            if (runningId != gameId) continue;
+            const auto pid = reinterpret_cast<GetGamePID>(methods[134])(clientUser, index);
+            if (!pid) continue;
+            winrt::handle process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid)};
+            if (!process) {
+                error = GetLastError();
+                checkpoint = L"open-error";
+                continue;
+            }
+            std::wstring image(32768, L'\0');
+            DWORD size = static_cast<DWORD>(image.size());
+            if (!QueryFullProcessImageNameW(process.get(), 0, image.data(), &size)) {
+                error = GetLastError();
+                checkpoint = L"image-query-error";
+                continue;
+            }
+            image.resize(size);
+            error = ERROR_SUCCESS;
+            if (!IsLocalSteamInstall(image, gameDirectory)) {
+                checkpoint = L"outside-game";
+                continue;
+            }
+            handle = std::move(process);
+            checkpoint = L"captured";
+            return;
+        }
+    }
+
+    std::wstring Report() const {
+        auto report = L"steam_launch_process=" + std::wstring(checkpoint) + L"\r\n";
+        if (error) report += L"steam_launch_process_error=" + Hex(error) + L"\r\n";
+        if (!handle) return report;
+        DWORD exitCode = 0;
+        if (WaitForSingleObject(handle.get(), 0) == WAIT_OBJECT_0 && GetExitCodeProcess(handle.get(), &exitCode)) {
+            report += L"steam_launch_process_exit=" + Hex(exitCode) + L"\r\n";
+        }
+        return report;
+    }
+};
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
@@ -1237,39 +1292,43 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     }
 
+    std::wstring gameDirectory;
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
-        if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
-        if (session->downloadApp || session->launchCall) co_return winrt::hstring(L"steam_launch=busy\r\n");
+        if (!session || !session->OwnsSession()) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+        if (session->downloadApp || session->launchCall) co_return winrt::hstring(report + L"steam_launch=busy\r\n");
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
         auto methods = FindSteamAppManager(*session);
         result = reinterpret_cast<CallResult>(GetProcAddress(session->module, "Steam_GetAPICallResult"));
         if (!methods || methods[2] != base + 0x874f20 || session->userMethods[182] != base + 0x75d640 ||
                 session->userMethods[67] != base + 0x75a320 || session->userMethods[68] != base + 0x75a4d0 ||
+                session->userMethods[132] != base + 0x8794c0 || session->userMethods[133] != base + 0x7b3e30 ||
+                session->userMethods[134] != base + 0x7b3fc0 ||
                 reinterpret_cast<std::uintptr_t>(result) != base + 0x9abb80) {
-            co_return winrt::hstring(L"steam_launch=interface-error\r\n");
+            co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
                 !reinterpret_cast<IsSubscribed>(session->userMethods[182])(session->clientUser, app)) {
-            co_return winrt::hstring(L"steam_launch=no-license\r\n");
+            co_return winrt::hstring(report + L"steam_launch=no-license\r\n");
         }
         auto manager = session->appManager;
         auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
         if ((state & installMask) != fullyInstalled) {
-            co_return winrt::hstring(L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
+            co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
                 std::to_wstring(state) + L"\r\n");
         }
-        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
-            co_return winrt::hstring(L"steam_launch=install-path-error\r\n");
+        gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
+            co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
+                SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
         }
         if (reinterpret_cast<GameQuery>(session->userMethods[67])(session->clientUser, &gameId)) {
-            co_return winrt::hstring(L"steam_launch=already-running\r\n");
+            co_return winrt::hstring(report + L"steam_launch=already-running\r\n");
         }
         session->PumpCallbacks();
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
-        if (!call) co_return winrt::hstring(L"steam_launch=request-rejected\r\n");
+        if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
     }
 
@@ -1283,7 +1342,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::array<std::uint8_t, 524> payload{};
     auto verdict = L"timeout";
     report += L"steam_launch_submitted=yes\r\n";
-    auto deadline = GetTickCount64() + 25000;
+    const auto started = GetTickCount64();
+    const auto deadline = started + 25000;
+    SteamGameProcess process;
     bool accepted = false;
     bool observedRunning = false;
     for (;;) {
@@ -1324,6 +1385,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto user = session->clientUser;
             auto running = reinterpret_cast<GameQuery>(session->userMethods[67])(user, &gameId);
             observedRunning = observedRunning || running;
+            if (running) process.Observe(user, session->userMethods, gameId, gameDirectory);
             auto windowReady = reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
             if (accepted && windowReady && running) verdict = L"window-ready";
             if ((responded && !accepted) || (accepted && windowReady && running) || GetTickCount64() >= deadline) {
@@ -1331,11 +1393,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     verdict = running ? L"running-window-unconfirmed" : L"exited-during-startup";
                 }
                 report += std::wstring(L"steam_launch_running_seen=") + (observedRunning ? L"yes\r\n" : L"no\r\n");
+                report += process.Report();
                 session->launchCall = 0;
                 break;
             }
         }
-        co_await winrt::resume_after(std::chrono::milliseconds(250));
+        co_await winrt::resume_after(std::chrono::milliseconds(GetTickCount64() - started < 3000 ? 50 : 250));
         co_await caller;
     }
     co_return winrt::hstring(report + L"steam_launch=" + verdict + L"\r\n");
