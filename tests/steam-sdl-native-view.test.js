@@ -46,7 +46,10 @@ test("the primary game video confirms rendered frames, resets its sample across 
         URL:{createObjectURL:() => "blob:media", revokeObjectURL:url => released.push(url)}});
     const control = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-1-2.bin\r\n", {
         running:() => running, presented:() => firstFrames++, mediaProgress() {}, mediaCapture:stats => captures.push(stats),
-        measured:(n,us) => measurements.push([n,us]), exited() {}, fallback:() => assert.fail("media failed")
+        measured:(n,us,stats) => {
+            measurements.push([n,us]);
+            assert.match(stats,new RegExp("sample_window=" + measurements.length + "\\r"));
+        }, exited() {}, fallback:() => assert.fail("media failed")
     }, false, screen);
     assert(control.primary);
     tick();
@@ -66,6 +69,8 @@ test("the primary game video confirms rendered frames, resets its sample across 
     now = 41000; total = 2003; tick();
     now = 71000; total += 1798; tick();
     assert.deepEqual(measurements, [[1798,30000000]]);
+    now = 101000; tick();
+    assert.deepEqual(measurements, [[1798,30000000],[0,30000000]]);
     running = false; tick(); control.close();
     assert.equal(finished, 1); assert.deepEqual(released, ["blob:media"]);
 });

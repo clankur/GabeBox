@@ -5,7 +5,8 @@
 
     function openMedia(host, path, events, nativePad, screen, mainId) {
         var video = document.createElement("video");
-        var timer, url, closed = false, opened = false, shown = false, measured = false;
+        var timer, url, closed = false, opened = false, shown = false;
+        var sampleWindow = 0;
         var started = Date.now(), owner = ++activeSession, sampleStart, nextReport = 0, phase = "open";
         var capturePending = false;
         function resetSample() { sampleStart = null; }
@@ -117,15 +118,17 @@
                         shown = true;
                         events.presented(stats + "\r\n" + foreground);
                     }
-                    if (shown && !measured && events.measured && count) {
+                    if (shown && events.measured && count) {
                         var now = performance.now(), rendered = +count[1];
                         if (!sampleStart) sampleStart = {time: now, frames: rendered};
                         var elapsed = Math.round((now - sampleStart.time) * 1000);
                         var unique = rendered - sampleStart.frames;
-                        if (elapsed >= 30000000 && unique > 0) {
-                            measured = true;
+                        if (elapsed >= 30000000) {
+                            sampleStart = {time: now, frames: rendered};
+                            ++sampleWindow;
                             var visibleSample = stats.replace(/^sample_(?:us|frames)=.*\r?$/gm, "") + "\r\n" +
-                                "sample_us=" + elapsed + "\r\nsample_frames=" + unique + "\r\n" + foreground;
+                                "sample_window=" + sampleWindow + "\r\nsample_us=" + elapsed +
+                                "\r\nsample_frames=" + unique + "\r\n" + foreground;
                             events.measured(unique, elapsed, visibleSample);
                         }
                     }

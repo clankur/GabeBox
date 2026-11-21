@@ -96,9 +96,10 @@
             var fields = stats.split(/\r?\n/).filter(function (line) {
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
-                    /^(capture_saved|video_ms)=[0-9]{1,16}$/.test(line) || /^media_phase=(open|attach|playback)$/.test(line);
+                    /^(capture_saved|video_ms|sample_window)=[0-9]{1,16}$/.test(line) || /^media_phase=(open|attach|playback)$/.test(line);
             });
             if (!fields.length) return;
+            if (stage === "sample" && gameFrames.sample) stage = "latest_sample";
             gameFrames[stage] = "appid=" + appId + " " + fields.join(" ");
             record(last, true);
         }
