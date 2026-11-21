@@ -190,6 +190,59 @@ def read_game_file(portal, package, folder, filename, limit):
     return data
 
 
+def stardew_host_summary(raw):
+    if not raw:
+        return 'stardew_host_trace=no-output'
+    encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+    text = raw.decode(encoding, errors='replace')
+    if not re.search(r'Stardew Valley\.(?:dll|exe)\b', text, re.I):
+        return 'stardew_host_trace=target-unconfirmed'
+    fields = ['stardew_host_trace=observed', f'stardew_host_bytes_read={len(raw)}']
+    markers = [('apphost', 'Invoked apphost'), ('hostfxr', 'Invoked hostfxr'),
+               ('hostpolicy', 'Invoked hostpolicy'), ('coreclr-path', 'CoreCLR path ='),
+               ('managed-launch', 'Launch host:')]
+    for phase, marker in markers:
+        if marker in text:
+            fields.append(f'stardew_host_phase={phase}')
+    for line in text.splitlines():
+        if re.search(r'Failed to load the dll|(?:required library|library.*required to execute).*'
+                     r'(?:could not be found|was not found)|Could not resolve CoreCLR path|'
+                     r'Failed to create CoreCLR|Failed to execute managed app', line, re.I):
+            library = re.search(r'\b(hostfxr|hostpolicy|coreclr)\.dll\b', line, re.I)
+            operation = re.search(r'Could not resolve CoreCLR path|Failed to create CoreCLR|'
+                                  r'Failed to execute managed app', line, re.I)
+            failure = 'runtime-library-load'
+            if library:
+                failure = library[0].lower()
+            elif operation:
+                failure = operation[0].lower().replace(' ', '-')
+            fields.append('stardew_host_error=' + failure)
+            break
+    for label, pattern in [('hresult', r'HRESULT:\s*(0x[0-9a-f]+)'),
+                           ('exit', r'Execute managed assembly exit code:\s*(0x[0-9a-f]+)')]:
+        for code in dict.fromkeys(re.findall(pattern, text, re.I)):
+            fields.append(f'stardew_host_{label}={code}')
+    return '\n'.join(fields)
+
+
+def stardew_managed_summary(raw):
+    allowed = (r'stardew_managed=(?:entered|unhandled-exception|process-exit)|'
+               r'stardew_managed_exception=(?:dll-not-found|entry-point-not-found|bad-image-format|platform-not-supported)|'
+               r'stardew_managed_fault=[a-zA-Z0-9_.+]{1,128}|'
+               r'stardew_managed_detail=(?:opengl|sdl|access-denied)|'
+               r'stardew_managed_library=(?:opengl32|sdl2)|'
+               r'stardew_graphics_frame=(?:MonoGame\.OpenGL\.|Microsoft\.Xna\.Framework\.Graphics\.)[a-zA-Z0-9_.+]{1,140}|'
+               r'stardew_graphics_sdl_error=(?:opengl|wgl)|'
+               r'stardew_graphics_sdl_driver=(?:windows|none|other|unavailable)|'
+               r'stardew_graphics_gl_context=(?:absent|present)|'
+               r'stardew_graphics_system_opengl=(?:loaded|0x[0-9A-F]{8})|'
+               r'stardew_graphics_d3d11_hresult=(?:unavailable|0x[0-9A-F]{8})|'
+               r'stardew_graphics_d3d11_feature_level=0x[0-9A-F]{4}|'
+               r'stardew_graphics_probe=incomplete')
+    lines = (raw or b'').decode('ascii', errors='replace').splitlines()
+    return '\n'.join(dict.fromkeys(line for line in lines if re.fullmatch(allowed, line))) or 'stardew_managed=no-output'
+
+
 def pe_summary(header):
     if len(header) < 64 or header[:2] != b'MZ':
         return {'pe_header': 'unavailable'}
@@ -391,6 +444,8 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--stardew-host', dest='report_file', action='store_const',
+                                const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -460,6 +515,19 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.report_file == 'stardew-host':
+            _, report = portal.request('GET', probe_report_path(app))
+            run = re.search(r'^steam_stardew_host_run=([0-9]{1,20})\r?$', decode_report(report), re.MULTILINE)
+            if not run:
+                print('stardew_host_trace=no-trace-request-in-report')
+                return
+            raw = read_game_file(portal, app, r'\LocalState', f'stardew-host-{run[1]}.log', 4 * 1024 * 1024)
+            print(stardew_host_summary(raw))
+            managed = re.search(r'^steam_stardew_managed_run=([0-9]{1,20})\r?$', decode_report(report), re.MULTILINE)
+            if managed:
+                raw = read_game_file(portal, app, r'\LocalState', f'stardew-managed-{managed[1]}.log', 8192)
+                print(stardew_managed_summary(raw))
+            return
         _, raw = portal.request('GET', probe_report_path(app, args.report_file))
         report = decode_report(raw)
         if not report.endswith('\n'):
