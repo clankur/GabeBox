@@ -24,6 +24,7 @@ static SDL_Cursor *XboxSdlCreateOffscreenCursor(SDL_Surface *surface, int hot_x,
         return NULL;
     }
     SDL_SetSurfaceBlendMode(cursor->image, SDL_BLENDMODE_BLEND);
+    cursor->cursor.driverdata = cursor;
     cursor->hot_x = hot_x;
     cursor->hot_y = hot_y;
     return &cursor->cursor;
@@ -50,8 +51,9 @@ static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, SDL_Surface *t
         (mouse->relative_mode && !mouse->relative_mode_cursor_visible)) {
         return;
     }
-    XboxSdlCursor *cursor = (XboxSdlCursor *)SDL_GetCursor();
-    if (cursor) {
+    SDL_Cursor *active = SDL_GetCursor();
+    if (active && active->driverdata) {
+        XboxSdlCursor *cursor = active->driverdata;
         SDL_Rect position = { 0, 0, cursor->image->w, cursor->image->h };
         SDL_GetMouseState(&position.x, &position.y);
         position.x -= cursor->hot_x;
