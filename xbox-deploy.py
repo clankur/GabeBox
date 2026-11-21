@@ -228,6 +228,20 @@ def pe_summary(header):
     return summary
 
 
+def xbox_executable_requirement(summary):
+    """Identify executable architectures outside the x64 Xbox app process model."""
+    if summary.get('pe_machine') == 'x86':
+        flags = summary.get('clr_flags')
+        if flags == 'unavailable':
+            return 'unknown'
+        if flags is None or summary['clr_requires_x86'] == 'yes' or not int(flags, 16) & 1:
+            return 'requires-x86'
+        return 'managed-il'
+    if summary.get('pe_machine') == 'x64':
+        return 'x64'
+    return 'unknown'
+
+
 def inspect_game(portal, package, app_id, executable):
     raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{app_id}.acf', 65536)
     if raw is None:
@@ -254,8 +268,10 @@ def inspect_game(portal, package, app_id, executable):
         header = read_game_file(portal, package, path, parts[-1], 131072)
         if header is not None:
             print(f'executable_source={source}')
-            for key, value in pe_summary(header).items():
+            summary = pe_summary(header)
+            for key, value in summary.items():
                 print(f'{key}={value}')
+            print(f'xbox_executable_requirement={xbox_executable_requirement(summary)}')
             return
     print('executable_source=missing')
 
