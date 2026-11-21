@@ -19,7 +19,7 @@
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file, report = Promise.resolve();
-        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, memory = {};
+        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, capture, memory = {}, gameFrames = {};
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -45,6 +45,8 @@
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
+                (capture ? "library_capture=" + capture + "\r\n" : "") +
+                Object.keys(gameFrames).map(function (key) { return "game_frame_" + key + "=" + gameFrames[key] + "\r\n"; }).join("") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
             // Device Portal may be reading the report during a cold launch. Its
@@ -62,6 +64,16 @@
             return switchView(to, from);
         }
         var playingApp = 0, presented = false, returnToGame, quitGame;
+        function recordGameFrame(appId, stage, stats) {
+            if (failed || !playing || appId !== playingApp || typeof stats !== "string" ||
+                (stage !== "first" && stage !== "sample")) return;
+            var fields = stats.split(/\r?\n/).filter(function (line) {
+                return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|sample_us|sample_frames)=[0-9]{1,16}$/.test(line);
+            });
+            if (!fields.length) return;
+            gameFrames[stage] = "appid=" + appId + " " + fields.join(" ");
+            record(last, true);
+        }
         var gameForeground = false;
         var firstActivation = true;
         function setGameForeground(value) {
@@ -139,6 +151,18 @@
             var request;
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
+            if (request.method === "capture-library-result") {
+                if (capture !== "requested") return;
+                if (request.state === "saved" && request.viewId === viewId && Number.isInteger(request.browserPid) &&
+                    request.browserPid > 0 && Number.isInteger(request.width) && request.width > 0 && request.width <= 16384 &&
+                    Number.isInteger(request.height) && request.height > 0 && request.height <= 16384) {
+                    capture = "saved width=" + request.width + " height=" + request.height +
+                        " view=" + viewId + " browser_pid=" + request.browserPid;
+                } else if (request.state === "error" || request.state === "not-visible") capture = request.state;
+                else return;
+                record(last, true);
+                return;
+            }
             if (request.method === "renderer-error") {
                 // Keep only the first short script failure. Exclude URLs or sign-in tokens.
                 if (!rendererError) {
@@ -196,7 +220,7 @@
                         if (!played(appId) || !returnToGame) return "busy";
                         return broker.session().then(function (user) { return user && user.steamId ? raiseGame(appId) : "signed-out"; });
                     }
-                    playing = true; playingApp = appId;
+                    playing = true; playingApp = appId; gameFrames = {};
                     // Make the expensive view handoff only after the broker has
                     // verified this account, the title and its local installation.
                     return broker.play(appId, function () {
@@ -265,7 +289,25 @@
                 });
             }
         }
-        var lastNative;
+        var lastNative, nextCaptureCheck = 0, lookingForCapture = false;
+        function checkCaptureRequest() {
+            if (!broker || !settled || !visible || failed || lookingForCapture || Date.now() < nextCaptureCheck) return;
+            nextCaptureCheck = Date.now() + 4000;
+            var folder = storage.ApplicationData.current.localFolder;
+            if (!folder.tryGetItemAsync) return;
+            lookingForCapture = true;
+            Promise.resolve().then(function () {
+                return folder.tryGetItemAsync("big-picture-capture-library.request");
+            }).then(function (request) {
+                if (!request || failed || !visible) return;
+                return request.deleteAsync().then(function () {
+                    if (failed || !visible) return;
+                    capture = "requested";
+                    host.reply(JSON.stringify({nativeCaptureLibrary: true}));
+                    record(last, true);
+                });
+            }).then(function () { lookingForCapture = false; }, function () { lookingForCapture = false; });
+        }
         function poll() {
             try {
                 var stage = host.status();
@@ -291,6 +333,7 @@
                     if (!request) break;
                     handle(request);
                 }
+                checkCaptureRequest();
             } catch (error) { fail(error); }
         }
         if (broker) readinessTimer = setTimeout(function () {
@@ -303,19 +346,20 @@
             host = BigPictureView.Native.Renderer;
             record("winrt-projected");
             record("status-before-open:" + host.status());
-            if (broker) host.openInCurrentView();
-            else host.open();
+            host.open();
             record("open-returned");
             timer = setInterval(poll, 80);
             poll();
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, ready: broker ? ready : startup};
+        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
+            ready: broker ? ready : startup};
         return session.ready;
     }
     window.steamBigPictureHost = {
         open: open,
         switchView: switchView,
+        recordGameFrame: function (appId, stage, stats) { if (session) session.recordGameFrame(appId, stage, stats); },
         samplePresenter: function (stage) {
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);
         },

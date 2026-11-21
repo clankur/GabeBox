@@ -6,7 +6,7 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, primary = false, openReport = async () => ({})} = {}) {
+function fixture({activationError = false, primary = false, findRequest, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0;
@@ -29,7 +29,7 @@ function fixture({activationError = false, primary = false, openReport = async (
             System: {MemoryManager: {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824}},
             Foundation: {GuidHelper: {createNewGuid: () => "test"}},
             Storage: {
-                ApplicationData: {current: {localFolder: {createFileAsync: openReport}}},
+                ApplicationData: {current: {localFolder: {createFileAsync: openReport, tryGetItemAsync: findRequest}}},
                 CreationCollisionOption: {openIfExists: 0},
                 FileIO: {writeTextAsync: async (_, report) => { reports.push(report); }}
             },
@@ -57,6 +57,27 @@ test("Steam can use the QR host's primary game view without a foreground switch"
     await ready;
     assert.equal(app.opens(), 1);
     assert.deepEqual(app.switches, []);
+});
+
+test("a local operator request captures the active console renderer only after startup", async () => {
+    const files = [], removed = [];
+    const app = fixture({primary: true, findRequest: async name => {
+        files.push(name);
+        return {deleteAsync: async () => { removed.push(name); }};
+    }});
+    const ready = app.start({});
+    await drain();
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(files, []);
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.deepEqual(files, ["big-picture-capture-library.request"]);
+    assert.deepEqual(removed, files);
+    assert.deepEqual(app.replies, [{nativeCaptureLibrary: true}]);
+    app.incoming.push(JSON.stringify({method: "capture-library-result", state: "saved", viewId: 3,
+        browserPid: 99, width: 1920, height: 1080}));
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /library_capture=saved width=1920 height=1080 view=3 browser_pid=99/);
 });
 
 test("opening Valve's window never waits on a locked startup report", async () => {

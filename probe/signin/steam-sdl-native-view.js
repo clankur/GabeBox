@@ -88,7 +88,7 @@
                 var count = /^(?:presented|unique_present_calls)=([0-9]+)\r?$/m.exec(stats);
                 if (!ready && shown && count && +count[1] > 0) {
                     ready = true;
-                    events.presented();
+                    events.presented(stats);
                 }
                 if (!ready && Date.now() - started > 12000) return failed();
                 if (ready && !measured && events.measured) {
@@ -96,7 +96,7 @@
                     var frames = /^sample_frames=([0-9]+)\r?$/m.exec(stats);
                     if (duration && +duration[1] > 0 && frames) {
                         measured = true;
-                        events.measured(+frames[1], +duration[1]);
+                        events.measured(+frames[1], +duration[1], stats);
                     }
                 }
                 var overlay = /^overlay_requested=([0-9]+)\r?$/m.exec(stats);
