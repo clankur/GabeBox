@@ -28,6 +28,7 @@
 
 #include "child-process.h"
 #include "pipe-protocol.h"
+#include "SteamSdlSurface.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -1234,8 +1235,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
     co_return winrt::hstring(L"steam_java_probe=exited\r\nsteam_java_probe_exit=" + Hex(exitCode) + L"\r\n");
 }
 
-enum class GameBackend { SteamPlay, DosBox };
+enum class GameBackend { SteamPlay, DosBox, SdlHost };
 static constexpr std::uint32_t xcomDosAppId = 7760;
+static constexpr std::uint32_t dwarfFortressAppId = 975370;
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix,
@@ -1247,6 +1249,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     using CallResult = bool (__cdecl *)(std::int32_t, std::uint64_t, void *, std::int32_t, std::int32_t, bool *);
     using RefreshLibrary = void (__cdecl *)(void *);
     if (backend == GameBackend::DosBox && app != xcomDosAppId) {
+        co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
+    }
+    const bool hostedSdl = backend == GameBackend::SdlHost;
+    if (hostedSdl && app != dwarfFortressAppId) {
         co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
     }
     if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"steam_launch=busy\r\n");
@@ -1280,8 +1286,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool sdlLateFrame = false;
     std::wstring sdlPreferencesPath;
     std::wstring diagnosticRenderer;
-    if (backend == GameBackend::SteamPlay) {
+    if (backend != GameBackend::DosBox) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+        if (hostedSdl && !co_await packageFolder.TryGetItemAsync(L"steam-sdl-host-975370.txt")) {
+            co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
+        }
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
         if (snapshotRequested) {
@@ -1313,6 +1322,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 diagnosticRenderer = choice.c_str();
             }
+        }
+        if (hostedSdl && (!snapshotRequested || !dummyVideo || diagnosticRenderer != L"software" ||
+                          !sdlWorkingDirectory || sdlPreferencesPath.empty())) {
+            co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
         }
         auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-launch-option-" + std::to_wstring(app) + L".txt"));
@@ -1515,7 +1528,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     } rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
       gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
-      frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"};
+      frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"};
+    std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1596,6 +1610,20 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (sdlLateFrame && frameDelayHint.Set(L"12000")) {
             report += L"steam_launch_sdl_frame_delay_ms=12000\r\n";
         }
+        if (hostedSdl) {
+            const auto mailbox = dataRoot + L"\\sdl-host-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                std::to_wstring(GetTickCount64()) + L".bin";
+            try {
+                pendingSdlSurface = std::make_shared<SteamSdlSurface>();
+                pendingSdlSurface->Open(mailbox);
+            } catch (winrt::hresult_error const& error) {
+                co_return winrt::hstring(report + L"steam_sdl_host=mailbox-error\r\nsteam_sdl_host_hresult=" +
+                    Hex(error.code()) + L"\r\n");
+            }
+            if (!sdlHostHint.Set(mailbox.c_str())) {
+                co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
+            }
+        }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
@@ -1613,7 +1641,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     report += L"steam_launch_submitted=yes\r\n";
     co_await checkpoint(L"waiting-for-steam");
     const auto started = GetTickCount64();
-    const auto deadline = started + 25000;
+    const auto deadline = started + (hostedSdl ? 40000 : 25000);
     using winrt::Windows::System::MemoryManager;
     std::uint64_t memoryLimit = 0, peakMemory = 0;
     try {
@@ -1670,9 +1698,20 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     memoryLimit = 0;
                 }
             }
-            const bool capturePending = snapshotRequested && !snapshotTaken && process.handle;
-            const bool queryWindow = !snapshotRequested || (accepted && running &&
-                (snapshotTaken || (!capturePending && GetTickCount64() >= deadline)));
+            if (pendingSdlSurface && accepted && process.handle && pendingSdlSurface->HasFrame() &&
+                    WaitForSingleObject(process.handle.get(), 0) == WAIT_TIMEOUT) {
+                report += process.Report();
+                pendingSdlSurface->Attach(std::move(process.handle));
+                {
+                    std::lock_guard surfaceLock(steamSdlMutex);
+                    steamSdlSurface = std::move(pendingSdlSurface);
+                }
+                session->launchCall = 0;
+                co_return winrt::hstring(report + L"steam_sdl_host=ready\r\n");
+            }
+            const bool capturePending = !hostedSdl && snapshotRequested && !snapshotTaken && process.handle;
+            const bool queryWindow = !hostedSdl && (!snapshotRequested || (accepted && running &&
+                (snapshotTaken || (!capturePending && GetTickCount64() >= deadline))));
             auto windowReady = queryWindow && reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
             if (accepted && windowReady && running) verdict = L"window-ready";
             if ((responded && !accepted) || (accepted && windowReady && running) ||
@@ -1690,7 +1729,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 break;
             }
         }
-        if (snapshotRequested && !snapshotTaken && process.handle) {
+        if (!hostedSdl && snapshotRequested && !snapshotTaken && process.handle) {
             // Write the identity and immediate OS result before waiting or making another Steam call.
             report += L"steam_launch_snapshot_pid=" + std::to_wstring(process.processId) + L"\r\n";
             report += L"steam_launch_snapshot_created_filetime=" + std::to_wstring(process.createdAt) + L"\r\n";
@@ -1816,6 +1855,32 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app,
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::SteamPlay);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamSdlGame(std::uint32_t app,
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return LaunchLocalSteamGame(app, file, prefix, GameBackend::SdlHost);
+    }
+
+    winrt::Windows::Storage::Streams::IBuffer SteamSdlFrame() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->Frame() : nullptr;
+    }
+
+    std::uint32_t SendSteamSdlInput(std::uint32_t pointer, std::uint32_t keys) {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->Input(pointer, keys) : 0;
+    }
+
+    bool SteamSdlRunning() {
+        std::lock_guard lock(steamSdlMutex);
+        if (steamSdlSurface && !steamSdlSurface->Alive()) steamSdlSurface.reset();
+        return steamSdlSurface != nullptr;
+    }
+
+    void QuitSteamSdl() {
+        std::lock_guard lock(steamSdlMutex);
+        if (steamSdlSurface) steamSdlSurface->Quit();
     }
 };
 

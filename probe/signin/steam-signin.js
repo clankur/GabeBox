@@ -35,6 +35,7 @@
         },
         start: window.xcomDosRuntime.start
     }] : [];
+    if (window.steamSdlRuntime) hostedGames.push(window.steamSdlRuntime);
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -244,6 +245,7 @@
             var message = " launch could not be confirmed.";
             if (result.indexOf("steam_launch=window-ready\r\n") >= 0) message = " started.";
             if (result.indexOf("steam_dos=guest-started\r\n") >= 0) message = " started in DOSBox.";
+            if (result.indexOf("steam_sdl_host_frame=presented\r\n") >= 0) message = " started.";
             if (result.indexOf("steam_launch=not-installed\r\n") >= 0) {
                 message = " is on disk, but Steam could not reopen its install.";
             }

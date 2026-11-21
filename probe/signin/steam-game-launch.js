@@ -11,6 +11,12 @@ var steamGameLaunch = (function () {
                 }
             };
         }
+        if (hosted.launch) {
+            return {
+                backend: hosted.backend,
+                start: function (attempt) { return hosted.launch(runner, appId, attempt); }
+            };
+        }
         return {
             backend: hosted.backend,
             start: function (attempt) {

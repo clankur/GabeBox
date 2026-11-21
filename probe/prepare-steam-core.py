@@ -128,7 +128,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
                    launch_options=(), startup_snapshot=False, startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
-                   startup_sdl_late_frame=False):
+                   startup_sdl_late_frame=False, startup_sdl_host=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
@@ -141,6 +141,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The SDL startup compatibility trial needs a startup snapshot.')
     if startup_sdl_late_frame and (startup_sdl_renderer != 'software' or not startup_sdl_dummy_video):
         raise ValueError('The delayed SDL capture requires the dummy video and software renderer trial.')
+    if startup_sdl_host and (launch_app_id != 975370 or not startup_snapshot or startup_sdl_renderer != 'software'
+                             or not startup_sdl_dummy_video or not startup_sdl_working_directory
+                             or not startup_sdl_local_preferences):
+        raise ValueError('The SDL host requires the licensed Dwarf Fortress software-rendering profile.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -204,6 +208,15 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / f'steam-startup-sdl-local-preferences-{launch_app_id}.txt').touch()
         if startup_sdl_late_frame:
             (layout / f'steam-startup-sdl-late-frame-{launch_app_id}.txt').touch()
+        if startup_sdl_host:
+            html_path = layout / 'steam-signin.html'
+            html = html_path.read_text(encoding='utf-8')
+            original = '<script src="steam-signin.js"></script>'
+            if not (layout / 'steam-sdl-host.js').is_file() or html.count(original) != 1:
+                raise ValueError('Use the SDK template with the live SDL host.')
+            html_path.write_text(html.replace(original, '<script src="steam-sdl-host.js"></script>\n    ' + original),
+                                 encoding='utf-8')
+            (layout / 'steam-sdl-host-975370.txt').touch()
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -262,6 +275,7 @@ def main():
                         help='offer SDL a writable preference directory within the package’s LocalState')
     parser.add_argument('--startup-sdl-late-frame', action='store_true',
                         help='wait 12 seconds after the first SDL software presentation before capturing')
+    parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -324,7 +338,7 @@ def main():
                    startup_sdl_dummy_video=args.startup_sdl_dummy_video,
                    startup_sdl_working_directory=args.startup_sdl_working_directory,
                    startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
-                   startup_sdl_late_frame=args.startup_sdl_late_frame)
+                   startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host)
 
 
 if __name__ == '__main__':
