@@ -197,7 +197,8 @@ static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstr
         result += L"steam_core=load-error\r\nsteam_error=" + Hex(GetLastError()) + L"\r\n";
     }
 
-    for (const auto *name : {L"tier0_s64.dll", L"vstdlib_s64.dll"}) {
+    for (const auto *name : {L"tier0_s64.dll", L"vstdlib_s64.dll",
+                             L"keyboard-ansi.dll", L"keyboard-wide.dll"}) {
         HMODULE dependency = LoadPackagedLibrary(name, 0);
         DWORD error = dependency ? ERROR_SUCCESS : GetLastError();
         if (dependency) FreeLibrary(dependency);

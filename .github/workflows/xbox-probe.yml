@@ -135,6 +135,14 @@ jobs:
             $steamArtifacts = Join-Path $work 'steam-artifacts'
             Copy-Item -Recurse $layout $steamLayout
             New-Item -ItemType Directory -Path $steamArtifacts | Out-Null
+            $user32 = "$sdk\Lib\$sdkVersion\um\x64\User32.lib"
+            foreach ($variant in @('ansi', 'wide')) {
+              $defines = if ($variant -eq 'wide') { @('/DPROBE_WIDE_IMPORT') } else { @() }
+              & cl.exe /nologo /c /O2 /GS- /Zl /TC @defines `
+                "/Fo$work\keyboard-$variant.obj" probe/keyboard-import.c
+              & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
+                "/out:$steamLayout\keyboard-$variant.dll" "$work\keyboard-$variant.obj" $user32
+            }
             [xml]$steam = Get-Content "$steamLayout/AppxManifest.xml"
             $steam.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.SteamCore')
             $steam.Package.Properties.DisplayName = 'Steam Core Loader Probe'
