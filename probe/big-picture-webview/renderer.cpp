@@ -235,6 +235,11 @@ struct View : implements<View, IFrameworkView> {
                     child.NavigationStarting([initial](auto const&, auto const& event) {
                         if (event.Uri() != L"about:blank" && event.Uri() != initial) event.Cancel(true);
                     });
+                    // The gamepad window renders its local menu into an inherited
+                    // about:blank frame. Keep that frame on the signed UI origin.
+                    child.FrameNavigationStarting([](auto const&, auto const& event) {
+                        if (event.Uri() != L"about:blank") event.Cancel(true);
+                    });
                     child.NewWindowRequested([](auto const&, auto const& event) { event.Handled(true); });
                     child.WindowCloseRequested([weak = get_weak()](auto const&, auto const&) {
                         if (auto view = weak.get(); view && !view->closed) {
