@@ -293,6 +293,8 @@
     var downloadMessages = {
         "starting": "Preparing the download",
         "queued": "Queued in Steam",
+        "resuming": "Steam is retrying the paused download",
+        "paused": "Steam reports the download is paused",
         "downloading": "Downloading from Steam",
         "staging": "Writing game files",
         "installed": "Download complete",
@@ -305,23 +307,32 @@
         "interrupted": "Download monitoring stopped on sign-out"
     };
 
+    function storageCheckpoint(stage) {
+        try {
+            return XboxProbe.Native.ProbeRunner.steamStorageInfo().replace(/^(?=\w)/gm, "steam_storage_" + stage + "_");
+        } catch (error) {
+            return "steam_storage_" + stage + "_error=unavailable\r\n";
+        }
+    }
+
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
         var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(checkpoint);
         var stage = parts ? parts[1] : "failed";
         var detail = parts ? parts[2] : "";
-        var active = stage === "starting" || stage === "queued" ||
-            stage === "downloading" || stage === "staging";
+        var active = stage === "starting" || stage === "queued" || stage === "resuming" ||
+            stage === "paused" || stage === "downloading" || stage === "staging";
         if (checkpoint !== job.last) {
             job.last = checkpoint;
             var message = downloadMessages[stage] || "Steam could not start or track the download";
             downloadStatus.textContent = job.entry.name + " · " + message;
             if (job.file) {
-                var report = "probe=steam-download\r\nrun_id=" + job.id + "\r\nsteam_download=" + stage + "\r\n";
+                var report = job.prefix + "steam_download=" + stage + "\r\n";
                 if (detail) {
                     var metric = stage === "install-rejected" || stage === "library-folder-error" ? "result" : "state";
                     report += "steam_download_" + metric + "=" + detail + "\r\n";
                 }
+                if (!active) report += storageCheckpoint("after");
                 report += "status=steam-download-" + (active ? "in-progress" : "complete") + "\r\n";
                 var write = function () { return Windows.Storage.FileIO.writeTextAsync(job.file, report); };
                 job.write = job.write ? job.write.then(write, write) : write();
@@ -356,8 +367,9 @@
             "steam-download-report.txt", Windows.Storage.CreationCollisionOption.replaceExisting
         ).then(function (file) {
             job.file = file;
-            return Windows.Storage.FileIO.writeTextAsync(file, "probe=steam-download\r\nrun_id=" + job.id +
-                "\r\nsteam_download=starting\r\nstatus=steam-download-in-progress\r\n");
+            job.prefix = "probe=steam-download\r\nrun_id=" + job.id + "\r\n" + storageCheckpoint("before");
+            return Windows.Storage.FileIO.writeTextAsync(file, job.prefix +
+                "steam_download=starting\r\nstatus=steam-download-in-progress\r\n");
         }).then(function () {
             return XboxProbe.Native.ProbeRunner.queueSteamDownload(job.entry.id);
         }).done(function (checkpoint) {

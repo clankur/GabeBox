@@ -99,6 +99,21 @@ The app writes `steam-download-report.txt` when Steam changes state. `queued` re
 
 Version `1.0.40.0` successfully installed a Steam title in app-local storage on Series X. The report progressed from `downloading` to `installed` with state `4`. The on-device manifest recorded 608,111,824 downloaded bytes and result `0`. A separate Device Portal directory count confirmed 16,017 installed files totaling 803,964,902 bytes. An earlier title reached state `514`, then stalled. Its manifest recorded disk-write result `11` and zero downloaded bytes. [Download SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44865311046)
 
+### Diagnose a paused download
+
+When the selected title is paused, pressing **Download** submits the normal install request and asks Steam to move that title to the front of its queue. The report identifies the paused state and records caller-available and volume-free bytes before and after the attempt. The Steam result `11` means disk-write failure. Steam uses separate results for disk space and quota limits. [Microsoft volume and caller space API](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdiskfreespaceexw)
+
+The CLI can inspect the title’s manifest and optionally the header of its Windows executable. It reads only the app's Steam library and samples the executable in memory without starting it. A PE machine type identifies the executable architecture. It does not validate the game’s dependencies or its platform support. [Microsoft PE format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" inspect-game --version 1.0.46.0 \
+  --app-id 646570 --executable jre/bin/javaw.exe
+```
+
+On Series X, `1.0.46.0` retried Slay the Spire and measured 30,867,873,792 caller-available bytes before and after the attempt. Steam stayed at state `514`, result `11`, and zero bytes downloaded. The bundled Java launcher was absent from the installed and staged folders. The Device Portal file listing could verify those folders, but the console returned HTTP `404` for its ETW provider endpoint and had no app-local Steam content log. The measured space rules out a full app volume during this attempt. The write operation that failed remains unidentified. [Recovery SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44867583238)
+
+A later retry on the same build transferred 271,127,152 bytes and installed Slay the Spire in app-local storage. Its manifest reported state `4`, result `0`, and 541,513,970 bytes on disk. The CLI inspected `jre/bin/javaw.exe` and verified x64 PE32+. Steam rejected Play with result `17` before it reported a running process. The installed game manifest references depot `228983` in shared app `228980`. The app-local library had no manifest for that shared app.
+
 ## Test Steam’s normal launch path
 
 Select a downloaded game in the library and choose **Play**. For a CLI launch test, prepare the sign-in package with `--launch-app-id APPID` for a game already installed in the Xbox app's own library. After Steam Guard approval, the probe makes one automatic launch attempt per package version. It refreshes the library and, if Steam needs to reopen a completed local install, asks the app manager to register the existing files. Launch requires Steam to confirm the current account owns the game and reports it fully installed in that library. The probe records Steam’s numeric response and whether the client observed a running game and ready window.
