@@ -23,9 +23,17 @@ RELEASES = {
 LIBRARIES = ('opengl32.dll', 'libgallium_wgl.dll', 'libEGL.dll', 'libGLESv2.dll', 'z-1.dll')
 UWP_FRAMEWORK = 'Microsoft.VCLibs.140.00'
 MICROSOFT = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+DXIL_ARCHIVE_SHA256 = '9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4'
+DXIL_FILES = {
+    'dxil.dll': 'bin/x64/dxil.dll',
+    'LICENSE.DXIL-MS.txt': 'LICENSE-MS.txt',
+    'LICENSE.DXIL-LLVM.txt': 'LICENSE-LLVM.txt',
+    'LICENSE.DXIL-MIT.txt': 'LICENSE-MIT.txt',
+}
 
 
-def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, slay_mesa_jni=None):
+def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, slay_mesa_jni=None,
+               dxil_archive=None, indexed_control=False):
     release = RELEASES.get(hashlib.sha256(archive.read_bytes()).hexdigest())
     if release is None:
         raise ValueError('Use a pinned, unchanged Mesa UWP release archive.')
@@ -45,6 +53,8 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
         target = (layout / 'steam-launch-app.txt').read_text(encoding='ascii').splitlines()
         if not target or target[0] not in ('413150', '646570'):
             raise ValueError('Scope this Mesa game trial to Stardew Valley or Slay the Spire.')
+    if indexed_control and target:
+        raise ValueError('Run the indexed Mesa control without Steam or game files.')
     if sdl_surfaceless and (target[:1] != ['413150'] or 'repeat' not in target
                             or not (layout / 'StardewStartupDiagnostic.dll').is_file()):
         raise ValueError('Use the repeatable Stardew Valley managed diagnostic for the SDL surfaceless trial.')
@@ -57,8 +67,17 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
         expected = f'{hashlib.sha256(jni_library).hexdigest()}  {jni_name}'
         if (slay_mesa_jni / 'SHA256SUMS').read_text(encoding='ascii').strip() != expected:
             raise ValueError('Use the verified Mesa JNI control workflow artifact.')
+    dxil_files = {}
+    if dxil_archive is not None:
+        if hashlib.sha256(dxil_archive.read_bytes()).hexdigest() != DXIL_ARCHIVE_SHA256:
+            raise ValueError('Use the pinned Microsoft DirectX Shader Compiler v1.8.2505.1 archive.')
+        with ZipFile(dxil_archive) as dxc:
+            dxil_files = {name: dxc.read(entry) for name, entry in DXIL_FILES.items()}
+    staged_names = (*libraries, 'LICENSE.mesa-uwp', 'mesa-uwp-source.txt', *dxil_files)
+    if indexed_control:
+        staged_names += ('mesa-indexed-control.txt',)
     if (manifest.count(b'</Dependencies>') != 1 or f'Name="{UWP_FRAMEWORK}"'.encode() in manifest
-            or any((layout / name).exists() for name in (*libraries, 'LICENSE.mesa-uwp', 'mesa-uwp-source.txt'))):
+            or any((layout / name).exists() for name in staged_names)):
         raise ValueError('Use a fresh diagnostic layout so the trial cannot overwrite an existing runtime.')
 
     with ZipFile(framework) as signed:
@@ -76,12 +95,17 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
         for name in libraries:
             with (layout / name).open('xb') as output:
                 output.write(mesa.read(prefix + name))
+    for name, data in dxil_files.items():
+        with (layout / name).open('xb') as output:
+            output.write(data)
     dependency = f'  <PackageDependency Name="{UWP_FRAMEWORK}" Publisher="{MICROSOFT}" MinVersion="{version}" />\n  '
     manifest_file.write_bytes(manifest.replace(b'</Dependencies>', dependency.encode('ascii') + b'</Dependencies>'))
     (layout / 'LICENSE.mesa-uwp').write_bytes(license_data)
     (layout / 'mesa-uwp-source.txt').write_text(source + '\n', encoding='ascii')
     if sdl_surfaceless:
         (layout / 'stardew-sdl-surfaceless.txt').touch(exist_ok=False)
+    if indexed_control:
+        (layout / 'mesa-indexed-control.txt').touch(exist_ok=False)
     if slay_mesa_jni is not None:
         with (layout / jni_name).open('xb') as output:
             output.write(jni_library)
@@ -95,8 +119,11 @@ def main():
     parser.add_argument('--framework', required=True, type=Path)
     parser.add_argument('--sdl-surfaceless', action='store_true', help='enable the SDL offscreen context trial')
     parser.add_argument('--slay-mesa-jni', type=Path, help='verified Mesa JNI control workflow artifact')
+    parser.add_argument('--dxil-archive', type=Path, help='pinned Microsoft DXC validator archive for indexed rendering')
+    parser.add_argument('--indexed-control', action='store_true', help='verify a completed indexed draw and pixel readback without Steam')
     args = parser.parse_args()
-    stage_mesa(args.layout, args.archive, args.license, args.framework, args.sdl_surfaceless, args.slay_mesa_jni)
+    stage_mesa(args.layout, args.archive, args.license, args.framework, args.sdl_surfaceless, args.slay_mesa_jni,
+               args.dxil_archive, args.indexed_control)
     print('Staged the pinned Mesa UWP runtime and framework dependency.')
 
 
