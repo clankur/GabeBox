@@ -580,12 +580,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         co_return winrt::hstring{};
     }
 
-    auto clientApps = FindPinnedSteamInterface(module, factory, handles.user, handles.pipe, 16, 0x9a8e90);
+    auto clientApps = FindPinnedSteamInterface(module, factory, handles.user, handles.pipe, 17, 0x9a8290);
     const auto appsMethods = SteamMethods(clientApps);
     const auto base = reinterpret_cast<std::uintptr_t>(module);
     if (reinterpret_cast<std::uintptr_t>(appsMethods) != base + 0x135f168 ||
             appsMethods[0] != base + 0x77fa60 || appsMethods[7] != base + 0x884200) {
-        report += L"steam_library_metadata=interface-error\r\n";
+        report += clientApps ? L"steam_library_metadata=abi-mismatch\r\n" : L"steam_library_metadata=no-interface\r\n";
         co_await save(complete);
         co_return winrt::hstring{};
     }
@@ -605,7 +605,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
             if (names[i].empty()) missing.push_back(apps[i]);
         }
         if (missing.empty() || GetTickCount64() >= deadline) break;
-        if (!requested) request(clientApps, missing.data(), static_cast<std::int32_t>(missing.size()));
+        if (!requested) {
+            report += request(clientApps, missing.data(), static_cast<std::int32_t>(missing.size()))
+                ? L"steam_library_metadata_request=accepted\r\n" : L"steam_library_metadata_request=not-queued\r\n";
+        }
         co_await winrt::resume_after(std::chrono::milliseconds(1500));
         co_await caller;
     }

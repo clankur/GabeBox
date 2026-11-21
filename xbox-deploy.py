@@ -151,19 +151,35 @@ def probe_identity(file):
     return identity.attrib['Name'], identity.attrib['Version']
 
 
-def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
+def find_installed_probe(portal, name, version):
     _, data = portal.request('GET', f'{PACKAGE_API}/packages')
     prefix = f'{name}_{version}_x64__' if version else f'{name}_'
     candidates = [package for package in json.loads(data)['InstalledPackages']
                   if package['PackageFullName'].startswith(prefix)]
     if len(candidates) != 1:
         raise ValueError(f'Expected exactly one installed probe matching {prefix}. Found {len(candidates)}.')
-    app = candidates[0]
+    return candidates[0]
+
+
+def probe_report_path(app, filename=PROBE_REPORT):
     package_name = app['PackageFullName']
-    print(f'Installed package: {package_name}', flush=True)
     query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package_name,
-                       'path': r'\LocalState', 'filename': PROBE_REPORT})
-    report_url = f'/api/filesystem/apps/file?{query}'
+                       'path': r'\LocalState', 'filename': filename})
+    return f'/api/filesystem/apps/file?{query}'
+
+
+def decode_report(raw):
+    encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8'
+    try:
+        return raw.decode(encoding)
+    except UnicodeDecodeError:
+        return ''  # The report can be read while the app is replacing it.
+
+
+def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
+    app = find_installed_probe(portal, name, version)
+    print(f'Installed package: {app["PackageFullName"]}', flush=True)
+    report_url = probe_report_path(app)
 
     def read_report():
         try:
@@ -198,11 +214,7 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
                 raise
             raw = b''
         if raw and raw != baseline:
-            encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8'
-            try:
-                report = raw.decode(encoding)
-            except UnicodeDecodeError:
-                report = ''  # The report can be read while the app is replacing it.
+            report = decode_report(raw)
             if report.endswith('\n') and report != last_report:
                 last_report = report
                 print(report, end='', flush=True)
@@ -257,6 +269,8 @@ def main():
     variant.add_argument('--steam-core', dest='probe_name', action='store_const', const=PROBE_STEAM_CORE_NAME,
                          help='watch the Steam Core Loader Probe')
     probe.set_defaults(probe_name=PROBE_NAME)
+    report_command = commands.add_parser('report', help='read the current Steam probe report without launching it')
+    report_command.add_argument('--version', required=True, help='installed Steam package version')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
@@ -305,6 +319,14 @@ def main():
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'probe':
         wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout, args.require_ipc)
+        return
+    if args.command == 'report':
+        app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        _, raw = portal.request('GET', probe_report_path(app))
+        report = decode_report(raw)
+        if not report.endswith('\n'):
+            raise ValueError('The app is writing its report. Try again.')
+        print(report, end='')
         return
     if args.command == 'deploy':
         portal.upload(files)
