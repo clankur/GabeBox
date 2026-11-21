@@ -17,6 +17,7 @@ final class XboxSdlDisplay implements DisplayImplementation {
     private static final int MAX_CURSOR_SIZE = 256;
     private static int width = INITIAL.getWidth();
     private static int height = INITIAL.getHeight();
+    private static boolean nativeReady;
     private static boolean visible;
     private static boolean closeRequested;
 
@@ -25,6 +26,7 @@ final class XboxSdlDisplay implements DisplayImplementation {
     }
 
     static native boolean open(String packageRoot);
+    private static native long lookupGl(String name);
     private static native boolean create(int width, int height);
     private static native void destroy();
     private static native boolean pollClose();
@@ -40,10 +42,29 @@ final class XboxSdlDisplay implements DisplayImplementation {
     static native boolean present();
     static native void swapInterval(int value);
 
+    static long glAddress(String name) {
+        if (!nativeReady) return 0;
+        switch (name) {
+            case "glBindFramebuffer":
+            case "glBindFramebufferEXT":
+            case "glViewport":
+            case "glClear":
+            case "glTexImage2D":
+            case "glCompileShader":
+            case "glLinkProgram":
+            case "glDrawElements":
+            case "glDrawArrays":
+                return lookupGl(name);
+            default:
+                return 0;
+        }
+    }
+
     public DisplayMode init() throws LWJGLException {
         File root = new File(System.getProperty(PACKAGE));
         System.load(new File(root, "slay-sdl-display.dll").getAbsolutePath());
         if (!open(root.getAbsolutePath())) throw new LWJGLException("Xbox SDL runtime initialization failed");
+        nativeReady = true;
         System.out.println("slay_sdl_display=ready");
         return INITIAL;
     }

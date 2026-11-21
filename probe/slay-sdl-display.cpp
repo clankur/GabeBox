@@ -20,6 +20,7 @@ void *(*currentContext)();
 void (*deleteContext)(void *);
 void (*swapWindow)(void *);
 int (*setInterval)(int);
+void *(*glAddress)(const char *);
 int (*pollEvent)(void *);
 unsigned (*mouseState)(int *, int *);
 void (*warpMouse)(void *, int, int);
@@ -44,6 +45,7 @@ bool loadSdl() {
     deleteContext = resolve<decltype(deleteContext)>("SDL_GL_DeleteContext");
     swapWindow = resolve<decltype(swapWindow)>("SDL_GL_SwapWindow");
     setInterval = resolve<decltype(setInterval)>("SDL_GL_SetSwapInterval");
+    glAddress = resolve<decltype(glAddress)>("SDL_GL_GetProcAddress");
     pollEvent = resolve<decltype(pollEvent)>("SDL_PollEvent");
     mouseState = resolve<decltype(mouseState)>("SDL_GetMouseState");
     warpMouse = resolve<decltype(warpMouse)>("SDL_WarpMouseInWindow");
@@ -54,7 +56,7 @@ bool loadSdl() {
     defaultCursor = resolve<decltype(defaultCursor)>("SDL_GetDefaultCursor");
     freeCursor = resolve<decltype(freeCursor)>("SDL_FreeCursor");
     if (mainReady && init && createWindow && destroyWindow && createContext && makeCurrent &&
-        currentContext && deleteContext && swapWindow && setInterval && pollEvent && mouseState &&
+        currentContext && deleteContext && swapWindow && setInterval && glAddress && pollEvent && mouseState &&
         warpMouse && createSurface && freeSurface && createCursor && setCursor && defaultCursor && freeCursor) return true;
     FreeLibrary(sdl);
     sdl = nullptr;
@@ -122,6 +124,15 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_present(JNIEnv *
 
 JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_swapInterval(JNIEnv *, jclass, jint interval) {
     if (currentContext()) setInterval(interval);
+}
+
+JNIEXPORT jlong JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_lookupGl(JNIEnv *env, jclass, jstring name) {
+    if (!currentContext()) return 0;
+    auto chars = env->GetStringUTFChars(name, nullptr);
+    if (!chars) return 0;
+    auto address = glAddress(chars);
+    env->ReleaseStringUTFChars(name, chars);
+    return reinterpret_cast<jlong>(address);
 }
 
 JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollClose(JNIEnv *, jclass) {

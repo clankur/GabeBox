@@ -24,6 +24,9 @@ public final class BuildXboxFactories implements Opcodes {
                 type = "ContextImplementation";
                 provider = "XboxSdlContext";
                 break;
+            case "org/lwjgl/opengl/GLContext":
+                transformGlResolver(reader, Path.of(args[1]), prefix, frames);
+                return;
             default: throw new IllegalArgumentException("Unexpected LWJGL class.");
         }
         ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
@@ -53,5 +56,37 @@ public final class BuildXboxFactories implements Opcodes {
         }, 0);
         if (changes[0] != 1) throw new IllegalStateException("Expected exactly one platform factory.");
         Files.write(Path.of(args[1]), writer.toByteArray());
+    }
+
+    private static void transformGlResolver(ClassReader reader, Path output, String prefix, boolean frames) throws Exception {
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+        int[] changes = { 0 };
+        reader.accept(new ClassVisitor(ASM9, writer) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+                MethodVisitor base = super.visitMethod(access, name, desc, signature, exceptions);
+                if (!name.equals("getFunctionAddress") || !desc.equals("(Ljava/lang/String;)J")) return base;
+                ++changes[0];
+                return new MethodVisitor(ASM9, base) {
+                    @Override
+                    public void visitCode() {
+                        super.visitCode();
+                        Label original = new Label();
+                        super.visitVarInsn(ALOAD, 0);
+                        super.visitMethodInsn(INVOKESTATIC, prefix + "XboxSdlDisplay", "glAddress", desc, false);
+                        super.visitInsn(DUP2);
+                        super.visitInsn(LCONST_0);
+                        super.visitInsn(LCMP);
+                        super.visitJumpInsn(IFEQ, original);
+                        super.visitInsn(LRETURN);
+                        super.visitLabel(original);
+                        if (frames) super.visitFrame(F_SAME1, 0, null, 1, new Object[] { LONG });
+                        super.visitInsn(POP2);
+                    }
+                };
+            }
+        }, 0);
+        if (changes[0] != 1) throw new IllegalStateException("Expected exactly one GL function resolver.");
+        Files.write(output, writer.toByteArray());
     }
 }

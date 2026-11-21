@@ -34,7 +34,7 @@ def main():
         subprocess.run(['javac', '--release', '8', '-cp', str(args.api), '-d', str(root), *map(str, inputs)], check=True)
         subprocess.run(['javac', '-cp', str(args.asm), '-d', str(root), str(providers / 'BuildXboxFactories.java')],
                        check=True)
-        for source in ('Display', 'ContextGL'):
+        for source in ('Display', 'ContextGL', 'GLContext'):
             entry = f'org/lwjgl/opengl/{source}.class'
             original = root / 'original.class'
             original.write_bytes(api.read(entry))

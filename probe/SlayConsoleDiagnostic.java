@@ -199,6 +199,7 @@ public final class SlayConsoleDiagnostic {
             String trace = log.getFileName().toString().replaceFirst("\\.log$", ".sdl.txt");
             builder.environment().put("XBOX_SDL_TRACE_FILE", log.resolveSibling(trace).toAbsolutePath().toString());
             builder.environment().put("XBOX_SDL_OPENGL_FRAME_DELAY_MS", "8000");
+            builder.environment().put("XBOX_SDL_TRACE_GL", "1");
         }
         Process child;
         try {
