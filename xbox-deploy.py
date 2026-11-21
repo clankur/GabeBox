@@ -147,7 +147,7 @@ def probe_identity(file):
     return identity.attrib['Name'], identity.attrib['Version']
 
 
-def wait_for_probe(portal, name, version, manual, timeout):
+def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
     _, data = portal.request('GET', f'{PACKAGE_API}/packages')
     prefix = f'{name}_{version}_x64__' if version else f'{name}_'
     candidates = [package for package in json.loads(data)['InstalledPackages']
@@ -206,6 +206,8 @@ def wait_for_probe(portal, name, version, manual, timeout):
                 if name == PROBE_CONTROL_NAME and re.search(r'^status=control-ready\s*$', report, re.MULTILINE):
                     return
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
+                    if require_ipc and not re.search(r'^ipc=success\s*$', report, re.MULTILINE):
+                        raise ValueError('The signed helper ran, but the named-pipe exchange did not succeed.')
                     return
                 if re.search(r'^exit_code_matches=no\s*$', report, re.MULTILINE):
                     raise ValueError('The probe ran, but the helper did not return its expected exit code.')
@@ -244,7 +246,12 @@ def main():
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
+        command.add_argument('--require-ipc', action='store_true', help='require a successful named-pipe exchange')
     args = parser.parse_args()
+    if args.command == 'deploy' and args.require_ipc and not args.test_probe:
+        deploy.error('--require-ipc requires --test-probe')
+    if args.command == 'probe' and args.require_ipc and args.control:
+        probe.error('--require-ipc applies to the main probe')
 
     settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
@@ -269,6 +276,8 @@ def main():
                 raise ValueError(f'File not found: {file}')
         if args.test_probe:
             name, version = probe_identity(args.package)
+            if args.require_ipc and name == PROBE_CONTROL_NAME:
+                deploy.error('--require-ipc applies to the main probe')
     if args.command in ('deploy', 'probe') and args.timeout <= 0:
         raise ValueError('--timeout must be a positive number of seconds.')
 
@@ -282,7 +291,7 @@ def main():
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'probe':
         name = PROBE_CONTROL_NAME if args.control else PROBE_NAME
-        wait_for_probe(portal, name, args.version, args.manual_launch, args.timeout)
+        wait_for_probe(portal, name, args.version, args.manual_launch, args.timeout, args.require_ipc)
         return
     if args.command == 'deploy':
         portal.upload(files)
@@ -295,7 +304,7 @@ def main():
         if status == 200:
             print_install_result(data)
             if args.command == 'deploy' and args.test_probe:
-                wait_for_probe(portal, name, version, args.manual_launch, args.timeout)
+                wait_for_probe(portal, name, version, args.manual_launch, args.timeout, args.require_ipc)
             return
         if args.command == 'status':
             print('Xbox Device Portal reports an install in progress.')

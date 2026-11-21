@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "child-process.h"
+#include "pipe-protocol.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -19,11 +20,7 @@ static std::wstring Hex(DWORD value) {
     return text;
 }
 
-static std::wstring ChildResult() {
-    auto folder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
-    std::wstring path(folder.Path());
-    path += L"\\child.exe";
-
+static std::wstring ChildResult(std::wstring const& path) {
     HMODULE module = LoadPackagedLibrary(PROBE_CHILD_MODULE, 0);
     if (!module) return L"status=child-module-load-error\r\nwin32_error=" + Hex(GetLastError()) + L"\r\n";
     auto run = reinterpret_cast<RunPackagedChildFn>(GetProcAddress(module, PROBE_CHILD_EXPORT));
@@ -45,13 +42,107 @@ static std::wstring ChildResult() {
         L"\r\nexit_code_matches=" + (matches ? L"yes\r\n" : L"no\r\n");
 }
 
+static std::wstring PipeFailure(const wchar_t *stage, DWORD error) {
+    return std::wstring(L"ipc=failed\r\nipc_stage=") + stage + L"\r\nipc_error=" + Hex(error) + L"\r\n";
+}
+
+static DWORD RemainingTime(ULONGLONG deadline) {
+    ULONGLONG now = GetTickCount64();
+    return now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+}
+
+static DWORD CompletePipeIo(HANDLE pipe, OVERLAPPED& operation, DWORD& bytes,
+                            BOOL started, ULONGLONG deadline) {
+    if (started) return ERROR_SUCCESS;
+    DWORD error = GetLastError();
+    if (error != ERROR_IO_PENDING) return error;
+    DWORD wait = WaitForSingleObject(operation.hEvent, RemainingTime(deadline));
+    if (wait == WAIT_OBJECT_0) {
+        return GetOverlappedResult(pipe, &operation, &bytes, FALSE) ? ERROR_SUCCESS : GetLastError();
+    }
+    error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+    CancelIoEx(pipe, &operation);
+    GetOverlappedResult(pipe, &operation, &bytes, TRUE);
+    return error;
+}
+
+static std::wstring PipeResult(std::wstring const& child) {
+    ULONGLONG tick = GetTickCount64();
+    std::wstring suffix = Hex(GetCurrentProcessId()).substr(2) + Hex(DWORD(tick >> 32)).substr(2) +
+                          Hex(DWORD(tick)).substr(2);
+    std::wstring name = PROBE_PIPE_PREFIX + suffix;
+    HANDLE rawPipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 256, 256, 0, nullptr);
+    if (rawPipe == INVALID_HANDLE_VALUE) return PipeFailure(L"create-pipe", GetLastError());
+    winrt::handle pipe(rawPipe);
+    winrt::handle connectEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
+    if (!connectEvent) return PipeFailure(L"create-event", GetLastError());
+
+    std::wstring arguments = L"\"" + child + L"\" " + suffix;
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION processInfo{};
+    if (!CreateProcessW(child.c_str(), arguments.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                        &startup, &processInfo)) {
+        return PipeFailure(L"create-child", GetLastError());
+    }
+    winrt::handle process(processInfo.hProcess);
+    winrt::handle thread(processInfo.hThread);
+    ULONGLONG deadline = GetTickCount64() + 5000;
+    OVERLAPPED connect{};
+    connect.hEvent = connectEvent.get();
+    DWORD bytes = 0;
+    DWORD error = CompletePipeIo(pipe.get(), connect, bytes, ConnectNamedPipe(pipe.get(), &connect), deadline);
+    if (error != ERROR_SUCCESS && error != ERROR_PIPE_CONNECTED) {
+        DWORD exit = 0;
+        std::wstring result = PipeFailure(L"connect", error);
+        if (GetExitCodeProcess(process.get(), &exit) && exit != STILL_ACTIVE)
+            result += L"ipc_child_exit=" + Hex(exit) + L"\r\n";
+        return result;
+    }
+
+    ULONG peer = 0;
+    if (!GetNamedPipeClientProcessId(pipe.get(), &peer)) return PipeFailure(L"identify-peer", GetLastError());
+    if (peer != processInfo.dwProcessId) return PipeFailure(L"peer-mismatch", ERROR_INVALID_DATA);
+    winrt::handle readEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
+    winrt::handle writeEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
+    if (!readEvent || !writeEvent) return PipeFailure(L"create-event", GetLastError());
+
+    OVERLAPPED read{};
+    read.hEvent = readEvent.get();
+    DWORD request = 0;
+    error = CompletePipeIo(pipe.get(), read, bytes, ReadFile(pipe.get(), &request, sizeof(request), &bytes, &read), deadline);
+    if (error != ERROR_SUCCESS) return PipeFailure(L"read-request", error);
+    if (bytes != sizeof(request) || request != (peer ^ PROBE_PIPE_HELLO))
+        return PipeFailure(L"invalid-request", ERROR_INVALID_DATA);
+
+    OVERLAPPED write{};
+    write.hEvent = writeEvent.get();
+    DWORD reply = request ^ PROBE_PIPE_REPLY;
+    error = CompletePipeIo(pipe.get(), write, bytes, WriteFile(pipe.get(), &reply, sizeof(reply), &bytes, &write), deadline);
+    if (error != ERROR_SUCCESS) return PipeFailure(L"write-reply", error);
+    if (bytes != sizeof(reply)) return PipeFailure(L"short-reply", ERROR_WRITE_FAULT);
+
+    DWORD wait = WaitForSingleObject(process.get(), RemainingTime(deadline));
+    if (wait != WAIT_OBJECT_0) return PipeFailure(L"wait-for-child", wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError());
+    DWORD exit = 0;
+    if (!GetExitCodeProcess(process.get(), &exit)) return PipeFailure(L"read-child-exit", GetLastError());
+    return std::wstring(L"ipc=") + (exit == PROBE_PIPE_EXIT ? L"success\r\n" : L"failed\r\n") +
+        L"ipc_request=" + Hex(request) + L"\r\nipc_reply=" + Hex(reply) + L"\r\nipc_child_exit=" + Hex(exit) + L"\r\n";
+}
+
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
                                         winrt::XboxProbe::Native::IProbeRunnerStatics> {
     winrt::Windows::Foundation::IInspectable ActivateInstance() {
         throw winrt::hresult_not_implemented();
     }
 
-    winrt::hstring Run() { return winrt::hstring(ChildResult()); }
+    winrt::hstring Run() {
+        auto folder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+        std::wstring path = std::wstring(folder.Path()) + L"\\";
+        return winrt::hstring(ChildResult(path + L"child.exe") + PipeResult(path + L"pipe-child.exe"));
+    }
 };
 
 extern "C" HRESULT WINAPI ProbeGetActivationFactory(HSTRING classId, void **factory) noexcept try {
