@@ -7,6 +7,7 @@
         var video = document.createElement("video");
         var timer, url, closed = false, opened = false, shown = false, measured = false;
         var started = Date.now(), owner = ++activeSession, sampleStart, nextReport = 0, phase = "open";
+        var capturePending = false;
         function resetSample() { sampleStart = null; }
         function close() {
             if (closed) return;
@@ -39,6 +40,64 @@
             return !video.paused && video.readyState >= 2 &&
                 video.videoWidth > 0 && video.videoHeight > 0 && video.getBoundingClientRect().width > 0;
         }
+        function captureFrame() {
+            var folder = Windows.Storage.ApplicationData.current.localFolder, temporary, requested = false, captureStats;
+            var width = video.videoWidth, height = video.videoHeight;
+            function currentVideo() {
+                return !closed && owner === activeSession && events.running() && visible() &&
+                    video.videoWidth === 1920 && video.videoHeight === 1080 &&
+                    screen.contains(document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2));
+            }
+            if (capturePending || !events.mediaCapture || !folder.tryGetItemAsync || !shown) return;
+            capturePending = true;
+            Promise.resolve().then(function () {
+                return folder.tryGetItemAsync("big-picture-capture-game.request");
+            }).then(function (request) {
+                if (!request || !currentVideo()) return;
+                requested = true;
+                return request.deleteAsync().then(function () {
+                    if (!currentVideo()) throw new Error("game-hidden");
+                    // Read only the video element that Windows is playing on this
+                    // view. The resulting PNG is distinct from Xbox TV output.
+                    var canvas = document.createElement("canvas");
+                    canvas.width = width; canvas.height = height;
+                    canvas.getContext("2d").drawImage(video, 0, 0);
+                    captureStats = "capture_saved=1\r\nwidth=" + width + "\r\nheight=" + height +
+                        "\r\nvisible=1\r\nprimary_media=1\r\nvideo_ms=" + Math.max(0, Math.round(video.currentTime * 1000)) +
+                        "\r\n" + host.mediaStatus();
+                    return new Promise(function (resolve, reject) {
+                        function encoded(blob) {
+                            if (!blob || blob.type !== "image/png" || blob.size > 12 * 1024 * 1024) {
+                                reject(new Error("game-encode")); return;
+                            }
+                            var reader = new FileReader();
+                            reader.onerror = function () { reject(new Error("game-read")); };
+                            reader.onload = function () { resolve(new Uint8Array(reader.result)); };
+                            reader.readAsArrayBuffer(blob);
+                        }
+                        if (canvas.msToBlob) encoded(canvas.msToBlob());
+                        else canvas.toBlob(encoded, "image/png");
+                    });
+                }).then(function (bytes) {
+                    if (!currentVideo()) throw new Error("game-hidden");
+                    return folder.createFileAsync("big-picture-game-video.tmp", Windows.Storage.CreationCollisionOption.generateUniqueName)
+                        .then(function (file) {
+                            temporary = file;
+                            var buffer = Windows.Security.Cryptography.CryptographicBuffer.createFromByteArray(bytes);
+                            return Windows.Storage.FileIO.writeBufferAsync(file, buffer);
+                        });
+                }).then(function () {
+                    if (!currentVideo()) throw new Error("game-hidden");
+                    return temporary.renameAsync("big-picture-game-video.png", Windows.Storage.NameCollisionOption.replaceExisting);
+                }).then(function () {
+                    temporary = null;
+                    if (currentVideo()) events.mediaCapture(captureStats);
+                });
+            }).catch(function () {
+                if (requested && !closed) events.mediaCapture("capture_saved=0\r\nprimary_media=1");
+                if (temporary) return Promise.resolve(temporary.deleteAsync()).catch(function () {});
+            }).then(function () { capturePending = false; });
+        }
         function poll() {
             if (closed) return;
             try {
@@ -49,6 +108,7 @@
                 if (events.mediaProgress && Date.now() >= nextReport) {
                     nextReport = Date.now() + 5000;
                     events.mediaProgress(stats);
+                    captureFrame();
                 }
                 if (visible()) {
                     var count = /^presented=([0-9]+)\r?$/m.exec(stats);

@@ -92,11 +92,11 @@
         var playingApp = 0, presented = false, returnToGame, quitGame;
         function recordGameFrame(appId, stage, stats) {
             if (failed || !playing || appId !== playingApp || typeof stats !== "string" ||
-                (stage !== "first" && stage !== "sample" && stage !== "fallback" && stage !== "media")) return;
+                (stage !== "first" && stage !== "sample" && stage !== "fallback" && stage !== "media" && stage !== "media_capture")) return;
             var fields = stats.split(/\r?\n/).filter(function (line) {
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
-                    /^media_phase=(open|attach|playback)$/.test(line);
+                    /^(capture_saved|video_ms)=[0-9]{1,16}$/.test(line) || /^media_phase=(open|attach|playback)$/.test(line);
             });
             if (!fields.length) return;
             gameFrames[stage] = "appid=" + appId + " " + fields.join(" ");

@@ -7,15 +7,18 @@ const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native
 
 test("the primary game video confirms rendered frames, resets its sample across an overlay and closes once", async () => {
     let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
-    const measurements = [], switches = [], released = [], listeners = new Map();
+    const measurements = [], switches = [], released = [], captures = [], listeners = new Map();
+    let captureRequest = true, drawn = null;
     const video = {
-        paused:false, readyState:2, videoWidth:1920, videoHeight:1080,
+        paused:false, readyState:2, videoWidth:1920, videoHeight:1080, currentTime:1.5,
         play:async () => {}, pause() {}, removeAttribute() {}, setAttribute() {},
         addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({width:1920})
     };
-    const screen = {hidden:false, classList:{add() {}, remove() {}},
+    const screen = {hidden:false, contains:node => node === video, classList:{add() {}, remove() {}},
         appendChild(node) { node.parentNode = screen; }, removeChild(node) { node.parentNode = null; }};
-    const document = {hidden:false, createElement: () => video,
+    const canvas = {getContext:() => ({drawImage:node => { drawn = node; }}),
+        msToBlob:() => ({size:4, type:"image/png"})};
+    const document = {hidden:false, elementFromPoint:() => video, createElement:name => name === "canvas" ? canvas : video,
         addEventListener: (event, callback) => listeners.set(event, callback),
         removeEventListener: event => listeners.delete(event)};
     const host = {
@@ -25,13 +28,24 @@ test("the primary game video confirms rendered frames, resets its sample across 
     };
     const window = {Fhd:{Native:{RenderHost:host}},
         steamBigPictureHost:{switchView:async (to, from) => { switches.push([to,from]); }}};
+    const localFolder = {path:"C:\\LocalState",
+        async tryGetItemAsync(name) {
+            assert.equal(name, "big-picture-capture-game.request");
+            return captureRequest && {async deleteAsync() { captureRequest = false; }};
+        },
+        async createFileAsync() { return {async renameAsync(name) { assert.equal(name,"big-picture-game-video.png"); }}; }};
     const Windows = {UI:{ViewManagement:{ApplicationView:{getForCurrentView:() => ({id:3})}}},
-        Storage:{ApplicationData:{current:{localFolder:{path:"C:\\LocalState"}}}}};
-    vm.runInNewContext(source, {window,document,Windows,performance:{now: () => now},
+        Security:{Cryptography:{CryptographicBuffer:{createFromByteArray:array => array}}},
+        Storage:{ApplicationData:{current:{localFolder}}, CreationCollisionOption:{generateUniqueName:1},
+            NameCollisionOption:{replaceExisting:1}, FileIO:{async writeBufferAsync(_, data) { assert.equal(data.length,4); }}}};
+    class FileReader {
+        readAsArrayBuffer() { this.result = new Uint8Array([137,80,78,71]).buffer; this.onload(); }
+    }
+    vm.runInNewContext(source, {window,document,Windows,FileReader,Date:{now: () => now},performance:{now: () => now},
         setInterval:callback => { tick = callback; return 1; }, clearInterval() {},
         URL:{createObjectURL:() => "blob:media", revokeObjectURL:url => released.push(url)}});
     const control = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-1-2.bin\r\n", {
-        running:() => running, presented:() => firstFrames++,
+        running:() => running, presented:() => firstFrames++, mediaProgress() {}, mediaCapture:stats => captures.push(stats),
         measured:(n,us) => measurements.push([n,us]), exited() {}, fallback:() => assert.fail("media failed")
     }, false, screen);
     assert(control.primary);
@@ -40,6 +54,9 @@ test("the primary game video confirms rendered frames, resets its sample across 
     total = 1; tick();
     assert.equal(firstFrames, 1);
     now = 20000; total = 1201; tick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(drawn,video);
+    assert.match(captures[0], /capture_saved=1[\s\S]*video_ms=1500/);
     document.hidden = true; listeners.get("visibilitychange")();
     now = 40000; tick();
     assert.deepEqual(measurements, []);

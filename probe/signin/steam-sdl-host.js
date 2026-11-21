@@ -617,6 +617,10 @@
                         var steam = window.steamBigPictureHost;
                         if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "media", stats);
                     },
+                    mediaCapture: function (stats) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "media_capture", stats);
+                    },
                     measured: function (frames, microseconds, stats) {
                         if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
                             window.steamBigPictureHost.recordGameFrame(appId, "sample", stats);
