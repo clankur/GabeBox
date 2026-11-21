@@ -19,10 +19,10 @@ extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D1
 
 namespace {
 using namespace winrt;
-using namespace Windows::Foundation;
-using namespace Windows::Graphics::DirectX::Direct3D11;
-using namespace Windows::Media::Core;
-using namespace Windows::Media::MediaProperties;
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using namespace winrt::Windows::Media::Core;
+using namespace winrt::Windows::Media::MediaProperties;
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 constexpr unsigned width = 1920, height = 1080;
