@@ -434,6 +434,7 @@ struct SteamSignInHandles {
     std::uint64_t downloadStarted = 0;
     std::uint64_t lastTransition = 0;
     std::uint32_t lastInstallState = 0;
+    std::uint32_t otherDownloadApp = 0;
     enum class DownloadRetry { NotAttempted, Accepted, Declined };
     DownloadRetry downloadRetry = DownloadRetry::NotAttempted;
     std::uint64_t launchCall = 0;
@@ -979,6 +980,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
     session->libraryPath = path;
     session->downloadStarted = session->lastTransition = GetTickCount64();
     session->lastInstallState = 0;
+    session->otherDownloadApp = 0;
     using Retry = SteamSignInHandles::DownloadRetry;
     session->downloadRetry = Retry::NotAttempted;
     if (wasPaused) {
@@ -990,6 +992,32 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
         }
     }
     co_return winrt::hstring(L"queued");
+}
+
+static std::wstring DescribeSteamDownloadQueue(SteamSignInHandles const& session, std::uintptr_t const *methods,
+        std::uint32_t app, std::uint32_t active) {
+    const auto base = reinterpret_cast<std::uintptr_t>(session.module);
+    if (methods[40] != base + 0x759800 || methods[55] != base + 0x74ff30 ||
+            methods[58] != base + 0x780170 || methods[60] != base + 0x7a9fb0 ||
+            session.userMethods[93] != base + 0x758050) {
+        return L"steam_download_queue=interface-unavailable\r\n";
+    }
+    using Query = bool (__cdecl *)(void *);
+    using QueueIndex = std::int32_t (__cdecl *)(void *, std::uint32_t);
+    using QueueCount = std::uint32_t (__cdecl *)(void *);
+    const auto manager = session.appManager;
+    const auto enabled = reinterpret_cast<Query>(methods[40])(manager);
+    const auto allowWhilePlaying = reinterpret_cast<Query>(methods[55])(manager);
+    const auto anyGameRunning = reinterpret_cast<Query>(session.userMethods[93])(session.clientUser);
+    const auto queueIndex = reinterpret_cast<QueueIndex>(methods[58])(manager, app);
+    const auto queueCount = reinterpret_cast<QueueCount>(methods[60])(manager);
+    return std::wstring(L"steam_download_active=") + (active == 0 ? L"none" : active == app ? L"selected" : L"other") +
+        L"\r\nsteam_download_other_active_app=" + std::to_wstring(session.otherDownloadApp) +
+        L"\r\nsteam_download_enabled=" + (enabled ? L"yes" : L"no") +
+        L"\r\nsteam_download_allow_while_playing=" + (allowWhilePlaying ? L"yes" : L"no") +
+        L"\r\nsteam_download_game_running=" + (anyGameRunning ? L"yes" : L"no") +
+        L"\r\nsteam_download_queue_index=" + std::to_wstring(queueIndex) +
+        L"\r\nsteam_download_queue_count=" + std::to_wstring(queueCount) + L"\r\n";
 }
 
 static winrt::hstring ReadSteamDownload() {
@@ -1014,6 +1042,7 @@ static winrt::hstring ReadSteamDownload() {
     const auto app = session->downloadApp;
     auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
     auto activeApp = reinterpret_cast<ActiveApp>(methods[42])(manager);
+    if (activeApp && activeApp != app) session->otherDownloadApp = activeApp;
     auto now = GetTickCount64();
     if (state != session->lastInstallState || activeApp == session->downloadApp) {
         session->lastInstallState = state;
@@ -1049,13 +1078,16 @@ static winrt::hstring ReadSteamDownload() {
         checkpoint = L"queued";
     }
     auto report = checkpoint + L":" + std::to_wstring(state);
+    if ((state & updatePaused) || !session->downloadApp) {
+        report += L"\r\n" + DescribeSteamDownloadQueue(*session, methods, app, activeApp);
+    }
     if (!session->downloadApp) {
         using winrt::Windows::ApplicationModel::Package;
         using winrt::Windows::Storage::ApplicationData;
         const auto destination = ReadSteamDestination(manager, methods, app, session->libraryPath,
             std::wstring(ApplicationData::Current().LocalFolder().Path()),
             std::wstring(Package::Current().InstalledLocation().Path()));
-        report += L"\r\nsteam_download_install_scope=" + std::wstring(destination.installScope) + L"\r\n";
+        report += L"steam_download_install_scope=" + std::wstring(destination.installScope) + L"\r\n";
         report += L"steam_download_library_scope=" + std::wstring(destination.libraryScope) + L"\r\n";
         report += L"steam_download_library_index=" + std::to_wstring(destination.index) + L"\r\n";
         const auto retry = session->downloadRetry;
