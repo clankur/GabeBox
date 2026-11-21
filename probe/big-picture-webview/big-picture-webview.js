@@ -284,12 +284,14 @@
                      typeof appId === "number" && appId > 0 && appId <= 0xffffffff && appId % 1 === 0) {
                 if (!settled) return respond(id, false, "unavailable");
                 if (request.method === "resume-game" || request.method === "quit-game") action = function () {
+                    if (request.method === "quit-game") record("game-quit-received");
                     return broker.session().then(function (user) {
                         if (!user || !user.steamId) return "signed-out";
                         if (request.method === "resume-game") return raiseGame(appId);
                         if (!visible || !played(appId) || !quitGame) return "unavailable";
                         if (!quitGame()) return "unavailable";
                         quitGame = null;
+                        record("game-quit-requested");
                         return "quit-requested";
                     });
                 };

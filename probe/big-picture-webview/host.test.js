@@ -423,11 +423,14 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     app.incoming.push('{"method":"quit-game","id":5,"appId":975370}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 5 && e.result === "unavailable"));
+    assert.match(app.reports.at(-1), /game-quit-received/);
+    assert.doesNotMatch(app.reports.at(-1), /game-quit-requested/);
     assert.equal(await app.shell.showForGame(975370, 90, restore, quit), true);
     app.incoming.push('{"method":"quit-game","id":6,"appId":413150}', '{"method":"quit-game","id":7,"appId":975370}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 6 && e.result === "unavailable"));
     assert.ok(app.replies.some(e => e.id === 7 && e.result === "quit-requested"));
+    assert.match(app.reports.at(-1), /game-quit-requested/);
     assert.equal(quitRequests, 1);
     await app.shell.resume(975370);
     await drain();
