@@ -190,6 +190,25 @@ def read_game_file(portal, package, folder, filename, limit):
     return data
 
 
+def read_stardew_frame(portal, app, destination):
+    _, report = portal.request('GET', probe_report_path(app))
+    run = re.search(r'^steam_stardew_managed_run=([0-9]{1,20})\r?$', decode_report(report), re.MULTILINE)
+    if not run:
+        raise ValueError('The current report has no Stardew frame trial.')
+    data = read_game_file(portal, app, r'\LocalState', f'stardew-managed-{run[1]}.sdl.bmp', 4096 * 4096 * 4 + 1024)
+    if not data or len(data) < 54 or data[:2] != b'BM':
+        raise ValueError('The latest Stardew trial has no captured BMP frame.')
+    size, offset = unpack_from('<I4xI', data, 2)
+    width, height, planes, bits = unpack_from('<iiHH', data, 18)
+    stride = (width * bits + 31) // 32 * 4
+    if (size != len(data) or not 54 <= offset < size or not 1 <= width <= 4096 or not 1 <= abs(height) <= 4096
+            or planes != 1 or bits not in (24, 32) or size - offset < stride * abs(height)):
+        raise ValueError('The Stardew frame was incomplete or had an unexpected bitmap layout.')
+    with destination.open('xb') as output:
+        output.write(data)
+    print(f'Saved Stardew frame ({width} by {abs(height)}) to {destination}.')
+
+
 def stardew_host_summary(raw):
     if not raw:
         return 'stardew_host_trace=no-output'
@@ -454,6 +473,7 @@ def main():
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
     report_variant.add_argument('--stardew-host', dest='report_file', action='store_const',
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
+    report_variant.add_argument('--stardew-frame', type=Path, metavar='BMP', help='save the current Stardew SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -523,6 +543,9 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.stardew_frame is not None:
+            read_stardew_frame(portal, app, args.stardew_frame)
+            return
         if args.report_file == 'stardew-host':
             _, report = portal.request('GET', probe_report_path(app))
             run = re.search(r'^steam_stardew_host_run=([0-9]{1,20})\r?$', decode_report(report), re.MULTILINE)
