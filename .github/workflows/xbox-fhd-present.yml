@@ -1,0 +1,56 @@
+name: Build Xbox native game presenter
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h']
+  pull_request:
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h']
+
+permissions:
+  contents: read
+
+jobs:
+  component:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile component and matching Windows Runtime metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $version = (Get-ChildItem "$sdk\bin" -Directory |
+            Where-Object { $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)\x64\cppwinrt.exe") } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          $tool = "$sdk\bin\$version\x64"
+          $metadata = "$sdk\UnionMetadata\$version\Windows.winmd"
+          $work = Join-Path $env:RUNNER_TEMP 'native-presenter'
+          $out = Join-Path $work 'artifact'
+          New-Item -ItemType Directory -Path $out | Out-Null
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" probe/fhd/Fhd.Native.idl
+          & "$tool\cppwinrt.exe" -input "$out\Fhd.Native.winmd" -reference $metadata -output "$work\projection" -include Fhd.Native -overwrite
+          $objects = @()
+          foreach ($source in 'render-host','host-session','gpu-receiver','hosted-input') {
+            $obj = "$work\$source.obj"
+            & cl.exe /nologo /c /O2 /Gy /MT /EHsc /std:c++20 /DNOMINMAX /DUNICODE /D_UNICODE /DFHD_SDK_METADATA /DFHD_NATIVE_INPUT "/I$work\projection" "/I$sdk\Include\$version\cppwinrt" "/Fo$obj" "probe/fhd/$source.cpp"
+            $objects += $obj
+          }
+          & cl.exe /nologo /c /TC /std:c11 /O2 /Gy /MT "/Fo$work\targets.obj" probe/fhd/present.c
+          & "$env:ProgramFiles\LLVM\bin\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -ffunction-sections -DFHD_GRAPHICS_CONTROL -DFHD_SECONDARY_VIEW -DFHD_HOSTED_VIEW -c probe/probe.c -o "$work\entry.obj"
+          & link.exe /nologo /dll /machine:x64 /subsystem:windows,10.00 /appcontainer /opt:ref /dynamicbase /nxcompat /highentropyva /Brepro /export:DllGetActivationFactory /export:DllCanUnloadNow "/out:$out\Fhd.Native.dll" "/implib:$work\Fhd.Native.lib" @objects "$work\targets.obj" "$work\entry.obj" WindowsApp.lib d3d11.lib d3d12.lib dxgi.lib dxguid.lib
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' -CertStoreLocation Cert:\CurrentUser\My
+          & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out\Fhd.Native.dll"
+          Export-Certificate -Cert $cert -FilePath "$out\Fhd.Native.cer" | Out-Null
+          Get-FileHash "$out\Fhd.Native.dll","$out\Fhd.Native.winmd" | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" } | Set-Content -Encoding ascii "$out\SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-fhd-present-x64
+          path: ${{ runner.temp }}/native-presenter/artifact/

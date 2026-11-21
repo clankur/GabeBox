@@ -1,0 +1,13 @@
+namespace Fhd.Native
+{
+    runtimeclass RenderHost
+    {
+        static void Open(String mailboxPath);
+        static void Start();
+        static Int32 ViewId();
+        static String Status();
+        static void Close();
+        static void LaunchControl();
+        static void SetNativeGamepad(Boolean enabled);
+    };
+}
