@@ -181,3 +181,28 @@ jobs:
           name: xbox-steam-core-template
           path: ${{ runner.temp }}/xbox-probe/steam-artifacts/
           if-no-files-found: error
+      - name: Collect the Visual C++ UWP dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $extensions = "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs"
+          $framework = "$extensions\Microsoft.VCLibs\14.0\Appx\Retail\x64\Microsoft.VCLibs.x64.14.00.appx"
+          if (!(Test-Path $framework)) {
+            Write-Warning 'Visual Studio did not install the x64 Visual C++ UWP framework.'
+            return
+          }
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $signTool = (Get-ChildItem "$sdk\bin\*\x64\SignTool.exe" -File |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1).FullName
+          & $signTool verify /pa $framework
+          $output = New-Item -ItemType Directory "$env:RUNNER_TEMP\xbox-probe\vclibs-framework"
+          Copy-Item $framework $output.FullName
+          $hash = (Get-FileHash $framework -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $framework)" | Set-Content -Encoding ascii "$output\SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-vclibs-framework
+          path: ${{ runner.temp }}/xbox-probe/vclibs-framework/
+          if-no-files-found: ignore

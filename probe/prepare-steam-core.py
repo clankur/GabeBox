@@ -62,9 +62,29 @@ def adapt_pinned_keyboard(binary, objdump):
     print(f'Derived Steam client SHA-256: {hashlib.sha256(candidate).hexdigest()}.')
 
 
+def vclibs_dependency(appx):
+    required_dlls = {'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'}
+    with ZipFile(appx) as framework:
+        names = {name.lower() for name in framework.namelist()}
+        if 'appxsignature.p7x' not in names or not required_dlls <= names:
+            raise ValueError('Use a signed Visual C++ framework containing the required x64 runtime DLLs.')
+        manifest = ElementTree.fromstring(framework.read('AppxManifest.xml'))
+        identity = manifest.find('{*}Identity')
+        if (identity is None or identity.get('Name') != 'Microsoft.VCLibs.140.00'
+                or identity.get('ProcessorArchitecture') != 'x64'):
+            raise ValueError('Use the Microsoft.VCLibs.140.00 x64 UWP framework package.')
+        publisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+        version = identity.get('Version', '')
+        if (identity.get('Publisher') != publisher or manifest.findtext('{*}Properties/{*}Framework') != 'true'
+                or not re.fullmatch(r'14\.0\.\d+\.\d+', version)):
+            raise ValueError('Unexpected Microsoft Visual C++ framework manifest.')
+    return (f'<PackageDependency Name="Microsoft.VCLibs.140.00" Publisher="{publisher}" '
+            f'MinVersion="{version}" />').encode('ascii')
+
+
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False):
+                   library_inventory=False, vclibs_framework=None):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -78,6 +98,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         entries = [name for name in signed.namelist() if name.lower() not in APPX_FOOTPRINT]
         if any(Path(name).name.lower() in VALVE_FILES for name in entries):
             raise ValueError('The template must contain only probe code and assets.')
+        dependency = vclibs_dependency(vclibs_framework) if vclibs_framework else None
+        if dependency and manifest.count(b'</Dependencies>') != 1:
+            raise ValueError('Use a Steam Core template with a single Dependencies section.')
 
         if valve_archive:
             release = json.loads((ANALYSIS / 'valve-release.json').read_text())
@@ -100,6 +123,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             if 'steam-signin.html' not in entries or updated.count(b'StartPage="index.html"') != 1:
                 raise ValueError('Use a Steam Core template containing the sign-in page.')
             updated = updated.replace(b'StartPage="index.html"', b'StartPage="steam-signin.html"')
+        if dependency:
+            updated = updated.replace(b'</Dependencies>', b'  ' + dependency + b'\n  </Dependencies>')
         (layout / 'AppxManifest.xml').write_bytes(updated)
         if launch_app_id is not None:
             config = [str(launch_app_id)]
@@ -149,6 +174,8 @@ def main():
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
                         help='save game names and AppIDs in the app’s local data for compatibility testing')
+    parser.add_argument('--vclibs-framework', type=Path,
+                        help='add a dependency on a signed Microsoft.VCLibs.140.00 x64 UWP framework APPX')
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
     args = parser.parse_args()
@@ -172,7 +199,7 @@ def main():
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
-                   args.install_before_launch, args.library_inventory)
+                   args.install_before_launch, args.library_inventory, args.vclibs_framework)
 
 
 if __name__ == '__main__':
