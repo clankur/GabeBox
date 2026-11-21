@@ -64,6 +64,15 @@ def add_startup_trace(tree):
     shutil.copyfile(Path(__file__).with_name('sdl-startup-trace.h'), source_root / 'sdl-startup-trace.h')
     shutil.copyfile(Path(__file__).with_name('sdl-local-preferences.h'), source_root / 'sdl-local-preferences.h')
     shutil.copyfile(Path(__file__).with_name('sdl-software-frame.h'), source_root / 'sdl-software-frame.h')
+    for header in ('sdl-host-protocol.h', 'sdl-host-runtime.h'):
+        shutil.copyfile(Path(__file__).with_name(header), source_root / 'render' / header)
+    dummy = source_root / 'video/dummy/SDL_nullevents.c'
+    source = dummy.read_text(encoding='utf-8')
+    marker = '    /* do nothing. */'
+    if source.count(marker) != 1:
+        raise ValueError('Expected the pinned SDL dummy event pump.')
+    source = source.replace('#include "SDL_nullevents_c.h"', '#include "SDL_nullevents_c.h"\n\nextern void XboxSdlPollHostInput(void);')
+    dummy.write_text(source.replace(marker, '    XboxSdlPollHostInput();'), encoding='utf-8')
     for filename, hooks in HOOKS.items():
         file = source_root / filename
         source = file.read_text(encoding='utf-8')
@@ -81,8 +90,10 @@ def add_startup_trace(tree):
                 raise ValueError('Expected the SDL2 main entrypoint in the pinned source.')
         if filename == 'render/SDL_render.c':
             declaration = r'^(void\s+SDL_RenderPresent\(SDL_Renderer \*\s*renderer\)\s*\{)'
-            source, count = re.subn(declaration, '#include "../sdl-software-frame.h"\n\n'
-                                    r'\1' '\n    XboxSdlCaptureSoftwareFrame(renderer);', source, flags=re.MULTILINE)
+            source, count = re.subn(declaration, '#include "../sdl-software-frame.h"\n'
+                                    '#include "sdl-host-runtime.h"\n\n'
+                                    r'\1' '\n    XboxSdlPublishHostFrame(renderer);\n'
+                                    '    XboxSdlCaptureSoftwareFrame(renderer);', source, flags=re.MULTILINE)
             if count != 1:
                 raise ValueError('Expected the SDL renderer present entrypoint in the pinned source.')
         suffix = ''
