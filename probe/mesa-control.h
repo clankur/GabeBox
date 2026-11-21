@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mesa-indexed-control.h"
+
 struct MesaControlResult {
     unsigned stage = 0;
     DWORD loadError = ERROR_SUCCESS;
@@ -14,7 +16,8 @@ struct MesaControlResult {
 };
 
 template <typename ContextCheck>
-static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned), ContextCheck checkCurrentContext) {
+static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned), ContextCheck checkCurrentContext,
+                                       bool indexed = false) {
     using Handle = void *;
     using Boolean = unsigned;
     using GetDisplay = Handle (WINAPI *)(Handle);
@@ -149,6 +152,13 @@ static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned), ContextChe
                 result.pixel[2] == 0 && result.pixel[3] == 255) {
             stage(8);
             checkCurrentContext();
+            if (indexed) {
+                RunMesaIndexedControl([&](const char *name) -> EglProc {
+                    const auto entry = GetProcAddress(gl, name);
+                    return entry ? reinterpret_cast<EglProc>(entry) : proc(name);
+                }, stage, result.pixel);
+                result.glError = glError();
+            }
         }
     } while (false);
 
@@ -162,8 +172,4 @@ static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned), ContextChe
     FreeLibrary(gl);
     FreeLibrary(egl);
     return result;
-}
-
-static MesaControlResult RunMesaControl() {
-    return RunMesaControl(nullptr, [] {});
 }

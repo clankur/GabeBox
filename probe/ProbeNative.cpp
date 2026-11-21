@@ -216,14 +216,27 @@ static std::wstring AngleResult() {
         L"," + std::to_wstring(result.pixel[2]) + L"," + std::to_wstring(result.pixel[3]) + L"\r\n";
 }
 
+static void WriteMesaIndexedCheckpoint(unsigned stage) {
+    auto local = winrt::Windows::Storage::ApplicationData::Current().LocalFolder();
+    auto path = std::wstring(local.Path()) + L"\\mesa-indexed-stage.txt";
+    HANDLE raw = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (raw == INVALID_HANDLE_VALUE) return;
+    winrt::handle file{raw};
+    auto text = "mesa_stage=" + std::to_string(stage) + "\r\n";
+    DWORD bytes = 0;
+    if (WriteFile(file.get(), text.data(), static_cast<DWORD>(text.size()), &bytes, nullptr)) FlushFileBuffers(file.get());
+}
+
 static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstring const& inventory) {
     if (GetFileAttributesW((packagePath + L"angle-control.dll").c_str()) != INVALID_FILE_ATTRIBUTES) {
         return AngleResult() + L"status=steam-core-complete\r\n";
     }
     if (GetFileAttributesW((packagePath + L"mesa-uwp-source.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
-        const auto result = RunMesaControl();
-        const bool green = result.stage == 8 && result.eglError == 0x3000;
-        return std::wstring(L"mesa_control=") + (green ? L"green-pixel" : L"failed") +
+        const bool indexed = GetFileAttributesW((packagePath + L"mesa-indexed-control.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
+        const auto result = RunMesaControl(indexed ? WriteMesaIndexedCheckpoint : nullptr, [] {}, indexed);
+        const bool passed = result.stage == (indexed ? 13u : 8u) && result.eglError == 0x3000 && result.glError == 0;
+        return std::wstring(L"mesa_control=") + (passed ? (indexed ? L"indexed-pixel" : L"green-pixel") : L"failed") +
             L"\r\nmesa_stage=" + std::to_wstring(result.stage) + L"\r\nmesa_win32_error=" + Hex(result.loadError) +
             L"\r\nmesa_egl_error=" + Hex(result.eglError) + L"\r\nmesa_gl_error=" + Hex(result.glError) +
             L"\r\nmesa_pbuffer_egl_error=" + Hex(result.pbufferError) +
