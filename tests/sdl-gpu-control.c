@@ -95,9 +95,8 @@ static void sample(const char *phase, Uint64 elapsed, Uint64 freq, unsigned rend
                  generation, accepted, active);
     record(line);
 }
-int main(int argc, char **argv)
+static int run_control(void)
 {
-    (void)argc; (void)argv;
     SDL_SetMainReady();
     SDL_Window *window = NULL;
     SDL_GLContext context = NULL;
@@ -153,3 +152,9 @@ end:
     if (log_file != INVALID_HANDLE_VALUE) CloseHandle(log_file);
     return exit_code;
 }
+
+#ifdef SDL_GPU_FREESTANDING
+void WINAPI XboxSdlGpuControlEntry(void) { ExitProcess((UINT)run_control()); }
+#else
+int main(void) { return run_control(); }
+#endif
