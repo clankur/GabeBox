@@ -130,6 +130,16 @@ jobs:
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
             & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe" "$layout/pipe-child.exe"
+            $lifetimeLayout = Join-Path $work 'lifetime-layout'
+            $lifetimeArtifacts = Join-Path $work 'lifetime-artifacts'
+            Copy-Item -Recurse $layout $lifetimeLayout
+            New-Item -ItemType Directory -Path $lifetimeArtifacts | Out-Null
+            [xml]$lifetime = Get-Content "$lifetimeLayout/AppxManifest.xml"
+            $lifetime.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Lifetime')
+            $lifetime.Package.Properties.DisplayName = 'Packaged process lifetime test'
+            $lifetime.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process lifetime test')
+            $lifetime.Save("$lifetimeLayout/AppxManifest.xml")
+            Write-ProbePackage $lifetimeLayout $lifetimeArtifacts $cert
             Write-ProbePackage $layout $artifacts $cert
             Write-ProbePackage $controlLayout $controlArtifacts $cert
           } finally {
@@ -144,4 +154,9 @@ jobs:
         with:
           name: xbox-probe-fresh-identity
           path: ${{ runner.temp }}/xbox-probe/control-artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-lifetime
+          path: ${{ runner.temp }}/xbox-probe/lifetime-artifacts/
           if-no-files-found: error

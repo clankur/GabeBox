@@ -4,6 +4,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/XboxProbe.Native.h>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -42,9 +43,21 @@ static std::wstring ChildResult(std::wstring const& path) {
         L"\r\nexit_code_matches=" + (matches ? L"yes\r\n" : L"no\r\n");
 }
 
-static std::wstring PipeFailure(const wchar_t *stage, DWORD error) {
-    return std::wstring(L"ipc=failed\r\nipc_stage=") + stage + L"\r\nipc_error=" + Hex(error) + L"\r\n";
-}
+struct PipeError {
+    const wchar_t *stage;
+    DWORD code;
+};
+
+struct PipeSession {
+    winrt::handle pipe;
+    winrt::handle process;
+    std::wstring suffix;
+    DWORD pid = 0;
+    DWORD helperToken = 0;
+};
+
+static std::mutex lifetimeMutex;
+static PipeSession lifetimeSession;
 
 static DWORD RemainingTime(ULONGLONG deadline) {
     ULONGLONG now = GetTickCount64();
@@ -66,68 +79,143 @@ static DWORD CompletePipeIo(HANDLE pipe, OVERLAPPED& operation, DWORD& bytes,
     return error;
 }
 
-static std::wstring PipeResult(std::wstring const& child) {
+static winrt::handle PipeEvent() {
+    winrt::handle event(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
+    if (!event) throw PipeError{L"create-event", GetLastError()};
+    return event;
+}
+
+static void OpenPipe(PipeSession& session, std::wstring const& child, bool lifetime) {
     ULONGLONG tick = GetTickCount64();
-    std::wstring suffix = Hex(GetCurrentProcessId()).substr(2) + Hex(DWORD(tick >> 32)).substr(2) +
-                          Hex(DWORD(tick)).substr(2);
-    std::wstring name = PROBE_PIPE_PREFIX + suffix;
+    session.suffix = Hex(GetCurrentProcessId()).substr(2) + Hex(DWORD(tick >> 32)).substr(2) +
+                     Hex(DWORD(tick)).substr(2);
+    std::wstring name = PROBE_PIPE_PREFIX + session.suffix;
     HANDLE rawPipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
         1, 256, 256, 0, nullptr);
-    if (rawPipe == INVALID_HANDLE_VALUE) return PipeFailure(L"create-pipe", GetLastError());
-    winrt::handle pipe(rawPipe);
-    winrt::handle connectEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
-    if (!connectEvent) return PipeFailure(L"create-event", GetLastError());
+    if (rawPipe == INVALID_HANDLE_VALUE) throw PipeError{L"create-pipe", GetLastError()};
+    session.pipe.attach(rawPipe);
+    auto event = PipeEvent();
 
-    std::wstring arguments = L"\"" + child + L"\" " + suffix;
+    std::wstring arguments = L"\"" + child + L"\" " + (lifetime ? L"L" : L"") + session.suffix;
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION processInfo{};
     if (!CreateProcessW(child.c_str(), arguments.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                         &startup, &processInfo)) {
-        return PipeFailure(L"create-child", GetLastError());
+        throw PipeError{L"create-child", GetLastError()};
     }
-    winrt::handle process(processInfo.hProcess);
+    session.process.attach(processInfo.hProcess);
+    session.pid = processInfo.dwProcessId;
     winrt::handle thread(processInfo.hThread);
-    ULONGLONG deadline = GetTickCount64() + 5000;
+
     OVERLAPPED connect{};
-    connect.hEvent = connectEvent.get();
+    connect.hEvent = event.get();
     DWORD bytes = 0;
-    DWORD error = CompletePipeIo(pipe.get(), connect, bytes, ConnectNamedPipe(pipe.get(), &connect), deadline);
-    if (error != ERROR_SUCCESS && error != ERROR_PIPE_CONNECTED) {
-        DWORD exit = 0;
-        std::wstring result = PipeFailure(L"connect", error);
-        if (GetExitCodeProcess(process.get(), &exit) && exit != STILL_ACTIVE)
-            result += L"ipc_child_exit=" + Hex(exit) + L"\r\n";
-        return result;
+    auto deadline = GetTickCount64() + 5000;
+    DWORD error = CompletePipeIo(session.pipe.get(), connect, bytes,
+                                 ConnectNamedPipe(session.pipe.get(), &connect), deadline);
+    if (error != ERROR_SUCCESS && error != ERROR_PIPE_CONNECTED) throw PipeError{L"connect", error};
+}
+
+template <typename Message>
+static void TransferPipe(PipeSession const& session, Message& message, bool write, ULONGLONG deadline) {
+    auto event = PipeEvent();
+    OVERLAPPED operation{};
+    operation.hEvent = event.get();
+    DWORD bytes = 0;
+    auto pipe = session.pipe.get();
+    BOOL started = write ? WriteFile(pipe, &message, sizeof(message), &bytes, &operation)
+                         : ReadFile(pipe, &message, sizeof(message), &bytes, &operation);
+    DWORD error = CompletePipeIo(pipe, operation, bytes, started, deadline);
+    if (error != ERROR_SUCCESS || bytes != sizeof(message)) {
+        throw PipeError{write ? L"write-reply" : L"read-request",
+                        error != ERROR_SUCCESS ? error : ERROR_INVALID_DATA};
     }
+}
 
-    winrt::handle readEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
-    if (!readEvent) return PipeFailure(L"create-event", GetLastError());
-    winrt::handle writeEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
-    if (!writeEvent) return PipeFailure(L"create-event", GetLastError());
-
-    OVERLAPPED read{};
-    read.hEvent = readEvent.get();
-    DWORD request = 0;
-    error = CompletePipeIo(pipe.get(), read, bytes, ReadFile(pipe.get(), &request, sizeof(request), &bytes, &read), deadline);
-    if (error != ERROR_SUCCESS) return PipeFailure(L"read-request", error);
-    if (bytes != sizeof(request) || request != (processInfo.dwProcessId ^ PROBE_PIPE_HELLO))
-        return PipeFailure(L"invalid-request", ERROR_INVALID_DATA);
-
-    OVERLAPPED write{};
-    write.hEvent = writeEvent.get();
-    DWORD reply = request ^ PROBE_PIPE_REPLY;
-    error = CompletePipeIo(pipe.get(), write, bytes, WriteFile(pipe.get(), &reply, sizeof(reply), &bytes, &write), deadline);
-    if (error != ERROR_SUCCESS) return PipeFailure(L"write-reply", error);
-    if (bytes != sizeof(reply)) return PipeFailure(L"short-reply", ERROR_WRITE_FAULT);
-
-    DWORD wait = WaitForSingleObject(process.get(), RemainingTime(deadline));
-    if (wait != WAIT_OBJECT_0) return PipeFailure(L"wait-for-child", wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError());
+static DWORD ChildExit(PipeSession const& session, ULONGLONG deadline) {
+    DWORD wait = WaitForSingleObject(session.process.get(), RemainingTime(deadline));
+    if (wait != WAIT_OBJECT_0)
+        throw PipeError{L"wait-for-child", wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError()};
     DWORD exit = 0;
-    if (!GetExitCodeProcess(process.get(), &exit)) return PipeFailure(L"read-child-exit", GetLastError());
-    return std::wstring(L"ipc=") + (exit == PROBE_PIPE_EXIT ? L"success\r\n" : L"failed\r\n") +
-        L"ipc_request=" + Hex(request) + L"\r\nipc_reply=" + Hex(reply) + L"\r\nipc_child_exit=" + Hex(exit) + L"\r\n";
+    if (!GetExitCodeProcess(session.process.get(), &exit)) throw PipeError{L"read-child-exit", GetLastError()};
+    return exit;
+}
+
+static std::wstring PipeFailure(const wchar_t *test, PipeSession const& session, PipeError error) {
+    std::wstring label = test;
+    std::wstring report = label + L"=failed\r\n" + label + L"_stage=" + error.stage +
+                          L"\r\n" + label + L"_error=" + Hex(error.code) + L"\r\n";
+    DWORD exit = 0;
+    if (session.process && GetExitCodeProcess(session.process.get(), &exit) && exit != STILL_ACTIVE)
+        report += label + L"_child_exit=" + Hex(exit) + L"\r\n";
+    return report;
+}
+
+static std::wstring PipeResult(std::wstring const& child) {
+    PipeSession session;
+    try {
+        OpenPipe(session, child, false);
+        auto deadline = GetTickCount64() + 5000;
+        DWORD request = 0;
+        TransferPipe(session, request, false, deadline);
+        if (request != (session.pid ^ PROBE_PIPE_HELLO)) throw PipeError{L"invalid-request", ERROR_INVALID_DATA};
+        DWORD reply = request ^ PROBE_PIPE_REPLY;
+        TransferPipe(session, reply, true, deadline);
+        DWORD exit = ChildExit(session, deadline);
+        return std::wstring(L"ipc=") + (exit == PROBE_PIPE_EXIT ? L"success\r\n" : L"failed\r\n") +
+            L"ipc_request=" + Hex(request) + L"\r\nipc_reply=" + Hex(reply) +
+            L"\r\nipc_child_exit=" + Hex(exit) + L"\r\n";
+    } catch (PipeError error) {
+        return PipeFailure(L"ipc", session, error);
+    }
+}
+
+static std::wstring LifetimeIdentity(PipeSession const& session) {
+    return L"parent_pid=" + Hex(GetCurrentProcessId()) + L"\r\nchannel_id=" + session.suffix +
+        L"\r\nhelper_pid=" + Hex(session.pid) + L"\r\nhelper_token=" + Hex(session.helperToken) + L"\r\n";
+}
+
+static std::wstring StartLifetimePipe(std::wstring const& child) {
+    std::lock_guard lock(lifetimeMutex);
+    lifetimeSession = {};
+    try {
+        OpenPipe(lifetimeSession, child, true);
+        ProbeLifetimeHello hello{};
+        TransferPipe(lifetimeSession, hello, false, GetTickCount64() + 5000);
+        if (hello.pid != (lifetimeSession.pid ^ PROBE_PIPE_HELLO))
+            throw PipeError{L"invalid-request", ERROR_INVALID_DATA};
+        lifetimeSession.helperToken = hello.token;
+        return L"lifetime=ready\r\n" + LifetimeIdentity(lifetimeSession);
+    } catch (PipeError error) {
+        auto report = PipeFailure(L"lifetime", lifetimeSession, error);
+        lifetimeSession = {};
+        return report;
+    }
+}
+
+static std::wstring FinishLifetimePipe() {
+    std::lock_guard lock(lifetimeMutex);
+    if (!lifetimeSession.pipe) return L"lifetime=failed\r\nlifetime_stage=no-open-connection\r\n";
+    PipeSession session = std::move(lifetimeSession);
+    try {
+        ULONGLONG tick = GetTickCount64();
+        DWORD challenge = DWORD(tick);
+        TransferPipe(session, challenge, true, tick + 5000);
+        DWORD exit = ChildExit(session, tick + 5000);
+        DWORD expected = PROBE_LIFETIME_EXIT(challenge, session.helperToken);
+        return std::wstring(L"lifetime=") + (exit == expected ? L"complete\r\n" : L"failed\r\n") +
+            LifetimeIdentity(session) + L"return_challenge=" + Hex(challenge) +
+            L"\r\nlifetime_child_exit=" + Hex(exit) + L"\r\nlifetime_expected_exit=" + Hex(expected) + L"\r\n";
+    } catch (PipeError error) {
+        return LifetimeIdentity(session) + PipeFailure(L"lifetime", session, error);
+    }
+}
+
+static std::wstring InstalledPath() {
+    auto folder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+    return std::wstring(folder.Path()) + L"\\";
 }
 
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
@@ -137,9 +225,15 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     }
 
     winrt::hstring Run() {
-        auto folder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
-        std::wstring path = std::wstring(folder.Path()) + L"\\";
+        auto path = InstalledPath();
         return winrt::hstring(ChildResult(path + L"child.exe") + PipeResult(path + L"pipe-child.exe"));
+    }
+    winrt::hstring StartLifetime() {
+        return winrt::hstring(StartLifetimePipe(InstalledPath() + L"pipe-child.exe"));
+    }
+
+    winrt::hstring FinishLifetime() {
+        return winrt::hstring(FinishLifetimePipe());
     }
 };
 
@@ -155,5 +249,6 @@ extern "C" HRESULT WINAPI ProbeGetActivationFactory(HSTRING classId, void **fact
 }
 
 extern "C" HRESULT WINAPI ProbeCanUnloadNow() noexcept {
-    return winrt::get_module_lock() ? S_FALSE : S_OK;
+    std::lock_guard lock(lifetimeMutex);
+    return winrt::get_module_lock() || lifetimeSession.pipe ? S_FALSE : S_OK;
 }
