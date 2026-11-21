@@ -4,6 +4,8 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Gaming.Input.h>
 #include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
@@ -11,6 +13,8 @@
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.ViewManagement.h>
+#include <algorithm>
+#include <array>
 #include <deque>
 #include <string>
 
@@ -27,9 +31,12 @@ namespace {
 constexpr wchar_t entry[] = L"https://steamloopback.host/index.html";
 constexpr size_t maxPending = 32;
 
+constexpr wchar_t signedEntry[] = L"https://steamloopback.host/index.html?IN_CLIENT=true";
+
 bool isEntry(hstring const& uri) {
     std::wstring_view address(uri);
-    return address.substr(0, address.find(L'#')) == entry;
+    auto page = address.substr(0, address.find(L'#'));
+    return page == entry || page == signedEntry;
 }
 
 slim_mutex gate;
@@ -57,6 +64,7 @@ struct View : implements<View, IFrameworkView> {
     CoreWebView2Environment environment{nullptr};
     CoreWebView2CompositionController controller{nullptr};
     CoreWebView2CompositionController popup{nullptr};
+    std::array<Windows::Gaming::Input::Gamepad, 8> gamepadSlots{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     bool openingPopup = false;
     bool popupRequestedVisible = false;
     CoreWebView2 web{nullptr};
@@ -146,7 +154,7 @@ struct View : implements<View, IFrameworkView> {
         } catch (hresult_error const&) {
             // Some device contracts can withhold version information.
         }
-        return L"{\"deviceFamily\":" + family + L",\"deviceFamilyVersion\":" + version +
+        return L"{\"nativeGamepads\":true,\"deviceFamily\":" + family + L",\"deviceFamilyVersion\":" + version +
             L",\"devToolsEnabled\":" + (web.Settings().AreDevToolsEnabled() ? L"true" : L"false") + L"}";
     }
 
@@ -160,8 +168,45 @@ struct View : implements<View, IFrameworkView> {
             (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
     }
 
+    void publishGamepads() {
+        std::wstring result = L"{\"event\":\"xbox-gamepads\",\"pads\":[";
+        bool first = true;
+        if (window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) {
+            try {
+                auto pads = Windows::Gaming::Input::Gamepad::Gamepads();
+                uint32_t index;
+                for (auto& slot : gamepadSlots)
+                    if (slot && !pads.IndexOf(slot, index)) slot = nullptr;
+                for (const auto& pad : pads) {
+                    auto slot = std::find(gamepadSlots.begin(), gamepadSlots.end(), pad);
+                    if (slot == gamepadSlots.end()) {
+                        slot = std::find(gamepadSlots.begin(), gamepadSlots.end(), nullptr);
+                        if (slot == gamepadSlots.end()) break;
+                        *slot = pad;
+                    }
+                    const auto reading = pad.GetCurrentReading();
+                    if (!first) result += L",";
+                    first = false;
+                    result += L"{\"slot\":" + std::to_wstring(slot - gamepadSlots.begin()) +
+                        L",\"bits\":" + std::to_wstring(static_cast<uint32_t>(reading.Buttons)) +
+                        L",\"lx\":" + std::to_wstring(reading.LeftThumbstickX) +
+                        L",\"ly\":" + std::to_wstring(reading.LeftThumbstickY) +
+                        L",\"rx\":" + std::to_wstring(reading.RightThumbstickX) +
+                        L",\"ry\":" + std::to_wstring(reading.RightThumbstickY) +
+                        L",\"lt\":" + std::to_wstring(reading.LeftTrigger) +
+                        L",\"rt\":" + std::to_wstring(reading.RightTrigger) + L"}";
+                }
+            } catch (hresult_error const&) {
+                // A controller can disconnect between enumeration and reading.
+                // Retry from the fresh WinRT collection on the next input tick.
+            }
+        }
+        web.PostWebMessageAsJson(hstring(result + L"]}"));
+    }
+
     bool handleWindowCommand(hstring const& message) {
-        if (message == L"\"xbox-window-focus\"") focusVisible();
+        if (message == L"\"xbox-read-gamepads\"") publishGamepads();
+        else if (message == L"\"xbox-window-focus\"") focusVisible();
         else if (message == L"\"xbox-window-show\"" || message == L"\"xbox-window-hide\"") {
             if (popup) {
                 popupRequestedVisible = message == L"\"xbox-window-show\"";
@@ -361,7 +406,7 @@ struct View : implements<View, IFrameworkView> {
                     adapter = co_await Windows::Storage::FileIO::ReadTextAsync(file);
             }
             if (closed) co_return;
-            hstring script = LR"JS(if(window === window.top && location.href.split("#")[0] === "https://steamloopback.host/index.html"){
+            hstring script = LR"JS(if(window === window.top && ["https://steamloopback.host/index.html","https://steamloopback.host/index.html?IN_CLIENT=true"].includes(location.href.split("#")[0])){
                 window.addEventListener("error", function(event) {
                     const message = String(event.message || "resource load error").slice(0,180);
                     window.chrome.webview.postMessage({method:"renderer-error", message});
@@ -374,7 +419,7 @@ struct View : implements<View, IFrameworkView> {
             auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() + L"));\n";
             co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
             if (closed) co_return;
-            web.Navigate(entry);
+            web.Navigate(adapter.empty() ? entry : signedEntry);
             controller.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
         } catch (...) {
             if (!closed) checkpoint(std::wstring(step) + L"-error:" + std::to_wstring(to_hresult().value));
