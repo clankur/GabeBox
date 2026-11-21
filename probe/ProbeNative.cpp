@@ -1000,18 +1000,31 @@ static const wchar_t *SteamPathScope(std::wstring const& directory, std::wstring
     return L"outside-app";
 }
 
-static std::wstring DescribeSteamDestination(void *manager, std::uintptr_t const *methods,
-        std::uint32_t app, std::wstring_view checkpoint, std::wstring const& library,
+struct SteamDestination {
+    std::int32_t index;
+    std::wstring_view installScope;
+    std::wstring_view libraryScope;
+};
+
+static SteamDestination ReadSteamDestination(void *manager, std::uintptr_t const *methods,
+        std::uint32_t app, std::wstring const& library,
         std::wstring const& data, std::wstring const& package) {
     using AppLibraryFolder = std::int32_t (__cdecl *)(void *, std::uint32_t);
     auto index = reinterpret_cast<AppLibraryFolder>(methods[82])(manager, app);
     auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+    auto folder = index < 0 ? std::wstring{} : SteamPath(reinterpret_cast<SteamAppPath>(methods[76]), manager, index);
+    return {index, SteamPathScope(directory, library, data, package), SteamPathScope(folder, library, data, package)};
+}
+
+static std::wstring DescribeSteamDestination(void *manager, std::uintptr_t const *methods,
+        std::uint32_t app, std::wstring_view checkpoint, std::wstring const& library,
+        std::wstring const& data, std::wstring const& package) {
+    const auto destination = ReadSteamDestination(manager, methods, app, library, data, package);
     std::wstring prefix = L"steam_launch_redistributables_" + std::wstring(checkpoint) + L"_";
-    auto report = prefix + L"install_scope=" + SteamPathScope(directory, library, data, package) + L"\r\n";
-    report += prefix + L"library_index=" + std::to_wstring(index) + L"\r\n";
-    if (index >= 0) {
-        auto folder = SteamPath(reinterpret_cast<SteamAppPath>(methods[76]), manager, index);
-        report += prefix + L"library_scope=" + SteamPathScope(folder, library, data, package) + L"\r\n";
+    auto report = prefix + L"install_scope=" + std::wstring(destination.installScope) + L"\r\n";
+    report += prefix + L"library_index=" + std::to_wstring(destination.index) + L"\r\n";
+    if (destination.index >= 0) {
+        report += prefix + L"library_scope=" + std::wstring(destination.libraryScope) + L"\r\n";
     }
     return report;
 }
