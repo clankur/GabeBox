@@ -370,6 +370,8 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--sdl-startup', dest='report_file', action='store_const',
+                                const='sdl-startup', help='read the SDL startup checkpoints for the current launch')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -431,6 +433,17 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.report_file == 'sdl-startup':
+            _, raw = portal.request('GET', probe_report_path(app))
+            run = re.search(r'^steam_launch_sdl_run=([0-9]{1,20})\r?$', decode_report(raw), re.MULTILINE)
+            if not run:
+                print('sdl_startup=no-trace-request')
+                return
+            trace = read_game_file(portal, app, r'\LocalState', f'sdl-startup-{run[1]}.txt', 4096)
+            snapshots = re.findall(r'^sdl_(?:video_init|window|renderer)=(?:begin|ready|error)$',
+                                   decode_report(trace or b''), re.MULTILINE)
+            print('\n'.join(snapshots) or 'sdl_startup=no-checkpoints')
+            return
         _, raw = portal.request('GET', probe_report_path(app, args.report_file))
         report = decode_report(raw)
         if not report.endswith('\n'):

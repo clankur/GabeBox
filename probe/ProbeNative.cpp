@@ -1476,12 +1476,20 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
-    struct SdlRendererHint {
+    struct SdlTrialEnvironment {
+        wchar_t const* name;
         bool created = false;
-        ~SdlRendererHint() {
-            if (created) SetEnvironmentVariableW(L"SDL_RENDER_DRIVER", nullptr);
+        bool Set(wchar_t const* value) {
+            wchar_t existing[1];
+            SetLastError(ERROR_SUCCESS);
+            if (GetEnvironmentVariableW(name, existing, 1) != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) return false;
+            created = SetEnvironmentVariableW(name, value) != FALSE;
+            return created;
         }
-    } rendererHint;
+        ~SdlTrialEnvironment() {
+            if (created) SetEnvironmentVariableW(name, nullptr);
+        }
+    } rendererHint{L"SDL_RENDER_DRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"};
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1538,14 +1546,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         GetSystemTimeAsFileTime(&launchTime);
+        if (snapshotRequested) {
+            const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                launchTime.dwLowDateTime);
+            const auto file = dataRoot + L"\\sdl-startup-" + id + L".txt";
+            if (sdlTrace.Set(file.c_str())) report += L"steam_launch_sdl_run=" + id + L"\r\n";
+        }
         if (!diagnosticRenderer.empty()) {
-            wchar_t existing[1];
-            SetLastError(ERROR_SUCCESS);
-            if (GetEnvironmentVariableW(L"SDL_RENDER_DRIVER", existing, 1) == 0 &&
-                    GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
-                rendererHint.created = SetEnvironmentVariableW(L"SDL_RENDER_DRIVER", diagnosticRenderer.c_str()) != FALSE;
-            }
-            report += L"steam_launch_sdl_renderer=" + (rendererHint.created ? diagnosticRenderer : std::wstring(L"unavailable")) + L"\r\n";
+            const auto applied = rendererHint.Set(diagnosticRenderer.c_str());
+            report += L"steam_launch_sdl_renderer=" + (applied ? diagnosticRenderer : std::wstring(L"unavailable")) + L"\r\n";
         }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
