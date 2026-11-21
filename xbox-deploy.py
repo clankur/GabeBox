@@ -196,10 +196,15 @@ def read_game_file(portal, package, folder, filename, limit):
 
 
 def sdl_frame_stem(report):
-    run = re.search(r'^steam_(launch_sdl|stardew_managed)_run=([0-9]{1,20})\r?$', report, re.MULTILINE)
+    run = re.search(r'^steam_(launch_sdl|stardew_managed|slay_console)_run=([0-9]{1,20})\r?$', report, re.MULTILINE)
     if not run:
         raise ValueError('The current console report has no SDL frame trial.')
-    return f'sdl-startup-{run[2]}' if run[1] == 'launch_sdl' else f'stardew-managed-{run[2]}.sdl'
+    template = {
+        'launch_sdl': 'sdl-startup-{}',
+        'stardew_managed': 'stardew-managed-{}.sdl',
+        'slay_console': 'slay-console-{}.sdl',
+    }
+    return template[run[1]].format(run[2])
 
 
 def read_sdl_frame(portal, app, report, destination):
