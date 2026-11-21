@@ -3,6 +3,7 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Security.Cryptography.Core.h>
 #include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
