@@ -1242,6 +1242,21 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     const std::uint64_t gameId = app;  // Regular Steam AppID in CGameID's 24-bit app field.
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
+    std::uint32_t launchOption = 0;
+    auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+    auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
+        L"steam-launch-option-" + std::to_wstring(app) + L".txt"));
+    if (optionItem) {
+        auto optionFile = optionItem.try_as<StorageFile>();
+        if (!optionFile) co_return winrt::hstring(L"steam_launch=invalid-launch-option\r\n");
+        auto value = winrt::to_string(co_await FileIO::ReadTextAsync(optionFile));
+        auto end = value.find_last_not_of("\r\n");
+        value.resize(end == std::string::npos ? 0 : end + 1);
+        auto parsed = std::from_chars(value.data(), value.data() + value.size(), launchOption);
+        if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+            co_return winrt::hstring(L"steam_launch=invalid-launch-option\r\n");
+        }
+    }
     const bool installedManifest = co_await HasCompletedSteamManifest(folder, app);
     std::uint64_t call = 0;
     CallResult result = nullptr;
@@ -1267,7 +1282,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         reinterpret_cast<RefreshLibrary>(managerMethods[83])(session->appManager);
     }
 
-    report = L"steam_launch_library_refreshed=yes\r\n";
+    report = L"steam_launch_option_index=" + std::to_wstring(launchOption) +
+        L"\r\nsteam_launch_library_refreshed=yes\r\n";
     co_await checkpoint(L"checking-installed-state");
     winrt::apartment_context caller;
     auto installDeadline = GetTickCount64() + 6000;
@@ -1459,7 +1475,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_dos_install=verified\r\n");
         }
         GetSystemTimeAsFileTime(&launchTime);
-        call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
+        call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
     }

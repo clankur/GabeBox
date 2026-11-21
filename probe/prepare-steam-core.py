@@ -117,7 +117,7 @@ def add_xcom_runtime(layout, archive):
 
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None):
+                   library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -166,6 +166,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             if install_before_launch:
                 config.append('install')
             (layout / 'steam-launch-app.txt').write_text('\n'.join(config), encoding='ascii')
+            if launch_option is not None:
+                (layout / f'steam-launch-option-{launch_app_id}.txt').write_text(str(launch_option), encoding='ascii')
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -204,6 +206,8 @@ def main():
                         help='test a local Unicode import adaptation of the pinned Steam core')
     parser.add_argument('--steam-sign-in', action='store_true', help='start the interactive Steam Guard page')
     parser.add_argument('--launch-app-id', type=int, help='test one installed Steam game after sign-in')
+    parser.add_argument('--launch-option', type=int, metavar='INDEX',
+                        help='select a publisher launch option for the configured Steam AppID (default 0)')
     parser.add_argument('--repeat-launch', action='store_true',
                         help='run the launch test again each time the probe starts from a fresh process')
     parser.add_argument('--install-before-launch', action='store_true',
@@ -227,6 +231,8 @@ def main():
         parser.error('--unicode-keyboard requires --valve-archive')
     if args.launch_app_id is not None and (not args.steam_sign_in or not 0 < args.launch_app_id <= 0xFFFFFF):
         parser.error('--launch-app-id requires --steam-sign-in and a Steam AppID from 1 to 16777215')
+    if args.launch_option is not None and (args.launch_app_id is None or not 0 <= args.launch_option <= 0xffffffff):
+        parser.error('--launch-option requires --launch-app-id and an unsigned 32-bit index')
     if args.probe_java_runtime and args.launch_app_id != 646570:
         parser.error('--probe-java-runtime requires --launch-app-id 646570')
     if args.repeat_launch and args.launch_app_id is None:
@@ -241,7 +247,8 @@ def main():
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
-                   args.install_before_launch, args.library_inventory, args.vclibs_framework, args.xcom_dos_runtime)
+                   args.install_before_launch, args.library_inventory, args.vclibs_framework,
+                   xcom_runtime_archive=args.xcom_dos_runtime, launch_option=args.launch_option)
 
 
 if __name__ == '__main__':
