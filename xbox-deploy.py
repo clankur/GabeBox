@@ -207,6 +207,8 @@ def slay_console_summary(raw):
         return 'slay_console=unrecognized-output'
     result.extend(re.findall(r'^slay_console_jar=(?:readable|unavailable)\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_capture=(?:truncated|read-error|incomplete)\r?$', text, re.M))
+    result.extend(re.findall(r'^slay_console_cwd=(?:game-directory|unexpected-main-class|native-load-error)\r?$', text, re.M))
+    result.extend(re.findall(r'^slay_console_cwd_error=0x[0-9A-F]{8}\r?$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
               ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),

@@ -135,6 +135,12 @@ jobs:
             $steamArtifacts = Join-Path $work 'steam-artifacts'
             Copy-Item -Recurse $layout $steamLayout
             New-Item -ItemType Directory -Path $steamArtifacts | Out-Null
+            $jni = Join-Path $env:JAVA_HOME 'include'
+            & cl.exe /nologo /c /O2 /GS- /Zl /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+              "/I$jni" "/I$jni\win32" "/Fo$work\slay-working-directory.obj" probe/slay-working-directory.c
+            & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
+              "/out:$steamLayout\slay-working-directory.dll" "/implib:$work\slay-working-directory.lib" `
+              "$work\slay-working-directory.obj" $lib
             $user32 = "$sdk\Lib\$sdkVersion\um\x64\User32.lib"
             foreach ($variant in @('ansi', 'wide')) {
               $defines = @(if ($variant -eq 'wide') { '/DPROBE_WIDE_IMPORT' })

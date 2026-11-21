@@ -85,7 +85,8 @@ def vclibs_dependency(appx):
 
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False, vclibs_framework=None, slay_startup_log=False, slay_console=False):
+                   library_inventory=False, vclibs_framework=None, slay_startup_log=False, slay_console=False,
+                   slay_native_cwd=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -97,6 +98,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         if version_parts <= tuple(int(part) for part in base_version.split('.')):
             raise ValueError(f'Use a version higher than the template version {base_version}.')
         entries = [name for name in signed.namelist() if name.lower() not in APPX_FOOTPRINT]
+        if slay_native_cwd and (not slay_console or launch_app_id != 646570 or 'slay-working-directory.dll' not in entries):
+            raise ValueError('The Slay native working-directory trial requires the matching SDK template and console diagnostic.')
+        if not slay_native_cwd and 'slay-working-directory.dll' in entries:
+            entries.remove('slay-working-directory.dll')
         if any(Path(name).name.lower() in VALVE_FILES for name in entries):
             raise ValueError('The template must contain only probe code and assets.')
         dependency = vclibs_dependency(vclibs_framework) if vclibs_framework else None
@@ -190,6 +195,8 @@ def main():
                         help='collect Slay the Spire startup logging during normal Steam Play')
     parser.add_argument('--slay-console', action='store_true',
                         help='capture the publisher console diagnostic after Slay the Spire exits with code 1')
+    parser.add_argument('--slay-native-cwd', action='store_true',
+                        help='set the native working directory in the opt-in Slay console diagnostic')
     args = parser.parse_args()
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
@@ -203,6 +210,8 @@ def main():
         parser.error('--slay-startup-log requires --launch-app-id 646570')
     if args.slay_console and args.launch_app_id != 646570:
         parser.error('--slay-console requires --launch-app-id 646570')
+    if args.slay_native_cwd and not args.slay_console:
+        parser.error('--slay-native-cwd requires --slay-console')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
     if args.install_before_launch and args.launch_app_id is None:
@@ -216,7 +225,7 @@ def main():
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework, args.slay_startup_log,
-                   args.slay_console)
+                   args.slay_console, args.slay_native_cwd)
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.JarFile;
 
 public final class SlayConsoleDiagnostic {
     private static final int OUTPUT_LIMIT = 64 * 1024;
@@ -33,7 +34,36 @@ public final class SlayConsoleDiagnostic {
         }
     }
 
-    public static void main(String[] args) throws IOException, InterruptedException {
+    private static native int setGameDirectory(String path);
+
+    private static void launchFromGameDirectory(String game, String library, String jar) throws Exception {
+        final String gameMain = "com.megacrit.cardcrawl.desktop.DesktopLauncher";
+        try (JarFile archive = new JarFile(jar)) {
+            if (archive.getManifest() == null || !gameMain.equals(archive.getManifest().getMainAttributes().getValue("Main-Class"))) {
+                System.out.println("slay_console_cwd=unexpected-main-class");
+                System.exit(1);
+            }
+        }
+        try {
+            System.load(library);
+        } catch (UnsatisfiedLinkError e) {
+            System.out.println("slay_console_cwd=native-load-error");
+            System.exit(1);
+        }
+        int error = setGameDirectory(game);
+        if (error != 0) {
+            System.out.printf("slay_console_cwd_error=0x%08X%n", error);
+            System.exit(1);
+        }
+        System.out.println("slay_console_cwd=game-directory");
+        Class.forName(gameMain).getMethod("main", String[].class).invoke(null, (Object) new String[0]);
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length == 4 && args[0].equals("--launch-from-game-directory")) {
+            launchFromGameDirectory(args[1], args[2], args[3]);
+            return;
+        }
         Path log = Paths.get(args[0]);
         Files.write(log, "slay_console=helper-started\n".getBytes(StandardCharsets.UTF_8),
                     StandardOpenOption.CREATE_NEW);
@@ -42,8 +72,18 @@ public final class SlayConsoleDiagnostic {
         File jar = new File(game, "desktop-1.0.jar");
         String inputs = "slay_console_jar=" + (jar.isFile() && jar.canRead() ? "readable" : "unavailable") + "\n";
         Files.write(log, inputs.getBytes(StandardCharsets.UTF_8), StandardOpenOption.APPEND);
-        ProcessBuilder builder = new ProcessBuilder(launcher.getAbsolutePath(), "-Duser.dir=" + game.getAbsolutePath(),
-                                                    "-jar", jar.getAbsolutePath());
+        String packageRoot = System.getProperty("java.class.path");
+        File workingDirectory = new File(packageRoot, "slay-working-directory.dll");
+        ProcessBuilder builder;
+        if (workingDirectory.isFile()) {
+            builder = new ProcessBuilder(launcher.getAbsolutePath(), "-Duser.dir=" + game.getAbsolutePath(), "-cp",
+                                         packageRoot + File.pathSeparator + jar.getAbsolutePath(), "SlayConsoleDiagnostic",
+                                         "--launch-from-game-directory", game.getAbsolutePath(),
+                                         workingDirectory.getAbsolutePath(), jar.getAbsolutePath());
+        } else {
+            builder = new ProcessBuilder(launcher.getAbsolutePath(), "-Duser.dir=" + game.getAbsolutePath(),
+                                         "-jar", jar.getAbsolutePath());
+        }
         builder.directory(game).redirectErrorStream(true);
         Process child;
         try {
