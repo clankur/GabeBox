@@ -1,6 +1,6 @@
 // WebView2 can require a browser gesture before it exposes a controller.
-// The native fallback reads the foreground Xbox view's Windows.Gaming.Input
-// collection and never synthesizes the platform-reserved Guide button.
+// On Xbox, Windows.Gaming.Input owns physical controller state even when
+// Chromium exposes a connected controller with an unchanged reading.
 function installXboxGamepadReader() {
     const native = typeof xboxNativeWindow !== 'undefined' && xboxNativeWindow.nativeGamepads === true;
     let cached = [], request;
@@ -32,14 +32,12 @@ function installXboxGamepadReader() {
     }
     return {
         read(view) {
-            const pads = browser(view);
-            if (pads.length || !native) return pads;
+            if (!native) return browser(view);
             sampleNative().catch(() => { cached = []; });
             return cached;
         },
         async enumerate(view) {
-            const pads = browser(view);
-            return pads.length || !native ? pads : await sampleNative();
+            return native ? await sampleNative() : browser(view);
         }
     };
 }

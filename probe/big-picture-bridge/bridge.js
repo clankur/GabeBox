@@ -27,8 +27,12 @@
             activeApp = data.appId;
             controlsApp = data.overlay ? activeApp : 0;
             if (controlsApp && !focusStore) attachRunningGameFocus();
-            if (changed) refresh().catch(error => console.error('Steam library unavailable', error.message));
-            showGameOverlay(data.overlay ? activeApp : 0);
+            const requested = controlsApp;
+            function updateControls() {
+                if (controlsApp === requested) showGameOverlay(requested);
+            }
+            if (changed) refresh().then(updateControls, error => console.error('Steam library unavailable', error.message));
+            else updateControls();
             return;
         }
         const request = pending.get(data?.id);
@@ -103,13 +107,20 @@
                     sort_as: game.name.toLowerCase(), visible_in_game_list: true, subscribed_to: true,
                     per_client_data: [local]};
             });
+            const revision = JSON.stringify(apps.map(app => [
+                app.appid, app.display_name, app.per_client_data[0].display_status
+            ]));
             for (const subscription of listeners) {
+                if (subscription.revision === revision) continue;
                 const removed = [...subscription.ids].filter(id => !current.has(id));
                 const bytes = change.fromObject({app_overview: apps, removed_appid: removed,
                     full_update: true, update_complete: true}).serializeBinary();
-                subscription.callback(bytes);
                 subscription.ids = current;
+                subscription.revision = revision;
+                subscription.callback(bytes);
             }
+            // The native broker serves the catalog only to its signed-in owner.
+            openStartupLibrary();
             const byId = new Map(apps.map(app => [app.appid, app]));
             for (const sub of detailListeners) {
                 const app = byId.get(sub.id);
@@ -120,7 +131,9 @@
                 sub.name = app.display_name;
                 sub.callback({unAppID: app.appid, strDisplayName: app.display_name, bIsSubscribedTo: true,
                     bHasAnyLocalContent: local.installed, eDisplayStatus: local.display_status,
-                    vecChildConfigApps: [], achievements: {}});
+                    rtLastTimePlayed: 0, // No verified play timestamp is available to the broker.
+                    // Xbox enumerates base games only and has no beta selector.
+                    vecDLC: [], vecChildConfigApps: [], strSelectedBeta: '', vecBetas: [], achievements: {}});
             }
         }).finally(() => {
             updating = undefined;
@@ -133,6 +146,14 @@
     }
 
     window.SteamClient = {Apps: {
+        async GetLaunchOptionsForApp(id) {
+            if (!validId(id)) throw new TypeError('Expected an AppID');
+            const game = (await send('library')).find(app => app.id === id);
+            if (!game || !game.installed || !game.canPlay) return [];
+            // Xbox owns one default launch path per installed playable game.
+            // Valve's pinned ELaunchOptionType_Default is 1.
+            return [{nIndex: 0, eType: 1, strGameName: game.name, strDescription: ''}];
+        },
         RegisterForAppDetails(id, callback) {
             if (!validId(id) || typeof callback !== 'function') throw new TypeError('Expected an AppID and a details listener');
             const sub = {id, callback};
@@ -153,7 +174,7 @@
         },
         async RunGame(gameId, launchOptions, launchOptionIndex, source) {
             const appId = Number(gameId);
-            if (!validId(appId) || String(appId) !== String(gameId) || launchOptions !== '' || launchOptionIndex !== -1) {
+            if (!validId(appId) || String(appId) !== String(gameId) || launchOptions !== '' || (launchOptionIndex !== -1 && launchOptionIndex !== 0)) {
                 throw new Error('Unsupported Steam launch request');
             }
             const result = await runAction(appId, source, () => send('play', appId));
@@ -170,7 +191,38 @@
         if (typeof mode !== 'boolean') throw new Error('Xbox presentation mode unavailable');
         return mode;
     }};
-    installXboxWindow(client, send);
+    let startupLibraryRequested = false;
+    function openStartupLibrary() {
+        if (startupLibraryRequested) return;
+        startupLibraryRequested = true;
+        // Valve's own Go to Library action uses Navigator.LibraryTab("AllGames").
+        // Its popup and navigation history mount asynchronously after store initialization.
+        const deadline = Date.now() + 110000;
+        let previous;
+        function trace(stage) {
+            if (stage === previous) return;
+            previous = stage;
+            host.postMessage({method: 'startup-route', stage});
+        }
+        function whenMounted() {
+            if (activeApp) return;
+            const gamepad = runtime(5757).oy.WindowStore.GamepadUIMainWindowInstance;
+            const target = xboxGamepadPopup?.document.getElementById('popup_target');
+            if (!window.App?.BHasCurrentUser()) trace('waiting-user');
+            else if (!runtime(90544).tw.m_bIsInitialized) trace('waiting-store');
+            else if (!gamepad?.History?.location?.pathname || !gamepad.Navigator) trace('waiting-window');
+            else if (!target?.firstElementChild) trace('waiting-portal');
+            else {
+                trace('selecting-library');
+                gamepad.Navigator.LibraryTab('AllGames', {bReplace: true});
+                trace(gamepad.History.location.pathname === '/library/tab/AllGames' ? 'library-selected' : 'selection-pending');
+                return;
+            }
+            if (Date.now() < deadline) setTimeout(whenMounted, 100);
+        }
+        whenMounted();
+    }
+    installXboxWindow(client, send, openStartupLibrary);
     installXboxBrowserView(client);
     installXboxUser(client, send, () => runtime);
     client.User.StartRestart = async force => {

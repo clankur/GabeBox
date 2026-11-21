@@ -350,19 +350,29 @@ struct View : implements<View, IFrameworkView> {
             if (visible(connect) && !connect.disabled && connect.querySelector('svg')) return 1;
             const choices = target?.querySelectorAll('._2RjHR32VwDeGwslJx6LcCN[role=listbox] .zzXtdadESGEkT4IFqLvjm[role=option][lang]');
             if (choices && new Set([...choices].filter(el => visible(el) && el.textContent.trim()).map(el => el.lang)).size > 1) return 1;
-            return 0;
+            if (!target) return 3;
+            if (!target.firstElementChild) return 4;
+            if (target.innerText.includes('Error Reference:')) return 5;
+            if (target.querySelector('[role=grid]')) return 6;
+            return target.innerText.trim() ? 7 : 8;
         })())JS";
         auto lifetime = get_strong();
         apartment_context ui;
         try {
             bool setup = false;
-            for (int sample = 0; sample < 80 || setup;) {
+            hstring previous;
+            for (int sample = 0; sample < 240 || setup;) {
                 co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
                 co_await ui;
                 if (closed || popup != browser) co_return;
                 if (gameForeground || !window.Visible()) continue;
                 if (!setup) ++sample;
                 auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(check);
+                if (result != previous && result.size() == 1 && result[0] >= L'1' && result[0] <= L'8') {
+                    previous = result;
+                    slim_lock_guard lock(gate);
+                    if (requests.size() < maxPending) requests.push_back(hstring(L"{\"method\":\"surface-state\",\"state\":" + std::wstring(result) + L"}"));
+                }
                 if (result == L"1" && !setup) {
                     setup = true;
                     checkpoint(L"setup-ready");

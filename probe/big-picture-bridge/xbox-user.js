@@ -74,6 +74,9 @@ function installXboxUser(client, send, getRuntime) {
         } };
     }
     client.User = client.User || {};
+    // The Xbox QR host selects the account before starting this renderer. No
+    // Steam desktop user chooser is pending (default chooser state in this release).
+    client.User.GetStartupUserChooserState = async () => 0;
     client.User.RegisterForLoginStateChange = callback => subscribe(callback, false);
     client.User.RegisterForCurrentUserChanges = callback => subscribe(callback, true);
 }

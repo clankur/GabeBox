@@ -6,11 +6,18 @@ function installXboxControllerService(runtime, gamepads) {
     const defaults = runtime(52660).OI();
     if (defaults.GetDefaultTransport()) return;
     const methods = new Set(['SteamInputManager.GetControllerList#1',
-        'SteamInputManager.WaitInitialControllerStateEnumerated#1']);
+        'SteamInputManager.WaitInitialControllerStateEnumerated#1', 'SteamInputManager.ShouldTritonPairInOobe#1']);
     defaults.SetDefaultTransport({
         async SendMsg(method, request, response, options) {
             if (options?.eClientExecutionSite !== 2 || !methods.has(method))
                 throw new Error('Steam client service unavailable: ' + method);
+            if (method === 'SteamInputManager.ShouldTritonPairInOobe#1') {
+                // Windows.Gaming.Input does not provide Steam Triton pairing.
+                // Valve's OOBE handles this specific unsuccessful response.
+                const reply = runtime(98237).w.InitFromObject(response, {});
+                reply.Hdr().set_eresult(20); // k_EResultServiceUnavailable
+                return reply;
+            }
             const view = getXboxGamepadWindow();
             // Browsers expose only the gamepads made available to this view.
             // A successful empty enumeration is distinct from a denied read.

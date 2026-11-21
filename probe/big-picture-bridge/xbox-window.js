@@ -7,7 +7,7 @@ function getXboxGamepadWindow() {
     return window;
 }
 
-function installXboxWindow(client, send) {
+function installXboxWindow(client, send, onInitialized) {
     if (typeof xboxNativeWindow === 'undefined') return; // Only the WebView host can supply these bindings.
     const host = window.chrome.webview;
     const desired = new Set(), display = new Set();
@@ -99,7 +99,10 @@ function installXboxWindow(client, send) {
     // The single Xbox window requests the pinned client's gamepad UI mode (4)
     // for its entire lifetime, including while a game owns the foreground.
     ui.GetUIMode = async () => 4;
-    ui.NotifyAppInitialized = () => host.postMessage('xbox-app-initialized');
+    ui.NotifyAppInitialized = () => {
+        host.postMessage('xbox-app-initialized');
+        onInitialized?.();
+    };
     ui.RegisterForUIModeChanged = callback => subscribeValue(mode, callback, fn => fn(4), true);
     ui.GetDesiredSteamUIWindows = async () => [{
         unID: state.viewId, unPID: state.pid, nBrowserID: state.ownerId, appid: 0, windowType: 0 // MainGamepadUI

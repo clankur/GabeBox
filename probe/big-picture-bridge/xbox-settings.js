@@ -1,12 +1,13 @@
-// These are device setup choices made by Valve's own UI. Only persist a
-// completion flag after that UI actually writes it through its native API.
+// Xbox supplies the language, clock, display and controller configuration for a
+// provisioned console. Honor explicit device setup choices written by Valve.
 function installXboxSettings(client, getRuntime) {
     const prefix = 'xbox-steamui:machine:1:';
     const names = ['oobe_completed', 'oobe_stage_2_completed'];
     const listeners = new Set();
     function codec() { return getRuntime()(29303).Ne; }
     function values() {
-        const result = {};
+        const configured = typeof xboxNativeWindow !== 'undefined' && xboxNativeWindow.deviceFamily === 'Windows.Xbox';
+        const result = configured ? {oobe_completed: true, oobe_stage_2_completed: true} : {};
         for (const key of names) {
             const value = localStorage.getItem(prefix + key);
             if (value === 'true' || value === 'false') result[key] = value === 'true';

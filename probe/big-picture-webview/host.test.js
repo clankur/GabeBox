@@ -93,8 +93,8 @@ test("Valve can restart its foreground client after setup and retain the signed-
     await ready;
     app.incoming.push(JSON.stringify({id: 7, method: "restart-client"}));
     await app.advance("setup-ready");
-    assert.deepEqual(app.replies.at(-1), {id: 7, result: "restart"});
-    assert.equal(app.opens(), 2);
+    assert.deepEqual(app.replies.slice(-2), [{id: 7, result: "restart"}, {nativeRestartClient: true}]);
+    assert.equal(app.opens(), 1);
     assert.equal(failures, 0);
     await app.advance("gamepad-ready");
     assert.match(app.reports.at(-1), /status=gamepad-ready/);

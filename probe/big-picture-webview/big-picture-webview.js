@@ -20,7 +20,7 @@
         var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
             storage.CreationCollisionOption.replaceExisting);
         var report = Promise.resolve(file);
-        var messages = [], last = "", servedGames, rendererError, memory = {};
+        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, memory = {};
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -43,6 +43,8 @@
             } else if (!refresh) return report;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
+                (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
+                (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
             report = report.then(function (f) {
@@ -56,6 +58,23 @@
         }
         var playingApp = 0, presented = false, returnToGame, quitGame;
         var gameForeground = false;
+        var firstActivation = true;
+        var composed = false;
+        function gameSurface() {
+            if (!composed || !playing || failed) return null;
+            return {
+                viewId: viewId,
+                start: function () { return host.startGameSurfaceAsync(); },
+                show: function (value) { return host.setGameSurfaceVisibleAsync(value); },
+                overlayRequested: function () { return host.takeGameOverlayRequest(); },
+                close: function () { return host.closeGameSurfaceAsync(); },
+                standalone: function () {
+                    // Only after the composition worker has released this mailbox.
+                    composed = false;
+                    return show(mainId, viewId);
+                }
+            };
+        }
         function setGameForeground(value) {
             if (!host || failed || value === gameForeground) return;
             gameForeground = value;
@@ -70,7 +89,18 @@
             if (failed || !viewId || visible) return Promise.resolve();
             var wasGame = gameForeground;
             setGameForeground(false);
-            if (!activeSwitch) activeSwitch = show(viewId, from || mainId).then(function () {
+            if (composed) {
+                visible = true;
+                return Promise.resolve();
+            }
+            // The initial Steam window needs its own Xbox foreground allocation.
+            // Replacing the QR view directly can retire the primary WWA host.
+            if (!activeSwitch) activeSwitch = (firstActivation ?
+                Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(viewId)).then(function (shown) {
+                    if (!shown) throw new Error("Xbox could not show the Steam window");
+                    return views.ApplicationViewSwitcher.switchAsync(viewId, mainId);
+                }) : show(viewId, from || mainId)).then(function () {
+                firstActivation = false;
                 visible = true; activeSwitch = null;
             }, function (error) { activeSwitch = null; if (wasGame) setGameForeground(true); throw error; });
             return activeSwitch;
@@ -108,6 +138,7 @@
             playingApp = 0; returnToGame = quitGame = null;
             return showValve(mainId).then(function () {
                 if (returning && !playing && !failed) {
+                    composed = false;
                     sampleMemory("return"); gameEvent(false); return record("game-returned-to-steam");
                 }
             });
@@ -130,6 +161,16 @@
                     // Independent stores can fail while the gamepad window goes on to render.
                     record(last, true);
                 }
+                return;
+            }
+            if (request.method === "surface-state" && Number.isInteger(request.state) && request.state >= 1 && request.state <= 8) {
+                surfaceState = ["", "setup", "library-or-home", "no-portal", "empty-portal", "error-boundary", "grid", "content", "empty-content"][request.state];
+                record(last, true);
+                return;
+            }
+            if (request.method === "startup-route" && /^(waiting-user|waiting-store|waiting-window|waiting-portal|selecting-library|library-selected|selection-pending)$/.test(request.stage)) {
+                startupRoute = request.stage;
+                record(last, true);
                 return;
             }
             var id = request.id, appId = request.appId;
@@ -167,7 +208,12 @@
                     // Make the expensive view handoff only after the broker has
                     // verified this account, the title and its local installation.
                     return broker.play(appId, function () {
-                        return show(mainId, viewId).then(function () {
+                        // Slay exceeded the foreground budget on the separate FHD view.
+                        // Keep its game's swapchain in the existing Valve CoreWindow.
+                        composed = appId === 646570 && typeof host.startGameSurfaceAsync === "function" &&
+                            typeof host.setGameSurfaceVisibleAsync === "function" && typeof host.closeGameSurfaceAsync === "function" &&
+                            typeof host.takeGameOverlayRequest === "function";
+                        return (composed ? Promise.resolve() : show(mainId, viewId)).then(function () {
                             visible = false;
                             setGameForeground(true);
                             sampleMemory("handoff");
@@ -186,7 +232,8 @@
             Promise.resolve().then(function () { if (!failed) return action(); }).then(function (result) {
                 respond(id, true, result);
                 if (request.method === "restart-client" && result === "restart" && !playing && !failed) {
-                    finish("client-restart", true);
+                    record("client-restart");
+                    host.reply(JSON.stringify({nativeRestartClient: true}));
                     return;
                 }
                 if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
@@ -197,9 +244,9 @@
         }
         function fail(error, stage) {
             var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
-            finish(stage || "host-error:" + code, false);
+            finish(stage || "host-error:" + code);
         }
-        function finish(stage, restart) {
+        function finish(stage) {
             if (failed) return;
             failed = true;
             clearInterval(timer);
@@ -224,9 +271,7 @@
                     return check();
                 }).catch(function () {}).then(function () {
                     if (session === current) session = null;
-                    if (restart) {
-                        open(broker, onFailure).catch(function (error) { if (onFailure) onFailure(error); });
-                    } else if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
+                    if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
                 });
             }
         }
@@ -252,7 +297,7 @@
         }
         if (broker) readinessTimer = setTimeout(function () {
             fail(new Error("Timed out waiting for Valve's gamepad window"), "gamepad-timeout:" + (lastNative || "starting"));
-        }, 45000);
+        }, 120000);
         sampleMemory("startup");
         var startup = record("starting").then(function () {
             mainId = views.ApplicationView.getForCurrentView().id;
@@ -269,11 +314,12 @@
             });
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, ready: broker ? ready : startup};
+        session = {resume: resume, showForGame: showForGame, gameSurface: gameSurface, sampleMemory: sampleMemory, ready: broker ? ready : startup};
         return session.ready;
     }
     window.steamBigPictureHost = {
         open: open,
+        gameSurface: function () { return session ? session.gameSurface() : null; },
         switchView: switchView,
         samplePresenter: function (stage) {
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);

@@ -40,7 +40,9 @@ function installXboxInput(client, gamepads) {
         for (const code of state.down) if (!next.has(code)) dispatch(digital, pad.index, code, false, 0, 0);
         for (const code of next) if (!state.down.has(code)) dispatch(digital, pad.index, code, true, 0, 0);
         state.down = next;
-        const guide = !!pad.buttons[16]?.pressed;
+        // Xbox reserves its Guide button. Use the same View + Menu chord as
+        // the game presenter to open Valve's menu inside the Steam window.
+        const guide = !!pad.buttons[16]?.pressed || (!!pad.buttons[8]?.pressed && !!pad.buttons[9]?.pressed);
         if (guide && !state.guide) dispatch(system, {eKey: 0, nControllerIndex: pad.index});
         state.guide = guide;
         const x = pad.axes[0] || 0, y = pad.axes[1] || 0;
