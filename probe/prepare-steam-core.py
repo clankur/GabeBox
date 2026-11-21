@@ -123,10 +123,32 @@ def title_launch_option(spec):
     raise argparse.ArgumentTypeError('expected APPID:INDEX with a 24-bit AppID and unsigned 32-bit index')
 
 
+def add_angle_control(layout, artifact):
+    if b'RunAngleControl\0' not in (layout / 'ProbeNative.dll').read_bytes():
+        raise ValueError('Use the Windows SDK template with the ANGLE graphics control.')
+    required = {'angle-control.dll', 'libEGL.dll', 'libGLESv2.dll', 'LICENSE.angle'}
+    allowed = required | {'zlib.dll', 'zlib1.dll', 'LICENSE.zlib'}
+    checked = set()
+    for checksum in (artifact / 'SHA256SUMS').read_text(encoding='ascii').splitlines():
+        match = re.fullmatch(r'([a-f0-9]{64})  ([A-Za-z0-9.-]+)', checksum)
+        if not match or match[2] not in allowed or match[2] in checked:
+            raise ValueError('Use the extracted Xbox ANGLE workflow artifact with its original checksum manifest.')
+        name = match[2]
+        data = (artifact / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != match[1]:
+            raise ValueError(f'ANGLE artifact checksum does not match: {name}')
+        (layout / name).write_bytes(data)
+        checked.add(name)
+    if required - checked:
+        raise ValueError('The ANGLE artifact is missing a required runtime file.')
+
+
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
-                   launch_options=()):
+                   launch_options=(), angle_control=None):
+    if angle_control and (valve_archive or steam_sign_in or launch_app_id):
+        raise ValueError('Build the standalone ANGLE graphics control without Steam runtime or game options.')
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
@@ -188,6 +210,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
     if xcom_runtime_archive:
         add_xcom_runtime(layout, xcom_runtime_archive)
 
+    if angle_control:
+        add_angle_control(layout, angle_control)
     if valve_archive:
         with ZipFile(valve_archive) as archive:
             for filename in VALVE_FILES:
@@ -234,6 +258,8 @@ def main():
                         help='run the installed Slay the Spire Java version check after a startup exit')
     parser.add_argument('--xcom-dos-runtime', type=Path, metavar='JS_DOS_TGZ',
                         help='use pinned js-dos 6.22.60 for the licensed X-COM DOS install')
+    parser.add_argument('--angle-control', type=Path, metavar='ARTIFACT_DIR',
+                        help='build a standalone packaged ANGLE D3D11 pbuffer test')
     args = parser.parse_args()
     if args.xcom_dos_runtime and not args.steam_sign_in:
         parser.error('--xcom-dos-runtime requires --steam-sign-in')
@@ -269,7 +295,7 @@ def main():
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework,
                    xcom_runtime_archive=args.xcom_dos_runtime, launch_option=args.launch_option,
-                   launch_options=title_options)
+                   launch_options=title_options, angle_control=args.angle_control)
 
 
 if __name__ == '__main__':

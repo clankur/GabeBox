@@ -26,6 +26,7 @@
 #include <string_view>
 #include <vector>
 
+#include "angle-control.h"
 #include "child-process.h"
 #include "pipe-protocol.h"
 
@@ -185,7 +186,39 @@ static std::wstring InspectSteamImports(winrt::hstring const& inventory) {
     return result;
 }
 
+static std::wstring AngleResult() {
+    auto library = LoadPackagedLibrary(L"angle-control.dll", 0);
+    if (!library) {
+        auto report = L"angle_control=load-error\r\nangle_win32_error=" + Hex(GetLastError()) + L"\r\n";
+        for (const auto *name : {L"libEGL.dll", L"libGLESv2.dll", L"D3DCompiler_47.dll"}) {
+            const auto dependency = LoadPackagedLibrary(name, 0);
+            report += std::wstring(name) + L"_load_error=" + Hex(dependency ? ERROR_SUCCESS : GetLastError()) + L"\r\n";
+            if (dependency) FreeLibrary(dependency);
+        }
+        return report;
+    }
+    using Run = void (__cdecl *)(AngleControlResult *);
+    auto run = reinterpret_cast<Run>(GetProcAddress(library, "RunAngleControl"));
+    if (!run) {
+        FreeLibrary(library);
+        return L"angle_control=missing-export\r\n";
+    }
+    AngleControlResult result{};
+    run(&result);
+    FreeLibrary(library);
+    const bool green = result.stage == 11 && result.gl_error == 0 && result.egl_error == 0x3000;
+    return std::wstring(L"angle_control=") + (green ? L"green-pixel" : L"failed") +
+        L"\r\nangle_stage=" + std::to_wstring(result.stage) +
+        L"\r\nangle_egl_error=" + Hex(result.egl_error) + L"\r\nangle_gl_error=" + Hex(result.gl_error) +
+        L"\r\nangle_egl_version=" + std::to_wstring(result.egl_major) + L"." + std::to_wstring(result.egl_minor) +
+        L"\r\nangle_rgba=" + std::to_wstring(result.pixel[0]) + L"," + std::to_wstring(result.pixel[1]) +
+        L"," + std::to_wstring(result.pixel[2]) + L"," + std::to_wstring(result.pixel[3]) + L"\r\n";
+}
+
 static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstring const& inventory) {
+    if (GetFileAttributesW((packagePath + L"angle-control.dll").c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return AngleResult() + L"status=steam-core-complete\r\n";
+    }
     std::wstring result;
     HMODULE control = LoadPackagedLibrary(PROBE_CHILD_MODULE, 0);
     if (control) {

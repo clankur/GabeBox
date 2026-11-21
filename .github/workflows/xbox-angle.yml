@@ -1,0 +1,66 @@
+name: Build ANGLE UWP graphics control
+
+on:
+  push:
+    paths:
+      - '.github/workflows/xbox-angle.yml'
+      - 'probe/angle-control.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  angle-uwp-x64:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned ANGLE and the pbuffer test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $work = Join-Path $env:RUNNER_TEMP 'xbox-angle'
+          $vcpkg = Join-Path $work 'vcpkg'
+          $triplets = Join-Path $work 'triplets'
+          $artifacts = Join-Path $work 'artifacts'
+          New-Item -ItemType Directory -Path $vcpkg, $triplets, $artifacts | Out-Null
+          git -C $vcpkg init
+          git -C $vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $vcpkg fetch --depth 1 origin 9967a8eb5f4f5cd7be2b6717d31ddb7ff84c4751
+          git -C $vcpkg checkout --detach FETCH_HEAD
+          & "$vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE static)
+          set(VCPKG_LIBRARY_LINKAGE dynamic)
+          set(VCPKG_CMAKE_SYSTEM_NAME WindowsStore)
+          set(VCPKG_CMAKE_SYSTEM_VERSION 10.0)
+          set(VCPKG_BUILD_TYPE release)
+          '@ | Set-Content -Encoding ascii "$triplets/x64-uwp-release.cmake"
+          $installedRoot = Join-Path $work 'installed'
+          & "$vcpkg/vcpkg.exe" install angle:x64-uwp-release --classic `
+            "--overlay-triplets=$triplets" "--x-install-root=$installedRoot"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          $installed = Join-Path $installedRoot 'x64-uwp-release'
+          & cl.exe /nologo /LD /O2 /MT /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+            "/I$installed/include" "/Fo$work/angle-control.obj" "/Fe$artifacts/angle-control.dll" probe/angle-control.c `
+            "$installed/lib/libEGL.lib" "$installed/lib/libGLESv2.lib" /link /APPCONTAINER "/IMPLIB:$work/angle-control.lib"
+          Copy-Item "$installed/bin/*.dll" $artifacts
+          Copy-Item "$installed/share/angle/copyright" "$artifacts/LICENSE.angle"
+          Copy-Item "$installed/share/zlib/copyright" "$artifacts/LICENSE.zlib"
+          $hashes = Get-ChildItem $artifacts -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          [IO.File]::WriteAllText("$artifacts/SHA256SUMS", ($hashes -join "`n") + "`n")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-angle-uwp-x64
+          path: ${{ runner.temp }}/xbox-angle/artifacts/
+          if-no-files-found: error
