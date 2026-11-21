@@ -4,9 +4,9 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
   pull_request:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
 
 permissions:
   contents: read
@@ -38,6 +38,8 @@ jobs:
 
           & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\input-test.obj" "/Fe$work\input-test.exe" tests/fhd-hosted-input.test.cpp
           & "$work\input-test.exe"
+          & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\media-test.obj" "/Fe$work\media-test.exe" tests/fhd-media-frame-count.test.cpp
+          & "$work\media-test.exe"
 
           & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" probe/fhd/Fhd.Native.idl
           & "$tool\cppwinrt.exe" -input "$out\Fhd.Native.winmd" -reference $metadata -output "$work\projection" -include Fhd.Native -overwrite

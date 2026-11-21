@@ -1,13 +1,13 @@
 // A live video source for the primary WWA view. The existing receiver converts
 // both the shared GPU texture and CPU SDL mailbox into the same BGRA target.
 #include "gpu-receiver.h"
+#include "media-frame-count.h"
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Media.MediaProperties.h>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -43,9 +43,8 @@ struct Stream : std::enable_shared_from_this<Stream> {
     com_ptr<ID3D11DeviceContext> context;
     std::array<Slot, 3> slots;
     MediaStreamSource source{nullptr};
-    uint64_t gpuCount = 0, cpuCount = 0, rendered = 0, startCount = 0, measured = 0;
-    int64_t sampleUs = 0;
-    Clock::time_point firstSample{}, firstRender{}, measurement{};
+    MediaFrameCount frames;
+    Clock::time_point firstSample{};
 
     ~Stream() { FhdReleaseMedia(token); }
 
@@ -93,15 +92,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
 
     void onRendered() {
         std::lock_guard guard(lock);
-        if (closed || rendered >= cpuCount + gpuCount) return;
-        ++rendered;
-        auto now = Clock::now();
-        if (rendered == 1) firstRender = now;
-        if (!startCount && now - firstRender >= 5s) { startCount = rendered; measurement = now; }
-        if (startCount && !sampleUs && now - measurement >= 30s) {
-            measured = rendered - startCount;
-            sampleUs = std::chrono::duration_cast<std::chrono::microseconds>(now - measurement).count();
-        }
+        if (!closed) frames.display(Clock::now());
     }
 
     void close() {
@@ -129,7 +120,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
             check_hresult(hr);
             context->Flush();
             auto now = Clock::now();
-            if (!cpuCount && !gpuCount) firstSample = now;
+            if (!frames.cpu && !frames.gpu) firstSample = now;
             auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface,
                 std::chrono::duration_cast<TimeSpan>(now - firstSample));
             sample.Duration(TimeSpan{10000000 / 60});
@@ -141,7 +132,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
                 }
             });
             slot.busy = true;
-            if (gpu) ++gpuCount; else ++cpuCount;
+            frames.submit(gpu);
             return sample;
         }
         return nullptr;
@@ -172,13 +163,13 @@ struct Stream : std::enable_shared_from_this<Stream> {
             text += key; text += L"="; text += std::to_wstring(value); text += L"\r\n";
         };
         field(L"running", !closed); field(L"width", width); field(L"height", height);
-        field(L"submitted", gpuCount + cpuCount); field(L"presented", rendered);
-        field(L"gpu_submitted", gpuCount); field(L"cpu_submitted", cpuCount);
-        if (!cpuCount || !gpuCount) {
-            field(L"gpu_presented", gpuCount ? rendered : 0);
-            field(L"cpu_presented", cpuCount ? rendered : 0);
+        field(L"submitted", frames.gpu + frames.cpu); field(L"presented", frames.rendered);
+        field(L"gpu_submitted", frames.gpu); field(L"cpu_submitted", frames.cpu);
+        if (frames.singleMode()) {
+            field(L"gpu_presented", frames.gpu ? frames.rendered : 0);
+            field(L"cpu_presented", frames.cpu ? frames.rendered : 0);
         }
-        field(L"sample_us", sampleUs); field(L"sample_frames", measured);
+        field(L"sample_us", frames.sampleUs); field(L"sample_frames", frames.sampleFrames);
         if (FAILED(error)) field(L"error", static_cast<uint32_t>(error));
         return hstring(text);
     }
