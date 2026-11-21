@@ -79,6 +79,19 @@ test("a local operator request captures the active console renderer only after s
     assert.match(app.reports.at(-1), /library_capture=saved width=1920 height=1080 view=3 browser_pid=99/);
 });
 
+test("surface sizing reports only the fixed numeric native and DOM measurements", async () => {
+    const app = fixture(), ready = app.start({});
+    await drain();
+    app.incoming.push(JSON.stringify({method: "surface-sizing", values: ["private-field"]}));
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.doesNotMatch(app.reports.at(-1), /surface_sizing=|private-field/);
+    app.incoming.push(JSON.stringify({method: "surface-sizing",
+        values: [1920, 1080, 3840, 2160, 1500, 1920, 1080, 1000, 1920, 1080, 1000, 1000]}));
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /bounds_width=1920 bounds_height=1080 raster_scale_milli=1000 css_width=1920/);
+});
+
 test("opening Valve's window never waits on a locked startup report", async () => {
     let release;
     const app = fixture({openReport: () => new Promise(resolve => { release = resolve; })});

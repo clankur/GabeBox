@@ -20,6 +20,7 @@
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, capture, memory = {}, gameFrames = {};
+        var surfaceSizing = "";
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -42,6 +43,7 @@
             } else if (!refresh) return;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
+                (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
@@ -169,6 +171,16 @@
                     rendererError = String(request.message || "script error").slice(0, 180)
                         .replace(/https?:\/\/\S+/gi, "[url]").replace(/[\r\n]/g, " ");
                     // Independent stores can fail while the gamepad window goes on to render.
+                    record(last, true);
+                }
+                return;
+            }
+            if (request.method === "surface-sizing") {
+                var labels = ["view_width", "view_height", "screen_width", "screen_height", "display_scale_milli",
+                    "bounds_width", "bounds_height", "raster_scale_milli", "css_width", "css_height", "dpr_milli", "backing_scale_milli"];
+                if (Array.isArray(request.values) && request.values.length === labels.length &&
+                    request.values.every(function (n) { return Number.isInteger(n) && n >= 0 && n <= 16384; })) {
+                    surfaceSizing = labels.map(function (label, i) { return label + "=" + request.values[i]; }).join(" ");
                     record(last, true);
                 }
                 return;

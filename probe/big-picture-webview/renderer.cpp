@@ -76,6 +76,9 @@ struct View : implements<View, IFrameworkView> {
     hstring assets;
     bool closed = false;
     bool frameOpen = false;
+    bool xboxDisplay = false;
+    double nativeRasterRatio = 1.;
+    float backingCorrection = 1.f;
     uint64_t frameGeneration = 0;
     bool capturePending = false;
     uint64_t popupVisibilityEpoch = 0;
@@ -101,20 +104,33 @@ struct View : implements<View, IFrameworkView> {
     }
     void Load(hstring const&) {}
 
+    static double textScale() {
+        try { return UISettings().TextScaleFactor(); } catch (hresult_error const&) { return 1.; }
+    }
+
     void resize() {
         if (!controller) return;
-        float scale = static_cast<float>(Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
+        auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+        const float scale = static_cast<float>(display.RawPixelsPerViewPixel());
         auto bounds = window.Bounds();
         auto visible = ApplicationView::GetForCurrentView().VisibleBounds();
-        placement = {steam_display::viewport({bounds.X, bounds.Y, bounds.Width, bounds.Height},
-            {visible.X, visible.Y, visible.Width, visible.Height}, safeBounds, gameForeground), scale};
+        const steam_display::Bounds full{bounds.X, bounds.Y, bounds.Width, bounds.Height};
+        const float backingScale = xboxDisplay ? steam_display::fhdScale(full, scale,
+            static_cast<float>(display.ScreenWidthInRawPixels()), static_cast<float>(display.ScreenHeightInRawPixels())) * backingCorrection : scale;
+        placement = {steam_display::viewport(full, {visible.X, visible.Y, visible.Width, visible.Height}, safeBounds, gameForeground), backingScale};
         root.Size({bounds.Width, bounds.Height});
         auto place = [&](CoreWebView2CompositionController const& browser, ContainerVisual const& surface) {
             browser.BoundsMode(CoreWebView2BoundsMode::UseRawPixels);
+            if (xboxDisplay) {
+                // Preserve Valve's logical layout and the user's text scaling
+                // when reducing the number of pixels used per view unit.
+                browser.ShouldDetectMonitorScaleChanges(false);
+                browser.RasterizationScale(backingScale * nativeRasterRatio * textScale());
+            }
             browser.Bounds({0.f, 0.f, placement.pixelWidth(), placement.pixelHeight()});
             surface.Offset({placement.view.x, placement.view.y, 0});
             surface.Size({placement.pixelWidth(), placement.pixelHeight()});
-            surface.Scale({placement.visualScale(), placement.visualScale(), 1.f});
+            surface.Scale({placement.visualScaleX(), placement.visualScaleY(), 1.f});
         };
         place(controller, mainSurface);
         if (popup) place(popup, popupSurface);
@@ -479,6 +495,62 @@ struct View : implements<View, IFrameworkView> {
         publishWindow();
     }
 
+    fire_and_forget measureSurface(CoreWebView2CompositionController surface, uint64_t generation) {
+        using Windows::Data::Json::JsonArray;
+        auto lifetime = get_strong();
+        apartment_context ui;
+        try {
+            // Read only fixed numeric geometry after the real gamepad surface
+            // has mounted. Verify a mismatch twice before adjusting its backing.
+            float firstCorrection = 1.f;
+            for (int sample = 0; sample < 3; ++sample) {
+                if (sample) {
+                    co_await resume_after(std::chrono::milliseconds(180));
+                    co_await ui;
+                }
+                auto current = [&] {
+                    return !closed && frameOpen && generation == frameGeneration && !gameForeground &&
+                        surface == gamepadSurface() && gamepadVisible() && window.Visible();
+                };
+                if (!current()) co_return;
+                auto raw = co_await web.ExecuteScriptAsync(inGamepad(L"[innerWidth,innerHeight,Math.round(window.devicePixelRatio*1000)]"));
+                JsonArray metrics{nullptr};
+                if (!current() || !JsonArray::TryParse(raw, metrics) || metrics.Size() != 3) co_return;
+                const auto cssWidth = metrics.GetNumberAt(0), cssHeight = metrics.GetNumberAt(1), dpr = metrics.GetNumberAt(2);
+                if (!(cssWidth > 0 && cssWidth <= 16384 && cssHeight > 0 && cssHeight <= 16384 && dpr > 0 && dpr <= 16000)) co_return;
+                const auto bounds = surface.Bounds();
+                const auto correction = steam_display::overrunCorrection(bounds.Width, bounds.Height,
+                    static_cast<float>(cssWidth * dpr / 1000), static_cast<float>(cssHeight * dpr / 1000));
+                if (xboxDisplay && backingCorrection == 1.f && correction < 1.f) {
+                    if (!sample) { firstCorrection = correction; continue; }
+                    if (sample == 1 && std::abs(correction - firstCorrection) < .005f) {
+                        backingCorrection = correction;
+                        ++popupVisibilityEpoch;
+                        resize();
+                        continue;
+                    }
+                }
+                const auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+                const auto view = window.Bounds();
+                // Protocol order is shared with the trusted WWA report. Scales
+                // use fixed-point thousandths; lengths are read from their owner.
+                const double values[] = {view.Width, view.Height, static_cast<double>(display.ScreenWidthInRawPixels()),
+                    static_cast<double>(display.ScreenHeightInRawPixels()), display.RawPixelsPerViewPixel() * 1000,
+                    bounds.Width, bounds.Height, surface.RasterizationScale() * 1000, cssWidth, cssHeight, dpr,
+                    placement.pixelsPerDip * 1000};
+                std::wstring result = L"{\"method\":\"surface-sizing\",\"values\":[";
+                for (auto value : values) {
+                    if (!std::isfinite(value) || value < 0 || value > 16384) co_return;
+                    if (result.back() != L'[') result += L",";
+                    result += std::to_wstring(std::lround(value));
+                }
+                slim_lock_guard lock(gate);
+                if (requests.size() < maxPending) requests.emplace_back(result + L"]}");
+                co_return;
+            }
+        } catch (hresult_error const&) { /* The surface can close while it is being measured. */ }
+    }
+
     fire_and_forget observeGamepad(CoreWebView2CompositionController browser) {
         // These selectors identify the shell layout, home carousel and library in
         // Valve's pinned build 1794536281. Ignore blank windows and loading views.
@@ -509,6 +581,7 @@ struct View : implements<View, IFrameworkView> {
         const auto generation = frameGeneration;
         try {
             bool setup = false;
+            bool measured = false;
             hstring previous;
             for (int sample = 0; sample < 240 || setup;) {
                 co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
@@ -518,6 +591,10 @@ struct View : implements<View, IFrameworkView> {
                 if (!setup) ++sample;
                 auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(inGamepad(check));
                 if (closed || gamepadSurface() != browser || generation != frameGeneration) co_return;
+                if (frameOpen && !measured && (result == L"1" || result == L"2")) {
+                    measured = true;
+                    measureSurface(browser, generation);
+                }
                 if (result != previous && result.size() == 1 && result[0] >= L'1' && result[0] <= L'8') {
                     previous = result;
                     slim_lock_guard lock(gate);
@@ -622,6 +699,13 @@ struct View : implements<View, IFrameworkView> {
             auto browser = co_await environment.CreateCoreWebView2CompositionControllerAsync(parent);
             if (closed) { browser.Close(); co_return; }
             controller = browser;
+            try {
+                xboxDisplay = Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox";
+                if (xboxDisplay) {
+                    auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+                    nativeRasterRatio = browser.RasterizationScale() / (display.RawPixelsPerViewPixel() * textScale());
+                }
+            } catch (hresult_error const&) { xboxDisplay = false; }
             step = L"surface";
             checkpoint(step);
             resize();
@@ -661,8 +745,9 @@ struct View : implements<View, IFrameworkView> {
                 if (cloudCache->consume(message)) return;
                 if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
                 Windows::Data::Json::JsonObject parsed{nullptr};
-                if (!Windows::Data::Json::JsonObject::TryParse(message, parsed) ||
-                    parsed.GetNamedString(L"method", L"") == L"capture-library-result") return;
+                if (!Windows::Data::Json::JsonObject::TryParse(message, parsed)) return;
+                const auto method = parsed.GetNamedString(L"method", L"");
+                if (method == L"capture-library-result" || method == L"capture-surface-result" || method == L"surface-sizing") return;
                 message = parsed.Stringify(); // WWA receives exactly the object validated above.
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);

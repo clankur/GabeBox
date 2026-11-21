@@ -17,17 +17,29 @@ int main() {
     for (float scale : {1.f, 1.5f, 2.f}) {
         const steam_display::Placement full{steam_display::viewport(screen, safe, false, false), scale};
         assert(full.view.x == 0 && full.view.y == 0);
-        assert(full.pixelWidth() * full.visualScale() == 1280);
-        assert(full.pixelHeight() * full.visualScale() == 720);
+        assert(full.pixelWidth() * full.visualScaleX() == 1280);
+        assert(full.pixelHeight() * full.visualScaleY() == 720);
         assert(full.localPixelX(640) == full.pixelWidth() / 2);
         assert(full.localPixelY(360) == full.pixelHeight() / 2);
         const steam_display::Placement inset{steam_display::viewport(screen, safe, true, false), scale};
         assert(inset.view.x == 40 && inset.view.y == 20);
-        assert(inset.view.x + inset.pixelWidth() * inset.visualScale() == 1240);
-        assert(inset.view.y + inset.pixelHeight() * inset.visualScale() == 700);
+        assert(inset.view.x + inset.pixelWidth() * inset.visualScaleX() == 1240);
+        assert(inset.view.y + inset.pixelHeight() * inset.visualScaleY() == 700);
         assert(inset.localPixelX(40) == 0 && inset.localPixelY(20) == 0);
         assert(inset.localPixelX(640) == 600 * scale && inset.localPixelY(360) == 340 * scale);
     }
+    const steam_display::Bounds fhd{0, 0, 1920, 1080};
+    assert(steam_display::fhdScale(fhd, 1.5f, 3840, 2160) == 1.f);
+    assert(steam_display::fhdScale(screen, 1.5f, 1920, 1080) == 1.5f);
+    assert(steam_display::fhdScale(screen, 2.f, 1280, 720) == 1.f);
+    const steam_display::Bounds wide{0, 0, 2560, 1080};
+    assert(steam_display::fhdScale(wide, 2.f, 3840, 2160) == .75f);
+    assert(steam_display::overrunCorrection(1920, 1080, 2880, 1620) == 2.f / 3.f);
+    assert(steam_display::overrunCorrection(1920, 1080, 1921, 1080) == 1.f);
+    assert(steam_display::overrunCorrection(1920, 1080, 2880, 1080) == 1.f);
+    const steam_display::Placement fractional{{4.5f, 8.5f, 1201.5f, 679.5f}, 1.3f};
+    assert(std::abs(fractional.localPixelX(1206) - fractional.pixelWidth()) < .01f);
+    assert(std::abs(fractional.localPixelY(688) - fractional.pixelHeight()) < .01f);
     const auto hidden = steam_display::viewport(screen, safe, true, true);
     assert(hidden.width == 1 && hidden.height == 1);
     constexpr auto route = L"https://steamloopback.host/routes/oobe/1";
