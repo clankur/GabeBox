@@ -31,6 +31,11 @@ PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe'}
 PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
+SDL_TRIALS = {
+    975370: ('Dwarf Fortress', '2.26.2', '9603fdfd2b4bd75b3574bb993e25332bae820a66f18e7ffb6f8c82cb4f6c004a'),
+    413150: ('Stardew Valley', '2.30.9', '58f0a2af6653445b48e58ace6890fbe237bf76452c9743e800358d6b935ded64'),
+}
+SDL_LIMIT = 8 * 1024 * 1024
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
 
@@ -260,6 +265,107 @@ def inspect_game(portal, package, app_id, executable):
     print('executable_source=missing')
 
 
+def stop_probe_for_sdl_trial(portal, package):
+    encoded = base64.b64encode(package['PackageFullName'].encode()).decode('ascii')
+    try:
+        portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': encoded}))
+    except PortalError as error:
+        if error.status != 404 and not (error.status == 400 and re.search(
+                r'"ErrorCode"\s*:\s*-2147483635\b', str(error))):
+            raise
+
+
+def trial_sdl(portal, args):
+    name, upstream, original_hash = SDL_TRIALS[args.app_id]
+    package = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+    folder = f'{STEAMAPPS_PATH}\\common\\{name}'
+    artifact = args.artifact / 'SDL2.dll'
+    checksum = (args.artifact / 'SHA256SUMS').read_text(encoding='ascii').strip()
+    expected = re.fullmatch(r'([0-9a-f]{64})  SDL2\.dll', checksum)
+    if artifact.stat().st_size > SDL_LIMIT or not expected:
+        raise ValueError('Use a checked SDL2 workflow artifact containing SHA256SUMS.')
+    candidate = artifact.read_bytes()
+    if hashlib.sha256(candidate).hexdigest() != expected[1] or pe_summary(candidate).get('pe_machine') != 'x64':
+        raise ValueError('The SDL2 workflow artifact has an unexpected checksum or architecture.')
+    version_marker = b'\xbd\x04\xef\xfe\x00\x00\x01\x00'
+    version_offset = candidate.find(version_marker)
+    if version_offset < 0 or version_offset + 16 > len(candidate):
+        raise ValueError('The SDL2 workflow artifact has no Windows version resource.')
+    major_minor, patch_build = unpack_from('<II', candidate, version_offset + 8)
+    version = f'{major_minor >> 16}.{major_minor & 0xffff}.{patch_build >> 16}'
+    if version != upstream:
+        raise ValueError(f'{name} requires the version-matched SDL {upstream} workflow artifact.')
+
+    def read_sdl():
+        data = read_game_file(portal, package, folder, 'SDL2.dll', SDL_LIMIT + 1)
+        if not data or len(data) > SDL_LIMIT:
+            raise ValueError('The Xbox install does not contain a readable SDL2.dll of the expected size.')
+        return data
+
+    def replace_sdl(data):
+        boundary = uuid4().hex
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="SDL2.dll"; filename="SDL2.dll"\r\n'
+                'Content-Type: application/octet-stream\r\n\r\n').encode() + data + f'\r\n--{boundary}--\r\n'.encode()
+        query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package['PackageFullName'],
+                           'path': folder, 'extract': 'false'})
+        portal.request('POST', '/api/filesystem/apps/file?' + query, body,
+                       {'Content-Type': f'multipart/form-data; boundary={boundary}'})
+        if read_sdl() != data:
+            raise ValueError('The uploaded SDL2.dll did not match the bytes read back from the Xbox.')
+
+    args.backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = args.backup_dir / f'{args.app_id}-SDL2-{original_hash[:12]}.dll'
+    lock = backup.with_suffix('.lock')
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        current = read_sdl()
+        if args.restore_only and hashlib.sha256(current).hexdigest() == original_hash:
+            print(f'Verified the original SDL2 for {name}.', flush=True)
+            return
+        if not args.restore_only:
+            if hashlib.sha256(current).hexdigest() != original_hash:
+                raise ValueError('The installed SDL2 differs from the known original. Check the game version or restore a previous trial.')
+            try:
+                with open(backup, 'xb', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+                    output.write(current)
+            except FileExistsError:
+                pass
+        original = backup.read_bytes()
+        if hashlib.sha256(original).hexdigest() != original_hash:
+            raise ValueError('The SDL2 backup checksum differs from the known installed original.')
+        if args.restore_only:
+            if not candidate.startswith(current):
+                raise ValueError('The installed SDL2 matches neither the original nor this trial artifact.')
+            stop_probe_for_sdl_trial(portal, package)
+            replace_sdl(original)
+        else:
+            _, raw = portal.request('GET', probe_report_path(package))
+            if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
+                raise ValueError('First run the signed Xbox diagnostic for the selected AppID to establish its stock baseline.')
+            stop_probe_for_sdl_trial(portal, package)
+            applied = False
+            try:
+                replace_sdl(candidate)
+                applied = True
+                print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
+                wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout)
+            finally:
+                try:
+                    installed = read_sdl()
+                    if installed != original:
+                        if installed != candidate and (applied or not candidate.startswith(installed)):
+                            raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
+                        stop_probe_for_sdl_trial(portal, package)
+                        replace_sdl(original)
+                except (OSError, ValueError):
+                    print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
+                    raise
+        print(f'Verified the original SDL2 for {name}.', flush=True)
+    finally:
+        lock.unlink()
+
+
 def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
     app = find_installed_probe(portal, name, version)
     print(f'Installed package: {app["PackageFullName"]}', flush=True)
@@ -375,6 +481,13 @@ def main():
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
     game.add_argument('--executable', help='relative .exe path within the game folder')
+    sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
+    sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
+    sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
+    sdl.add_argument('--artifact', required=True, type=Path, help='workflow artifact directory with SDL2.dll and SHA256SUMS')
+    sdl.add_argument('--backup-dir', required=True, type=Path, help='directory for the verified original DLL and trial lock')
+    sdl.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
+    sdl.add_argument('--timeout', type=int, default=100, help='seconds to wait for a fresh launch report')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
@@ -414,7 +527,7 @@ def main():
             name, version = probe_identity(args.package)
             if args.require_ipc and name != PROBE_NAME:
                 deploy.error('--require-ipc applies to the main probe')
-    if args.command in ('deploy', 'probe') and args.timeout <= 0:
+    if args.command in ('deploy', 'probe', 'sdl-trial') and args.timeout <= 0:
         raise ValueError('--timeout must be a positive number of seconds.')
 
     if not hmac.compare_digest(portal.request(), fingerprint):
@@ -440,6 +553,9 @@ def main():
     if args.command == 'inspect-game':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
         inspect_game(portal, app, args.app_id, args.executable)
+        return
+    if args.command == 'sdl-trial':
+        trial_sdl(portal, args)
         return
     if args.command == 'deploy':
         portal.upload(files)

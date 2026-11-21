@@ -164,6 +164,25 @@ For a local test of the Microsoft x64 desktop C++ runtime, download the official
 
 The console accepted version `1.0.84.0` with framework version `14.0.33321.0`. Steam restored the saved session, reused the installed game and accepted Play. The captured process exited with `0xC0000139` (entry point missing) before a ready window. The change in error narrowed the loader investigation. [Microsoft’s NTSTATUS reference](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55)
 
+An import probe in `1.0.85.0` resolved 24 system DLLs used by the installed Dwarf Fortress executable and its startup libraries. The only missing entry point in that check was SDL2's `imm32.dll!ImmGetIMEFileNameA`. The installed game's SDL2 reports version `2.26.2`. The SDL2 workflow builds upstream `2.32.10` with `SDL_DISABLE_WINDOWS_IME` and verifies that it omits this import. The rebuilt library provides all 117 SDL2 exports requested by the game and its SDL2_image library. [SDL2 Windows input source](https://github.com/libsdl-org/SDL/blob/release-2.32.10/src/video/windows/SDL_windowskeyboard.c) · [SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44875975339)
+
+In the local `1.0.88.0` trial, the console received the rebuilt SDL2 after the original file was backed up and verified. The Steam library rendered and the launch test wrote its starting checkpoint. It timed out without a final report or an observed Dwarf Fortress process. The original DLL was restored and verified.
+
+The workflow also builds SDL2 `2.26.2`, the version shipped with Dwarf Fortress, using the same disabled Windows IME option. The original DLL reproduced `0xC0000139` on build `1.0.92.0`. An A/B test with the rebuilt `2.26.2` under the same Xbox app version wrote the `game-running` checkpoint from Steam, then timed out without a final report. Device Portal did not observe a sustained Dwarf Fortress process or verify a game window. [SDL2 2.26.2 release](https://github.com/libsdl-org/SDL/releases/tag/release-2.26.2) · [SDL build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44877353402)
+
+### Shared SDL2 compatibility trials
+
+Use the same SDL2 source workflow for games with this loader dependency. It produces versioned x64 artifacts with a license and checksum. The current profiles pair Dwarf Fortress with `2.26.2` and Stardew Valley with `2.30.9`. Keep each profile tied to the installed original DLL digest and the corresponding upstream build. Verify later window, renderer, audio and input behavior per game before releasing a profile for regular Play. [SDL2 workflow](../.github/workflows/xbox-sdl.yml)
+
+Run the selected game's signed diagnostic with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. For example, the following command runs the Stardew profile on an already installed diagnostic package.
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" sdl-trial \
+  --version "$version" --app-id 413150 --artifact "$sdl_artifact" --backup-dir "$trial_dir"
+```
+
+The command verifies the x64 artifact checksum, embedded SDL version and installed original. It stores the original in the backup directory, applies the rebuilt DLL for a single restart, and restores and verifies the original even when the launch times out. Use the same directory on repeat runs. If the console connection fails during restoration, rerun with the same arguments and `--restore-only`. A process that is forcibly killed can leave the backup directory's `.lock` file. Check that the first process has stopped before removing the lock for recovery.
+
 The pinned app manager’s launch call takes a regular `CGameID`, a launch option index, a source value and an argument string. For the default launch, the probe uses option and source zero and an empty argument string. The completion event must match the returned handle, game ID and the pinned result layout. An accepted launch request and a ready game window are separate checkpoints. [Steam CGameID](https://partner.steamgames.com/doc/api/steam_api#CGameID) · [Earlier launch adapter observations](https://github.com/willfaust/madeira-dock/blob/main/docs/CLIENT_LAYOUTS.md)
 
 Before Play, the launch probe reads the installed game’s dependency list from Steam. When Steam lists Common Redistributables (AppID `228980`), the probe asks Steam to download that shared component into the app-local library and waits for its own installed checkpoint. The eventual game launch still uses Steam’s normal checks. The report includes the prerequisite’s initial and final states and Steam’s response to the install request. [Valve Common Redistributables](https://partner.steamgames.com/doc/features/common_redist)
