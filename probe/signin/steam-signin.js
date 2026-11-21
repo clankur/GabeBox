@@ -290,6 +290,19 @@
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
     }
 
+    function saveLibraryInventory() {
+        var storage = Windows.Storage;
+        return Windows.ApplicationModel.Package.current.installedLocation
+            .tryGetItemAsync("steam-library-inventory.txt").then(function (marker) {
+                if (!marker) return "";
+                var games = entries.map(function (entry) { return { id: entry.id, name: entry.name }; });
+                return storage.ApplicationData.current.localFolder.createFileAsync("steam-library-inventory.json",
+                    storage.CreationCollisionOption.replaceExisting).then(function (file) {
+                    return storage.FileIO.writeTextAsync(file, JSON.stringify(games) + "\r\n");
+                }).then(function () { return "steam_library_inventory=saved\r\n"; });
+            }).then(null, function () { return "steam_library_inventory=unavailable\r\n"; });
+    }
+
     function finishNative(attempt, payload) {
         return Windows.Storage.FileIO.readTextAsync(attempt.file).then(function (report) {
             if (payload) {
@@ -312,7 +325,10 @@
                     downloadStatus.textContent = "This Xbox could not save the Steam sign-in.";
                 }
                 attempt.libraryReport = report.replace("status=steam-library-rendering\r\n", "steam_library_rendered=yes\r\n");
-                return completeLibrary(attempt);
+                return saveLibraryInventory().then(function (checkpoint) {
+                    attempt.libraryReport += checkpoint;
+                    return completeLibrary(attempt);
+                });
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
                 finish(attempt, "Steam approved sign-in. The library did not finish loading.");
             } else {
