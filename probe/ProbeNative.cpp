@@ -1078,9 +1078,7 @@ static winrt::hstring ReadSteamDownload() {
         checkpoint = L"queued";
     }
     auto report = checkpoint + L":" + std::to_wstring(state);
-    if ((state & updatePaused) || !session->downloadApp) {
-        report += L"\r\n" + DescribeSteamDownloadQueue(*session, methods, app, activeApp);
-    }
+    report += L"\r\n" + DescribeSteamDownloadQueue(*session, methods, app, activeApp);
     if (!session->downloadApp) {
         using winrt::Windows::ApplicationModel::Package;
         using winrt::Windows::Storage::ApplicationData;

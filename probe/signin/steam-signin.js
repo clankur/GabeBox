@@ -376,6 +376,31 @@
         }
     }
 
+    function readDownloadProgress(job) {
+        var storage = Windows.Storage;
+        return storage.ApplicationData.current.localFolder.tryGetItemAsync("SteamLibrary").then(function (folder) {
+            return folder ? folder.tryGetItemAsync("steamapps") : null;
+        }).then(function (folder) {
+            return folder ? folder.tryGetItemAsync("appmanifest_" + job.entry.id + ".acf") : null;
+        }).then(function (file) {
+            return file ? storage.FileIO.readTextAsync(file) : "";
+        }).then(function (text) {
+            var downloaded = /^\s*"BytesDownloaded"\s*"([0-9]+)"\s*$/mi.exec(text);
+            var total = /^\s*"BytesToDownload"\s*"([0-9]+)"\s*$/mi.exec(text);
+            var staged = /^\s*"BytesStaged"\s*"([0-9]+)"\s*$/mi.exec(text);
+            if (!downloaded || !total || +total[1] <= 0) return;
+            var now = Date.now();
+            var bytes = +downloaded[1];
+            var previous = job.progress;
+            var stagedBytes = staged ? +staged[1] : 0;
+            var changed = !previous || bytes !== previous.bytes || stagedBytes !== previous.staged;
+            var rate = previous && now > previous.time ?
+                Math.max(0, bytes - previous.bytes) * 1000 / (now - previous.time) : 0;
+            job.progress = {bytes: bytes, total: +total[1], staged: stagedBytes, time: now,
+                rate: Math.round(rate), lastChange: changed ? now : previous.lastChange};
+        }, function () {});
+    }
+
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
         var firstLineEnd = checkpoint.indexOf("\r\n");
@@ -385,9 +410,26 @@
         var detail = parts ? parts[2] : "";
         var active = stage === "starting" || stage === "queued" || stage === "resuming" ||
             stage === "paused" || stage === "downloading" || stage === "staging";
-        if (checkpoint !== job.last) {
-            job.last = checkpoint;
+        var progress = job.progress;
+        var progressReport = "";
+        var waiting = false;
+        if (progress) {
+            waiting = stage === "downloading" && progress.time - progress.lastChange >= 90000;
+            progressReport = "steam_download_bytes=" + progress.bytes + "\r\n" +
+                "steam_download_total_bytes=" + progress.total + "\r\n" +
+                "steam_download_staged_bytes=" + progress.staged + "\r\n" +
+                "steam_download_bytes_per_second=" + progress.rate + "\r\n" +
+                "steam_download_active_without_progress=" + (waiting ? "yes" : "no") + "\r\n";
+        }
+        var update = checkpoint + progressReport;
+        if (update !== job.last) {
+            job.last = update;
             var message = downloadMessages[stage] || "Steam could not start or track the download";
+            if (waiting) message = "Steam reports an active download, with no byte progress";
+            if (active && progress) {
+                message += " · " + (progress.bytes * 100 / progress.total).toFixed(1) + "% · " +
+                    (progress.rate / 1000000).toFixed(1) + " MB/s";
+            }
             downloadStatus.textContent = job.entry.name + " · " + message;
             if (job.file) {
                 var report = job.prefix + "steam_download=" + stage + "\r\n";
@@ -396,6 +438,7 @@
                     report += "steam_download_" + metric + "=" + detail + "\r\n";
                 }
                 if (firstLineEnd >= 0) report += checkpoint.slice(firstLineEnd + 2);
+                report += progressReport;
                 if (!active) report += storageCheckpoint("after");
                 report += "status=steam-download-" + (active ? "in-progress" : "complete") + "\r\n";
                 var write = function () { return Windows.Storage.FileIO.writeTextAsync(job.file, report); };
@@ -416,6 +459,16 @@
     }
 
     function pollDownload(job) {
+        if (transfer !== job) return;
+        if (!job.progressPoll || Date.now() - job.progressPoll >= 5000) {
+            job.progressPoll = Date.now();
+            readDownloadProgress(job).then(function () { pollDownloadStatus(job); });
+        } else {
+            pollDownloadStatus(job);
+        }
+    }
+
+    function pollDownloadStatus(job) {
         if (transfer !== job) return;
         try {
             updateDownload(job, XboxProbe.Native.ProbeRunner.steamDownloadStatus());
