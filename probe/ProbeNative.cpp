@@ -431,8 +431,11 @@ struct SteamSignInHandles {
     void *appManager = nullptr;
     std::uint32_t downloadApp = 0;
     std::wstring libraryPath;
+    std::uint64_t downloadStarted = 0;
     std::uint64_t lastTransition = 0;
     std::uint32_t lastInstallState = 0;
+    enum class DownloadRetry { NotAttempted, Accepted, Declined };
+    DownloadRetry downloadRetry = DownloadRetry::NotAttempted;
     std::uint64_t launchCall = 0;
 
     void PumpCallbacks() const {
@@ -933,6 +936,12 @@ static SteamDestination ReadSteamDestination(void *manager, std::uintptr_t const
     return {index, SteamPathScope(directory, library, data, package), SteamPathScope(folder, library, data, package)};
 }
 
+static bool RequestSteamDownloadNow(void *manager, std::uintptr_t const *methods, std::uint32_t app) {
+    using SetQueuePlacement = bool (__cdecl *)(void *, std::uint32_t, std::int32_t);
+    constexpr std::int32_t firstInQueue = 1;
+    return reinterpret_cast<SetQueuePlacement>(methods[56])(manager, app, firstInQueue);
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDownload(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     auto root = ApplicationData::Current().LocalFolder();
@@ -952,7 +961,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
     }
 
     auto methods = FindSteamAppManager(*session);
-    if (!methods) co_return winrt::hstring(L"interface-error");
+    if (!methods || methods[56] != base + 0x766730 || methods[82] != base + 0x781040) {
+        co_return winrt::hstring(L"interface-error");
+    }
     auto manager = session->appManager;
     auto registration = RegisterSteamLibrary(manager, methods, path);
     if (registration.index < 0) {
@@ -961,22 +972,20 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
 
     constexpr std::uint32_t updatePaused = 0x200;
     const bool wasPaused = (reinterpret_cast<SteamAppValue>(methods[4])(manager, app) & updatePaused) != 0;
-    const auto queuePlacement = methods[56];
-    if (wasPaused && queuePlacement != base + 0x766730) {
-        co_return winrt::hstring(L"interface-error");
-    }
     auto install = reinterpret_cast<SteamInstall>(methods[0]);
     auto result = install(manager, app, registration.index, false);
     if (result != 0) co_return winrt::hstring(L"install-rejected:" + std::to_wstring(result));
     session->downloadApp = app;
     session->libraryPath = path;
-    session->lastTransition = GetTickCount64();
+    session->downloadStarted = session->lastTransition = GetTickCount64();
     session->lastInstallState = 0;
+    using Retry = SteamSignInHandles::DownloadRetry;
+    session->downloadRetry = Retry::NotAttempted;
     if (wasPaused) {
         // This is the explicit “Download now” action for the selected, already queued title.
-        using SetQueuePlacement = bool (__cdecl *)(void *, std::uint32_t, std::int32_t);
-        constexpr std::int32_t firstInQueue = 1;
-        if (reinterpret_cast<SetQueuePlacement>(queuePlacement)(manager, app, firstInQueue)) {
+        const bool accepted = RequestSteamDownloadNow(manager, methods, app);
+        session->downloadRetry = accepted ? Retry::Accepted : Retry::Declined;
+        if (accepted) {
             co_return winrt::hstring(L"resuming");
         }
     }
@@ -1000,8 +1009,10 @@ static winrt::hstring ReadSteamDownload() {
     constexpr std::uint32_t missingOrCorrupt = 0xa0;
     constexpr std::uint32_t stagingOrCommitting = 0x600000;
     constexpr std::uint32_t downloading = 0x100000;
+    constexpr auto installMask = fullyInstalled | updateRequired | missingOrCorrupt | downloading | stagingOrCommitting;
     using ActiveApp = std::uint32_t (__cdecl *)(void *);
-    auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, session->downloadApp);
+    const auto app = session->downloadApp;
+    auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
     auto activeApp = reinterpret_cast<ActiveApp>(methods[42])(manager);
     auto now = GetTickCount64();
     if (state != session->lastInstallState || activeApp == session->downloadApp) {
@@ -1009,9 +1020,19 @@ static winrt::hstring ReadSteamDownload() {
         session->lastTransition = now;
     }
 
+    using Retry = SteamSignInHandles::DownloadRetry;
+    if ((state & installMask) != fullyInstalled && (state & updatePaused) && now - session->downloadStarted >= 3000 &&
+            session->downloadRetry == Retry::NotAttempted) {
+        const bool accepted = RequestSteamDownloadNow(manager, methods, app);
+        session->downloadRetry = accepted ? Retry::Accepted : Retry::Declined;
+        if (accepted) {
+            session->lastTransition = now;
+            return winrt::hstring(L"resuming:" + std::to_wstring(state));
+        }
+    }
+
     std::wstring checkpoint;
-    if ((state & (fullyInstalled | updateRequired | missingOrCorrupt | downloading | stagingOrCommitting)) ==
-            fullyInstalled) {
+    if ((state & installMask) == fullyInstalled) {
         auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, session->downloadApp);
         checkpoint = IsLocalSteamInstall(directory, session->libraryPath) ? L"installed" : L"install-path-error";
         session->downloadApp = 0;
@@ -1027,7 +1048,21 @@ static winrt::hstring ReadSteamDownload() {
     } else {
         checkpoint = L"queued";
     }
-    return winrt::hstring(checkpoint + L":" + std::to_wstring(state));
+    auto report = checkpoint + L":" + std::to_wstring(state);
+    if (!session->downloadApp) {
+        using winrt::Windows::ApplicationModel::Package;
+        using winrt::Windows::Storage::ApplicationData;
+        const auto destination = ReadSteamDestination(manager, methods, app, session->libraryPath,
+            std::wstring(ApplicationData::Current().LocalFolder().Path()),
+            std::wstring(Package::Current().InstalledLocation().Path()));
+        report += L"\r\nsteam_download_install_scope=" + std::wstring(destination.installScope) + L"\r\n";
+        report += L"steam_download_library_scope=" + std::wstring(destination.libraryScope) + L"\r\n";
+        report += L"steam_download_library_index=" + std::to_wstring(destination.index) + L"\r\n";
+        const auto retry = session->downloadRetry;
+        report += std::wstring(L"steam_download_retry=") +
+            (retry == Retry::Accepted ? L"accepted" : retry == Retry::Declined ? L"declined" : L"not-attempted") + L"\r\n";
+    }
+    return winrt::hstring(report);
 }
 
 static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManifest(
@@ -1307,10 +1342,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
                 const auto now = GetTickCount64();
                 if (!retriedPaused && now - started >= 3000 && (state & updatePaused)) {
-                    using SetQueuePlacement = bool (__cdecl *)(void *, std::uint32_t, std::int32_t);
-                    constexpr std::int32_t firstInQueue = 1;
-                    auto accepted = reinterpret_cast<SetQueuePlacement>(methods[56])(
-                        manager, commonRedistributables, firstInQueue);
+                    auto accepted = RequestSteamDownloadNow(manager, methods, commonRedistributables);
                     retriedPaused = true;
                     report += std::wstring(L"steam_launch_redistributables_retry=") +
                         (accepted ? L"accepted\r\n" : L"declined\r\n");
