@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <fileapifromapp.h>
 #include <winstring.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Data.Json.h>
@@ -29,6 +30,7 @@
 #include "child-process.h"
 #include "pipe-protocol.h"
 #include "SteamSdlSurface.h"
+#include "SteamCloudRestore.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -472,6 +474,8 @@ static std::mutex steamSessionMutex;
 static SteamSignInHandles *liveSteamSession = nullptr;
 static std::atomic_flag steamSignInActive{};
 static std::atomic_flag steamLaunchActive{};
+
+#include "SteamCloudTransfer.h"
 
 static void SteamSignOut() {
     std::lock_guard lock(steamSessionMutex);
@@ -1241,6 +1245,75 @@ static constexpr std::uint32_t dwarfFortressAppId = 975370;
 static constexpr std::uint32_t stardewValleyAppId = 413150;
 static constexpr std::uint32_t slayTheSpireAppId = 646570;
 
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySteamCloud(
+        std::uint32_t app, bool preview) {
+    using namespace winrt::Windows::Data::Json;
+    using namespace winrt::Windows::Storage;
+    if (app != slayTheSpireAppId) co_return winrt::hstring(L"unsupported");
+    if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"busy");
+    struct ResetOperation {
+        ~ResetOperation() { steamLaunchActive.clear(); }
+    } resetOperation;
+    {
+        std::lock_guard lock(steamSdlMutex);
+        if (steamSdlSurface && steamSdlSurface->Alive()) co_return winrt::hstring(L"busy");
+    }
+    try {
+        auto root = ApplicationData::Current().LocalFolder();
+        auto library = co_await root.GetFolderAsync(L"SteamLibrary");
+        if (!co_await HasCompletedSteamManifest(library, app)) co_return winrt::hstring(L"not-installed");
+        auto apps = co_await library.GetFolderAsync(L"steamapps");
+        auto common = co_await apps.GetFolderAsync(L"common");
+        auto game = co_await common.GetFolderAsync(L"SlayTheSpire");
+        if (!SlayCloudDirectoryExists(std::wstring(game.Path()))) co_return winrt::hstring(L"not-installed");
+        std::uint64_t account = 0;
+        {
+            std::lock_guard lock(steamSessionMutex);
+            if (!liveSteamSession || !liveSteamSession->OwnsSession()) co_return winrt::hstring(L"sign-in");
+            account = liveSteamSession->accountId;
+        }
+        auto cloud = co_await root.CreateFolderAsync(L"SteamCloud", CreationCollisionOption::OpenIfExists);
+        auto title = co_await cloud.CreateFolderAsync(L"646570", CreationCollisionOption::OpenIfExists);
+        auto stage = co_await title.CreateFolderAsync(L"download", CreationCollisionOption::GenerateUniqueName);
+        winrt::hstring result;
+        try {
+            auto response = JsonObject::Parse(co_await StageSteamCloudFiles(app, stage));
+            auto status = response.GetNamedString(L"status");
+            if (status == L"ready") {
+                bool sameAccount;
+                {
+                    std::lock_guard lock(steamSessionMutex);
+                    sameAccount = liveSteamSession && liveSteamSession->accountId == account && liveSteamSession->OwnsSession();
+                }
+                auto files = response.GetNamedArray(L"files");
+                if (!sameAccount) {
+                    result = L"sign-in";
+                } else if (preview) {
+                    result = winrt::hstring(L"verified:" + std::to_wstring(files.Size()));
+                } else {
+                    RollBackSlayCloud(std::wstring(title.Path()), std::wstring(game.Path()));
+                    auto restored = co_await RestoreSlayCloudFiles(title, stage, game, files);
+                    result = restored ? winrt::hstring(L"restored:" + std::to_wstring(restored)) : winrt::hstring(L"no-compatible-saves");
+                }
+            } else {
+                auto serviceError = response.GetNamedNumber(L"steamResult", 0);
+                result = preview && serviceError ? winrt::hstring(std::wstring(status) + L":" +
+                    std::to_wstring(static_cast<std::int32_t>(serviceError))) : status;
+            }
+        } catch (winrt::hresult_error const&) {
+            result = L"storage-error";
+        }
+        try {
+            co_await stage.DeleteAsync(StorageDeleteOption::PermanentDelete);
+        } catch (winrt::hresult_error const&) {
+            // A downloaded staging folder is private; it never contains live saves.
+        }
+        co_return result;
+    } catch (winrt::hresult_error const&) {
+        co_return winrt::hstring(L"storage-error");
+    }
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix,
         GameBackend backend) {
@@ -1279,6 +1352,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     auto folder = item.try_as<StorageFolder>();
     if (!folder) co_return winrt::hstring(L"steam_launch=no-local-library\r\n");
     auto path = folder.Path();
+    if (hostedSlay) {
+        try {
+            const auto cloudPath = SlayCloudChild(SlayCloudChild(root.Path(), L"SteamCloud"), L"646570");
+            const auto slayPath = SlayCloudChild(path, L"steamapps\\common\\SlayTheSpire");
+            RollBackSlayCloud(cloudPath, slayPath);
+        } catch (winrt::hresult_error const&) {
+            co_return winrt::hstring(L"steam_launch=save-recovery-error\r\n");
+        }
+    }
 
     const std::uint64_t gameId = app;  // Regular Steam AppID in CGameID's 24-bit app field.
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
@@ -1949,6 +2031,10 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamSdlGame(std::uint32_t app,
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::SdlHost);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSteamCloud(std::uint32_t app, bool preview) {
+        return RestoreSlaySteamCloud(app, preview);
     }
 
     winrt::Windows::Storage::Streams::IBuffer SteamSdlFrame() {

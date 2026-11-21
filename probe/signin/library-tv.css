@@ -105,13 +105,6 @@
 }
 #cloud-saves-panel p { margin: .7em 0; }
 #cloud-saves-status:empty { margin: 0; }
-#cloud-saves-code {
-    display: block;
-    width: 6.75em;
-    max-width: 100%;
-    margin: 0;
-    image-rendering: pixelated;
-}
 #library .download-status { color: #e8d9df; }
 @media (max-width: 1090px) {
     #library-list button { flex-basis: 48%; width: 48%; }
