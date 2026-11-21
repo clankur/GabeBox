@@ -14,12 +14,15 @@
     var entryName = document.getElementById("entry-name");
     var entryType = document.getElementById("entry-type");
     var signOut = document.getElementById("sign-out");
+    var play = document.getElementById("play");
     var download = document.getElementById("download");
     var downloadStatus = document.getElementById("download-status");
     var current;
     var entries = [];
     var selected;
     var transfer;
+    var launching = false;
+    var manifestFolder;
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -146,9 +149,33 @@
         if (button) button.setAttribute("aria-pressed", "true");
         entryName.textContent = button ? button.entry.name : "";
         entryType.textContent = button ? button.entry.type : "";
-        download.hidden = !button || !button.entry.game;
-        download.disabled = !!transfer || !!(button && button.entry.installed);
-        download.textContent = button && button.entry.installed ? "Downloaded" : "Download";
+        updateActions();
+        if (button && button.entry.game) checkLocalInstall(button.entry);
+    }
+
+    function updateActions() {
+        var entry = selected && selected.entry;
+        play.hidden = !entry || !entry.game || !entry.installed;
+        download.hidden = !entry || !entry.game || !!entry.installed;
+        play.disabled = download.disabled = launching || !!transfer;
+    }
+
+    function checkLocalInstall(entry) {
+        if (entry.installed || entry.checked || !manifestFolder) return;
+        entry.checked = true;
+        var storage = Windows.Storage;
+        manifestFolder.then(function (folder) {
+            if (!folder) return null;
+            return folder.tryGetItemAsync("appmanifest_" + entry.id + ".acf");
+        }).then(function (file) {
+            return file ? storage.FileIO.readTextAsync(file) : "";
+        }).done(function (text) {
+            var match = /^\s*"StateFlags"\s*"([0-9]+)"\s*$/mi.exec(text);
+            if (match && (+match[1] & 0x7000a6) === 4) {
+                entry.installed = true;
+                if (selected && selected.entry === entry) updateActions();
+            }
+        }, function () { entry.checked = false; });
     }
 
     function renderList() {
@@ -169,14 +196,43 @@
         select(list.firstElementChild);
     }
 
-    function completeLibrary(attempt, report) {
+    function runGameLaunch(attempt, entry) {
+        if (transfer || launching) return;
+        var fileIO = Windows.Storage.FileIO;
+        var complete = "status=steam-core-complete\r\n";
+        var report = attempt.libraryReport + "steam_launch_run_id=" + Date.now() + "\r\n";
+        launching = true;
+        signOut.disabled = true;
+        updateActions();
+        downloadStatus.textContent = "Starting " + entry.name + "…";
+
+        function finish(result) {
+            launching = false;
+            signOut.disabled = false;
+            updateActions();
+            var message = " launch could not be confirmed.";
+            if (result.indexOf("steam_launch=window-ready\r\n") >= 0) message = " started.";
+            if (result.indexOf("steam_launch=not-installed\r\n") >= 0) {
+                message = " is on disk, but Steam could not reopen its install.";
+            }
+            if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            downloadStatus.textContent = entry.name + message;
+            return fileIO.writeTextAsync(attempt.file, report + result + complete);
+        }
+
+        return fileIO.writeTextAsync(attempt.file, report + "status=steam-game-launch-starting\r\n").then(function () {
+            return XboxProbe.Native.ProbeRunner.launchSteamGame(entry.id);
+        }).then(finish, function () { return finish("steam_launch=failed\r\n"); });
+    }
+
+    function completeLibrary(attempt) {
         var storage = Windows.Storage;
         var packageInfo = Windows.ApplicationModel.Package.current;
         var values = storage.ApplicationData.current.localSettings.values;
         var versionKey = "steamLaunchProbePackage";
         var complete = "status=steam-core-complete\r\n";
         function save(checkpoint) {
-            return storage.FileIO.writeTextAsync(attempt.file, report + checkpoint);
+            return storage.FileIO.writeTextAsync(attempt.file, attempt.libraryReport + checkpoint);
         }
 
         if (values.hasKey(versionKey) && values.lookup(versionKey) === packageInfo.id.fullName) return save(complete);
@@ -189,25 +245,8 @@
                 }
                 values.insert(versionKey, packageInfo.id.fullName);
                 var game = entries.filter(function (entry) { return entry.id === +requested; })[0];
-                var selectedName = game ? game.name : "Steam game";
-                downloadStatus.textContent = "Starting " + selectedName + "…";
-                signOut.disabled = true;
-                download.disabled = true;
-                return save("status=steam-game-launch-starting\r\n").then(function () {
-                    return XboxProbe.Native.ProbeRunner.launchSteamGame(+requested);
-                }).then(function (result) {
-                    downloadStatus.textContent = result.indexOf("steam_launch=window-ready\r\n") >= 0
-                        ? selectedName + " started." : selectedName + " launch could not be confirmed.";
-                    return save(result + complete);
-                }).then(function () {
-                    signOut.disabled = false;
-                    select(selected);
-                }, function () {
-                    signOut.disabled = false;
-                    select(selected);
-                    downloadStatus.textContent = selectedName + " launch failed.";
-                    return save("steam_launch=failed\r\n" + complete);
-                });
+                if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
+                return runGameLaunch(attempt, game);
             });
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
     }
@@ -217,6 +256,10 @@
             if (payload) {
                 entries = JSON.parse(payload);
                 entries.sort(function (a, b) { return a.name.localeCompare(b.name); });
+                manifestFolder = Windows.Storage.ApplicationData.current.localFolder
+                    .tryGetItemAsync("SteamLibrary").then(function (folder) {
+                        return folder ? folder.tryGetItemAsync("steamapps") : null;
+                    });
                 libraryCount.textContent = entries.length + (entries.length === 1 ? " title" : " titles");
                 search.value = "";
                 renderList();
@@ -225,8 +268,8 @@
                 list.firstElementChild.focus();
                 attempt.done = true;
                 attempt.client.close();
-                return completeLibrary(attempt, report.replace("status=steam-library-rendering\r\n",
-                    "steam_library_rendered=yes\r\n"));
+                attempt.libraryReport = report.replace("status=steam-library-rendering\r\n", "steam_library_rendered=yes\r\n");
+                return completeLibrary(attempt);
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
                 finish(attempt, "Steam approved sign-in. The library did not finish loading.");
             } else {
@@ -303,7 +346,7 @@
     }
 
     function startDownload() {
-        if (transfer || !selected || !selected.entry.game || selected.entry.installed) return;
+        if (transfer || launching || !selected || !selected.entry.game || selected.entry.installed) return;
         var job = { entry: selected.entry, id: Date.now() };
         transfer = job;
         download.disabled = true;
@@ -420,7 +463,8 @@
         case 39:
         case 206:
         case 213:
-            next = download.hidden || download.disabled ? signOut : download;
+            if (!play.hidden && !play.disabled) next = play;
+            else next = download.hidden || download.disabled ? signOut : download;
             break;
         default:
             return;
@@ -429,16 +473,22 @@
         if (next) next.focus();
     });
     download.addEventListener("click", startDownload);
-    download.addEventListener("keydown", function (event) {
+    play.addEventListener("click", function () {
+        if (selected && selected.entry.installed) runGameLaunch(current, selected.entry);
+    });
+    function backToLibrary(event) {
         if (selected && (event.keyCode === 37 || event.keyCode === 205 || event.keyCode === 214)) {
             event.preventDefault();
             selected.focus();
         }
-    });
+    }
+    download.addEventListener("keydown", backToLibrary);
+    play.addEventListener("keydown", backToLibrary);
     signOut.addEventListener("click", function () {
         if (transfer) updateDownload(transfer, "interrupted");
         XboxProbe.Native.ProbeRunner.signOutSteam();
         entries = [];
+        manifestFolder = null;
         renderList();
         library.hidden = true;
         signin.hidden = false;

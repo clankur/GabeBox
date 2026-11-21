@@ -99,6 +99,22 @@ The app writes `steam-download-report.txt` when Steam changes state. `queued` re
 
 Version `1.0.40.0` successfully installed a Steam title in app-local storage on Series X. The report progressed from `downloading` to `installed` with state `4`. The on-device manifest recorded 608,111,824 downloaded bytes and result `0`. A separate Device Portal directory count confirmed 16,017 installed files totaling 803,964,902 bytes. An earlier title reached state `514`, then stalled. Its manifest recorded disk-write result `11` and zero downloaded bytes. [Download SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44865311046)
 
+## Test Steam’s normal launch path
+
+Prepare the sign-in package with `--launch-app-id APPID` for a Steam game already installed in the Xbox app's own library. After the account owner approves Steam Guard, the probe makes one launch attempt per package version. It confirms that Steam sees the title as owned and fully installed in that library, then uses the default launch entry through Steam’s app manager. It records Steam’s numeric response and whether the client observed a running game and playable window.
+
+```sh
+python3 probe/prepare-steam-core.py "$template" "$trial_dir/launch" --version 1.0.42.0 \
+  --valve-archive "$trial_dir/bins_win64.zip" --objdump "$objdump_path" \
+  --unicode-keyboard --steam-sign-in --launch-app-id 105600
+bash probe/package.sh --layout "$trial_dir/launch" "$trial_dir/launch-package"
+python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+  "$trial_dir/launch-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 270
+python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.42.0
+```
+
+The pinned app manager’s launch call takes a regular `CGameID`, a launch option index, a source value and an argument string. For the default launch, the probe uses option and source zero and an empty argument string. The completion event must match the returned handle, game ID and the pinned result layout. An accepted launch request and a ready game window are separate checkpoints. [Steam CGameID](https://partner.steamgames.com/doc/api/steam_api#CGameID) · [Earlier launch adapter observations](https://github.com/willfaust/madeira-dock/blob/main/docs/CLIENT_LAYOUTS.md)
+
 ## Series X observations
 
 - Windows SDK template `1.0.13.0` and locally signed control `1.0.14.0` both loaded the owned library and found its export. With all three Valve files absent, `LoadPackagedLibrary` returned `0x7E` (`ERROR_MOD_NOT_FOUND`).
