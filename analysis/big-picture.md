@@ -114,6 +114,14 @@ After testing the Valve shell, the console received the regular FHD payload as a
 
 ## Steam Machine experience on Series X
 
+The repeated-run ledger records each cold launch, authenticated Library capture and game attempt by package version. It includes failed launches, the original image hashes and the evidence needed for a release verdict. [Series X reliability ledger](big-picture-reliability.md)
+
+### Game classification and the Library startup crash
+
+Xbox Dev Home showed **App type → Game** for the installed Steam Core package. On build `1.0.230.19`, one of three cold starts displayed the Library, and the third emitted WebView2’s `out-of-memory` process failure before the Library appeared. The raw Dev Home capture for build `1.0.230.20` has SHA-256 `42e60ad428e08d639b6224d15a91cf2853db4e69a5a25f34389b62fd616c2328`. Microsoft documents separate foreground allowances for UWP apps and games on Series X|S. [Xbox system resource allocation](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation)
+
+Keeping the primary Xbox window in front during startup on build `.20` preserved a measured 5 GiB limit while Steam opened its secondary window and received the signed-in library. In two cold starts, the host then brought that window forward by timeout, at 2,447,257,600 and 2,481,258,496 bytes of total app usage. The limit immediately after the switch was 1,073,741,824 bytes. Both sessions ended before an unobscured Library capture. Build `.21` samples memory before switching windows and lets WebView2 release unused data while it prepares the Library. The release ledger tracks the result of hardware trials on that package.
+
 ### Background Steam and the running game
 
 With an authenticated fixture in offline Chromium, Valve's own game list accepted a running AppID, navigated to `/app/42/overlay/controller` and displayed Resume game, Controller settings, View game details and Exit game. Activating the original Resume button issued the Xbox foreground request for AppID 42. When the host reported the process had exited, Valve cleared its running-game state and returned to the previous screen. This test uses Valve's pinned client UI with a simulated Xbox host. [Original-shell test](../tests/steam-big-picture-shell.cjs)

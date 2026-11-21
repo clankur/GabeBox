@@ -84,6 +84,7 @@ struct View : implements<View, IFrameworkView> {
     float backingCorrection = 1.f;
     uint64_t frameGeneration = 0;
     bool capturePending = false;
+    bool authenticatedEmptyLibrary = false;
     uint64_t popupVisibilityEpoch = 0;
     CoreWindow::PointerMoved_revoker moved;
     CoreWindow::PointerPressed_revoker pressed;
@@ -443,7 +444,9 @@ struct View : implements<View, IFrameworkView> {
         auto lifetime = get_strong();
         capturePending = true;
         auto surface = gamepadSurface();
-        const auto selector = libraryOnly ? steam_capture::library : steam_capture::surface;
+        std::wstring selector = libraryOnly ? steam_capture::library : steam_capture::surface;
+        if (libraryOnly && authenticatedEmptyLibrary)
+            selector = std::wstring(steam_capture::emptyLibrary) + L" && " + steam_capture::emptyForeground;
         const auto filename = libraryOnly ? L"big-picture-library.png" : L"big-picture-surface.png";
         const auto visibilityEpoch = popupVisibilityEpoch;
         StorageFile temporary{nullptr};
@@ -453,7 +456,7 @@ struct View : implements<View, IFrameworkView> {
         try {
             sourceView = ApplicationView::GetForCurrentView().Id();
             if (web) browserPid = web.BrowserProcessId();
-            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector)) == L"true" &&
+            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector.c_str())) == L"true" &&
                 canCapture(surface, visibilityEpoch)) {
                 auto folder = ApplicationData::Current().LocalFolder();
                 temporary = co_await folder.CreateFileAsync(L"big-picture-library.capture.tmp", CreationCollisionOption::GenerateUniqueName);
@@ -473,7 +476,7 @@ struct View : implements<View, IFrameworkView> {
                     header.Close();
                 }
                 stream.Close();
-                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector)) == L"true" &&
+                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector.c_str())) == L"true" &&
                     canCapture(surface, visibilityEpoch)) {
                     co_await temporary.RenameAsync(filename, NameCollisionOption::ReplaceExisting);
                     temporary = nullptr;
@@ -575,6 +578,8 @@ struct View : implements<View, IFrameworkView> {
                 return b.width > 0 && b.height > 0 && b.right > 0 && b.bottom > 0 && b.left < innerWidth && b.top < innerHeight;
             }
             const shell = document.getElementById('Header.Main.Footer');
+            const tour = target?.querySelector('._16IUnAiPD_1s1KQ0g8vJpq');
+            if (visible(tour) && tour.textContent.trim()) return 1;
             if (target?.contains(shell) && shell?.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq') &&
                 visible(shell.querySelector('.ZBBhezbBR4VJYysmVhF3_, ._2_cRkGdbegoIbiRsy_-I7'))) return 2;
             const library = target?.querySelector('#GamepadUI_Full_Root._3LYP1SIxyoky-yW9Ug_1fq #Main [role=tabpanel][id$="AllGames_Content"] [role=grid]');
@@ -608,6 +613,9 @@ struct View : implements<View, IFrameworkView> {
                 if (!layoutOnly && !foreground()) continue;
                 if (!setup) ++sample;
                 auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(inGamepad(check, layoutOnly));
+                if (authenticatedEmptyLibrary && result != L"1" && result != L"2" &&
+                    co_await browser.CoreWebView2().ExecuteScriptAsync(inGamepad(steam_capture::emptyLibrary, layoutOnly)) == L"true")
+                    result = L"2";
                 if (closed || gamepadSurface() != browser || generation != frameGeneration) co_return;
                 if (layoutOnly) {
                     if (warming && (result == L"1" || result == L"2"))
@@ -944,7 +952,9 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
                     view.publishWindow();
                     if (view.controller) view.focusVisible();
                 }
-            } else if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
+            } else if (message == L"{\"nativeEmptyLibrary\":true}") view.authenticatedEmptyLibrary = !view.account.empty();
+            else if (message == L"{\"nativeEmptyLibrary\":false}") view.authenticatedEmptyLibrary = false;
+            else if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
             else if (message == L"{\"nativeGameForeground\":false}") view.setGameForeground(false);
             else if (message == L"{\"nativeRestartClient\":true}") view.restartClient();
             else if (message == L"{\"nativeCaptureLibrary\":true}") view.captureGamepad(true);

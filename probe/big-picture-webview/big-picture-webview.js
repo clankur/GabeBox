@@ -332,6 +332,7 @@
                 if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
                     if (warming) warmProgress = Date.now();
                     servedGames = result.length;
+                    host.reply(JSON.stringify({nativeEmptyLibrary: servedGames === 0}));
                     record(last, true);
                 }
             }, function () { respond(id, false, "failed"); });
