@@ -136,6 +136,8 @@ A later retry on the same build transferred 271,127,152 bytes and installed Slay
 
 ## Test Steam’s normal launch path
 
+The [game launch contract](GAME-LAUNCH.md) describes the common Steam checks, the supported launch backends, and how to verify another title.
+
 Select a downloaded game in the library and choose **Play**. For a CLI launch test, prepare the sign-in package with `--launch-app-id APPID` for a game already installed in the Xbox app's own library. After Steam Guard approval, the probe makes one automatic launch attempt per package version. It refreshes the library and, if Steam needs to reopen a completed local install, asks the app manager to register the existing files. Launch requires Steam to confirm the current account owns the game and reports it fully installed in that library. The probe records Steam’s numeric response and whether the client observed a running game and ready window.
 
 ```sh
@@ -164,7 +166,7 @@ For a local test of the Microsoft x64 desktop C++ runtime, download the official
 
 The console accepted version `1.0.84.0` with framework version `14.0.33321.0`. Steam restored the saved session, reused the installed game and accepted Play. The captured process exited with `0xC0000139` (entry point missing) before a ready window. The change in error narrowed the loader investigation. [Microsoft’s NTSTATUS reference](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55)
 
-The pinned app manager’s launch call takes a regular `CGameID`, a launch option index, a source value and an argument string. For the default launch, the probe uses option and source zero and an empty argument string. The completion event must match the returned handle, game ID and the pinned result layout. An accepted launch request and a ready game window are separate checkpoints. [Steam CGameID](https://partner.steamgames.com/doc/api/steam_api#CGameID) · [Earlier launch adapter observations](https://github.com/willfaust/madeira-dock/blob/main/docs/CLIENT_LAYOUTS.md)
+The pinned app manager’s launch call takes a regular `CGameID`, a launch option index, a source value and an argument string. The probe defaults to index zero. To test Factorio’s publisher-configured x64 Windows executable, prepare the sign-in package with `--launch-app-id 427520 --launch-option 1 --repeat-launch`. The launch report records `steam_launch_option_index`. Other library games use index zero. The source stays zero and the argument string stays empty. The completion event must match the returned handle, game ID and pinned result layout. [Steam CGameID](https://partner.steamgames.com/doc/api/steam_api#CGameID) · [Earlier launch adapter observations](https://github.com/willfaust/madeira-dock/blob/main/docs/CLIENT_LAYOUTS.md)
 
 Before Play, the launch probe reads the installed game’s dependency list from Steam. When Steam lists Common Redistributables (AppID `228980`), the probe asks Steam to download that shared component into the app-local library and waits for its own installed checkpoint. The eventual game launch still uses Steam’s normal checks. The report includes the prerequisite’s initial and final states and Steam’s response to the install request. [Valve Common Redistributables](https://partner.steamgames.com/doc/features/common_redist)
 
