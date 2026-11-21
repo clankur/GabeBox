@@ -198,8 +198,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
     startup_app_id = launch_app_id
-    if measure_sdl_frames and not (launch_app_id == 646570 and slay_sdl_host and repeat_launch):
-        raise ValueError('Frame measurement requires the hosted Slay repeat launch trial.')
+    hosted_profiles = {646570: slay_sdl_host, 413150: stardew_sdl_host, 975370: startup_sdl_host}
+    if measure_sdl_frames and not (repeat_launch and hosted_profiles.get(launch_app_id)):
+        raise ValueError('Frame measurement requires a repeat launch of an enabled SDL host profile.')
     if startup_sdl_host and launch_app_id is None:
         startup_app_id = 975370
         startup_snapshot = True
@@ -323,6 +324,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 if not (layout / 'steam-sdl-native-view.js').is_file():
                     raise ValueError('The native SDL presenter requires its library view script.')
                 helper += '\n    <script src="steam-sdl-native-view.js"></script>'
+                if measure_sdl_frames:
+                    (layout / 'fhd-measure.txt').touch()
             if measure_sdl_frames:
                 if not (layout / 'steam-sdl-timing.js').is_file():
                     raise ValueError('Use the SDK template containing the SDL frame timing script.')
@@ -418,7 +421,7 @@ def main():
     parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
                         help='enable the hosted Stardew Valley SDL profile with its built startup hook')
     parser.add_argument('--measure-sdl-frames', action='store_true',
-                        help='measure 30 seconds of presentation after an eight-second hosted Slay warmup')
+                        help='measure presented frames during a hosted game trial')
     parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
                         help='enable the hosted Slay the Spire profile with its built Java and SDL adapters')
     parser.add_argument('--install-before-launch', action='store_true',
