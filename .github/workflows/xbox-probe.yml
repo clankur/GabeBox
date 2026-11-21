@@ -36,15 +36,43 @@ jobs:
           $artifacts = Join-Path $work 'artifacts'
           New-Item -ItemType Directory -Path $layout, $artifacts | Out-Null
           Copy-Item -Recurse probe/Assets $layout
-          Copy-Item probe/Package.appxmanifest "$layout/AppxManifest.xml"
+          Copy-Item probe/web/* $layout
+
+          [xml]$manifest = Get-Content probe/Package.appxmanifest
+          $app = $manifest.Package.Applications.Application
+          $app.RemoveAttribute('Executable')
+          $app.RemoveAttribute('EntryPoint')
+          $app.SetAttribute('StartPage', 'index.html')
+          $ns = $manifest.DocumentElement.NamespaceURI
+          $extensions = $manifest.CreateElement('Extensions', $ns)
+          $extension = $manifest.CreateElement('Extension', $ns)
+          $extension.SetAttribute('Category', 'windows.activatableClass.inProcessServer')
+          $server = $manifest.CreateElement('InProcessServer', $ns)
+          $serverPath = $manifest.CreateElement('Path', $ns)
+          $serverPath.InnerText = 'ProbeNative.dll'
+          $class = $manifest.CreateElement('ActivatableClass', $ns)
+          $class.SetAttribute('ActivatableClassId', 'XboxProbe.Native.ProbeRunner')
+          $class.SetAttribute('ThreadingModel', 'both')
+          $server.AppendChild($serverPath) | Out-Null
+          $server.AppendChild($class) | Out-Null
+          $extension.AppendChild($server) | Out-Null
+          $extensions.AppendChild($extension) | Out-Null
+          $manifest.Package.AppendChild($extensions) | Out-Null
+          $manifest.Save("$layout/AppxManifest.xml")
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          & cl.exe /nologo /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DUNICODE /D_UNICODE `
-            "/I$sdk\Include\$sdkVersion\cppwinrt" "/Fo$work\bootstrap.obj" "/Fe$layout\probe.exe" `
-            probe/bootstrap.cpp $lib /link /APPCONTAINER /SUBSYSTEM:WINDOWS
+          $metadata = "$sdk\UnionMetadata\$sdkVersion\Windows.winmd"
+          $projection = Join-Path $work 'projection'
+          $winmd = "$layout/XboxProbe.Native.winmd"
+          & "$bin\midl.exe" /nologo /winrt /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
+            /out $work /winmd $winmd probe/XboxProbe.Native.idl
+          & "$bin\cppwinrt.exe" -input $winmd -reference $metadata -output $projection -include XboxProbe.Native -overwrite
+          & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DUNICODE /D_UNICODE `
+            "/I$projection" "/I$sdk\Include\$sdkVersion\cppwinrt" "/Fo$work\ProbeNative.obj" "/Fe$layout\ProbeNative.dll" `
+            probe/ProbeNative.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/ProbeNative.lib"
 
           $targets = @(
             @{ Source = 'child'; Extension = 'exe'; Flags = @('/entry:ChildEntry') },
@@ -68,7 +96,10 @@ jobs:
           $control.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Control')
           $control.Package.Properties.DisplayName = 'Packaged process startup control'
           $control.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process startup control')
+          $control.Package.RemoveChild($control.Package.Extensions) | Out-Null
           $control.Save("$controlLayout/AppxManifest.xml")
+          Remove-Item -LiteralPath "$controlLayout/ProbeNative.dll", "$controlLayout/XboxProbe.Native.winmd",
+            "$controlLayout/child.exe", "$controlLayout/child-process.dll"
 
           function Write-ProbePackage($packageLayout, $outputDir, $cert) {
             & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $packageLayout /of "$packageLayout/resources.pri"

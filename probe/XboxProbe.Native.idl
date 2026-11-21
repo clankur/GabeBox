@@ -1,0 +1,7 @@
+namespace XboxProbe.Native
+{
+    runtimeclass ProbeRunner
+    {
+        static String Run();
+    };
+}

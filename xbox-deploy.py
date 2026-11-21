@@ -203,6 +203,8 @@ def wait_for_probe(portal, name, version, manual, timeout):
             if report.endswith('\n') and report != last_report:
                 last_report = report
                 print(report, end='', flush=True)
+                if name == PROBE_CONTROL_NAME and re.search(r'^status=control-ready\s*$', report, re.MULTILINE):
+                    return
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
                     return
                 if re.search(r'^exit_code_matches=no\s*$', report, re.MULTILINE):
