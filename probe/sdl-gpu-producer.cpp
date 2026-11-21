@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <new>
+#include <type_traits>
 
 #include "SDL_stdinc.h"
 #include "SDL_loadso.h"
@@ -23,7 +24,7 @@ struct Slot {
     ID3D12GraphicsCommandList *list = nullptr;
     HANDLE named[3] = {};
     UINT64 submitted = 0;
-    ~Slot() {
+    void close() {
         for (HANDLE handle : named) if (handle) CloseHandle(handle);
         release(list); release(allocator); release(source); release(texture); release(ready); release(done);
     }
@@ -41,7 +42,7 @@ struct Producer {
     bool failed = false;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     int width = 0, height = 0;
-    ~Producer() {
+    void close() {
         if (generation) {
             InterlockedExchange(&box->gpu_active, 0);
             InterlockedExchange(&box->accepted_generation, 0);
@@ -52,10 +53,14 @@ struct Producer {
         for (auto &s : slots)
             if (s.submitted && s.ready->GetCompletedValue() < s.submitted)
                 s.ready->SetEventOnCompletion(s.submitted, nullptr);
+        for (auto &s : slots) s.close();
         if (box) UnmapViewOfFile(box);
         release(mesa.queue); release(mesa.device);
     }
 };
+// SDL's Windows DLL deliberately omits the C++ runtime. Keep heap ownership
+// in SDL, including array cleanup, without compiler-generated deleting destructors.
+static_assert(std::is_trivially_destructible<Producer>::value, "Producer must only own explicitly released state");
 static volatile LONG generation_counter;
 
 bool fail(Producer *p, const char *stage, HRESULT code) {
@@ -216,7 +221,11 @@ void transition(ID3D12GraphicsCommandList *list, ID3D12Resource *r, D3D12_RESOUR
 } // namespace
 
 extern "C" void XboxSdlDestroyGpu(void *state) {
-    if (state) { static_cast<Producer *>(state)->~Producer(); SDL_free(state); }
+    if (!state) return;
+    auto *p = static_cast<Producer *>(state);
+    p->close();
+    p->~Producer();
+    SDL_free(p);
 }
 
 extern "C" void *XboxSdlCreateGpu(void *egl, void *display, void *context, void *flush, unsigned color, int width, int height, int *retry) {
