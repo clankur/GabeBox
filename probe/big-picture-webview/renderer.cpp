@@ -173,8 +173,11 @@ struct View : implements<View, IFrameworkView> {
                 auto browser = view.CoreWebView2();
                 const bool presented = view == controller ? showOwner : showPopup;
                 if (auto memory = browser.try_as<ICoreWebView2_19>()) {
-                    memory.MemoryUsageTargetLevel((presented || (warming && view == controller))
-                        ? CoreWebView2MemoryUsageTargetLevel::Normal : CoreWebView2MemoryUsageTargetLevel::Low);
+                    // A detached warmup still runs Valve scripts. Low asks
+                    // Edge to release unused caches before the Xbox view
+                    // switch reduces our foreground allocation from 5 to 1 GiB.
+                    memory.MemoryUsageTargetLevel(presented ? CoreWebView2MemoryUsageTargetLevel::Normal
+                                                           : CoreWebView2MemoryUsageTargetLevel::Low);
                 }
                 if (runBrowser) {
                     if (browser.IsSuspended()) browser.Resume();

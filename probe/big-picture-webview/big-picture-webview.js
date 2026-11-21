@@ -26,6 +26,7 @@
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
         var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
         var warming = false, warmStarted = 0, warmProgress = 0, warmSwitch = false;
+        var nextChargeCheck = 0, heldForMemory = false, belowBudgetSince = 0;
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -49,6 +50,7 @@
                     memoryRequest = (granted ? "granted" : "declined") + " requested_bytes=" + target +
                         (Number.isSafeInteger(currentLimit) && currentLimit > 0 ? " current_bytes=" + currentLimit : "");
                 }
+                return Number.isSafeInteger(usage) && usage > 0 ? usage : undefined;
             } catch (_) {}
         }
         var resolveReady, rejectReady, readinessTimer, settled = false, failed = false;
@@ -130,6 +132,26 @@
         }
         function handoffWarmup(reason) {
             if (warmSwitch || failed || !viewId) return;
+            var now = Date.now();
+            if (now < nextChargeCheck) return;
+            nextChargeCheck = now + 500;
+            // Xbox gives the secondary Steam view 1 GiB. A time-based switch
+            // while Chromium compiled Valve's shell was observed at 2.28 GiB.
+            // Keep the QR view's allocation until the native charge settles.
+            var usage = sampleMemory("warm_candidate");
+            if (usage > 992 * 1024 * 1024 || (heldForMemory && !usage)) {
+                belowBudgetSince = 0;
+                if (!heldForMemory) {
+                    heldForMemory = true;
+                    warmReport = "waiting-for-memory " + reason;
+                    record(last, true);
+                }
+                return;
+            }
+            if (heldForMemory) {
+                if (!belowBudgetSince) belowBudgetSince = now;
+                if (now - belowBudgetSince < 1500) return;
+            }
             warmSwitch = true;
             warmReport = reason + " elapsed_ms=" + Math.max(0, Date.now() - warmStarted);
             sampleMemory("warm_handoff");
@@ -417,6 +439,10 @@
             } catch (error) { fail(error); }
         }
         if (broker) readinessTimer = setTimeout(function () {
+            if (heldForMemory && !warmSwitch) {
+                sampleMemory("warm_timeout");
+                return fail(new Error("Steam did not fit the Xbox foreground memory budget"), "warmup-memory-timeout");
+            }
             fail(new Error("Timed out waiting for Valve's gamepad window"), "gamepad-timeout:" + (lastNative || "starting"));
         }, 120000);
         sampleMemory("startup");

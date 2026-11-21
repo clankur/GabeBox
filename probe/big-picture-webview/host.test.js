@@ -23,12 +23,12 @@ function fixture({activationError = false, primary = false, warm = false, expect
         close() { stage = "closed"; }
     };
     renderer.openForAccount = id => { owners.push(id); if (warm) warmOpens++; else opens++; stage = "composition"; };
-    const window = {};
+    const window = {}, memory = {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
+        expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }};
     vm.runInNewContext(source, {
         Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
         Windows: {
-            System: {MemoryManager: {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
-                expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }}},
+            System: {MemoryManager: memory},
             Foundation: {GuidHelper: {createNewGuid: () => "test"}},
             Storage: {
                 ApplicationData: {current: {localFolder: {createFileAsync: openReport, tryGetItemAsync: findRequest}}},
@@ -56,7 +56,7 @@ function fixture({activationError = false, primary = false, warm = false, expect
             stage = nextStage; poll(); await drain();
         },
         expire() { timeout(); },
-        elapse(ms) { now += ms; }, warmOpens: () => warmOpens, memoryRequests,
+        elapse(ms) { now += ms; }, warmOpens: () => warmOpens, memoryRequests, memory,
         shell: window.steamBigPictureHost, opens: () => opens, owners, switches, incoming, reports, replies
     };
 }
@@ -122,6 +122,50 @@ test("observed portal progress extends warmup only up to its measured hard limit
     assert.match(app.reports.at(-1), /warmup=time-limit elapsed_ms=32100/);
     await app.advance("gamepad-ready");
     await start;
+});
+
+test("a timed-out hidden layout keeps the Xbox allocation through a compilation spike", async () => {
+    const app = fixture({warm: true});
+    const started = app.start({});
+    await drain();
+    app.memory.appMemoryUsage = 2447257600; // Actual Xbox charge at the .20 fallback.
+    app.elapse(33000);
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(app.switches, []);
+    assert.match(app.reports.at(-1), /warmup=waiting-for-memory time-limit/);
+    app.elapse(1000);
+    await app.advance("warmup-gamepad-layout");
+    assert.deepEqual(app.switches, []);
+    app.memory.appMemoryUsage = 960 * 1024 * 1024;
+    app.elapse(500);
+    await app.advance("warmup-gamepad-layout");
+    app.memory.appMemoryUsage = 1200 * 1024 * 1024;
+    app.elapse(1000);
+    await app.advance("warmup-gamepad-layout");
+    app.memory.appMemoryUsage = 944 * 1024 * 1024;
+    app.elapse(500);
+    await app.advance("warmup-gamepad-layout");
+    app.elapse(1000);
+    await app.advance("warmup-gamepad-layout");
+    assert.deepEqual(app.switches, []);
+    app.elapse(500);
+    await app.advance("warmup-gamepad-layout");
+    assert.deepEqual(app.switches, [[10,3]]);
+    await app.advance("gamepad-ready");
+    await started;
+});
+
+test("a renderer which remains over the Xbox budget releases its view at the startup deadline", async () => {
+    const app = fixture({warm: true});
+    const failed = assert.rejects(app.start({}), /warmup-memory-timeout/);
+    await drain();
+    app.memory.appMemoryUsage = 2447257600;
+    app.elapse(33000);
+    await app.advance("warmup-gamepad-layout");
+    app.expire();
+    await failed;
+    assert.deepEqual(app.switches, []);
+    assert.match(app.reports.at(-1), /memory_warm_timeout_usage_bytes=2447257600/);
 });
 
 test("warmup errors leave QR in foreground and unsigned smoke uses ordinary activation", async () => {
