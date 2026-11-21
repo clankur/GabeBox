@@ -23,6 +23,7 @@ internal static class StartupHook
             Environment.SetEnvironmentVariable("SDL_VIDEO_GL_DRIVER", Path.Combine(package, "opengl32.dll"));
             Environment.SetEnvironmentVariable("SDL_VIDEO_EGL_DRIVER", Path.Combine(package, "libEGL.dll"));
             Environment.SetEnvironmentVariable("SDL_VIDEO_WIN_D3DCOMPILER", "none");
+            Environment.SetEnvironmentVariable("SDL_JOYSTICK_RAWINPUT", "0");
             Environment.SetEnvironmentVariable("XBOX_SDL_SURFACELESS", "1");
         }
 
