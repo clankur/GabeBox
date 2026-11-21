@@ -1544,6 +1544,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     } rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
       gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
       frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"},
+      sdlGamepadHint{L"XBOX_SDL_HOST_GAMEPAD"},
       managedHook{L"DOTNET_STARTUP_HOOKS"}, managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHeap{L"DOTNET_GCHeapHardLimit"};
     std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
     winrt::handle slayProcess;
@@ -1660,7 +1661,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 co_return winrt::hstring(report + L"steam_sdl_host=mailbox-error\r\nsteam_sdl_host_hresult=" +
                     Hex(error.code()) + L"\r\n");
             }
-            if (!sdlHostHint.Set(mailbox.c_str())) {
+            if (!sdlHostHint.Set(mailbox.c_str()) || ((hostedStardew || hostedSlay) && !sdlGamepadHint.Set(L"1"))) {
                 co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
             }
         }
@@ -1958,6 +1959,17 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     std::uint32_t SendSteamSdlInput(std::uint32_t pointer, std::uint32_t keys) {
         std::lock_guard lock(steamSdlMutex);
         return steamSdlSurface ? steamSdlSurface->Input(pointer, keys) : 0;
+    }
+
+    std::uint32_t SendSteamSdlGamepad(std::uint32_t buttons, std::int32_t leftX, std::int32_t leftY,
+            std::int32_t rightX, std::int32_t rightY, std::int32_t leftTrigger, std::int32_t rightTrigger) {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->Gamepad(buttons, {leftX, leftY, rightX, rightY, leftTrigger, rightTrigger}) : 0;
+    }
+
+    std::uint32_t SteamSdlGamepadAck() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->GamepadAck() : 0;
     }
 
     bool SteamSdlRunning() {

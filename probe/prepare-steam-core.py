@@ -226,7 +226,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             html_path = layout / 'steam-signin.html'
             html = html_path.read_text(encoding='utf-8')
             original = '<script src="steam-signin.js"></script>'
-            if not (layout / 'steam-sdl-host.js').is_file() or html.count(original) != 1:
+            if not all((layout / name).is_file() for name in ('steam-sdl-host.js', 'steam-sdl-gamepad.js')) or html.count(original) != 1:
                 raise ValueError('Use the SDK template with the live SDL host.')
             profiles = []
             if startup_sdl_host:
@@ -236,7 +236,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             if slay_sdl_host:
                 profiles.append('646570')
             script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
-            html_path.write_text(html.replace(original, script + '\n    ' + original), encoding='utf-8')
+            helper = '<script src="steam-sdl-gamepad.js"></script>'
+            html_path.write_text(html.replace(original, helper + '\n    ' + script + '\n    ' + original), encoding='utf-8')
         if startup_sdl_host:
             (layout / 'steam-sdl-host-975370.txt').touch()
         if stardew_sdl_host:

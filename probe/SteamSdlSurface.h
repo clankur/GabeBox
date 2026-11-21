@@ -52,6 +52,21 @@ public:
         return static_cast<std::uint32_t>(InterlockedIncrement(&view_->input_serial));
     }
 
+    std::uint32_t Gamepad(std::uint32_t buttons, std::array<std::int32_t, SDL_HOST_PAD_AXES> const& axes) const {
+        if (!Alive() || SdlHostLoad(&view_->quit)) return 0;
+        auto &pad = view_->gamepad;
+        InterlockedIncrement(&pad.serial);
+        InterlockedExchange(&pad.buttons, buttons & (SDL_HOST_PAD_CONNECTED | ((1u << SDL_HOST_PAD_BUTTONS) - 1)));
+        for (size_t i = 0; i < axes.size(); ++i) {
+            InterlockedExchange(&pad.axes[i], std::clamp(axes[i], -32768, 32767));
+        }
+        return static_cast<std::uint32_t>(InterlockedIncrement(&pad.serial));
+    }
+
+    std::uint32_t GamepadAck() const {
+        return Alive() ? static_cast<std::uint32_t>(SdlHostLoad(&view_->gamepad.ack)) : 0;
+    }
+
     winrt::Windows::Storage::Streams::IBuffer Frame() const {
         if (!Alive() || InterlockedCompareExchange(&view_->frame_state, SDL_HOST_READING, SDL_HOST_READY) != SDL_HOST_READY) {
             return nullptr;

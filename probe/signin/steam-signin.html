@@ -47,16 +47,16 @@
             </div>
         </section>
         <section id="sdl-game" aria-labelledby="sdl-game-title" hidden>
-            <header>
-                <h2 id="sdl-game-title"></h2>
-                <button id="sdl-exit">Quit to library</button>
-            </header>
+            <h2 id="sdl-game-title" hidden></h2>
             <p id="sdl-status" role="status"></p>
             <div id="sdl-picture">
                 <canvas id="sdl-frame" width="1" height="1" tabindex="0" aria-label="Game"></canvas>
                 <span id="sdl-pointer" aria-hidden="true"></span>
             </div>
-            <p>Move the pointer with the controller and press A to click.</p>
+            <div id="sdl-menu" role="dialog" aria-label="Game controls" hidden>
+                <button id="sdl-resume">Resume</button>
+                <button id="sdl-exit">Quit to library</button>
+            </div>
         </section>
     </main>
     <script src="qrcode.js"></script>

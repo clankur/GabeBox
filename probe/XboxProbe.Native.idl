@@ -19,6 +19,9 @@ namespace XboxProbe.Native
             Windows.Storage.StorageFile file, String prefix);
         static Windows.Storage.Streams.IBuffer SteamSdlFrame();
         static UInt32 SendSteamSdlInput(UInt32 pointer, UInt32 keys);
+        static UInt32 SendSteamSdlGamepad(UInt32 buttons, Int32 leftX, Int32 leftY, Int32 rightX, Int32 rightY,
+            Int32 leftTrigger, Int32 rightTrigger);
+        static UInt32 SteamSdlGamepadAck();
         static Boolean SteamSdlRunning();
         static void QuitSteamSdl();
         static Windows.Foundation.IAsyncOperation<String> AuthorizeXcomDos(Windows.Storage.StorageFile file, String prefix);
