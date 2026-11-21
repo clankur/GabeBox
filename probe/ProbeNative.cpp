@@ -2186,6 +2186,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::DosBox);
     }
 
+    winrt::hstring SteamSessionSteamId() {
+        std::lock_guard lock(steamSessionMutex);
+        if (!liveSteamSession || !liveSteamSession->OwnsSession()) return {};
+        return winrt::to_hstring(liveSteamSession->accountId);
+    }
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app,
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::SteamPlay);
