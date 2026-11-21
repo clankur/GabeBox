@@ -13,8 +13,22 @@ def replace_once(source, old, new):
 
 def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
-    for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h'):
+    for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h',
+                     'sdl-gpu-producer.cpp', 'sdl-gpu-protocol.h', 'mesa-glinterop.h'):
         shutil.copyfile(Path(__file__).with_name(filename), offscreen / filename)
+
+    cmake = tree / 'CMakeLists.txt'
+    source = cmake.read_text(encoding='utf-8')
+    old = '    list(APPEND SOURCE_FILES ${VIDEO_OFFSCREEN_SOURCES})'
+    source = replace_once(source, old, old + '''
+    if(WIN32)
+      set(SDL_GPU_SOURCE ${SDL2_SOURCE_DIR}/src/video/offscreen/sdl-gpu-producer.cpp)
+      list(APPEND SOURCE_FILES ${SDL_GPU_SOURCE})
+      if(MSVC)
+        set_source_files_properties(${SDL_GPU_SOURCE} PROPERTIES COMPILE_FLAGS "/EHs-c- /GR-")
+      endif()
+    endif()''')
+    cmake.write_text(source, encoding='utf-8')
 
     video = offscreen / 'SDL_offscreenvideo.c'
     source = video.read_text(encoding='utf-8')
@@ -77,6 +91,7 @@ def add_surfaceless(tree):
     unsigned xbox_color, xbox_depth_stencil;
     void *xbox_get_integer, *xbox_pixel_store, *xbox_read_pixels;
     void *xbox_bind_framebuffer, *xbox_bind_buffer;
+    void *xbox_gpu;
     SDL_bool xbox_pack_invert;
     unsigned xbox_readback_samples;
     Uint64 xbox_readback_ticks;
@@ -194,6 +209,12 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
 ''' + old)
     old = '#include "../SDL_egl_c.h"'
     source = replace_once(source, old, old + '\n#include "SDL_hints.h"')
+    old = '        SDL_EGL_DestroySurface(_this, offscreen_window->egl_surface);'
+    source = replace_once(source, old, '''#ifdef _WIN32
+        extern void XboxSdlDestroyGpu(void *state);
+        XboxSdlDestroyGpu(offscreen_window->xbox_gpu);
+#endif
+''' + old)
     window.write_text(source, encoding='utf-8')
 
 

@@ -12,6 +12,9 @@ on:
       - 'probe/sdl-host-protocol.h'
       - 'probe/sdl-host-runtime.h'
       - 'probe/sdl-surfaceless-framebuffer.h'
+      - 'probe/sdl-gpu-producer.cpp'
+      - 'probe/sdl-gpu-protocol.h'
+      - 'probe/mesa-glinterop.h'
       - 'probe/sdl-gl-trace.h'
       - 'probe/sdl-offscreen-cursor.h'
   workflow_dispatch:
