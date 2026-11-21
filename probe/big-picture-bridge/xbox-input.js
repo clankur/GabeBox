@@ -32,8 +32,14 @@ function installXboxInput(client, gamepads) {
             state = {name: pad.id, down: new Set(), x: 0, y: 0, guide: false};
             states.set(pad.index, state);
         }
+        const view = !!pad.buttons[8]?.pressed, menu = !!pad.buttons[9]?.pressed;
+        const menuChord = view && menu;
+        state.menuChord = menuChord || (state.menuChord && (view || menu));
         const next = new Set();
-        buttonCodes.forEach((code, index) => { if (pad.buttons[index]?.pressed) next.add(code); });
+        buttonCodes.forEach((code, index) => {
+            if (state.menuChord && (index === 8 || index === 9)) return;
+            if (pad.buttons[index]?.pressed) next.add(code);
+        });
         // Valve's navigation map uses LEFTSTICK_* for UI directions. The
         // D-pad and left stick share those actions, including overlapping holds.
         padDirections(pad, state.down).forEach((pressed, index) => { if (pressed) next.add(20 + index); });
@@ -42,7 +48,7 @@ function installXboxInput(client, gamepads) {
         state.down = next;
         // Xbox reserves its Guide button. Use the same View + Menu chord as
         // the game presenter to open Valve's menu inside the Steam window.
-        const guide = !!pad.buttons[16]?.pressed || (!!pad.buttons[8]?.pressed && !!pad.buttons[9]?.pressed);
+        const guide = !!pad.buttons[16]?.pressed || menuChord;
         if (guide && !state.guide) dispatch(system, {eKey: 0, nControllerIndex: pad.index});
         state.guide = guide;
         const x = pad.axes[0] || 0, y = pad.axes[1] || 0;

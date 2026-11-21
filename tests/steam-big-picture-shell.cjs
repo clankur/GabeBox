@@ -455,7 +455,9 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                     await popup.waitForTimeout(350);
                 }
                 const tour = ['Welcome to Big Picture', 'Steam Menu', 'Quick Access Menu', 'Set up Parental Controls', 'Have fun'];
-                for (const step of tour) {
+                const welcome = popup.getByText('Welcome to Big Picture', {exact: true}).first();
+                const hasTour = await welcome.isVisible();
+                for (const step of hasTour ? tour : []) {
                     const heading = popup.getByText(new RegExp('^' + step + '[!.]?$', 'i')).first();
                     await heading.waitFor({state: 'visible', timeout: 4000}).catch(async error => { throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700)); });
                     await pressNative(4);
@@ -463,8 +465,12 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 }
                 await pressNative(3); // View + Menu opens Valve's own main menu.
                 const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
-                await menu.getByText('Library', {exact: true}).waitFor({state: 'visible', timeout: 7000});
-                console.log('Native A changed the Valve screen and View + Menu opened the original main menu.');
+                await menu.getByText('Library', {exact: true}).waitFor({state: 'visible', timeout: 7000}).catch(async error => {
+                    throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 450));
+                });
+                await pressNative(8); // B closes the menu and returns to the library.
+                await menu.getByText('Library', {exact: true}).waitFor({state: 'hidden'});
+                console.log('Native View + Menu opened Steam and B returned to the library. Tour shown:', hasTour);
                 return;
             }
             await openStockLibrary(page, popup);

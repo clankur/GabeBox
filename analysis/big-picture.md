@@ -40,7 +40,31 @@ python3 xbox-deploy.py report --big-picture-activation --version 1.0.0.3
 python3 xbox-deploy.py report --big-picture-webview --version 1.0.0.3
 ```
 
-To test after QR sign-in or session restore on a development console, `probe/prepare-big-picture-library.py` takes the signed regular FHD 1.0.230.0 APPX, the Windows-built renderer directory and a new layout directory. Supply an upgrade `--version`. Both builders accept an offline `--archive-cache`. The integrated package preserves the Steam Core identity, installed games, game adapters and FHD presenter. It routes the authenticated library and Play requests to the existing Steam Core backend and records startup in `report --steam-core-webview --version VERSION`. The complete shell still depends on Valve's native services.
+### Build the compatibility layer for the signed-in FHD app
+
+The Xbox package supplies the Steam client calls that Valve's JavaScript makes after QR sign-in. It loads the original UI from Valve release `1794536281`. The window and display bindings use the Xbox WebView2 composition controller. The SteamID and owned games come from the live Steam session. Play uses the same entitlement check and native presenter as the regular shared-FHD build. [Adapter source](../probe/big-picture-bridge) · [Signed-in host](../probe/signin/steam-big-picture-broker.js)
+
+| Valve interface | Xbox implementation |
+| --- | --- |
+| User and Apps | Active QR session, owned app overviews serialized with Valve's protobuf, and default launch of an installed game. A session change revokes the old catalog. |
+| UI, Browser and Window | Gamepad window request, WebView2 popup attachment, foreground focus, primary display bounds and scaling. |
+| Input and System.UI | Standard Gamepad API buttons and axes, direction changes, and releases on disconnect. Guide input depends on whether Xbox exposes that button to the app. |
+| System | Reads the host's retail-demo and assigned-access settings for restricted presentation. If neither setting can be read, the adapter requests restricted presentation. |
+| URL and Storage | Resolves Valve's pinned URL definitions and public CDN roots, dispatches supported local screen-navigation routes, and stores supported UI preferences under the current account. |
+
+The integrated builder accepts the signed regular FHD `1.0.230.0` APPX, a Windows-built WebView2 renderer and a Steam Core native artifact with the session accessor. The checksum below identifies the native session artifact from the linked build. A new native build requires its own checksum. Offline staging also needs the pinned `public_all` archive for Valve's URL catalog. [Native session build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44945918130)
+
+```sh
+python3 probe/prepare-big-picture-library.py /path/to/regular/PackagedProcessProbe-x64.appx \
+  /path/to/xbox-big-picture-webview-x64 ./integrated-layout --version 1.0.230.3 \
+  --session-artifact /path/to/xbox-steam-core-template \
+  --session-checksum 569d1fe08b5c4182394f3c15f05a6f9ec8632f167ba1b5af0517a7aff73466a7 \
+  --archive-cache /path/to/valve-archives
+bash probe/package.sh --layout ./integrated-layout ./integrated-signed
+python3 xbox-deploy.py report --steam-core-webview --version 1.0.230.3
+```
+
+The integrated package uses the existing Steam Core identity and its installed games. The report records `gamepad-ready` when visible content appears in Valve's gamepad window. A loaded document or a broker launch test alone does not establish this.
 
 ### Test the Windows Steam bootstrap
 
@@ -68,6 +92,8 @@ The standalone WebView2 package `1.0.0.3` ran on the same Series X. The Microsof
 
 The integrated `1.0.230.1` package restored the existing QR-authenticated session, verified the Steam library, found 134 visible games and handed control to the WebView2 host. On that console the original Valve page reached `document-loaded` and raised `Cannot read properties of undefined (reading 'IsSteamInTournamentMode')`. The adapter implements app overviews and game launch. The shell's native System interface and additional services described below remain unresolved. The host returned to a startup error message. Valve's home, library, menus, and Play button were unavailable. [Windows build for the signed-in test](https://github.com/clankur/steam-xbox-devmode/actions/runs/44943721428)
 
+On the same Series X, integrated build `1.0.230.3` restored the QR session, served 134 owned games to Valve and reported `gamepad-window-created`. The player heard Steam's boot sound. The TV capture showed Valve's own React error view naming `System.RegisterForBatteryStateChanges`. The Home and Library views had not appeared at this point. [Windows build for the popup mapping](https://github.com/clankur/steam-xbox-devmode/actions/runs/44947202496)
+
 In a separate check on the same console, Steam Core `1.0.230.0` restored the Steam session. All three games opened from their **Play** buttons in that library. A screen capture confirmed each title screen. Each test game process was closed through Device Portal at its title screen and the app returned to the library. The native presenter recorded a 1920×1080 source for all three. Its built-in 30-second sample begins five seconds after the first distinct frame, so it can include loading.
 
 | Game (Steam AppID) | Distinct frames | Sample seconds | Average FPS |
@@ -87,6 +113,22 @@ After testing the Valve shell, the console received the regular FHD payload as a
 | Stardew Valley | 1920×1080 | 1,798 | 30.001369 | 59.93 |
 
 ## Steam Machine experience on Series X
+
+### Background Steam and the running game
+
+With an authenticated fixture in offline Chromium, Valve's own game list accepted a running AppID, navigated to `/app/42/overlay/controller` and displayed Resume game, Controller settings, View game details and Exit game. Activating the original Resume button issued the Xbox foreground request for AppID 42. When the host reported the process had exited, Valve cleared its running-game state and returned to the previous screen. This test uses Valve's pinned client UI with a simulated Xbox host. [Original-shell test](../tests/steam-big-picture-shell.cjs)
+
+Valve's shared context owns the gamepad window, its main menu and Quick Access. On the Xbox compatibility branch, the native presenter takes foreground focus when a hosted game produces its first frame. The WebView2 host keeps the same Valve windows alive and asks WebView2 to suspend hidden content. Pressing **View + Menu** in a hosted game requests the running game's Valve controls. The bridge publishes the confirmed AppID in Valve's app-overview protobuf and calls the registered `open/apprunningcontrols` handler. Valve's Resume command switches focus back to that game's existing presenter. The Xbox host supports one active hosted game. To switch titles, exit the current game using Valve's controls and select the next title after the game has exited. These input and focus transitions require verification on each console build. [Window and game lifecycle](../probe/big-picture-webview/big-picture-webview.js) · [Steam navigation](../probe/big-picture-bridge/xbox-url.js) · [Valve's overlay documentation](https://partner.steamgames.com/doc/features/overlay)
+
+On Series X test build `1.0.230.4`, a diagnostic requested launches through Valve's `SteamClient.Apps.RunGame` interface using the restored Steam session. Dwarf Fortress reached its title screen at 1920×1080 and delivered 1,767 distinct frames in 30.001 seconds (58.90 FPS). The physical stick and A generated SDL events, but the tester saw no movement or menu response. The updated FHD presenter draws the emulated pointer in the game view for this title. Slay the Spire opened a native frame and then exited. Stardew Valley reached the ConcernedApe splash after changing Steam Core's Dev Home classification from App to Game, then returned to Dev Home. Neither title produced a valid 30-second sample on that build. These checks exercised the launch API. The original on-screen Play button and a round trip through the running-game menu require separate testing. [App and game resource allocations](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/system-resource-allocation)
+
+Series X build `1.0.230.6` opened Dwarf Fortress and Stardew Valley through Valve’s launch API. At their title screens, the native presenter recorded 1,783 and 1,748 distinct 1920×1080 frames over 30 seconds, respectively (59.43 and 58.27 FPS). Dwarf Fortress displayed the new virtual cursor. Both games returned to Valve’s Welcome screen when their test processes closed. A physical controller response with the visible cursor and a round trip through the in-game menu still need confirmation. Slay the Spire displayed one frame and exited before its title screen.
+
+On `1.0.230.7`, a fresh Series X launch supplied 134 owned titles to Valve and reached `setup-ready`. The app host and all six WebView2 processes then exited before the Library appeared. The app measured a 5 GiB startup allocation. Device Portal had no matching crash dump or Windows Error Reporting entry. The last recorded renderer warning concerned Steam’s audio feature query. These observations establish the exit but do not identify its cause.
+
+On `1.0.230.9`, the console showed Valve’s language setup and Steam requested a client restart. The next native view creation returned `0x800700AA` (resource in use). The renderer now restarts the signed Steam document in the existing Xbox view. It also forwards Xbox pointer coordinates into the visible WebView2 composition surface and reads physical controllers through Windows.Gaming.Input.
+
+On `1.0.230.10`, Dev Home confirmed the Game classification and Steam Core measured a 5 GiB startup allowance. The signed-in broker returned 134 titles. The TV flashed white and the host’s 45-second readiness timer expired at `app-initialized`. The host then displayed its retry message. In offline Chromium the same branch opened Valve’s All Games tab and its Play control without opening the Steam menu first. The console run did not reach that screen.
 
 The existing Xbox QR screen handles sign-in and restores a remembered session. After authentication, the product entry point is Valve's full Big Picture shell. Valve owns home, library, search, game details, Play, downloads, controller settings, Steam menus, store, friends and the in-game overlay. Returning from a game must restore focus to Valve's interface. The Xbox backend can perform the existing entitlement checks, download, launch and fullscreen presentation underneath those controls.
 
