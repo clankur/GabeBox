@@ -15,6 +15,8 @@
     let updating;
     let refreshAgain = false;
     let activeApp = 0;
+    let controlsApp = 0;
+    let focusStore;
     // Capture the release's serializer without replacing its entry, routes or modules.
     (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => { runtime = require; }]);
 
@@ -23,6 +25,8 @@
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
             activeApp = data.appId;
+            controlsApp = data.overlay ? activeApp : 0;
+            if (controlsApp && !focusStore) attachRunningGameFocus();
             if (changed) refresh().catch(error => console.error('Steam library unavailable', error.message));
             showGameOverlay(data.overlay ? activeApp : 0);
             return;
@@ -56,6 +60,22 @@
 
     function validId(id) {
         return Number.isInteger(id) && id > 0 && id <= 0xffffff;
+    }
+
+    function attachRunningGameFocus() {
+        const store = runtime?.(5757).oy;
+        if (!store || typeof store.SetRunningApp !== 'function') return;
+        const original = store.SetRunningApp;
+        // The release invokes this selection command for its Resume button. It
+        // also raises a desktop HWND when an injected overlay exists. Xbox's
+        // single presenter needs the equivalent ApplicationView switch.
+        Object.defineProperty(store, 'SetRunningApp', {configurable: true, value: function (appId) {
+            const result = original.call(this, appId);
+            if (controlsApp === appId && !store.WindowStore.GetOverlayInstances(appId).length)
+                client.Apps.RaiseWindowForGame(String(appId)).catch(error => console.error('Steam game focus unavailable', error.message));
+            return result;
+        }});
+        focusStore = store;
     }
 
     function refresh() {

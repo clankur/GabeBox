@@ -84,6 +84,22 @@ test("an optional script failure is recorded while Valve continues opening its g
     assert.doesNotMatch(report, /example.com/);
 });
 
+test("Valve can restart its foreground client after setup and retain the signed-in broker", async () => {
+    const app = fixture();
+    let failures = 0;
+    const ready = app.start({session: async () => ({steamId: "76561198000000000"})}, () => failures++);
+    await drain();
+    await app.advance("setup-ready");
+    await ready;
+    app.incoming.push(JSON.stringify({id: 7, method: "restart-client"}));
+    await app.advance("setup-ready");
+    assert.deepEqual(app.replies.at(-1), {id: 7, result: "restart"});
+    assert.equal(app.opens(), 2);
+    assert.equal(failures, 0);
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /status=gamepad-ready/);
+});
+
 test("timeout retains the first script failure and last native milestone", async () => {
     const app = fixture();
     const deadline = assert.rejects(app.start({}), /gamepad-timeout:gamepad-window-created/);
