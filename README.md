@@ -1,46 +1,42 @@
-# Valve Steam client on Xbox Series X Developer Mode
+# Steam on Xbox Series X Developer Mode
 
-**Result, 21 November 2026.** We found no buildable native Xbox port of Valve’s desktop Steam client in the public materials examined. The Windows client already has an x64 executable. Its operating-system dependencies, Steam’s closed client implementation, and the execution environment for downloaded PC games are the obstacles to an installable port. The repository contains the reproducible audit and a separate Xbox diagnostic. A native Steam client package and on-console gameplay remain unverified.
+This project tests Steam sign-in, owned-game downloads, and local game launches on an Xbox Series X in Developer Mode. `main` contains the signed Xbox diagnostic and Steam core loader probe. The interactive Steam library and X-COM runtime were tested from feature branches. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 
-## What REA measured
+## Setup
 
-We obtained Valve’s Windows x64 client manifest (version `1794536281`), downloaded three of the named archives, matched the byte counts and SHA-256 hashes in the manifest, and inspected five actual client components with REA 6.10.1. The Windows installer was audited separately because its architecture differs from the client that it installs. [Valve client manifest](https://client-update.akamai.steamstatic.com/steam_client_win64) · [Pinned archives and hashes](analysis/valve-release.json) · [Per-file results](analysis/client-imports.json)
+You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on the console, and Xbox Device Portal enabled. Run the commands from the repository root on a computer that can reach the console. The deployment CLI requires Python 3.9 or later.
 
-| Component | Architecture | Selected observed dependencies | What a port would have to investigate |
-| --- | --- | --- | --- |
-| `steam.exe` | x64 | `CreateProcessW`, `CreateWindowExW` | Starting helpers and creating desktop windows |
-| `steamwebhelper.exe` | x64 | `libcef.dll` functions including `cef_initialize` and `cef_execute_process` | Hosting Chromium and its process model for Steam’s interface |
-| `steamclient64.dll` | x64 | `CreateProcessW`, `OpenSCManagerW`, `StartServiceW`, `ShellExecuteExW` | Process launch and integration with Windows services |
-| `SteamUI.dll` | x64 | `RegisterClassExW`, `OpenSCManagerW`, `StartServiceW` | Desktop UI and service interactions |
-| `SteamService.exe` | x86 | `CreateServiceW`, `StartServiceCtrlDispatcherW` | A separately shipped 32-bit Windows service |
+1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username.
+2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate presented by Device Portal in your browser, then set `XBOX_PORTAL_CERT_SHA256` in `.env`. The CLI prompts for your Device Portal password.
+3. Download the `xbox-probe-windows-sdk` artifact from a successful **Build Xbox probe** run for the revision you want to test. Verify its checksums and deploy the signed APPX. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml)
 
-An import establishes a binary dependency. It cannot tell us whether Steam exercises a particular code path during login or whether Valve could remove that dependency in an Xbox build. The measured x86 service alone does not establish a launch failure. [Installer-specific evidence](analysis/REPORT.md)
+   ```sh
+   (cd /path/to/artifact && shasum -a 256 -c SHA256SUMS)
+   python3 xbox-deploy.py deploy /path/to/artifact/PackagedProcessProbe-x64.appx --test-probe
+   ```
 
-## What would be required to ship and play
+   `exit_code_matches=yes` confirms the bundled helper ran. If Device Portal requests a signing certificate, rerun deployment with `--certificate` pointing to the artifact’s `PackagedProcessProbe.cer`. [Probe setup and report fields](probe/README.md)
 
-1. **A build of Valve’s client for Xbox.** REA exposes binary structure and can produce pseudocode with an analysis backend. The public inputs we found are compiled releases. The public Steamworks SDK is for software integrating with Steam and depends on a running Steam client. We found no public Valve client build project or Xbox target. [REA capabilities](https://github.com/morluto/rea) · [Valve Steamworks API](https://partner.steamgames.com/doc/api/steam_api)
-2. **A supported Xbox application and process model.** Microsoft documents a distinct API surface for Xbox game development. A Steam port would need implementations for its windowing, helper processes, updates, service-dependent operations and game launching, plus an Xbox package identity. Packaging the Windows files supplies none of these adaptations. [Xbox GDK overview](https://learn.microsoft.com/en-us/gaming/gdk/docs/gdk-dev/intro/introduction) · [Microsoft application process models](https://learn.microsoft.com/en-us/windows/apps/get-started/intro-pack-dep-proc)
-3. **Local PC game compatibility.** Even an Xbox Steam UI that signs in and downloads an owned game would still need an execution environment for that game’s Windows or Linux build. The concrete acceptance test is Steam’s own library installing a game, launching it locally on a Series X, accepting input, saving, and reloading. Two games with different dependencies would provide initial evidence of library breadth. Neither test has been demonstrated here.
-4. **Distribution rights for a modified Steam client.** Valve’s subscriber agreement restricts modification and redistribution, subject to its stated exceptions and applicable law. We identified no public grant covering a repackaged Steam client for Xbox. [Steam Subscriber Agreement](https://store.steampowered.com/subscriber_agreement/)
+### Try the Steam prototype
 
-## Xbox workflow investigation
+Check out the verified revision `547182a` and download its `xbox-steam-core-template` artifact. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Tested source](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae) · [Matching build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44881408709) · [Steam setup guide](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md)
 
-The [workflow report](analysis/xbox-workflows.md) maps the observed desktop dependencies to Xbox Developer Mode and partner GDK APIs. It covers WebView2, prerequisites, package updates, Steam depot downloads and game activation.
+To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
 
-## Native translation tests
+## Verified features
 
-The [porting investigation](analysis/native-port-path.md) records which measured Steam imports link against Microsoft’s UWP SDK, what still needs an Xbox runtime test, and how to interpret a successful result. The [packaged process test](probe/README.md) runs a single controlled experiment on a Series X in Developer Mode.
+- **Console diagnostics.** The deployment CLI installs signed packages through Device Portal and reads fresh reports. The baseline probe verified same-package process startup and named-pipe communication. [Console probe](probe/README.md)
+- **Steam sign-in and library.** Prototype builds verified Steam Guard QR approval, optional session reuse across an app upgrade, a searchable games-only library, controller navigation, and artwork caching. [Steam library setup and results](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#run-the-on-console-sign-in)
+- **Downloads and launch diagnostics.** Steam installed owned games into app-local storage. The prototype submits standard Steam Play requests, supports per-title launch options, and records startup checkpoints and process exits. [Download tests](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#test-an-owned-game-download) · [Launch verification](https://github.com/clankur/steam-xbox-devmode/pull/47)
+- **X-COM: UFO Defense.** On a Series X, the prototype checked Steam ownership and installation, then ran the installed DOS game in its packaged runtime and rendered frames from the original intro. [Series X results](https://github.com/clankur/steam-xbox-devmode/issues/44)
 
-The [Windows startup trace](analysis/windows-startup.md) follows the same Valve client build from launch to a web-helper window. It records the desktop libraries loaded at startup and the service state on the test VM.
+## Missing features and planned work
 
-## Reproduce the audit
+- Verify in-game Xbox controller input for X-COM and add persistent saves that survive an app restart. [X-COM follow-up](https://github.com/clankur/steam-xbox-devmode/issues/44)
+- Fix game-path resolution after the first shared prerequisite install and refresh the competing AppID when the Steam download queue changes. [Prerequisite path](https://github.com/clankur/steam-xbox-devmode/issues/54) · [Download queue reporting](https://github.com/clankur/steam-xbox-devmode/issues/55)
+- Investigate Windows game startup and graphics blockers. A playable window remains unverified for the Windows titles under test. Begin with controlled renderer tests and title-by-title launch checks. [Current compatibility issues](https://github.com/clankur/steam-xbox-devmode/issues) · [ANGLE experiment](https://github.com/clankur/steam-xbox-devmode/pull/53) · [Win32 experiment plan](https://github.com/clankur/steam-xbox-devmode/pull/51)
+- Bring the verified Steam prototype features into a reproducible build from `main`.
 
-With Python 3.11 or later and the REA 6.10.1 CLI installed, run the following from the repository root. The client script downloads about 71 MB from Valve’s CDN. It verifies the pinned archive hashes and inspects the selected files in a temporary directory. It never launches them. A matching result produces no output from `diff`.
+## Research archive
 
-```sh
-python3 analysis/audit-client.py > /tmp/steam-client-imports.json
-diff -u analysis/client-imports.json /tmp/steam-client-imports.json
-bash analysis/audit-steamsetup.sh /tmp/steam-installer-audit
-```
-
-Set `REA_BIN` to the CLI executable when it is outside your PATH. Use `--cache DIRECTORY` to read previously downloaded pinned archives. The separate installer script fetches the live installer URL, so a future Valve installer update can change its result.
+The original Steam client audit, import measurements, porting analysis, and reproduction commands are in the [historical audit](analysis/steam-client-audit.md). See the [probe development guide](probe/DEVELOPMENT.md) for the Xbox diagnostic build and deployment workflow.
