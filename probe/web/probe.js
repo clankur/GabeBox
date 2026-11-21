@@ -9,8 +9,11 @@
 
     try {
         var storage = Windows.Storage;
-        var control = Windows.ApplicationModel.Package.current.id.name === "XboxPortabilityProbe.ChildProcess.Control";
-        var header = "probe=" + (control ? "packaged-startup-control" : "packaged-child-process") +
+        var packageName = Windows.ApplicationModel.Package.current.id.name;
+        var control = packageName === "XboxPortabilityProbe.ChildProcess.Control";
+        var steamCore = packageName === "XboxPortabilityProbe.ChildProcess.SteamCore";
+        var probeName = steamCore ? "packaged-steam-core" : "packaged-child-process";
+        var header = "probe=" + (control ? "packaged-startup-control" : probeName) +
             "\r\nrun_id=" + Date.now() + "\r\n";
         storage.ApplicationData.current.localFolder.createFileAsync(
             "probe-report.txt", storage.CreationCollisionOption.replaceExisting
