@@ -23,7 +23,7 @@ def main():
     parser.add_argument('api', type=Path)
     parser.add_argument('asm', type=Path)
     parser.add_argument('output', type=Path)
-    parser.add_argument('--render-size', choices=('1280x720', '960x540', '854x480', '640x360'), default='1280x720',
+    parser.add_argument('--render-size', choices=('1280x720', '960x540', '854x480', '640x360'), default='854x480',
                         help='Slay virtual window size in the signed adapter (default: %(default)s)')
     parser.add_argument('--gdx-api', type=Path)
     parser.add_argument('--gdx-controllers-api', type=Path)

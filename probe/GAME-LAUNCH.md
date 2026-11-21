@@ -89,7 +89,21 @@ python3 probe/build-lwjgl-sdl.py \
   "$deps/lwjgl-2.9.2-sources.jar" "$deps/lwjgl-2.9.2.jar" "$deps/asm-9.7.1.jar" \
   "$runtime_dir/slay-lwjgl-display.jar" \
   --gdx-api "$deps/gdx-1.9.5.jar" --gdx-controllers-api "$deps/gdx-controllers-1.9.5.jar" \
-  --render-size 1280x720
+  --render-size 854x480
 ```
 
 Pass the resulting runtime directory to the existing `--slay-sdl-host` packaging option. Selecting **Play** starts the signed-in library launch. The offscreen game uses the TV player's presentation clock. A configured 60 FPS permits the renderer to produce up to 120 frames per second so fresh frames can be ready between TV refreshes. Lower frame limits retain their configured values. The adapter reads the player's existing FPS setting from `info.displayconfig` and stores subsequent Xbox FPS changes in app-local `slay-native-temp/xbox-slay-fps.txt`.
+
+On Series X, the original libGDX pixmap decoder failed on both `title/title.jpg` and `bottomScene/scene.jpg`. The hosted adapter decodes the title and act atlas pages at half size on each axis and retains the original atlas coordinates. The Series X loaded the title and entered an Act 1 encounter with those assets. Other game textures use the original loader.
+
+For a presentation trace, add `--launch-app-id 646570 --repeat-launch --measure-sdl-frames` to a hosted Slay test package. The player counts a frame after it submits a new SDL sequence to the fullscreen canvas. The report includes a 30-second average, the lowest rolling one-second count, and frame intervals. A slow load can lower that first sample. For steady-state gameplay comparisons, start each sample after the scene has finished loading. Capture Device Portal screenshots outside the sample period because a capture can stall the game for about half a second.
+
+The default hosted resolution is 854×480, scaled to fill the 16:9 player. In a Series X test with a fresh, isolated Ironclad profile, each scene warmed up for eight seconds before a 30-second sample. Fullscreen presentation used lossless RGB frame differences. A player with an older native bridge uses the existing full-frame transfer.
+
+| Scene | New frames presented per second | Lowest rolling one-second count | Longest frame interval |
+| --- | ---: | ---: | ---: |
+| Title menu | 61.98 | 58 | 34.0 ms |
+| Act 1 map | 62.42 | 60 | 34.3 ms |
+| Act 1 combat | 61.52 | 56 | 48.4 ms |
+
+The combat sample included two attacks, three blocks, enemy turns, and hand redraws. These counts measure the application submitting distinct frames to the canvas. At 960×540 the same transfer averaged 55.82 FPS during combat, including a Device Portal screenshot. The baseline title test with the original frame timers averaged 15.25 FPS at 1280×720.
