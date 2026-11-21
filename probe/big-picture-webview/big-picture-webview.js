@@ -222,11 +222,13 @@
                 return;
             }
             if (request.method === "startup-popup" && /^(?:[01]-){4}(?:[0-9]{1,2}-){4}[01]-[01]-[01]$/.test(request.phase)) {
+                if (warming && request.phase !== popupPhase) warmProgress = Date.now();
                 popupPhase = request.phase;
                 record(last, true);
                 return;
             }
             if (request.method === "startup-route" && /^(waiting-user|waiting-store|waiting-window|waiting-portal|selecting-library|library-selected|selection-pending)$/.test(request.stage)) {
+                if (warming && request.stage !== startupRoute) warmProgress = Date.now();
                 startupRoute = request.stage;
                 if (request.stage === "library-selected") sampleMemory("library_selected");
                 record(last, true);
@@ -294,6 +296,7 @@
                     return;
                 }
                 if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
+                    if (warming) warmProgress = Date.now();
                     servedGames = result.length;
                     record(last, true);
                 }
@@ -379,11 +382,6 @@
                         } else resume().catch(fail);
                     }
                 }
-                if (warming && viewId && !warmSwitch) {
-                    if (stage === "warmup-gamepad-layout" || stage === "warmup-setup-layout") handoffWarmup(stage);
-                    else if (Date.now() - warmStarted >= 32000) handoffWarmup("time-limit");
-                    else if (Date.now() - warmProgress >= 14000) handoffWarmup("no-layout-progress");
-                }
                 if (!settled && visible && (stage === "gamepad-ready" || stage === "setup-ready")) {
                     sampleMemory("steam_foreground");
                     settled = true; clearTimeout(readinessTimer);
@@ -395,6 +393,11 @@
                     var request = host.read();
                     if (!request) break;
                     handle(request);
+                }
+                if (warming && viewId && !warmSwitch) {
+                    if (stage === "warmup-gamepad-layout" || stage === "warmup-setup-layout") handoffWarmup(stage);
+                    else if (Date.now() - warmStarted >= 32000) handoffWarmup("time-limit");
+                    else if (Date.now() - warmProgress >= 14000) handoffWarmup("no-layout-progress");
                 }
                 checkCaptureRequest();
             } catch (error) { fail(error); }

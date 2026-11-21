@@ -79,7 +79,6 @@ struct View : implements<View, IFrameworkView> {
     bool warming;
     bool frameOpen = false;
     bool xboxDisplay = false;
-    double nativeRasterRatio = 1.;
     float backingCorrection = 1.f;
     uint64_t frameGeneration = 0;
     bool capturePending = false;
@@ -124,10 +123,10 @@ struct View : implements<View, IFrameworkView> {
         auto place = [&](CoreWebView2CompositionController const& browser, ContainerVisual const& surface) {
             browser.BoundsMode(CoreWebView2BoundsMode::UseRawPixels);
             if (xboxDisplay) {
-                // Preserve Valve's logical layout and the user's text scaling
-                // when reducing the number of pixels used per view unit.
+                // Xbox reports a 1920-pixel FHD surface and a 150% display.
+                // Use the display DPI for UI layout independently of the backing budget.
                 browser.ShouldDetectMonitorScaleChanges(false);
-                browser.RasterizationScale(backingScale * nativeRasterRatio * textScale());
+                browser.RasterizationScale(steam_display::rasterScale(scale, textScale()));
             }
             browser.Bounds({0.f, 0.f, placement.pixelWidth(), placement.pixelHeight()});
             surface.Offset({placement.view.x, placement.view.y, 0});
@@ -721,10 +720,6 @@ struct View : implements<View, IFrameworkView> {
             controller = browser;
             try {
                 xboxDisplay = Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox";
-                if (xboxDisplay) {
-                    auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
-                    nativeRasterRatio = browser.RasterizationScale() / (display.RawPixelsPerViewPixel() * textScale());
-                }
             } catch (hresult_error const&) { xboxDisplay = false; }
             step = L"surface";
             checkpoint(step);

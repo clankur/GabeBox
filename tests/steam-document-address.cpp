@@ -30,6 +30,11 @@ int main() {
     }
     const steam_display::Bounds fhd{0, 0, 1920, 1080};
     assert(steam_display::fhdScale(fhd, 1.5f, 3840, 2160) == 1.f);
+    const steam_display::Placement xbox{fhd, steam_display::fhdScale(fhd, 1.5f, 1920, 1080)};
+    const auto zoom = steam_display::rasterScale(1.5, 1.);
+    assert(xbox.pixelWidth() == 1920 && xbox.pixelHeight() == 1080);
+    assert(xbox.pixelWidth() / zoom == 1280 && xbox.pixelHeight() / zoom == 720);
+    assert(steam_display::rasterScale(1.5, 1.25) == 1.875);
     assert(steam_display::fhdScale(screen, 1.5f, 1920, 1080) == 1.5f);
     assert(steam_display::fhdScale(screen, 2.f, 1280, 720) == 1.f);
     const steam_display::Bounds wide{0, 0, 2560, 1080};

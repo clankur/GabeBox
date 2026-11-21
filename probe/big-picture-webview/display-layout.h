@@ -16,6 +16,12 @@ inline Bounds viewport(Bounds window, Bounds visible, bool safe, bool game) {
     return {0, 0, window.width, window.height};
 }
 
+inline double rasterScale(double displayScale, double textScale) {
+    if (!(std::isfinite(displayScale) && displayScale > 0)) displayScale = 1.;
+    if (!(std::isfinite(textScale) && textScale > 0)) textScale = 1.;
+    return displayScale * textScale;
+}
+
 inline float fhdScale(Bounds window, float nativeScale, float screenWidth, float screenHeight) {
     if (window.width <= 0 || window.height <= 0 || nativeScale <= 0) return 1.f;
     const float width = screenWidth > 0 ? std::min(1920.f, screenWidth) : 1920.f;

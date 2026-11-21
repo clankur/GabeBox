@@ -97,6 +97,24 @@ test("when hidden Steam stops making progress switch once and wait for visible s
     assert.deepEqual(app.memoryRequests, []);
 });
 
+test("observed portal progress extends warmup only up to its measured hard limit", async () => {
+    const app = fixture({warm: true});
+    const start = app.start({});
+    await drain();
+    for (const route of ["waiting-window", "waiting-portal", "library-selected"]) {
+        app.elapse(10500);
+        app.incoming.push(JSON.stringify({method: "startup-route", stage: route}));
+        await app.advance("composition");
+    }
+    assert.deepEqual(app.switches, []);
+    app.elapse(600);
+    await app.advance("composition");
+    assert.deepEqual(app.switches, [[10,3]]);
+    assert.match(app.reports.at(-1), /warmup=time-limit elapsed_ms=32100/);
+    await app.advance("gamepad-ready");
+    await start;
+});
+
 test("warmup errors leave QR in foreground and unsigned smoke uses ordinary activation", async () => {
     const app = fixture({warm: true});
     const rejected = assert.rejects(app.start({}), /process-error/);
