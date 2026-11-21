@@ -1,7 +1,7 @@
 (function () {
     "use strict";
 
-    function open(report, events) {
+    function open(report, events, nativePad) {
         var mailbox = /^steam_sdl_mailbox=(sdl-host-[0-9]+-[0-9]+\.bin)\r?$/m.exec(report);
         var host = window.Fhd && window.Fhd.Native && window.Fhd.Native.RenderHost;
         if (!mailbox || !host) return null;
@@ -9,7 +9,7 @@
         var manager = Windows.UI.ViewManagement, switcher = manager.ApplicationViewSwitcher;
         var mainId = manager.ApplicationView.getForCurrentView().id;
         var id = 0, timer, closed = false, switching = false;
-        var previousOverlay = 0, opened = false, shown = false, ready = false;
+        var overlayOpen = false, opened = false, shown = false, ready = false;
         var started = Date.now();
         function close() {
             if (closed) return;
@@ -24,6 +24,10 @@
         }
         function resume() {
             if (!id || switching || closed) return;
+            if (overlayOpen) {
+                try { host.start(); } catch (_) { failed(); return; }
+                overlayOpen = false;
+            }
             switching = true;
             function switchToGame() {
                 if (!closed) return switcher.switchAsync(id, mainId);
@@ -54,8 +58,8 @@
                 }
                 if (!ready && Date.now() - started > 12000) return failed();
                 var overlay = /^overlay_requested=([0-9]+)\r?$/m.exec(stats);
-                if (overlay && +overlay[1] > previousOverlay) {
-                    previousOverlay = +overlay[1];
+                if (overlay && +overlay[1] && !overlayOpen) {
+                    overlayOpen = true;
                     shown = false;
                     events.menu();
                 }
@@ -66,6 +70,7 @@
             var root = Windows.Storage.ApplicationData.current.localFolder.path;
             host.open(root + "\\" + mailbox[1]);
             opened = true;
+            if (host.setNativeGamepad) host.setNativeGamepad(nativePad !== false);
             host.start();
             timer = setInterval(poll, 100);
         } catch (_) { close(); return null; }

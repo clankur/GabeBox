@@ -590,7 +590,7 @@
                         keyboard.hidden = !keyboardReady;
                         if (!attempt.automaticTrial) complete(report + "steam_sdl_host_frame=presented\r\n");
                     }
-                });
+                }, nativePad);
             }
             animation = requestAnimationFrame(tick);
         }, function () { stop("steam_sdl_host=launch-error\r\n"); });
