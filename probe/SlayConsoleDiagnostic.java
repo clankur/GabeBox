@@ -37,6 +37,21 @@ public final class SlayConsoleDiagnostic {
     }
 
     private static native int setGameDirectory(String path);
+    private static native int[] runMesaControl();
+
+    private static void checkMesaInGameJvm(File packageRoot) {
+        File mesaLibrary = new File(packageRoot, "mesa-jni-control.dll");
+        if (!mesaLibrary.isFile()) return;
+        try {
+            System.load(mesaLibrary.getAbsolutePath());
+            int[] result = runMesaControl();
+            System.out.printf("slay_mesa_child_stage=%d%nslay_mesa_child_win32=0x%08X%nslay_mesa_child_egl=0x%08X%n" +
+                              "slay_mesa_child_gl=0x%08X%nslay_mesa_child_fbo=0x%08X%n",
+                              result[0], result[1], result[2], result[3], result[4]);
+        } catch (UnsatisfiedLinkError e) {
+            System.out.println("slay_mesa_child=load-error");
+        }
+    }
 
     private static void reportBundledLwjgl(File gameJar, Path log) throws Exception {
         try (JarFile archive = new JarFile(gameJar)) {
@@ -73,6 +88,7 @@ public final class SlayConsoleDiagnostic {
             System.exit(1);
         }
         System.out.println("slay_console_cwd=game-directory");
+        checkMesaInGameJvm(new File(library).getParentFile());
         Class.forName(gameMain).getMethod("main", String[].class).invoke(null, (Object) new String[0]);
     }
 

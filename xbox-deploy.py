@@ -211,6 +211,8 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_cwd_error=0x[0-9A-F]{8}\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_lwjgl_sha256=[0-9a-f]{64}$', text, re.M))
     result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
+    result.extend(re.findall(r'^slay_mesa_child=(?:load-error)$|^slay_mesa_child_stage=[0-8]$|'
+                             r'^slay_mesa_child_(?:win32|egl|gl|fbo)=0x[0-9A-F]{8}$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
               ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),
