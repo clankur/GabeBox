@@ -58,6 +58,16 @@ public static class SteamCoreControl {
     [return: MarshalAs(UnmanagedType.I1)]
     private delegate bool ReleasePipe(int pipe);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int CreateGlobalUser(ref int pipe);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ReleaseUser(int pipe, int user);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    private delegate bool LoggedOn(int user, int pipe);
+
     private static T GetExport<T>(IntPtr module, string name) where T : Delegate {
         var address = GetProcAddress(module, name);
         if (address == IntPtr.Zero) throw new Win32Exception();
@@ -73,13 +83,28 @@ public static class SteamCoreControl {
             var client = createInterface("SteamClient023", out int code);
             int? pipe = null;
             bool? released = null;
+            object bootstrap = null;
             if (client != IntPtr.Zero && code == 0) {
                 var create = GetExport<CreatePipe>(module, "Steam_CreateSteamPipe");
                 var release = GetExport<ReleasePipe>(module, "Steam_BReleaseSteamPipe");
                 pipe = create();
                 if (pipe > 0) released = release(pipe.Value);
+                if (pipe == 0) {
+                    var createUser = GetExport<CreateGlobalUser>(module, "Steam_CreateGlobalUser");
+                    var releaseUser = GetExport<ReleaseUser>(module, "Steam_ReleaseUser");
+                    var loggedOn = GetExport<LoggedOn>(module, "Steam_BLoggedOn");
+                    int bootstrapPipe = 0;
+                    int user = createUser(ref bootstrapPipe);
+                    bool? signedIn = null;
+                    if (user > 0 && bootstrapPipe > 0) {
+                        signedIn = loggedOn(user, bootstrapPipe);
+                        releaseUser(bootstrapPipe, user);
+                    }
+                    bool? closed = bootstrapPipe > 0 ? release(bootstrapPipe) : null;
+                    bootstrap = new { user, pipe = bootstrapPipe, signedIn, released = closed };
+                }
             }
-            return new { interfacePresent = client != IntPtr.Zero, factoryCode = code, pipe, released };
+            return new { interfacePresent = client != IntPtr.Zero, factoryCode = code, pipe, released, bootstrap };
         } finally {
             FreeLibrary(module);
         }
