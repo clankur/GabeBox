@@ -5,6 +5,7 @@
     var library = document.getElementById("library");
     var exit = document.getElementById("sdl-exit");
     var status = document.getElementById("sdl-status");
+    var title = document.getElementById("sdl-game-title");
     var canvas = document.getElementById("sdl-frame");
     var cursor = document.getElementById("sdl-pointer");
     var context = canvas.getContext("2d");
@@ -190,6 +191,7 @@
 
         screen.hidden = false;
         library.hidden = true;
+        title.textContent = titles[appId];
         status.textContent = "Starting " + titles[appId] + "…";
         exit.disabled = true;
         exit.addEventListener("click", quit);
