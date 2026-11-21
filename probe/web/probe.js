@@ -7,6 +7,59 @@
         return "hresult=" + number + "\r\nmessage=" + error.message + "\r\n";
     }
 
+    function bounded(operation) {
+        var timer = setTimeout(function () { operation.cancel(); }, 7000);
+        return operation.then(function (value) {
+            clearTimeout(timer);
+            return value;
+        }, function (error) {
+            clearTimeout(timer);
+            throw error;
+        });
+    }
+
+    function connectSteamSocket(endpoint, report) {
+        var socket = new Windows.Networking.Sockets.MessageWebSocket();
+        return bounded(socket.connectAsync(new Windows.Foundation.Uri("wss://" + endpoint + "/cmsocket/")))
+            .then(function () {
+                socket.close();
+                return report + "steam_cm_websocket=connected\r\n";
+            }, function (error) {
+                socket.close();
+                return report + "steam_cm_websocket=failed\r\n" + errorText(error);
+            });
+    }
+
+    function checkSteamNetwork() {
+        var http = Windows.Web.Http;
+        var filter = new http.Filters.HttpBaseProtocolFilter();
+        filter.allowAutoRedirect = false;
+        var client = new http.HttpClient(filter);
+        var directory = new Windows.Foundation.Uri(
+            "https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/?cellid=0&cmtype=websockets"
+        );
+        return bounded(client.getAsync(directory)).then(function (response) {
+            var report = "steam_cm_directory_http=" + Number(response.statusCode) + "\r\n";
+            if (!response.isSuccessStatusCode) return report;
+
+            return bounded(response.content.readAsStringAsync()).then(function (body) {
+                var list = JSON.parse(body).response.serverlist;
+                var endpoints = list.filter(function (server) {
+                    return server.type === "websockets" &&
+                        /^[a-z0-9.-]+\.steamserver\.net:443$/i.test(server.endpoint);
+                });
+                report += "steam_cm_candidates=" + endpoints.length + "\r\n";
+                return endpoints.length ? connectSteamSocket(endpoints[0].endpoint, report) : report;
+            });
+        }).then(function (report) {
+            client.close();
+            return report;
+        }, function (error) {
+            client.close();
+            return "steam_cm_directory=failed\r\n" + errorText(error);
+        });
+    }
+
     try {
         var storage = Windows.Storage;
         var packageName = Windows.ApplicationModel.Package.current.id.name;
@@ -30,7 +83,9 @@
                     output.textContent = result;
                     if (steamCore && result.indexOf("create_interface=present\r\n") !== -1) {
                         var prefix = header + result.replace("status=steam-core-complete\r\n", "");
-                        return XboxProbe.Native.ProbeRunner.runSteamRuntime(file, prefix).then(function () {
+                        return checkSteamNetwork().then(function (network) {
+                            return XboxProbe.Native.ProbeRunner.runSteamRuntime(file, prefix + network);
+                        }).then(function () {
                             return storage.FileIO.readTextAsync(file).then(function (report) {
                                 output.textContent = report;
                             });
