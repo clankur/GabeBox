@@ -5,7 +5,18 @@
     var canvas = document.getElementById("code");
     var retry = document.getElementById("retry");
     var cancel = document.getElementById("cancel");
+    var signin = document.getElementById("signin");
+    var library = document.getElementById("library");
+    var libraryCount = document.getElementById("library-count");
+    var list = document.getElementById("library-list");
+    var search = document.getElementById("library-search");
+    var empty = document.getElementById("library-empty");
+    var entryName = document.getElementById("entry-name");
+    var entryType = document.getElementById("entry-type");
+    var signOut = document.getElementById("sign-out");
     var current;
+    var entries = [];
+    var selected;
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -126,11 +137,48 @@
         }
     }
 
-    function finishNative(attempt) {
+    function select(button) {
+        if (selected) selected.setAttribute("aria-pressed", "false");
+        selected = button;
+        if (button) button.setAttribute("aria-pressed", "true");
+        entryName.textContent = button ? button.entry.name : "";
+        entryType.textContent = button ? button.entry.type : "";
+    }
+
+    function renderList() {
+        var filter = search.value.trim().toLowerCase();
+        var fragment = document.createDocumentFragment();
+        entries.forEach(function (entry) {
+            if (filter && entry.name.toLowerCase().indexOf(filter) < 0) return;
+            var button = document.createElement("button");
+            button.type = "button";
+            button.textContent = entry.name;
+            button.entry = entry;
+            button.setAttribute("aria-pressed", "false");
+            fragment.appendChild(button);
+        });
+        list.textContent = "";
+        list.appendChild(fragment);
+        empty.hidden = !!list.firstElementChild;
+        select(list.firstElementChild);
+    }
+
+    function finishNative(attempt, payload) {
         return Windows.Storage.FileIO.readTextAsync(attempt.file).then(function (report) {
-            var count = /(?:^|\n)steam_library_count=(\d+)\r?\n/.exec(report);
-            if (report.indexOf("steam_library=verified\r\n") >= 0 && count) {
-                finish(attempt, "Steam approved sign-in. Library access verified for " + count[1] + " entries.");
+            if (payload) {
+                entries = JSON.parse(payload);
+                entries.sort(function (a, b) { return a.name.localeCompare(b.name); });
+                libraryCount.textContent = entries.length + (entries.length === 1 ? " title" : " titles");
+                search.value = "";
+                renderList();
+                signin.hidden = true;
+                library.hidden = false;
+                list.firstElementChild.focus();
+                attempt.done = true;
+                attempt.client.close();
+                return Windows.Storage.FileIO.writeTextAsync(attempt.file,
+                    report.replace("status=steam-library-rendering\r\n",
+                        "steam_library_rendered=yes\r\nstatus=steam-core-complete\r\n"));
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
                 finish(attempt, "Steam approved sign-in. The library did not finish loading.");
             } else {
@@ -148,7 +196,7 @@
         var operation = XboxProbe.Native.ProbeRunner.runSteamSignIn(
             attempt.file, approved, reply.account_name, reply.refresh_token, id
         );
-        return operation.then(function () { return finishNative(attempt); });
+        return operation.then(function (payload) { return finishNative(attempt, payload); });
     }
 
     function schedulePoll(attempt, challenge) {
@@ -212,6 +260,48 @@
     retry.addEventListener("click", start);
     cancel.addEventListener("click", function () {
         finish(current, "Sign-in cancelled.", "steam_approval=cancelled");
+    });
+    search.addEventListener("input", renderList);
+    search.addEventListener("keydown", function (event) {
+        if ((event.keyCode === 40 || event.keyCode === 211) && list.firstElementChild) {
+            event.preventDefault();
+            list.firstElementChild.focus();
+        }
+    });
+    list.addEventListener("focusin", function (event) {
+        if (event.target.entry) select(event.target);
+    });
+    list.addEventListener("click", function (event) {
+        if (event.target.entry) select(event.target);
+    });
+    list.addEventListener("keydown", function (event) {
+        var button = event.target;
+        if (!button.entry) return;
+        var next;
+        switch (event.keyCode) {
+        case 38:
+        case 210:
+            next = button.previousElementSibling || search;
+            break;
+        case 40:
+        case 211:
+            next = button.nextElementSibling;
+            break;
+        default:
+            return;
+        }
+        event.preventDefault();
+        if (next) next.focus();
+    });
+    signOut.addEventListener("click", function () {
+        XboxProbe.Native.ProbeRunner.signOutSteam();
+        entries = [];
+        renderList();
+        library.hidden = true;
+        signin.hidden = false;
+        status.textContent = "Signed out of Steam.";
+        retry.hidden = false;
+        retry.focus();
     });
     start();
 })();
