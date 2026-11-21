@@ -460,22 +460,25 @@
 
     function pollDownload(job) {
         if (transfer !== job) return;
-        if (!job.progressPoll || Date.now() - job.progressPoll >= 5000) {
-            job.progressPoll = Date.now();
-            readDownloadProgress(job).then(function () { pollDownloadStatus(job); });
-        } else {
-            pollDownloadStatus(job);
-        }
-    }
-
-    function pollDownloadStatus(job) {
-        if (transfer !== job) return;
+        var checkpoint;
         try {
-            updateDownload(job, XboxProbe.Native.ProbeRunner.steamDownloadStatus());
+            checkpoint = XboxProbe.Native.ProbeRunner.steamDownloadStatus();
         } catch (error) {
-            updateDownload(job, "failed");
+            checkpoint = "failed";
         }
-        if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 2000);
+        function advance() {
+            if (transfer !== job) return;
+            updateDownload(job, checkpoint);
+            if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 2000);
+        }
+        var active = /^(?:queued|resuming|paused|downloading|staging)(?=[:\r]|$)/.test(checkpoint);
+        var now = Date.now();
+        if (!active || !job.progressPoll || now - job.progressPoll >= 5000) {
+            job.progressPoll = now;
+            readDownloadProgress(job).then(advance);
+        } else {
+            advance();
+        }
     }
 
     function startDownload(entry) {
