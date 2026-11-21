@@ -9,6 +9,9 @@ static void XboxSdlCaptureSoftwareFrame(SDL_Renderer *renderer)
 {
     static unsigned attempts;
     static Uint32 last_attempt;
+    static Uint32 first_present;
+    static Uint32 delay;
+    static SDL_bool started;
     static SDL_bool captured;
     char path[1024];
     int width, height;
@@ -30,6 +33,16 @@ static void XboxSdlCaptureSoftwareFrame(SDL_Renderer *renderer)
     SDL_strlcpy(path, trace, sizeof(path));
     SDL_strlcpy(path + length - 4, ".bmp", 5);
     now = SDL_GetTicks();
+    if (!started) {
+        const char *setting = SDL_getenv("XBOX_SDL_SOFTWARE_FRAME_DELAY_MS");
+        int requested = setting ? SDL_atoi(setting) : 0;
+        delay = requested > 0 && requested <= 30000 ? (Uint32)requested : 0;
+        first_present = now;
+        started = SDL_TRUE;
+    }
+    if (now - first_present < delay) {
+        return;
+    }
     if (attempts && now - last_attempt < 250) {
         return;
     }

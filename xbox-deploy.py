@@ -218,11 +218,11 @@ def read_sdl_frame(portal, app, report, destination):
     print(f'Saved SDL frame ({width} by {abs(height)}) to {destination}.')
 
 
-def wait_for_sdl_frame(portal, package, destination):
+def wait_for_sdl_frame(portal, package, destination, timeout):
     _, raw = portal.request('GET', probe_report_path(package))
     report = decode_report(raw)
     stem = sdl_frame_stem(report)
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         trace = read_game_file(portal, package, r'\LocalState', stem + '.txt', 4096)
         if re.search(r'^sdl_(?:software|offscreen)_frame=ready\r?$', decode_report(trace or b''), re.MULTILINE):
@@ -390,7 +390,7 @@ def trial_sdl(portal, args):
                 wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout,
                                require_app_id=args.app_id)
                 if args.frame is not None:
-                    wait_for_sdl_frame(portal, package, args.frame)
+                    wait_for_sdl_frame(portal, package, args.frame, args.frame_timeout)
             finally:
                 try:
                     installed = read_sdl()
@@ -532,6 +532,7 @@ def main():
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
     sdl.add_argument('--artifact', required=True, type=Path, help='workflow artifact directory with SDL2.dll and SHA256SUMS')
     sdl.add_argument('--frame', type=Path, metavar='BMP', help='wait for and save the trial’s frame before restoring SDL')
+    sdl.add_argument('--frame-timeout', type=int, default=20, help='seconds to wait for a frame after the launch report')
     sdl.add_argument('--backup-dir', required=True, type=Path, help='directory for the verified original DLL and trial lock')
     sdl.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
     sdl.add_argument('--timeout', type=int, default=100, help='seconds to wait for a fresh launch report')
@@ -605,6 +606,8 @@ def main():
         inspect_game(portal, app, args.app_id, args.executable)
         return
     if args.command == 'sdl-trial':
+        if not 1 <= args.frame_timeout <= 120:
+            raise ValueError('--frame-timeout must be between 1 and 120 seconds.')
         trial_sdl(portal, args)
         return
     if args.command == 'deploy':
