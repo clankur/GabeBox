@@ -1124,6 +1124,30 @@ struct SteamGameProcess {
     }
 };
 
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVersion(std::wstring gameDirectory) {
+    co_await winrt::resume_background();
+    const auto java = gameDirectory + L"\\jre\\bin\\java.exe";
+    auto command = L"\"" + java + L"\" -version";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(java.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, gameDirectory.c_str(), &startup, &child)) {
+        co_return winrt::hstring(L"steam_java_probe=create-error\r\nsteam_java_probe_error=" +
+            Hex(GetLastError()) + L"\r\n");
+    }
+    winrt::handle process(child.hProcess);
+    winrt::handle thread(child.hThread);
+    DWORD wait = WaitForSingleObject(process.get(), 10000);
+    if (wait == WAIT_TIMEOUT) co_return winrt::hstring(L"steam_java_probe=timeout\r\n");
+    DWORD exitCode = 0;
+    if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess(process.get(), &exitCode)) {
+        co_return winrt::hstring(L"steam_java_probe=wait-error\r\nsteam_java_probe_error=" +
+            Hex(GetLastError()) + L"\r\n");
+    }
+    co_return winrt::hstring(L"steam_java_probe=exited\r\nsteam_java_probe_exit=" + Hex(exitCode) + L"\r\n");
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
@@ -1313,6 +1337,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     }
 
     FILETIME launchTime{};
+    std::wstring gameDirectory;
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1338,7 +1363,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
                 std::to_wstring(state) + L"\r\n");
         }
-        const auto gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
         if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
@@ -1438,7 +1463,19 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await winrt::resume_after(std::chrono::milliseconds(GetTickCount64() - started < 3000 ? 50 : 250));
         co_await caller;
     }
-    co_return winrt::hstring(report + L"steam_launch=" + verdict + L"\r\n");
+    report += L"steam_launch=" + std::wstring(verdict) + L"\r\n";
+    if (app == 646570 && verdict == std::wstring_view(L"exited-during-startup")) {
+        try {
+            auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+            if (co_await package.TryGetItemAsync(L"steam-java-probe.txt")) {
+                const auto javaReport = co_await ProbeJavaVersion(gameDirectory);
+                report += javaReport.c_str();
+            }
+        } catch (winrt::hresult_error const& error) {
+            report += L"steam_java_probe=runtime-error\r\nsteam_java_probe_error=" + Hex(error.code()) + L"\r\n";
+        }
+    }
+    co_return winrt::hstring(report);
 }
 
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
