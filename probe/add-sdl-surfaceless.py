@@ -28,6 +28,14 @@ def add_surfaceless(tree):
 ''' + old)
     video.write_text(source, encoding='utf-8')
 
+    events = offscreen / 'SDL_offscreenevents.c'
+    source = events.read_text(encoding='utf-8')
+    old = '#include "SDL_offscreenevents_c.h"'
+    source = replace_once(source, old, old + '\n\nextern void XboxSdlPollHostInput(void);')
+    old = 'void OFFSCREEN_PumpEvents(_THIS)\n{'
+    source = replace_once(source, old, old + '\n    XboxSdlPollHostInput();')
+    events.write_text(source, encoding='utf-8')
+
     main = tree / 'src/SDL.c'
     source = main.read_text(encoding='utf-8')
     old = '        if (SDL_HelperWindowCreate() < 0) {'
@@ -130,6 +138,7 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
             SDL_Delay(frame_time - (Uint32)elapsed);
         }
         offscreen_wind->xbox_last_swap = SDL_GetTicks64();
+        XboxSdlPresentHostFrame(_this, offscreen_wind);
         XboxSdlCaptureFrame(_this, offscreen_wind);
         return 0;
     }

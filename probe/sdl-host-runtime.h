@@ -37,37 +37,52 @@ static void XboxSdlOpenHost(void)
     XboxSdlTrace(xbox_host_mailbox ? "sdl_host=mapped\n" : "sdl_host=map-error\n");
 }
 
-static void XboxSdlPublishHostFrame(SDL_Renderer *renderer)
+Uint8 *XboxSdlBeginHostFrame(SDL_Window *window, int width, int height)
 {
     static Uint32 last;
-    SDL_Window *window;
     Uint32 now;
-    int width, height;
     LONG old_state;
     SdlHostMailbox *mailbox;
     XboxSdlOpenHost();
     mailbox = xbox_host_mailbox;
-    if (!mailbox || SdlHostLoad(&mailbox->quit)) return;
+    if (!mailbox || !window || SdlHostLoad(&mailbox->quit) ||
+        width < 1 || width > SDL_HOST_MAX_WIDTH || height < 1 || height > SDL_HOST_MAX_HEIGHT) return NULL;
     now = SDL_GetTicks();
-    if (now - last < 50 || SDL_GetRenderTarget(renderer)) return;
-    window = SDL_RenderGetWindow(renderer);
-    if (!window || SDL_GetRendererOutputSize(renderer, &width, &height) < 0 ||
-        width < 1 || width > SDL_HOST_MAX_WIDTH || height < 1 || height > SDL_HOST_MAX_HEIGHT) return;
+    if (now - last < 50) return NULL;
     old_state = SdlHostLoad(&mailbox->frame_state);
     if ((old_state != SDL_HOST_EMPTY && old_state != SDL_HOST_READY) ||
-        InterlockedCompareExchange(&mailbox->frame_state, SDL_HOST_WRITING, old_state) != old_state) return;
+        InterlockedCompareExchange(&mailbox->frame_state, SDL_HOST_WRITING, old_state) != old_state) return NULL;
     last = now;
     xbox_host_window = SDL_GetWindowID(window);
-    if (SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_RGBA32, mailbox->pixels, width * 4) < 0) {
+    mailbox->frame.width = (uint32_t)width;
+    mailbox->frame.height = (uint32_t)height;
+    return mailbox->pixels;
+}
+
+void XboxSdlEndHostFrame(SDL_bool success)
+{
+    SdlHostMailbox *mailbox = xbox_host_mailbox;
+    if (!success) {
         InterlockedExchange(&mailbox->frame_state, SDL_HOST_EMPTY);
         return;
     }
-    mailbox->frame.width = (uint32_t)width;
-    mailbox->frame.height = (uint32_t)height;
     mailbox->frame.sequence = (uint32_t)InterlockedIncrement(&mailbox->frame_sequence);
     mailbox->frame.input_ack = (uint32_t)SdlHostLoad(&mailbox->input_ack);
     mailbox->frame.input_events = (uint32_t)SdlHostLoad(&mailbox->input_events);
     InterlockedExchange(&mailbox->frame_state, SDL_HOST_READY);
+}
+
+static void XboxSdlPublishHostFrame(SDL_Renderer *renderer)
+{
+    int width, height;
+    SDL_Window *window = SDL_RenderGetWindow(renderer);
+    if (!window || SDL_GetRenderTarget(renderer) || SDL_GetRendererOutputSize(renderer, &width, &height) < 0) {
+        return;
+    }
+    Uint8 *pixels = XboxSdlBeginHostFrame(window, width, height);
+    if (pixels) {
+        XboxSdlEndHostFrame(SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_RGBA32, pixels, width * 4) == 0);
+    }
 }
 
 void XboxSdlPollHostInput(void)

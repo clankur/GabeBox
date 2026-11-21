@@ -78,7 +78,10 @@ static void *XboxSdlGetProcAddress(_THIS, const char *name)
     return function;
 }
 
-static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
+extern Uint8 *XboxSdlBeginHostFrame(SDL_Window *window, int width, int height);
+extern void XboxSdlEndHostFrame(SDL_bool success);
+
+static SDL_bool XboxSdlReadFrame(_THIS, OFFSCREEN_Window *offscreen, Uint8 *pixels)
 {
     typedef void (APIENTRY *GetInteger)(GLenum, GLint *);
     typedef void (APIENTRY *PixelStore)(GLenum, GLint);
@@ -91,36 +94,10 @@ static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
     GLint old_read, old_pack_buffer;
     const GLenum pack_options[] = { GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_PIXELS, GL_PACK_SKIP_ROWS };
     GLint old_pack[SDL_arraysize(pack_options)];
-    char path[1024];
-    const char *trace = SDL_getenv("XBOX_SDL_TRACE_FILE");
-    size_t path_length = trace ? SDL_strlen(trace) : 0;
     int pitch = offscreen->xbox_width * 4;
-    Uint8 *pixels;
     SDL_Surface *surface;
-    if (offscreen->xbox_capture_attempted || offscreen->xbox_context != SDL_GL_GetCurrentContext()) {
-        return;
-    }
-    if (!offscreen->xbox_first_swap) {
-        offscreen->xbox_first_swap = offscreen->xbox_last_swap;
-    }
-    const char *delay_hint = SDL_GetHint("XBOX_SDL_OPENGL_FRAME_DELAY_MS");
-    int delay = delay_hint ? SDL_clamp(SDL_atoi(delay_hint), 0, 15000) : 0;
-    if (offscreen->xbox_last_swap - offscreen->xbox_first_swap < (Uint64)delay) {
-        return;
-    }
-    offscreen->xbox_capture_attempted = SDL_TRUE;
-    if (!get_integer || !pixel_store || !read_pixels || !bind_framebuffer || !bind_buffer ||
-        path_length <= 4 || path_length >= sizeof(path) || SDL_strcmp(trace + path_length - 4, ".txt") != 0) {
-        XboxSdlTrace("sdl_offscreen_frame=error\n");
-        return;
-    }
-
-    pixels = SDL_calloc((size_t)offscreen->xbox_height + 1, pitch);
-    if (!pixels) {
-        XboxSdlTrace("sdl_offscreen_frame=error\n");
-        return;
-    }
-    SDL_memset(pixels, 0xCD, (size_t)offscreen->xbox_height * pitch);
+    if (!get_integer || !pixel_store || !read_pixels || !bind_framebuffer || !bind_buffer) return SDL_FALSE;
+    SDL_memset(pixels, 0xCD, 4);
     get_integer(GL_READ_FRAMEBUFFER_BINDING, &old_read);
     get_integer(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
     bind_framebuffer(GL_READ_FRAMEBUFFER, offscreen->xbox_framebuffer);
@@ -136,13 +113,10 @@ static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
     bind_buffer(GL_PIXEL_PACK_BUFFER, old_pack_buffer);
     bind_framebuffer(GL_READ_FRAMEBUFFER, old_read);
 
-    if (pixels[0] == 0xCD && pixels[1] == 0xCD && pixels[2] == 0xCD && pixels[3] == 0xCD) {
-        XboxSdlTrace("sdl_offscreen_frame=error\n");
-        SDL_free(pixels);
-        return;
-    }
+    if (pixels[0] == 0xCD && pixels[1] == 0xCD && pixels[2] == 0xCD && pixels[3] == 0xCD) return SDL_FALSE;
 
-    Uint8 *scratch = pixels + (size_t)offscreen->xbox_height * pitch;
+    Uint8 *scratch = SDL_stack_alloc(Uint8, pitch);
+    if (!scratch) return SDL_FALSE;
     for (int y = 0; y < offscreen->xbox_height / 2; ++y) {
         Uint8 *top = pixels + (size_t)y * pitch;
         Uint8 *bottom = pixels + (size_t)(offscreen->xbox_height - y - 1) * pitch;
@@ -150,12 +124,44 @@ static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
         SDL_memcpy(top, bottom, pitch);
         SDL_memcpy(bottom, scratch, pitch);
     }
-    SDL_strlcpy(path, trace, sizeof(path));
-    SDL_strlcpy(path + path_length - 4, ".bmp", 5);
+    SDL_stack_free(scratch);
     surface = SDL_CreateRGBSurfaceWithFormatFrom(pixels, offscreen->xbox_width, offscreen->xbox_height,
                                                  32, pitch, SDL_PIXELFORMAT_RGBA32);
     if (surface) {
         XboxSdlBlitOffscreenCursor(offscreen->sdl_window, surface);
+        SDL_FreeSurface(surface);
+    }
+    return SDL_TRUE;
+}
+
+static void XboxSdlPresentHostFrame(_THIS, OFFSCREEN_Window *offscreen)
+{
+    if (offscreen->xbox_context != SDL_GL_GetCurrentContext()) return;
+    Uint8 *pixels = XboxSdlBeginHostFrame(offscreen->sdl_window, offscreen->xbox_width, offscreen->xbox_height);
+    if (pixels) XboxSdlEndHostFrame(XboxSdlReadFrame(_this, offscreen, pixels));
+}
+
+static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
+{
+    if (offscreen->xbox_capture_attempted || offscreen->xbox_context != SDL_GL_GetCurrentContext()) return;
+    if (!offscreen->xbox_first_swap) offscreen->xbox_first_swap = offscreen->xbox_last_swap;
+    const char *delay_hint = SDL_GetHint("XBOX_SDL_OPENGL_FRAME_DELAY_MS");
+    int delay = delay_hint ? SDL_clamp(SDL_atoi(delay_hint), 0, 15000) : 0;
+    if (offscreen->xbox_last_swap - offscreen->xbox_first_swap < (Uint64)delay) return;
+    offscreen->xbox_capture_attempted = SDL_TRUE;
+
+    char path[1024];
+    const char *trace = SDL_getenv("XBOX_SDL_TRACE_FILE");
+    size_t path_length = trace ? SDL_strlen(trace) : 0;
+    if (path_length <= 4 || path_length >= sizeof(path) || SDL_strcmp(trace + path_length - 4, ".txt") != 0) return;
+    SDL_strlcpy(path, trace, sizeof(path));
+    SDL_strlcpy(path + path_length - 4, ".bmp", 5);
+    int pitch = offscreen->xbox_width * 4;
+    Uint8 *pixels = SDL_malloc((size_t)offscreen->xbox_height * pitch);
+    SDL_Surface *surface = NULL;
+    if (pixels && XboxSdlReadFrame(_this, offscreen, pixels)) {
+        surface = SDL_CreateRGBSurfaceWithFormatFrom(pixels, offscreen->xbox_width, offscreen->xbox_height,
+                                                     32, pitch, SDL_PIXELFORMAT_RGBA32);
     }
     XboxSdlTrace(surface && SDL_SaveBMP(surface, path) == 0 ? "sdl_offscreen_frame=ready\n" : "sdl_offscreen_frame=error\n");
     SDL_FreeSurface(surface);
