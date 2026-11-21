@@ -26,7 +26,8 @@
         var pointerHeld = false;
         var pointerX = 0.5, pointerY = 0.5;
         var lastPointer = -1, lastKeys = -1;
-        var animation, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0;
+        var animation, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0, trialRetry = 0;
+        var trialComplete = false;
         var lastTime = 0, lastFrameTime = 0;
         var ready = false, closing = false, stopped = false;
         var result = "";
@@ -154,19 +155,26 @@
                     if (frame && !firstFrame) {
                         firstFrame = now;
                         status.textContent = "";
-                        if (attempt.automaticTrial) {
-                            trialEvents = frame.events;
-                            pointerX = 0.64;
-                            trialSerial = runner.sendSteamSdlInput(encodePointer(false), 0);
-                            lastPointer = encodePointer(false);
-                            lastKeys = 0;
-                        } else {
+                        if (!attempt.automaticTrial) {
                             complete(result + "steam_sdl_host_frame=presented\r\n");
                         }
                     }
-                    if (frame && trialSerial && frame.ack >= trialSerial && frame.events > trialEvents) {
-                        complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=delivered\r\n");
-                        trialSerial = 0;
+                    if (frame && attempt.automaticTrial && !trialComplete) {
+                        if (trialSerial && frame.ack >= trialSerial && frame.events > trialEvents) {
+                            trialComplete = true;
+                            complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=delivered\r\n");
+                        } else if (now - firstFrame > 24000) {
+                            trialComplete = true;
+                            complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=unconfirmed\r\n");
+                        } else if (now >= trialRetry) {
+                            // Some titles finish initializing their input devices after their first swap.
+                            trialEvents = frame.events;
+                            pointerX = pointerX === 0.64 ? 0.57 : 0.64;
+                            lastPointer = encodePointer(false);
+                            lastKeys = 0;
+                            trialSerial = runner.sendSteamSdlInput(lastPointer, lastKeys);
+                            trialRetry = now + 4000;
+                        }
                     }
                 }
                 if (!closing) {
@@ -180,9 +188,6 @@
                     cursor.style.top = pointerY * 100 + "%";
                 }
                 lastTime = now;
-                if (attempt.automaticTrial && firstFrame && now - firstFrame > 5000) {
-                    complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=unconfirmed\r\n");
-                }
                 animation = requestAnimationFrame(tick);
             } catch (_) {
                 runner.quitSteamSdl();
