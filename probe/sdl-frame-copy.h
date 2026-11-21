@@ -13,3 +13,15 @@ inline void CopyOpaqueSdlFrame(std::uint8_t *output, const std::uint8_t *pixels,
         std::memcpy(output + i * 4, &rgba, sizeof(rgba));
     }
 }
+
+// The Xbox HTML runtime copies a WinRT byte array one element at a time.
+// A string crosses that boundary in bulk. Each pair of non-surrogate code
+// units carries the 24 RGB bits, including black and colors containing NUL.
+inline void EncodeSdlRgb(std::uint16_t *output, const std::uint8_t *pixels, std::size_t pixelCount) {
+    for (std::size_t i = 0; i < pixelCount; ++i) {
+        std::uint32_t rgba;
+        std::memcpy(&rgba, pixels + 4 * i, sizeof(rgba));
+        output[2 * i] = 0x1000 | (rgba & 0xfff);
+        output[2 * i + 1] = 0x1000 | ((rgba >> 12) & 0xfff);
+    }
+}

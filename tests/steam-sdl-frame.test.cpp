@@ -14,6 +14,16 @@ int main() {
         for (std::size_t i = 0; i < count; ++i) expected[3 + 4 * i + 3] = 255;
         CopyOpaqueSdlFrame(output.data() + 3, input.data() + 1, count);
         assert(output == expected);
+        std::vector<std::uint16_t> encoded(2 * count);
+        EncodeSdlRgb(encoded.data(), input.data() + 1, count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto low = encoded[2 * i], high = encoded[2 * i + 1];
+            assert((low >> 12) == 1 && (high >> 12) == 1);
+            const auto rgb = (low & 4095) | ((high & 4095) << 12);
+            assert((rgb & 255) == input[1 + 4 * i]);
+            assert(((rgb >> 8) & 255) == input[2 + 4 * i]);
+            assert(((rgb >> 16) & 255) == input[3 + 4 * i]);
+        }
         assert(input == original);
     }
 }

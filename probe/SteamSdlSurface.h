@@ -139,6 +139,31 @@ public:
         return transfer_;
     }
 
+    winrt::hstring RgbFrame() const {
+        if (!Frame()) return {};
+        SdlHostFrame header{};
+        const auto bytes = transfer_.data();
+        std::memcpy(&header, bytes, sizeof(header));
+        wchar_t prefix[96];
+        const auto prefixLength = swprintf_s(prefix, L"%u,%u,%u,%u,%u\n", header.width, header.height,
+                                             header.sequence, header.input_ack, header.input_events);
+        const auto count = header.width * header.height;
+        wchar_t *encoded;
+        HSTRING_BUFFER storage;
+        winrt::check_hresult(WindowsPreallocateStringBuffer(prefixLength + 2 * count, &encoded, &storage));
+        std::memcpy(encoded, prefix, prefixLength * sizeof(wchar_t));
+        EncodeSdlRgb(reinterpret_cast<std::uint16_t *>(encoded + prefixLength), bytes + sizeof(header), count);
+        HSTRING text;
+        const auto hr = WindowsPromoteStringBuffer(storage, &text);
+        if (FAILED(hr)) {
+            WindowsDeleteStringBuffer(storage);
+            winrt::throw_hresult(hr);
+        }
+        winrt::hstring result;
+        winrt::attach_abi(result, text);
+        return result;
+    }
+
     // Async writers retain their pixels until WriteAsync completes. A second
     // reader can claim a new frame while the first writer owns its buffer.
     winrt::Windows::Storage::Streams::Buffer TakeFrame() {

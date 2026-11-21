@@ -2188,6 +2188,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return RestoreSlaySteamCloud(app, preview);
     }
 
+    winrt::hstring SteamSdlRgbFrame() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->RgbFrame() : winrt::hstring{};
+    }
+
     winrt::Windows::Storage::Streams::IBuffer SteamSdlFrame() {
         std::lock_guard lock(steamSdlMutex);
         return steamSdlSurface ? steamSdlSurface->Frame() : nullptr;

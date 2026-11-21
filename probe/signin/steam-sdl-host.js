@@ -293,7 +293,42 @@
             canvas.style.height = Math.round(canvas.height * scale) + "px";
         }
 
+        var imageWords;
+        function drawRgb() {
+            var began = timing && performance.now();
+            var text = runner.steamSdlRgbFrame();
+            if (!text) return null;
+            var acquired = timing && performance.now();
+            var headerEnd = text.indexOf("\n");
+            var fields = text.slice(0, headerEnd).split(",");
+            var width = +fields[0], height = +fields[1];
+            var count = width * height, offset = headerEnd + 1;
+            if (fields.length !== 5 || !width || !height || width > 1920 || height > 1080 ||
+                    text.length - offset !== count * 2) throw new Error("Unexpected SDL RGB frame");
+            if (!image || canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+                image = context.createImageData(width, height);
+                imageWords = new Uint32Array(image.data.buffer);
+                fitFrame();
+            }
+            for (var i = 0; i < count; i++, offset += 2) {
+                imageWords[i] = 0xff000000 | ((text.charCodeAt(offset + 1) & 4095) << 12) |
+                    (text.charCodeAt(offset) & 4095);
+            }
+            var copied = timing && performance.now();
+            context.putImageData(image, 0, 0);
+            var frame = { sequence: +fields[2], ack: +fields[3], events: +fields[4] };
+            if (timing) {
+                frame.nativeMs = acquired - began;
+                frame.readMs = copied - acquired;
+                frame.uploadMs = performance.now() - copied;
+            }
+            return frame;
+        }
+
         function draw() {
+            if (runner.steamSdlRgbFrame) return drawRgb();
             var began = timing && performance.now();
             var buffer = runner.steamSdlFrame();
             if (!buffer) return null;

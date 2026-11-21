@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-test("the SDL player presents ready frames each refresh and routes keyboard input", async () => {
+async function exercisePlayer(packed) {
     const source = fs.readFileSync(path.join(__dirname, "../probe/signin/steam-sdl-host.js"), "utf8");
     const elements = new Map();
     const listeners = {};
@@ -23,7 +23,10 @@ test("the SDL player presents ready frames each refresh and routes keyboard inpu
                 addEventListener() {},
                 getAttribute() { return "646570"; },
                 getContext() {
-                    return { createImageData: () => ({ data: new Uint8Array(4) }), putImageData() { presented++; } };
+                    return { createImageData: () => ({ data: new Uint8Array(4) }), putImageData(image) {
+                        presented++;
+                        if (packed) assert.deepEqual(Array.from(image.data), [0, 216, 255, 255]);
+                    } };
                 }
             });
         }
@@ -68,6 +71,10 @@ test("the SDL player presents ready frames each refresh and routes keyboard inpu
         sendSteamSdlText(value) { calls.push(["text", value]); return true; },
         resetSteamSdlKeyboard() { calls.push(["reset"]); }
     };
+    if (packed) {
+        runner.steamSdlRgbFrame = () => frameAvailable ? "1,1,1,0,0\n" + String.fromCharCode(0x1800, 0x1ffd) : "";
+        runner.steamSdlFrame = () => { throw new Error("Unexpected byte-array fallback"); };
+    }
     vm.runInNewContext(source, {
         document, window, Windows, navigator: {},
         requestAnimationFrame(callback) { frame = callback; }
@@ -121,4 +128,7 @@ test("the SDL player presents ready frames each refresh and routes keyboard inpu
 
     listeners.blur();
     assert.deepEqual(calls.at(-1), ["reset"]);
-});
+}
+
+test("the SDL player presents each refresh and routes keyboard input", () => exercisePlayer(false));
+test("the SDL player decodes bulk RGB while retaining keyboard input", () => exercisePlayer(true));
