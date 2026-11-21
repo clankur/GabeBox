@@ -52,8 +52,11 @@ This yields 1/2 confirmed Library starts, with one consecutive success. Later ob
 |---|---|---|---|---|
 | 1.0.230.15 · tour-15-173517 | Dwarf Fortress | Player selected the game from Valve's Library. Matching game process started. | TV stayed black after launch. | Session ended. No verified return to the original Library or matched 30-second sample. |
 | 1.0.230.17 · tour-17-174558 | Dwarf Fortress | Populated grid scrolled to the Dwarf tile. Tile activation and confirm were attempted. Stock Play execution remained unverified. | No matching game process or visible title. | No game round trip or sample. |
+| 1.0.230.19 · tour-19-180057 | Dwarf Fortress | Original green Play button activated. Matching game process and presenter were present. | Raw 1920×1080 console image showed the Dwarf Fortress title and main menu. | 1,797 distinct presented frames over 30.013639 s (59.87 FPS). A new run ID and disappearance of the package processes interrupted the session before a visible return to Library. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
+
+On `.19` Dwarf Fortress reached the game on TV on 1/1 attempt and completed 0/1 round trips. The player observed the pointer. No in-game overlay or return was independently confirmed in this run. Slay the Spire and Stardew Valley have no recorded `.19` Play attempts.
 
 ## Capture provenance
 
@@ -67,6 +70,8 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `welcome.png`, .19 whole-output centered tour | 1920×1080 | `8ea2371933cf51a18f6087394098dd03874f0b7e2a044fdcce09e0c9e9424091` |
 | `physical-tv-1795302175230899000.png`, .19 whole-output game details | 1920×1080 | `094fafc7ca951f3c1d7e5081f668b8560eb526d23b84661c14fbf5bbcaf58d09` |
 | `physical-tv-1795302202507642000.png`, .19 whole-output stock Library | 1920×1080 | `b5b301247cc09624cbf48fc1ad2d2b954b11ec9a7a0c715c952eff3856e021ad` |
+| `physical-tv-1795302269582823000.png`, .19 Dwarf Fortress details with Play | 1920×1080 | `789c56b960630c98110802dc6f5380e3aa096beb6716ee09b53d97aa9659fc27` |
+| `physical-tv-1795302410685794000.png`, .19 Dwarf Fortress title and menu | 1920×1080 | `120584cf51757da46ee8b8917b2a1adb066b76ecd000cfc3770bac020c0c6c45` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
