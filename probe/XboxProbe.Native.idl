@@ -5,7 +5,8 @@ namespace XboxProbe.Native
         static String Run();
         static String RunSteamCore(String inventory);
         static Windows.Foundation.IAsyncAction RunSteamRuntime(Windows.Storage.StorageFile file, String prefix);
-        static Windows.Foundation.IAsyncAction RunSteamSignIn(Windows.Storage.StorageFile file, String prefix,
-                                                              String account, String approval, String accountId);
+        static Windows.Foundation.IAsyncOperation<String> RunSteamSignIn(Windows.Storage.StorageFile file, String prefix,
+                                                                         String account, String approval, String accountId);
+        static void SignOutSteam();
     };
 }

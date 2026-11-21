@@ -2,21 +2,44 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Steam sign-in | Xbox Dev Mode</title>
+    <title>Steam library | Xbox Dev Mode</title>
     <link rel="stylesheet" href="steam-signin.css">
 </head>
 <body>
     <main>
-        <section aria-labelledby="title">
-            <h1 id="title">Steam sign-in</h1>
-            <p class="device">Xbox Developer Mode client</p>
-            <p id="status" role="status" aria-live="polite">Preparing Steam Guard sign-in…</p>
-            <div class="actions">
-                <button id="retry" hidden>Get a new code</button>
-                <button id="cancel" hidden>Cancel</button>
+        <section id="signin" aria-labelledby="title">
+            <div>
+                <h1 id="title">Steam sign-in</h1>
+                <p class="device">Xbox Developer Mode client</p>
+                <p id="status" role="status" aria-live="polite">Preparing Steam Guard sign-in…</p>
+                <div class="actions">
+                    <button id="retry" hidden>Get a new code</button>
+                    <button id="cancel" hidden>Cancel</button>
+                </div>
+            </div>
+            <canvas id="code" aria-label="Steam Guard QR code" hidden></canvas>
+        </section>
+        <section id="library" aria-labelledby="library-title" hidden>
+            <header class="library-header">
+                <div>
+                    <h1 id="library-title">Steam library</h1>
+                    <p id="library-count" class="device" role="status"></p>
+                </div>
+                <button id="sign-out">Sign out</button>
+            </header>
+            <div class="library-columns">
+                <div class="catalog">
+                    <label for="library-search">Search library</label>
+                    <input id="library-search" type="search" autocomplete="off">
+                    <div id="library-list" aria-label="Library titles"></div>
+                    <p id="library-empty" hidden>No matching titles.</p>
+                </div>
+                <section class="entry" aria-labelledby="entry-name">
+                    <p id="entry-type" class="device"></p>
+                    <h2 id="entry-name"></h2>
+                </section>
             </div>
         </section>
-        <canvas id="code" aria-label="Steam Guard QR code" hidden></canvas>
     </main>
     <script src="qrcode.js"></script>
     <script src="steam-signin.js"></script>

@@ -1,12 +1,38 @@
 html { background: #131a24; color: #f5f7fb; font: 24px 'Segoe UI', sans-serif; }
 body { min-height: 100vh; margin: 0; }
-main { display: flex; align-items: center; justify-content: space-between; margin: 0 auto; min-height: 86vh; max-width: 1160px; padding: 0 6vw; }
-section { max-width: 550px; }
+main { margin: 0 auto; max-width: 1480px; padding: 0 6vw; }
+#signin { display: flex; align-items: center; justify-content: space-between; min-height: 86vh; }
+#signin > div { max-width: 550px; }
 h1 { margin: 0; font-size: 2.6em; font-weight: 650; }
 p { line-height: 1.45; }
 .device { color: #aebbd0; margin: .25em 0 1.6em; }
 .actions { min-height: 64px; }
 button { margin-right: .5em; border: 2px solid #7990ad; border-radius: 4px; padding: .5em .9em; font: inherit; color: #f5f7fb; background: #24334a; }
-button:focus { outline: 3px solid #7cd5ff; outline-offset: 3px; }
+button:focus, input:focus { outline: 3px solid #7cd5ff; outline-offset: 3px; }
 canvas { max-width: 40vw; margin-left: 2em; background: white; }
-[hidden] { display: none; }
+[hidden] { display: none !important; }
+
+#library { padding: 6vh 0; }
+.library-header { display: flex; justify-content: space-between; align-items: baseline; }
+.library-header .device { margin-bottom: .8em; }
+.library-header button { margin-right: 0; }
+.library-columns { display: flex; }
+.catalog { width: 53%; padding-right: 2em; box-sizing: border-box; }
+.catalog label { display: block; margin-bottom: .35em; color: #c6d3e4; font-size: .82em; }
+.catalog input {
+    width: 100%; box-sizing: border-box; padding: .45em .65em; border: 1px solid #7186a0;
+    border-radius: 4px; background: #1b2a3e; color: inherit; font: inherit;
+}
+#library-list { max-height: 55vh; margin: .65em -.25em 0; padding: .25em; overflow-y: auto; }
+#library-list button {
+    display: block; width: 100%; margin: 0 0 .25em; border: 1px solid transparent;
+    padding: .55em .65em; text-align: left; background: #1b2a3e; overflow-wrap: break-word;
+}
+#library-list button[aria-pressed="true"] { background: #2b4462; border-color: #7fafd5; }
+.entry {
+    width: 47%; box-sizing: border-box; align-self: stretch; min-height: 60vh;
+    padding: 2em; border: 1px solid #34465d; border-radius: 8px;
+    background: linear-gradient(145deg, #24374d, #192434 65%);
+}
+.entry .device { margin: 0 0 .5em; }
+.entry h2 { margin: 0; font-weight: 650; font-size: 1.9em; overflow-wrap: break-word; }

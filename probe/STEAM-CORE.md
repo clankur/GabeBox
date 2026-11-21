@@ -77,9 +77,15 @@ python3 xbox-deploy.py --env-file "$xbox_env" deploy \
   "$trial_dir/signin-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 245
 ```
 
-`status=steam-approval-ready` shows that the app drew the Valve code. In Steam Mobile, open Steam Guard, scan the code, and approve the sign-in named **Xbox Dev Mode Steam client**. If it expires, **Get a new code** starts another request. The report contains neither the code nor the credentials returned by Valve. At completion, the probe signs out its native test session. [Steam Mobile](https://store.steampowered.com/mobile)
+`status=steam-approval-ready` shows that the app drew the Valve code. In Steam Mobile, open Steam Guard, scan the code, and approve the sign-in named **Xbox Dev Mode Steam client**. If it expires, **Get a new code** starts another request. The report contains stage markers and counts. [Steam Mobile](https://store.steampowered.com/mobile)
 
-A verified library result requires Valve’s native user interface to report online, its account ID to match the approved account, and its subscription query to return a positive count. The display and report expose only the count. The QR renderer is the pinned MIT-licensed `qrcode-generator` browser bundle, included by the SDK workflow and used locally. [QR renderer source](https://github.com/kazuhikoarase/qrcode-generator)
+A verified library result requires Valve’s native user interface to report online, its account ID to match the approved account, and its subscription query to return a positive count. The client reads title metadata for those AppIDs and passes it to the on-console page in memory. The page renders a searchable list and keeps the native session open until sign-out or app exit. `steam_library_named` is the number of entries with names returned by Steam. `steam_library_rendered=yes` confirms the view rendered. AppIDs, titles, account details and QR data stay off the CLI report. The QR renderer is the pinned MIT-licensed `qrcode-generator` browser bundle, included by the SDK workflow and used locally. [QR renderer source](https://github.com/kazuhikoarase/qrcode-generator)
+
+Read an existing report without restarting the app or interrupting the session.
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.38.0
+```
 
 ## Series X observations
 
@@ -106,3 +112,5 @@ On Series X, package `1.0.28.0` received a successful Valve directory response a
 Package `1.0.32.0` verified the same native ABI and signed-out query, and Valve’s authentication endpoint returned HTTP `200` with a valid approval challenge. The package discarded the challenge. No sign-in, account data, entitlement query, or library retrieval occurred. [QR preflight SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44863218500)
 
 The interactive `1.0.34.0` build showed a live code on the Series X and received the account owner’s approval through Steam Mobile. The pinned native client accepted the request, reported an online session whose account matched the approval, and returned a positive subscription count through `GetSubscribedApps`. The probe then signed out its native session. The report marked `steam_signin=authenticated` and `steam_library=verified`. Content installation and local game launch remain open. [Interactive SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44863836352)
+
+Version `1.0.36.0` authenticated and enumerated subscriptions, then stopped at the metadata interface check. In the pinned image, the per-user interface construction stores `IClientAppsMap` at offset `0x50`, which matches engine slot 17. Version `1.0.38.0` verifies that getter, the returned interface table and its metadata methods. On Series X it requested missing metadata, received titles for most of the subscriptions, and reported `steam_library_rendered=yes`. The read-only CLI command confirmed the same report without launching again. [Library SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44864916465)
