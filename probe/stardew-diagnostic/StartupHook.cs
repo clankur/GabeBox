@@ -36,6 +36,12 @@ internal static class StartupHook
         }
 
         Record("stardew_managed=entered");
+        if (package != null && File.Exists(Path.Combine(package, "stardew-low-memory.txt")))
+        {
+            var info = typeof(GC).GetMethod("GetGCMemoryInfo", Type.EmptyTypes)?.Invoke(null, null);
+            if (info?.GetType().GetProperty("TotalAvailableMemoryBytes")?.GetValue(info) is long limit)
+                Record("stardew_gc_available_bytes=" + limit);
+        }
         if (package != null && local != null && File.Exists(Path.Combine(package, "stardew-game-directory.txt")))
         {
             var expectedGame = Path.Combine(local, "SteamLibrary", "steamapps", "common", "Stardew Valley");

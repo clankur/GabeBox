@@ -250,6 +250,7 @@ def stardew_managed_summary(raw):
                r'stardew_managed_fault=[a-zA-Z0-9_.+]{1,128}|'
                r'stardew_managed_detail=(?:opengl|sdl|access-denied)|'
                r'stardew_game_directory=(?:ready|unexpected|error)|'
+               r'stardew_gc_available_bytes=[0-9]{1,16}|'
                r'stardew_invalid_argument=[a-zA-Z0-9_.+]{1,128}|'
                r'stardew_invalid_argument_frame=(?:StardewValley\.|Microsoft\.Xna\.Framework\.|MonoGame\.)[a-zA-Z0-9_.+]{1,140}|'
                r'stardew_data_roaming=(?:empty|resolved)|'

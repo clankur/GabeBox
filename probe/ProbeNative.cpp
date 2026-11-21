@@ -1417,11 +1417,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::wstring gameDirectory;
     bool traceStardew = false;
     bool diagnoseManagedStardew = false;
+    bool limitStardewHeap = false;
     if (app == 413150) {
         auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
         traceStardew = static_cast<bool>(co_await package.TryGetItemAsync(L"stardew-host-trace.txt"));
         if (traceStardew) {
             diagnoseManagedStardew = static_cast<bool>(co_await package.TryGetItemAsync(L"StardewStartupDiagnostic.dll"));
+            limitStardewHeap = diagnoseManagedStardew &&
+                static_cast<bool>(co_await package.TryGetItemAsync(L"stardew-low-memory.txt"));
         }
     }
     struct DiagnosticEnvironmentVariable {
@@ -1443,7 +1446,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (created) SetEnvironmentVariableW(name, nullptr);
         }
     } traceFile{L"COREHOST_TRACEFILE"}, traceEnabled{L"COREHOST_TRACE"},
-      managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHook{L"DOTNET_STARTUP_HOOKS"};
+      managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHook{L"DOTNET_STARTUP_HOOKS"},
+      managedHeap{L"DOTNET_GCHeapHardLimit"};
     bool sharedManifestComplete = false;
     if (appliedSharedOverride) {
         // Steam can publish the installed state before the on-disk manifest is readable.
@@ -1519,6 +1523,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     report += L"steam_stardew_managed=environment-unavailable\r\n";
                 }
             }
+        }
+        if (limitStardewHeap) {
+            report += managedHeap.Missing() && managedHeap.Set(L"10000000")
+                ? L"steam_stardew_heap_limit_mib=256\r\n"
+                : L"steam_stardew_heap_limit=environment-unavailable\r\n";
         }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
