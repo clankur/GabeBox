@@ -1,7 +1,8 @@
 # Run on a disposable Windows VM without a Steam desktop process.
 param(
     [Parameter(Mandatory)]
-    [string]$WorkDirectory
+    [string]$WorkDirectory,
+    [switch]$Bootstrap
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -74,7 +75,7 @@ public static class SteamCoreControl {
         return Marshal.GetDelegateForFunctionPointer<T>(address);
     }
 
-    public static object Check(string path) {
+    public static object Check(string path, bool tryBootstrap) {
         // Include the adjacent pinned dependencies and the standard loader directories.
         var module = LoadLibraryEx(path, IntPtr.Zero, 0x1100);
         if (module == IntPtr.Zero) throw new Win32Exception();
@@ -89,12 +90,13 @@ public static class SteamCoreControl {
                 var release = GetExport<ReleasePipe>(module, "Steam_BReleaseSteamPipe");
                 pipe = create();
                 if (pipe > 0) released = release(pipe.Value);
-                if (pipe == 0) {
+                if (pipe == 0 && tryBootstrap) {
                     var createUser = GetExport<CreateGlobalUser>(module, "Steam_CreateGlobalUser");
                     var releaseUser = GetExport<ReleaseUser>(module, "Steam_ReleaseUser");
                     var loggedOn = GetExport<LoggedOn>(module, "Steam_BLoggedOn");
                     int bootstrapPipe = 0;
                     int user = createUser(ref bootstrapPipe);
+                    Console.WriteLine($"Bootstrap returned user handle {user} and pipe handle {bootstrapPipe}.");
                     bool? signedIn = null;
                     if (user > 0 && bootstrapPipe > 0) {
                         signedIn = loggedOn(user, bootstrapPipe);
@@ -113,13 +115,14 @@ public static class SteamCoreControl {
 '@
 
 [Environment]::CurrentDirectory = $work.FullName
-$result = [SteamCoreControl]::Check($core)
+$result = [SteamCoreControl]::Check($core, $Bootstrap.IsPresent)
 $evidence = [ordered]@{
     windowsBuild = (Get-CimInstance Win32_OperatingSystem).BuildNumber
     valveManifest = $pin.version
     coreSha256 = (Get-FileHash -LiteralPath $core).Hash.ToLowerInvariant()
     interfaceVersion = 'SteamClient023'
     desktopProcessBefore = $false
+    bootstrapRequested = $Bootstrap.IsPresent
     outcome = $result
 }
 $evidence | ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $work.FullName 'evidence.json')
