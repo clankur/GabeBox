@@ -17,6 +17,11 @@
     var signOut = document.getElementById("sign-out");
     var play = document.getElementById("play");
     var download = document.getElementById("download");
+    var cloudSaves = document.getElementById("cloud-saves");
+    var cloudPanel = document.getElementById("cloud-saves-panel");
+    var cloudOpen = document.getElementById("cloud-saves-open");
+    var cloudStatus = document.getElementById("cloud-saves-status");
+    var cloudCode = document.getElementById("cloud-saves-code");
     var downloadStatus = document.getElementById("download-status");
     var current;
     var entries = [];
@@ -107,22 +112,26 @@
 
     function showCode(url) {
         if (!/^https:\/\/s\.team\/q\/[a-zA-Z0-9/_-]+$/.test(url)) throw new Error("Invalid Valve code");
+        drawCode(canvas, url);
+        canvas.hidden = false;
+    }
+
+    function drawCode(target, url) {
         var qr = qrcode(0, "M");
         qr.addData(url);
         qr.make();
         var size = qr.getModuleCount();
         var scale = 12;
-        canvas.width = canvas.height = (size + 8) * scale;
-        var context = canvas.getContext("2d");
+        target.width = target.height = (size + 8) * scale;
+        var context = target.getContext("2d");
         context.fillStyle = "#fff";
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillRect(0, 0, target.width, target.height);
         context.fillStyle = "#000";
         for (var y = 0; y < size; y++) {
             for (var x = 0; x < size; x++) {
                 if (qr.isDark(y, x)) context.fillRect((x + 4) * scale, (y + 4) * scale, scale, scale);
             }
         }
-        canvas.hidden = false;
     }
 
     function clearCode() {
@@ -164,6 +173,7 @@
 
     function select(button) {
         if (selected) selected.setAttribute("aria-pressed", "false");
+        if (selected !== button) closeCloudSaves();
         selected = button;
         if (button) button.setAttribute("aria-pressed", "true");
         entryName.textContent = button ? button.entry.name : "";
@@ -171,15 +181,28 @@
         if (button && button.entry.game) checkLocalInstall(button.entry);
     }
 
+    function closeCloudSaves() {
+        cloudPanel.hidden = true;
+        cloudSaves.setAttribute("aria-expanded", "false");
+        cloudStatus.textContent = "";
+    }
+
     function updateActions() {
         var focused = document.activeElement;
         var entry = selected && selected.entry;
         play.hidden = !entry || !entry.game || !entry.installed;
         download.hidden = !entry || !entry.game || !!entry.installed;
-        play.disabled = download.disabled = launching || !!transfer;
-        if ((focused === play || focused === download) && (focused.hidden || focused.disabled)) {
+        cloudSaves.hidden = !entry || !entry.game || !steamCloud.remoteStorageUrl(entry.id);
+        play.disabled = download.disabled = cloudSaves.disabled = launching || !!transfer;
+        if (cloudSaves.hidden || cloudSaves.disabled) closeCloudSaves();
+        if (((focused === play || focused === download || focused === cloudSaves) &&
+             (focused.hidden || focused.disabled)) || (focused === cloudOpen && cloudPanel.hidden)) {
             (selected || search).focus();
         }
+    }
+
+    function primaryAction() {
+        return play.hidden ? download : play;
     }
 
     function checkLocalInstall(entry) {
@@ -622,7 +645,7 @@
         var button = event.target.entry ? event.target : event.target.parentElement;
         if (!button || !button.entry) return;
         select(button);
-        var action = play.hidden ? download : play;
+        var action = primaryAction();
         if (!action.hidden && !action.disabled) action.focus();
     });
     var originalInputMode = navigator.gamepadInputEmulation;
@@ -646,7 +669,12 @@
         var next;
         if (key === 27 || key === 143 || key === 196) {
             if (target === search) return;
-            next = target.entry ? search : (selected || search);
+            if (!cloudPanel.hidden && (target === cloudOpen || target === cloudSaves)) {
+                closeCloudSaves();
+                next = cloudSaves;
+            } else {
+                next = target.entry ? search : (selected || search);
+            }
         } else if (!direction) {
             return;
         } else if (target === search) {
@@ -658,10 +686,17 @@
         } else if (target.entry) {
             next = libraryNavigation.adjacent(list.children, target, direction);
             if (!next && direction === "up") next = search;
-            if (!next && direction === "right") next = play.hidden ? download : play;
+            if (!next && direction === "right") next = primaryAction();
         } else if (target === play || target === download) {
             if (direction === "left") next = selected;
             if (direction === "up") next = signOut;
+            if (direction === "down") next = cloudSaves;
+        } else if (target === cloudSaves) {
+            if (direction === "left") next = selected;
+            if (direction === "up") next = primaryAction();
+            if (direction === "down" && !cloudPanel.hidden) next = cloudOpen;
+        } else if (target === cloudOpen) {
+            if (direction === "left" || direction === "up") next = cloudSaves;
         } else {
             return;
         }
@@ -673,6 +708,38 @@
     });
     play.addEventListener("click", function () {
         if (selected && selected.entry.installed) runGameLaunch(current, selected.entry);
+    });
+    cloudSaves.addEventListener("click", function () {
+        if (!cloudPanel.hidden) {
+            closeCloudSaves();
+            return;
+        }
+        var url = selected && steamCloud.remoteStorageUrl(selected.entry.id);
+        if (!url || cloudSaves.disabled) return;
+        drawCode(cloudCode, url);
+        cloudPanel.hidden = false;
+        cloudSaves.setAttribute("aria-expanded", "true");
+        cloudOpen.focus();
+    });
+    cloudOpen.addEventListener("click", function () {
+        var entry = selected && selected.entry;
+        var url = entry && steamCloud.remoteStorageUrl(entry.id);
+        if (!url || cloudPanel.hidden) return;
+
+        function showBrowserFailure() {
+            if (selected && selected.entry === entry && !cloudPanel.hidden) {
+                cloudStatus.textContent = "Could not open the Xbox browser. Scan the code to open Steam on your phone.";
+            }
+        }
+
+        cloudStatus.textContent = "";
+        try {
+            Windows.System.Launcher.launchUriAsync(new Windows.Foundation.Uri(url)).done(function (opened) {
+                if (!opened) showBrowserFailure();
+            }, showBrowserFailure);
+        } catch (error) {
+            showBrowserFailure();
+        }
     });
     signOut.addEventListener("click", function () {
         if (transfer) updateDownload(transfer, "interrupted");

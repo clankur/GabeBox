@@ -43,6 +43,13 @@
                     <h2 id="entry-name"></h2>
                     <button id="play" hidden>Play</button>
                     <button id="download" hidden>Download</button>
+                    <button id="cloud-saves" aria-controls="cloud-saves-panel" aria-expanded="false" hidden>Cloud saves</button>
+                    <div id="cloud-saves-panel" hidden>
+                        <button id="cloud-saves-open">Open Steam in browser</button>
+                        <p id="cloud-saves-status" role="status" aria-live="polite"></p>
+                        <p>Scan to view this game’s Steam Cloud files on your phone.</p>
+                        <canvas id="cloud-saves-code" role="img" aria-label="QR code for this game’s Steam Cloud page"></canvas>
+                    </div>
                     <p id="download-status" class="download-status" role="status" aria-live="polite"></p>
                 </section>
             </div>
@@ -71,6 +78,7 @@
     <script src="qrcode.js"></script>
     <script src="library-art.js"></script>
     <script src="library-navigation.js"></script>
+    <script src="steam-cloud.js"></script>
     <script src="steam-game-launch.js"></script>
     <script src="steam-signin.js"></script>
 </body>

@@ -91,6 +91,27 @@
     border-color: #ffd087;
     color: #29171d;
 }
+#library #cloud-saves, #library #cloud-saves-open {
+    display: block;
+    max-width: 100%;
+    margin-top: .7em;
+}
+#library #cloud-saves:disabled { opacity: .5; }
+#cloud-saves-panel {
+    margin-top: .7em;
+    padding-top: .15em;
+    border-top: 1px solid #624960;
+    font-size: .82em;
+}
+#cloud-saves-panel p { margin: .7em 0; }
+#cloud-saves-status:empty { margin: 0; }
+#cloud-saves-code {
+    display: block;
+    width: 6.75em;
+    max-width: 100%;
+    margin: 0;
+    image-rendering: pixelated;
+}
 #library .download-status { color: #e8d9df; }
 @media (max-width: 1090px) {
     #library-list button { flex-basis: 48%; width: 48%; }
