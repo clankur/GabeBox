@@ -219,8 +219,7 @@ static std::wstring AngleResult() {
 static void WriteMesaIndexedCheckpoint(unsigned stage) {
     auto local = winrt::Windows::Storage::ApplicationData::Current().LocalFolder();
     auto path = std::wstring(local.Path()) + L"\\mesa-indexed-stage.txt";
-    HANDLE raw = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE raw = CreateFile2(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, nullptr);
     if (raw == INVALID_HANDLE_VALUE) return;
     winrt::handle file{raw};
     auto text = "mesa_stage=" + std::to_string(stage) + "\r\n";
