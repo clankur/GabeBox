@@ -1,0 +1,33 @@
+{
+  "manifest_url": "https://client-update.akamai.steamstatic.com/steam_client_win64",
+  "manifest_sha256": "d5aa8724a30324cc3247bce8c6a983264926fbd34858f71f554a9a9e96570b0f",
+  "version": "1794536281",
+  "archives": [
+    {
+      "file": "steam_win64_steamrow.zip.42bca491d43dcfea62720044b1b8abdbb185b3fc",
+      "size": 2696423,
+      "sha256": "3f23dea515f9ef1470fd69283603f6852a823598de0b11f743f97592e27bf49f",
+      "members": [
+        "steam.exe"
+      ]
+    },
+    {
+      "file": "bins_webhelpers_win64.zip.68246d7b67427fae6b7dc9d6aafb56c2f89b4add",
+      "size": 3680781,
+      "sha256": "d4343a78e7807b0044fc1ceca69b13f5d934eb4f82e4f0d4068c9833651e6b08",
+      "members": [
+        "bin/cef/cef.win64/steamwebhelper.exe"
+      ]
+    },
+    {
+      "file": "bins_win64.zip.119a215939f1426cff28bdf03a5c55fcd865720c",
+      "size": 64658652,
+      "sha256": "5c9337cc6712adc696db81d483cc63663559bcf8604539f6b745883f505526d6",
+      "members": [
+        "steamclient64.dll",
+        "SteamUI.dll",
+        "bin/SteamService.exe"
+      ]
+    }
+  ]
+}

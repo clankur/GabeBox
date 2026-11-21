@@ -1,0 +1,271 @@
+{
+  "valve_manifest_version": "1794536281",
+  "components": [
+    {
+      "member": "steam.exe",
+      "sha256": "c97eb13c5a2a0c74aaac61e461a588da3bf8a703be93735a3efa83e71cf8aabf",
+      "bytes": 5830808,
+      "architecture": "amd64",
+      "bits": 64,
+      "imports": [
+        "KERNEL32.dll",
+        "USER32.dll",
+        "GDI32.dll",
+        "ADVAPI32.dll",
+        "SHELL32.dll",
+        "PSAPI.DLL",
+        "ntdll.dll",
+        "api-ms-win-shcore-scaling-l1-1-1.dll",
+        "VERSION.dll",
+        "CRYPT32.dll"
+      ],
+      "delay_imports": [
+        "ole32.dll",
+        "COMCTL32.dll",
+        "bcrypt.dll",
+        "WS2_32.dll",
+        "WSOCK32.dll"
+      ],
+      "selected_imports": [
+        {
+          "kind": "imports",
+          "module": "KERNEL32.dll",
+          "function": "CreateProcessW"
+        },
+        {
+          "kind": "imports",
+          "module": "USER32.dll",
+          "function": "CreateWindowExW"
+        },
+        {
+          "kind": "imports",
+          "module": "USER32.dll",
+          "function": "RegisterClassExW"
+        }
+      ]
+    },
+    {
+      "member": "bin/cef/cef.win64/steamwebhelper.exe",
+      "sha256": "e7ae397d5919d330c10dcc9ba00899726b33c07a657f02282a16686196978180",
+      "bytes": 7515288,
+      "architecture": "amd64",
+      "bits": 64,
+      "imports": [
+        "KERNEL32.dll",
+        "ADVAPI32.dll",
+        "WINMM.dll",
+        "ntdll.dll",
+        "api-ms-win-core-processenvironment-l1-1-0.dll",
+        "api-ms-win-core-file-l1-1-0.dll",
+        "api-ms-win-core-string-l1-1-0.dll",
+        "api-ms-win-core-errorhandling-l1-1-0.dll",
+        "api-ms-win-core-libraryloader-l1-2-0.dll",
+        "libcef.dll",
+        "tier0_s64.dll",
+        "vstdlib_s64.dll",
+        "dwmapi.dll",
+        "WS2_32.dll",
+        "dbghelp.dll",
+        "USERENV.dll",
+        "bcrypt.dll"
+      ],
+      "delay_imports": [
+        "USER32.dll",
+        "GDI32.dll",
+        "SHELL32.dll",
+        "ole32.dll",
+        "PSAPI.DLL",
+        "SDL3.dll"
+      ],
+      "selected_imports": [
+        {
+          "kind": "imports",
+          "module": "libcef.dll",
+          "function": "cef_execute_process"
+        },
+        {
+          "kind": "imports",
+          "module": "libcef.dll",
+          "function": "cef_initialize"
+        },
+        {
+          "kind": "imports",
+          "module": "libcef.dll",
+          "function": "cef_run_message_loop"
+        },
+        {
+          "kind": "delay_imports",
+          "module": "USER32.dll",
+          "function": "CreateDesktopW"
+        }
+      ]
+    },
+    {
+      "member": "steamclient64.dll",
+      "sha256": "669fa08e259277fbf5a1dfe15ce88afe734e89151194304b44d92f418dcc985b",
+      "bytes": 26787480,
+      "architecture": "amd64",
+      "bits": 64,
+      "imports": [
+        "KERNEL32.dll",
+        "USER32.dll",
+        "GDI32.dll",
+        "ADVAPI32.dll",
+        "SHELL32.dll",
+        "ole32.dll",
+        "OLEAUT32.dll",
+        "WS2_32.dll",
+        "SHLWAPI.dll",
+        "WINMM.dll",
+        "CRYPT32.dll",
+        "IPHLPAPI.DLL",
+        "imagehlp.dll",
+        "PSAPI.DLL",
+        "VERSION.dll",
+        "SETUPAPI.dll",
+        "tier0_s64.dll",
+        "vstdlib_s64.dll",
+        "ntdll.dll",
+        "MSWSOCK.dll",
+        "bcrypt.dll",
+        "Secur32.dll"
+      ],
+      "delay_imports": [],
+      "selected_imports": [
+        {
+          "kind": "imports",
+          "module": "KERNEL32.dll",
+          "function": "CreateProcessA"
+        },
+        {
+          "kind": "imports",
+          "module": "KERNEL32.dll",
+          "function": "CreateProcessW"
+        },
+        {
+          "kind": "imports",
+          "module": "USER32.dll",
+          "function": "RegisterClassExW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "OpenSCManagerW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "StartServiceW"
+        },
+        {
+          "kind": "imports",
+          "module": "SHELL32.dll",
+          "function": "ShellExecuteExW"
+        }
+      ]
+    },
+    {
+      "member": "SteamUI.dll",
+      "sha256": "2dfb0a5d50dd90667549cc7d413c7bfb0794c9af4ebaf08bf1cf7d938a11ea93",
+      "bytes": 19675800,
+      "architecture": "amd64",
+      "bits": 64,
+      "imports": [
+        "KERNEL32.dll",
+        "USER32.dll",
+        "GDI32.dll",
+        "ADVAPI32.dll",
+        "SHELL32.dll",
+        "ole32.dll",
+        "OLEAUT32.dll",
+        "WS2_32.dll",
+        "COMCTL32.dll",
+        "SHLWAPI.dll",
+        "WINMM.dll",
+        "SETUPAPI.dll",
+        "PSAPI.DLL",
+        "IPHLPAPI.DLL",
+        "VERSION.dll",
+        "libavcodec-62.dll",
+        "libavutil-60.dll",
+        "libpyrowave-shared-1.dll",
+        "SDL3.dll",
+        "tier0_s64.dll",
+        "video64.dll",
+        "vstdlib_s64.dll",
+        "ntdll.dll",
+        "CRYPT32.dll",
+        "WSOCK32.dll",
+        "bcrypt.dll"
+      ],
+      "delay_imports": [],
+      "selected_imports": [
+        {
+          "kind": "imports",
+          "module": "USER32.dll",
+          "function": "RegisterClassExW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "OpenSCManagerW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "StartServiceW"
+        }
+      ]
+    },
+    {
+      "member": "bin/SteamService.exe",
+      "sha256": "8c189276d72a1bccf299435ddb5dd7df8601552c90e247137539958586a520d1",
+      "bytes": 2966168,
+      "architecture": "386",
+      "bits": 32,
+      "imports": [
+        "KERNEL32.dll",
+        "USER32.dll",
+        "ADVAPI32.dll",
+        "SHELL32.dll",
+        "ole32.dll",
+        "OLEAUT32.dll",
+        "WS2_32.dll",
+        "SHLWAPI.dll",
+        "WINTRUST.dll",
+        "PSAPI.DLL",
+        "bcrypt.dll"
+      ],
+      "delay_imports": [
+        "VERSION.dll"
+      ],
+      "selected_imports": [
+        {
+          "kind": "imports",
+          "module": "KERNEL32.dll",
+          "function": "CreateProcessW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "CreateServiceW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "OpenSCManagerW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "StartServiceCtrlDispatcherW"
+        },
+        {
+          "kind": "imports",
+          "module": "ADVAPI32.dll",
+          "function": "StartServiceW"
+        }
+      ]
+    }
+  ]
+}
