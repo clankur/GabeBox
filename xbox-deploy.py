@@ -440,8 +440,9 @@ def main():
                 print('sdl_startup=no-trace-request')
                 return
             trace = read_game_file(portal, app, r'\LocalState', f'sdl-startup-{run[1]}.txt', 4096)
-            snapshots = re.findall(r'^sdl_(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|gl_library|gl_context)'
-                                   r'=(?:begin|ready|error)$', decode_report(trace or b''), re.MULTILINE)
+            snapshots = re.findall(r'^sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
+                                   r'audio_init|audio_device|gl_library|gl_context|gl_swap_interval)=(?:begin|ready|error)|'
+                                   r'init_flags=0x[0-9A-F]{8})$', decode_report(trace or b''), re.MULTILINE)
             print('\n'.join(snapshots) or 'sdl_startup=no-checkpoints')
             return
         _, raw = portal.request('GET', probe_report_path(app, args.report_file))
