@@ -12,6 +12,7 @@
 #include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <algorithm>
 #include <array>
@@ -203,6 +204,43 @@ struct View : implements<View, IFrameworkView> {
     void focusVisible() {
         if (!gameForeground && window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground)
             (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
+    }
+
+    // A composition controller has no child HWND. Forward CoreWindow pointer
+    // input to the visible Valve surface in physical pixels, including underscan.
+    void mouse(PointerEventArgs const& args, CoreWebView2MouseEventKind kind) {
+        if (closed || gameForeground || !popup || !popup.IsVisible() || !window.Visible()) return;
+        auto point = args.CurrentPoint();
+        if (point.PointerDevice().PointerDeviceType() != Windows::Devices::Input::PointerDeviceType::Mouse) return;
+        auto props = point.Properties();
+        using Update = Windows::UI::Input::PointerUpdateKind;
+        switch (props.PointerUpdateKind()) {
+        case Update::LeftButtonPressed: kind = CoreWebView2MouseEventKind::LeftButtonDown; break;
+        case Update::LeftButtonReleased: kind = CoreWebView2MouseEventKind::LeftButtonUp; break;
+        case Update::RightButtonPressed: kind = CoreWebView2MouseEventKind::RightButtonDown; break;
+        case Update::RightButtonReleased: kind = CoreWebView2MouseEventKind::RightButtonUp; break;
+        default: break;
+        }
+        auto pos = point.Position();
+        auto offset = popupSurface.Offset();
+        auto scale = static_cast<float>(Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
+        Point pixels{pos.X * scale - offset.x, pos.Y * scale - offset.y};
+        auto keys = props.IsLeftButtonPressed() ? CoreWebView2MouseEventVirtualKeys::LeftButton :
+            CoreWebView2MouseEventVirtualKeys::None;
+        if (props.IsRightButtonPressed()) keys = keys | CoreWebView2MouseEventVirtualKeys::RightButton;
+        if (kind == CoreWebView2MouseEventKind::LeftButtonDown) focusVisible();
+        popup.SendMouseInput(kind, keys, static_cast<uint32_t>(props.MouseWheelDelta()), pixels);
+        args.Handled(true);
+    }
+
+    void restartClient() {
+        if (closed || gameForeground || !web || !document->signedMode || !document->accepts(web.Source())) return;
+        closePopup();
+        cloudCache->cancel();
+        document->committed = false;
+        { slim_lock_guard lock(gate); requests.clear(); }
+        checkpoint(L"navigation");
+        web.Navigate(signedEntry);
     }
 
     void publishGamepads() {
@@ -506,6 +544,11 @@ struct View : implements<View, IFrameworkView> {
     void Run() {
         try {
             { slim_lock_guard lock(gate); if (closeRequested) return; }
+            auto pointer = [this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Move); };
+            window.PointerMoved(pointer);
+            window.PointerPressed(pointer);
+            window.PointerReleased(pointer);
+            window.PointerWheelChanged([this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Wheel); });
             window.SizeChanged({this, &View::onSize});
             window.VisibilityChanged([this](auto const&, auto const&) { applyVisibility(); publishWindow(); });
             window.Closed({this, &View::onClosed});
@@ -595,6 +638,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             // WebMessageReceived never accepts a presenter-visibility command.
             if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
             else if (message == L"{\"nativeGameForeground\":false}") view.setGameForeground(false);
+            else if (message == L"{\"nativeRestartClient\":true}") view.restartClient();
             else if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
