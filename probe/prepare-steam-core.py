@@ -126,11 +126,13 @@ def title_launch_option(spec):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
-                   launch_options=()):
+                   launch_options=(), startup_snapshot=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
         configured_options[launch_app_id] = launch_option
+    if startup_snapshot and (not steam_sign_in or not launch_app_id or (xcom_runtime_archive and launch_app_id == 7760)):
+        raise ValueError('A startup snapshot needs a native Steam Play target.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -180,6 +182,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'steam-launch-app.txt').write_text('\n'.join(config), encoding='ascii')
         for app_id, index in configured_options.items():
             (layout / f'steam-launch-option-{app_id}.txt').write_text(str(index), encoding='ascii')
+        if startup_snapshot:
+            (layout / f'steam-startup-snapshot-{launch_app_id}.txt').touch()
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -224,6 +228,8 @@ def main():
                         help='select a publisher launch option for the configured Steam AppID (default 0)')
     parser.add_argument('--repeat-launch', action='store_true',
                         help='run the launch test again each time the probe starts from a fresh process')
+    parser.add_argument('--startup-snapshot', action='store_true',
+                        help='sample the configured game process before polling Steam for a ready window')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -257,6 +263,8 @@ def main():
         parser.error('--probe-java-runtime requires --launch-app-id 646570')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
+    if args.startup_snapshot and (not args.launch_app_id or (args.xcom_dos_runtime and args.launch_app_id == 7760)):
+        parser.error('--startup-snapshot requires --launch-app-id with a native Steam Play target')
     if args.install_before_launch and args.launch_app_id is None:
         parser.error('--install-before-launch requires --launch-app-id')
     if args.library_inventory and not args.steam_sign_in:
@@ -269,7 +277,7 @@ def main():
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework,
                    xcom_runtime_archive=args.xcom_dos_runtime, launch_option=args.launch_option,
-                   launch_options=title_options)
+                   launch_options=title_options, startup_snapshot=args.startup_snapshot)
 
 
 if __name__ == '__main__':

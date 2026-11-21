@@ -31,3 +31,11 @@ python3 -m unittest discover -s tests
 ```
 
 The tests cover native Play and two synthetic hosted profiles, authorization refusal, launch-option layout, DOS files and empty save slots, and stale callbacks after a game is closed. On Xbox, verify each backend with a real installed title. For hosted games, capture a recognizable frame from the automatic trial and exercise input and return to the library before marking those behaviors verified. For Windows titles, keep the actual Steam result and process exit in the compatibility record.
+
+### Native process startup snapshot
+
+For a local native Steam Play trial, add `--launch-app-id 975370 --startup-snapshot` when preparing the package. The option binds the diagnostic to that AppID. Before submitting Play, the probe waits 50 ms on its own process and records the control outcome and the probe PID. A healthy control reports `steam_launch_snapshot_control=running`.
+
+Once Steam identifies a newly created process for the selected AppID, the probe writes its PID, creation time, available executable basename, and immediate Windows wait result at `captured-process`. It then waits up to one second on the same handle on a background thread and writes `sampled-process` before returning to Steam's callback and window polling. `running` describes an unsignaled handle at the sample time. `exited` includes the actual exit code. Neither outcome establishes a game window.
+
+For Dwarf Fortress, compare the stock and rebuilt SDL2 on the same installed package. Use the captured PID and creation time to correlate Device Portal observations. If only the first snapshot survives, record its exact fields and whether the probe PID still exists before restarting the app.

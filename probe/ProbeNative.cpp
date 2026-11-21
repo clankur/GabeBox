@@ -1117,6 +1117,9 @@ struct SteamGameProcess {
     winrt::handle handle;
     std::wstring_view checkpoint = L"not-reported";
     std::wstring_view imageRole = L"unavailable";
+    std::wstring basename;
+    DWORD processId = 0;
+    std::uint64_t createdAt = 0;
     DWORD error = ERROR_SUCCESS;
 
     void Observe(void *clientUser, std::uintptr_t const *methods, std::uint64_t gameId,
@@ -1150,6 +1153,8 @@ struct SteamGameProcess {
                 continue;
             }
             handle = std::move(process);
+            processId = pid;
+            createdAt = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
             checkpoint = L"captured";
             try {
                 using winrt::Windows::System::Diagnostics::ProcessDiagnosticInfo;
@@ -1160,6 +1165,7 @@ struct SteamGameProcess {
                         filename.remove_prefix(separator + 1);
                     }
                     const auto size = static_cast<int>(filename.size());
+                    if (filename.find_first_of(L"\r\n") == filename.npos) basename.assign(filename);
                     if (CompareStringOrdinal(filename.data(), size, L"javaw.exe", -1, TRUE) == CSTR_EQUAL) {
                         imageRole = L"java-windowed";
                     } else if (CompareStringOrdinal(filename.data(), size, L"java.exe", -1, TRUE) == CSTR_EQUAL) {
@@ -1185,6 +1191,24 @@ struct SteamGameProcess {
         return report;
     }
 };
+
+static std::wstring DescribeProcessWait(HANDLE handle, DWORD timeout, const wchar_t *key) {
+    const auto started = GetTickCount64();
+    const auto wait = WaitForSingleObject(handle, timeout);
+    const auto waitError = wait == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    std::wstring field(key);
+    auto result = field + L"_ms=" + std::to_wstring(GetTickCount64() - started) + L"\r\n";
+    if (wait == WAIT_TIMEOUT) return result + field + L"=running\r\n";
+    if (wait != WAIT_OBJECT_0) {
+        return result + field + L"=wait-error\r\n" + field + L"_error=" + Hex(waitError) + L"\r\n";
+    }
+    DWORD code = 0;
+    if (!GetExitCodeProcess(handle, &code)) {
+        const auto error = GetLastError();
+        return result + field + L"=exit-code-error\r\n" + field + L"_error=" + Hex(error) + L"\r\n";
+    }
+    return result + field + L"=exited\r\n" + field + L"_exit=" + Hex(code) + L"\r\n";
+}
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVersion(std::wstring gameDirectory) {
     co_await winrt::resume_background();
@@ -1249,8 +1273,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const std::uint64_t gameId = app;  // Regular Steam AppID in CGameID's 24-bit app field.
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
     std::uint32_t launchOption = 0;
+    bool snapshotRequested = false;
     if (backend == GameBackend::SteamPlay) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+        snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+            L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
         auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-launch-option-" + std::to_wstring(app) + L".txt"));
         if (optionItem) {
@@ -1437,6 +1464,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    if (snapshotRequested) {
+        co_await winrt::resume_background();
+        report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
+        report += DescribeProcessWait(GetCurrentProcess(), 50, L"steam_launch_snapshot_control");
+        co_await checkpoint(L"tested-process-wait");
+        co_await caller;
+    }
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
     if (backend == GameBackend::DosBox && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
@@ -1513,6 +1547,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool accepted = false;
     bool observedRunning = false;
     bool recordedRunning = false;
+    bool snapshotTaken = false;
     for (;;) {
         {
             std::lock_guard lock(steamSessionMutex);
@@ -1559,9 +1594,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     memoryLimit = 0;
                 }
             }
-            auto windowReady = reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
+            const bool capturePending = snapshotRequested && !snapshotTaken && process.handle;
+            const bool queryWindow = !snapshotRequested || (accepted && running &&
+                (snapshotTaken || (!capturePending && GetTickCount64() >= deadline)));
+            auto windowReady = queryWindow && reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
             if (accepted && windowReady && running) verdict = L"window-ready";
-            if ((responded && !accepted) || (accepted && windowReady && running) || GetTickCount64() >= deadline) {
+            if ((responded && !accepted) || (accepted && windowReady && running) ||
+                    (!capturePending && GetTickCount64() >= deadline)) {
                 if (accepted && observedRunning && verdict == std::wstring_view(L"start-unconfirmed")) {
                     verdict = running ? L"running-window-unconfirmed" : L"exited-during-startup";
                 }
@@ -1575,7 +1614,21 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 break;
             }
         }
-        if (observedRunning && !recordedRunning) {
+        if (snapshotRequested && !snapshotTaken && process.handle) {
+            // Write the identity and immediate OS result before waiting or making another Steam call.
+            report += L"steam_launch_snapshot_pid=" + std::to_wstring(process.processId) + L"\r\n";
+            report += L"steam_launch_snapshot_created_filetime=" + std::to_wstring(process.createdAt) + L"\r\n";
+            report += L"steam_launch_snapshot_executable=" +
+                (process.basename.empty() ? std::wstring(L"unavailable") : process.basename) + L"\r\n";
+            report += DescribeProcessWait(process.handle.get(), 0, L"steam_launch_snapshot_initial");
+            co_await checkpoint(L"captured-process");
+            co_await winrt::resume_background();
+            report += DescribeProcessWait(process.handle.get(), 1000, L"steam_launch_snapshot_followup");
+            co_await checkpoint(L"sampled-process");
+            co_await caller;
+            snapshotTaken = true;
+            recordedRunning = true;
+        } else if (observedRunning && !recordedRunning) {
             recordedRunning = true;
             co_await checkpoint(L"game-running");
         }

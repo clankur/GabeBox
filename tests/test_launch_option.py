@@ -22,6 +22,21 @@ def write_template(root):
 
 
 class LaunchOptionTests(unittest.TestCase):
+    def test_startup_snapshot_is_opt_in_and_title_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            template = write_template(root)
+            for enabled in (False, True):
+                layout = root / str(enabled)
+                prepare['prepare_layout'](template, layout, '1.0.2.0', None, None, False, True,
+                                          launch_app_id=975370, startup_snapshot=enabled)
+                markers = [p.name for p in layout.glob('steam-startup-snapshot-*.txt')]
+                self.assertEqual(markers, ['steam-startup-snapshot-975370.txt'] if enabled else [])
+            for app_id, archive in ((None, None), (7760, Path('hosted.tgz'))):
+                with self.assertRaisesRegex(ValueError, 'native Steam Play target'):
+                    prepare['prepare_layout'](template, root / 'invalid', '1.0.2.0', None, None, False, True,
+                                              launch_app_id=app_id, xcom_runtime_archive=archive, startup_snapshot=True)
+
     def test_target_specific_marker_and_legacy_launch_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
