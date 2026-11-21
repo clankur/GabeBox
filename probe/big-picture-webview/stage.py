@@ -18,7 +18,7 @@ WEB_CLASSES = ("ControllerWindowReference", "Controller", "Environment", "Custom
 PUBLISHER = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
 
 
-def add_webview_host(layout, host_artifact):
+def add_webview_host(layout, host_artifact, *, game_resources=False):
     layout, host_artifact = Path(layout), Path(host_artifact)
     proofs = {}
     for line in (host_artifact / "SHA256SUMS").read_text().splitlines():
@@ -43,6 +43,18 @@ def add_webview_host(layout, host_artifact):
     identity = root.find(ns + "Identity")
     if identity is None or identity.get("ProcessorArchitecture") != "x64":
         raise ValueError("WebView2 host requires an x64 package")
+    if game_resources:
+        rescap = "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+        ET.register_namespace("rescap", rescap)
+        capabilities = root.find(ns + "Capabilities")
+        if capabilities is None:
+            raise ValueError("The Xbox game package is missing its capabilities")
+        resource_tag = "{" + rescap + "}Capability"
+        if not any(c.get("Name") == "expandedResources" for c in capabilities.findall(resource_tag)):
+            ET.SubElement(capabilities, resource_tag, Name="expandedResources")
+        prefixes = root.get("IgnorableNamespaces", "").split()
+        if "rescap" not in prefixes:
+            root.set("IgnorableNamespaces", " ".join([*prefixes, "rescap"]))
     deps = root.find(ns + "Dependencies")
     if deps is None:
         raise ValueError("Missing package dependencies")

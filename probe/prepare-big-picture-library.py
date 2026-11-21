@@ -72,7 +72,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         shutil.copyfile(staged / "xcom-dos.js", staged / "xcom-runtime/xcom-dos.js")
 
         add_host = runpy.run_path(str(PROBE / "big-picture-webview/stage.py"))["add_webview_host"]
-        add_host(staged, host_artifact)
+        add_host(staged, host_artifact, game_resources=True)
         page = staged / "steam-signin.html"
         original = page.read_bytes()
         html = b'<html lang="en">'
