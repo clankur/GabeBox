@@ -6,6 +6,8 @@ main { margin: 0 auto; max-width: 1480px; padding: 0 6vw; }
 h1 { margin: 0; font-size: 2.6em; font-weight: 650; }
 p { line-height: 1.45; }
 .device { color: #aebbd0; margin: .25em 0 1.6em; }
+#remember-session { display: block; margin-bottom: 1em; }
+#remember { width: 1.05em; height: 1.05em; margin-right: .4em; vertical-align: middle; }
 .actions { min-height: 64px; }
 button { margin-right: .5em; border: 2px solid #7990ad; border-radius: 4px; padding: .5em .9em; font: inherit; color: #f5f7fb; background: #24334a; }
 button:focus, input:focus { outline: 3px solid #7cd5ff; outline-offset: 3px; }
