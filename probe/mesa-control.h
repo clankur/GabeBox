@@ -13,7 +13,8 @@ struct MesaControlResult {
     unsigned char pixel[4]{};
 };
 
-static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned) = nullptr) {
+template <typename ContextCheck>
+static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned), ContextCheck checkCurrentContext) {
     using Handle = void *;
     using Boolean = unsigned;
     using GetDisplay = Handle (WINAPI *)(Handle);
@@ -145,7 +146,10 @@ static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned) = nullptr) 
         read(1, 1, 1, 1, 0x1908, 0x1401, result.pixel); // GL_RGBA, GL_UNSIGNED_BYTE
         result.glError = glError();
         if (result.glError == 0 && result.pixel[0] == 0 && result.pixel[1] == 255 &&
-                result.pixel[2] == 0 && result.pixel[3] == 255) stage(8);
+                result.pixel[2] == 0 && result.pixel[3] == 255) {
+            stage(8);
+            checkCurrentContext();
+        }
     } while (false);
 
     result.eglError = error();
@@ -158,4 +162,8 @@ static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned) = nullptr) 
     FreeLibrary(gl);
     FreeLibrary(egl);
     return result;
+}
+
+static MesaControlResult RunMesaControl() {
+    return RunMesaControl(nullptr, [] {});
 }
