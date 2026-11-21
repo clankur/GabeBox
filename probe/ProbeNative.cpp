@@ -911,20 +911,27 @@ static const wchar_t *SteamPathScope(std::wstring const& directory, std::wstring
     return L"outside-app";
 }
 
-static std::wstring DescribeSteamDestination(void *manager, std::uintptr_t const *methods,
-        std::uint32_t app, std::wstring_view checkpoint, std::wstring const& library,
+struct SteamDestination {
+    std::int32_t index;
+    std::wstring_view installScope;
+    std::wstring_view libraryScope;
+
+    std::wstring Describe(std::wstring_view checkpoint) const {
+        const auto prefix = L"steam_launch_redistributables_" + std::wstring(checkpoint) + L"_";
+        return prefix + L"install_scope=" + std::wstring(installScope) + L"\r\n" +
+            prefix + L"library_index=" + std::to_wstring(index) + L"\r\n" +
+            prefix + L"library_scope=" + std::wstring(libraryScope) + L"\r\n";
+    }
+};
+
+static SteamDestination ReadSteamDestination(void *manager, std::uintptr_t const *methods,
+        std::uint32_t app, std::wstring const& library,
         std::wstring const& data, std::wstring const& package) {
     using AppLibraryFolder = std::int32_t (__cdecl *)(void *, std::uint32_t);
     auto index = reinterpret_cast<AppLibraryFolder>(methods[82])(manager, app);
     auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-    std::wstring prefix = L"steam_launch_redistributables_" + std::wstring(checkpoint) + L"_";
-    auto report = prefix + L"install_scope=" + SteamPathScope(directory, library, data, package) + L"\r\n";
-    report += prefix + L"library_index=" + std::to_wstring(index) + L"\r\n";
-    if (index >= 0) {
-        auto folder = SteamPath(reinterpret_cast<SteamAppPath>(methods[76]), manager, index);
-        report += prefix + L"library_scope=" + SteamPathScope(folder, library, data, package) + L"\r\n";
-    }
-    return report;
+    auto folder = index < 0 ? std::wstring{} : SteamPath(reinterpret_cast<SteamAppPath>(methods[76]), manager, index);
+    return {index, SteamPathScope(directory, library, data, package), SteamPathScope(folder, library, data, package)};
 }
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDownload(std::uint32_t app) {
@@ -1152,18 +1159,35 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto end = dependencies.begin() + count;
         if (std::find(dependencies.begin(), end, commonRedistributables) != end) {
             report += L"steam_launch_common_redistributables=required\r\n";
-            report += L"steam_launch_redistributables_requested_index=" + std::to_wstring(libraryIndex) + L"\r\n";
             auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
             report += L"steam_launch_redistributables_initial_state=" + std::to_wstring(state) + L"\r\n";
-            report += DescribeSteamDestination(
-                manager, methods, commonRedistributables, L"initial", libraryRoot, dataRoot, packageRoot);
+            const auto initial = ReadSteamDestination(
+                manager, methods, commonRedistributables, libraryRoot, dataRoot, packageRoot);
+            report += initial.Describe(L"initial");
             if ((state & installMask) != fullyInstalled) {
+                if (initial.installScope == L"read-only-package" || initial.libraryScope == L"read-only-package") {
+                    using ForceInstallDirectory = void (__cdecl *)(void *, const char *);
+                    if (methods[86] != base + 0x77b430) {
+                        co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
+                    }
+                    // Use the existing LocalState library as Steam's writable install root.
+                    const auto destination = winrt::to_string(path);
+                    reinterpret_cast<ForceInstallDirectory>(methods[86])(manager, destination.c_str());
+                    report += ReadSteamDestination(manager, methods, commonRedistributables,
+                        libraryRoot, dataRoot, packageRoot).Describe(L"after_override");
+                    auto library = RegisterSteamLibrary(manager, methods, path);
+                    if (library.index < 0) {
+                        co_return winrt::hstring(report + L"steam_launch=dependency-library-folder-error\r\n");
+                    }
+                    libraryIndex = library.index;
+                }
+                report += L"steam_launch_redistributables_requested_index=" + std::to_wstring(libraryIndex) + L"\r\n";
                 // Let Steam obtain the shared dependency of the game it just verified the account owns.
                 auto install = reinterpret_cast<SteamInstall>(methods[0]);
                 auto code = install(manager, commonRedistributables, libraryIndex, false);
                 report += L"steam_launch_redistributables_install_result=" + std::to_wstring(code) + L"\r\n";
-                report += DescribeSteamDestination(
-                    manager, methods, commonRedistributables, L"queued", libraryRoot, dataRoot, packageRoot);
+                report += ReadSteamDestination(manager, methods, commonRedistributables,
+                    libraryRoot, dataRoot, packageRoot).Describe(L"queued");
                 if (code != 0) co_return winrt::hstring(report + L"steam_launch=dependency-install-rejected\r\n");
                 waitForSharedInstall = true;
             }
@@ -1197,14 +1221,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 if ((state & installMask) == fullyInstalled) {
                     report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
-                    report += DescribeSteamDestination(
-                        manager, methods, commonRedistributables, L"final", libraryRoot, dataRoot, packageRoot);
+                    report += ReadSteamDestination(manager, methods, commonRedistributables,
+                        libraryRoot, dataRoot, packageRoot).Describe(L"final");
                     break;
                 }
                 if (now >= deadline) {
                     report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
-                    report += DescribeSteamDestination(
-                        manager, methods, commonRedistributables, L"final", libraryRoot, dataRoot, packageRoot);
+                    report += ReadSteamDestination(manager, methods, commonRedistributables,
+                        libraryRoot, dataRoot, packageRoot).Describe(L"final");
                     co_return winrt::hstring(report + L"steam_launch=dependency-install-incomplete\r\n");
                 }
             }
