@@ -89,6 +89,16 @@ A verified library result requires Valve’s native user interface to report onl
 
 In the library, use the controller D-pad to move between games. Right focuses the selected title’s available **Download** or **Play** button. Press **A** to activate the focused button, and use **B** to return from an action to the list or from a title to search. From search, Up reaches **Sign out** and Down returns to the first visible title. [UWP gamepad navigation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
 
+Game rows load Steam's public small capsule artwork as they approach the viewport. The client schedules up to three image loads at once and releases decoded artwork more than a viewport away. It caches up to 256 entries in IndexedDB, with an 8 MiB cap on JPEG payloads and a 30-day freshness window. Missing art shows the game’s initial. [Steam graphical assets](https://partner.steamgames.com/doc/store/assets)
+
+Read the library's aggregate artwork counters after the visible rows have loaded. `art_run_id` identifies the app process, and `art_active=0` marks a settled batch. A fresh app restart lets you compare `art_network_requests` with `art_disk_hits` on the same library viewport.
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.72.0 --artwork
+```
+
+On Series X, the `1.0.72.0` library rendered 134 games. The opening viewport displayed eight capsules from eight network requests, with no more than three artwork loads active at once. After a CLI restart, the same eight images came from disk with zero artwork requests. Both starts restored the saved Steam session. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44872841753)
+
 On Series X, version `1.0.70.0` restored the saved Steam session after the CLI upgrade and rendered 134 games from 612 named entries. The preceding DLC-only filter had displayed 361 entries. The configured launch test found Slay the Spire in the filtered library and submitted it to Steam. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44872147072)
 
 Read an existing report without restarting the app or interrupting the session.
