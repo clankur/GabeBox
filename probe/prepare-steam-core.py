@@ -86,10 +86,12 @@ def vclibs_dependency(appx):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, stardew_host_trace=False,
-                   stardew_startup_diagnostic=None):
+                   stardew_startup_diagnostic=None, stardew_game_directory=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     if stardew_startup_diagnostic and (not stardew_host_trace or launch_app_id != 413150):
         raise ValueError('The managed diagnostic requires a Stardew Valley host trace.')
+    if stardew_game_directory and not stardew_startup_diagnostic:
+        raise ValueError('The Stardew game-directory trial requires the managed startup diagnostic.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -143,6 +145,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'stardew-host-trace.txt').touch()
         if stardew_startup_diagnostic:
             shutil.copyfile(stardew_startup_diagnostic, layout / 'StardewStartupDiagnostic.dll')
+        if stardew_game_directory:
+            (layout / 'stardew-game-directory.txt').touch()
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
 
@@ -190,6 +194,8 @@ def main():
                         help='trace the bundled .NET host during the Stardew Valley Steam launch')
     parser.add_argument('--stardew-startup-diagnostic', type=Path, metavar='DLL',
                         help='add the locally built StardewStartupDiagnostic.dll to the host trace experiment')
+    parser.add_argument('--stardew-game-directory', action='store_true',
+                        help='start the managed diagnostic in the game’s app-local installation directory')
     args = parser.parse_args()
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
@@ -203,6 +209,8 @@ def main():
         parser.error('--stardew-host-trace requires --launch-app-id 413150')
     if args.stardew_startup_diagnostic and (not args.stardew_host_trace or not args.stardew_startup_diagnostic.is_file()):
         parser.error('--stardew-startup-diagnostic requires a built DLL and --stardew-host-trace')
+    if args.stardew_game_directory and not args.stardew_startup_diagnostic:
+        parser.error('--stardew-game-directory requires --stardew-startup-diagnostic')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
     if args.install_before_launch and args.launch_app_id is None:
@@ -216,7 +224,7 @@ def main():
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework, args.stardew_host_trace,
-                   args.stardew_startup_diagnostic)
+                   args.stardew_startup_diagnostic, args.stardew_game_directory)
 
 
 if __name__ == '__main__':

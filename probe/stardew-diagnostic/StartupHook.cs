@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
@@ -15,6 +16,7 @@ internal static class StartupHook
             Environment.SetEnvironmentVariable("XBOX_SDL_TRACE_FILE", Path.ChangeExtension(log, ".sdl.txt"));
 
         var package = Path.GetDirectoryName(typeof(StartupHook).Assembly.Location);
+        var local = Path.GetDirectoryName(log);
         if (package != null && File.Exists(Path.Combine(package, "stardew-sdl-surfaceless.txt")))
         {
             Environment.SetEnvironmentVariable("SDL_VIDEODRIVER", "offscreen");
@@ -32,6 +34,22 @@ internal static class StartupHook
         }
 
         Record("stardew_managed=entered");
+        if (package != null && local != null && File.Exists(Path.Combine(package, "stardew-game-directory.txt")))
+        {
+            var expectedGame = Path.Combine(local, "SteamLibrary", "steamapps", "common", "Stardew Valley");
+            if (string.Equals(Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\'), expectedGame,
+                              StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    Directory.SetCurrentDirectory(expectedGame);
+                    Record("stardew_game_directory=ready");
+                }
+                catch (IOException) { Record("stardew_game_directory=error"); }
+                catch (UnauthorizedAccessException) { Record("stardew_game_directory=error"); }
+            }
+            else Record("stardew_game_directory=unexpected");
+        }
         int remaining = 12;
         AppDomain.CurrentDomain.FirstChanceException += (_, args) =>
         {
@@ -65,9 +83,12 @@ internal static class StartupHook
                     Record("stardew_managed_detail=opengl");
                 if (inner.Message.IndexOf("SDL", StringComparison.OrdinalIgnoreCase) >= 0)
                     Record("stardew_managed_detail=sdl");
-                if (inner.Message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    inner.Message.IndexOf("denied", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (inner is UnauthorizedAccessException)
+                {
                     Record("stardew_managed_detail=access-denied");
+                    try { RecordFileAccess(inner, local, package, Record); }
+                    catch (Exception) { Record("stardew_file_location=unclassified"); }
+                }
             }
             if (fault?.GetType().FullName == "Microsoft.Xna.Framework.Graphics.NoSuitableGraphicsDeviceException")
             {
@@ -76,5 +97,29 @@ internal static class StartupHook
             }
         };
         AppDomain.CurrentDomain.ProcessExit += (_, args) => Record("stardew_managed=process-exit");
+    }
+
+    private static void RecordFileAccess(Exception fault, string? local, string? package, Action<string> record)
+    {
+        bool Mentions(string? root) => !string.IsNullOrEmpty(root) &&
+            fault.Message.IndexOf(root!, StringComparison.OrdinalIgnoreCase) >= 0;
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        record("stardew_data_roaming=" + (roaming.Length == 0 ? "empty" : "resolved"));
+        var location = Mentions(AppContext.BaseDirectory) ? "game-directory" :
+            Mentions(local) ? "app-local" : Mentions(package) ? "package" : Mentions(roaming) ? "roaming" : "unclassified";
+        record("stardew_file_location=" + location);
+        int remaining = 12;
+        foreach (var frame in new StackTrace(fault).GetFrames() ?? Array.Empty<StackFrame>())
+        {
+            var method = frame.GetMethod();
+            var type = method?.DeclaringType?.FullName;
+            if (type != null && (type.StartsWith("StardewValley.", StringComparison.Ordinal) ||
+                                 type.StartsWith("System.IO.", StringComparison.Ordinal) ||
+                                 type.StartsWith("Microsoft.Win32.SafeHandles.", StringComparison.Ordinal)))
+            {
+                record("stardew_file_frame=" + type + "." + method!.Name);
+                if (--remaining == 0) break;
+            }
+        }
     }
 }

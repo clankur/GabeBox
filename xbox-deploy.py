@@ -230,6 +230,10 @@ def stardew_managed_summary(raw):
                r'stardew_managed_exception=(?:dll-not-found|entry-point-not-found|bad-image-format|platform-not-supported)|'
                r'stardew_managed_fault=[a-zA-Z0-9_.+]{1,128}|'
                r'stardew_managed_detail=(?:opengl|sdl|access-denied)|'
+               r'stardew_game_directory=(?:ready|unexpected|error)|'
+               r'stardew_data_roaming=(?:empty|resolved)|'
+               r'stardew_file_location=(?:game-directory|app-local|package|roaming|unclassified)|'
+               r'stardew_file_frame=(?:StardewValley\.|System\.IO\.|Microsoft\.Win32\.SafeHandles\.)[a-zA-Z0-9_.+]{1,140}|'
                r'stardew_managed_library=(?:opengl32|sdl2)|'
                r'stardew_graphics_frame=(?:MonoGame\.OpenGL\.|Microsoft\.Xna\.Framework\.Graphics\.)[a-zA-Z0-9_.+]{1,140}|'
                r'stardew_graphics_sdl_error=(?:opengl|wgl)|'
@@ -531,7 +535,7 @@ def main():
                 print(stardew_managed_summary(raw))
                 trace = read_game_file(portal, app, r'\LocalState', f'stardew-managed-{managed[1]}.sdl.txt', 4096)
                 snapshots = re.findall(r'^sdl_(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
-                                       r'gl_library|gl_context|surfaceless_egl|surfaceless_context)'
+                                       r'gl_library|gl_context|surfaceless_egl|surfaceless_context|surfaceless_framebuffer|offscreen_frame)'
                                        r'=(?:begin|ready|error)$', decode_report(trace or b''), re.MULTILINE)
                 if snapshots:
                     print('\n'.join(snapshots))
