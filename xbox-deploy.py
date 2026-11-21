@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import ssl
+from struct import unpack_from
 import sys
 import time
 from urllib.parse import urlencode, urlsplit
@@ -29,6 +30,7 @@ PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_CONTROL_NAME: 'Packaged process startup control',
                 PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe'}
 PROBE_REPORT = 'probe-report.txt'
+STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
 
@@ -70,7 +72,7 @@ class DevicePortal:
         self.authorization = None
         self.csrf_token = None
 
-    def request(self, method=None, path=None, body=None, headers=None):
+    def request(self, method=None, path=None, body=None, headers=None, read_limit=None):
         connection = http.client.HTTPSConnection(self.host, self.port, timeout=30,
                                                 context=self.context)
         try:
@@ -96,7 +98,7 @@ class DevicePortal:
                     token = SimpleCookie(value).get('CSRF-Token')
                     if token is not None:
                         self.csrf_token = token.value
-            data = response.read()
+            data = response.read(read_limit)
             if response.status == 401:
                 raise ValueError('Xbox Device Portal rejected the username or password.')
             accepted_statuses = (200, 202, 204) if method == 'POST' else (200, 204)
@@ -174,6 +176,88 @@ def decode_report(raw):
         return raw.decode(encoding)
     except UnicodeDecodeError:
         return ''  # The report can be read while the app is replacing it.
+
+
+def read_game_file(portal, package, folder, filename, limit):
+    query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package['PackageFullName'],
+                       'path': folder, 'filename': filename})
+    try:
+        _, data = portal.request('GET', '/api/filesystem/apps/file?' + query, read_limit=limit)
+    except PortalError as error:
+        if error.status == 404:
+            return None
+        raise
+    return data
+
+
+def pe_summary(header):
+    if len(header) < 64 or header[:2] != b'MZ':
+        return {'pe_header': 'unavailable'}
+    pe = unpack_from('<I', header, 0x3c)[0]
+    if pe < 64 or pe + 26 > len(header) or header[pe:pe + 4] != b'PE\0\0':
+        return {'pe_header': 'unavailable'}
+
+    machine, sections = unpack_from('<HH', header, pe + 4)
+    optional_size = unpack_from('<H', header, pe + 20)[0]
+    optional = pe + 24
+    magic = unpack_from('<H', header, optional)[0]
+    directory = {0x10b: 96, 0x20b: 112}.get(magic)
+    section_table = optional + optional_size
+    if directory is None or optional_size < directory or section_table > len(header):
+        return {'pe_header': 'unavailable'}
+
+    summary = {'pe_machine': {0x14c: 'x86', 0x8664: 'x64', 0xaa64: 'arm64'}.get(machine, hex(machine)),
+               'pe_format': 'PE32' if magic == 0x10b else 'PE32+'}
+    clr_entry = directory + 14 * 8
+    count = unpack_from('<I', header, optional + directory - 4)[0]
+    if count < 15 or optional_size < clr_entry + 8:
+        return summary
+    clr_rva, clr_size = unpack_from('<II', header, optional + clr_entry)
+    if not clr_rva or clr_size < 20:
+        return summary
+
+    summary['clr_flags'] = 'unavailable'
+    for section in range(min(sections, (len(header) - section_table) // 40)):
+        _, address, raw_size, offset = unpack_from('<IIII', header, section_table + 40 * section + 8)
+        relative = clr_rva - address
+        if 0 <= relative <= raw_size - 20 and offset + relative + 20 <= len(header):
+            flags = unpack_from('<I', header, offset + relative + 16)[0]
+            summary['clr_flags'] = f'0x{flags:08x}'
+            summary['clr_requires_x86'] = 'yes' if flags & 2 and not flags & 0x20000 else 'no'
+            break
+    return summary
+
+
+def inspect_game(portal, package, app_id, executable):
+    raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{app_id}.acf', 65536)
+    if raw is None:
+        raise ValueError('Steam has not created a local manifest for this AppID.')
+    manifest = decode_report(raw)
+    fields = ('StateFlags', 'UpdateResult', 'BytesToDownload', 'BytesDownloaded', 'SizeOnDisk')
+    for field in fields:
+        match = re.search(rf'^[ \t]*"{field}"[ \t]+"([0-9]+)"', manifest, re.MULTILINE | re.IGNORECASE)
+        if match:
+            print(f'{field}={match[1]}')
+    if executable is None:
+        return
+    install = re.search(r'^[ \t]*"installdir"[ \t]+"([^"\r\n]+)"', manifest, re.MULTILINE | re.IGNORECASE)
+    valid_component = r'[\w -][\w .()\-]*(?<![ .])'
+    if not install or not re.fullmatch(valid_component, install[1]):
+        raise ValueError('The Steam manifest has no usable local install folder.')
+    parts = executable.replace('\\', '/').split('/')
+    if not parts[-1].lower().endswith('.exe') or any(not re.fullmatch(valid_component, p) for p in parts):
+        raise ValueError('Use an .exe path relative to the game folder, such as jre/bin/javaw.exe.')
+
+    candidates = (('installed', ('common', install[1])), ('staging', ('downloading', str(app_id))))
+    for source, folder in candidates:
+        path = '\\'.join((STEAMAPPS_PATH, *folder, *parts[:-1]))
+        header = read_game_file(portal, package, path, parts[-1], 131072)
+        if header is not None:
+            print(f'executable_source={source}')
+            for key, value in pe_summary(header).items():
+                print(f'{key}={value}')
+            return
+    print('executable_source=missing')
 
 
 def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
@@ -272,6 +356,10 @@ def main():
     report_command = commands.add_parser('report', help='read the current Steam probe report without launching it')
     report_command.add_argument('--version', required=True, help='installed Steam package version')
     report_command.add_argument('--download', action='store_true', help='read the Steam download checkpoint')
+    game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
+    game.add_argument('--version', required=True, help='installed Steam package version')
+    game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
+    game.add_argument('--executable', help='relative .exe path within the game folder')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
@@ -281,6 +369,8 @@ def main():
         deploy.error('--require-ipc requires --test-probe')
     if args.command == 'probe' and args.require_ipc and args.probe_name != PROBE_NAME:
         probe.error('--require-ipc applies to the main probe')
+    if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
+        game.error('--app-id must be a positive Steam AppID')
 
     settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
@@ -329,6 +419,10 @@ def main():
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
         print(report, end='')
+        return
+    if args.command == 'inspect-game':
+        app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        inspect_game(portal, app, args.app_id, args.executable)
         return
     if args.command == 'deploy':
         portal.upload(files)

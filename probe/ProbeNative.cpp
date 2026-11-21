@@ -1078,6 +1078,17 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return ReadSteamDownload();
     }
 
+    winrt::hstring SteamStorageInfo() {
+        auto path = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path();
+        ULARGE_INTEGER callerAvailable{}, total{}, volumeAvailable{};
+        if (!GetDiskFreeSpaceExW(path.c_str(), &callerAvailable, &total, &volumeAvailable)) {
+            return winrt::hstring(L"error=" + Hex(GetLastError()) + L"\r\n");
+        }
+        return winrt::hstring(L"caller_available=" + std::to_wstring(callerAvailable.QuadPart) +
+            L"\r\nvolume_size=" + std::to_wstring(total.QuadPart) +
+            L"\r\nvolume_available=" + std::to_wstring(volumeAvailable.QuadPart) + L"\r\n");
+    }
+
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app) {
         return LaunchLocalSteamGame(app);
     }
