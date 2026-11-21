@@ -16,6 +16,17 @@ def add_surfaceless(tree):
     framebuffer = Path(__file__).with_name('sdl-surfaceless-framebuffer.h')
     shutil.copyfile(framebuffer, offscreen / framebuffer.name)
 
+    main = tree / 'src/SDL.c'
+    source = main.read_text(encoding='utf-8')
+    old = '        if (SDL_HelperWindowCreate() < 0) {'
+    source = replace_once(source, old, '''        const char *driver = SDL_GetHint(SDL_HINT_VIDEODRIVER);
+        const SDL_bool offscreen = driver && SDL_strcmp(driver, "offscreen") == 0 &&
+            SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE);
+        if (offscreen) {
+            XboxSdlTrace("sdl_offscreen_helper_window=skipped\\n");
+        } else if (SDL_HelperWindowCreate() < 0) {''')
+    main.write_text(source, encoding='utf-8')
+
     window_header = offscreen / 'SDL_offscreenwindow.h'
     source = window_header.read_text(encoding='utf-8')
     old = '    EGLSurface egl_surface;'
@@ -23,6 +34,7 @@ def add_surfaceless(tree):
     SDL_GLContext xbox_context;
     unsigned xbox_framebuffer;
     int xbox_width, xbox_height;
+    Uint64 xbox_last_swap;
     SDL_bool xbox_capture_attempted;''')
     window_header.write_text(source, encoding='utf-8')
 
@@ -30,19 +42,33 @@ def add_surfaceless(tree):
     source = context_header.read_text(encoding='utf-8')
     source = replace_once(source, '#define OFFSCREEN_GLES_GetProcAddress  SDL_EGL_GetProcAddress',
                           'extern void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name);')
+    source = replace_once(source, '#define OFFSCREEN_GLES_SetSwapInterval SDL_EGL_SetSwapInterval',
+                          'extern int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval);')
     context_header.write_text(source, encoding='utf-8')
 
     context = offscreen / 'SDL_offscreenopengles.c'
     source = context.read_text(encoding='utf-8')
     old = '#include "SDL_offscreenwindow.h"'
     source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "../../sdl-startup-trace.h"'
-                          '\n#include "sdl-surfaceless-framebuffer.h"')
+                          '\n#include "SDL_timer.h"\n#include "sdl-surfaceless-framebuffer.h"')
     old = '/* EGL implementation of SDL OpenGL support */'
     source = replace_once(source, old, old + '''
 
 void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name)
 {
     return XboxSdlGetProcAddress(_this, name);
+}
+
+int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
+{
+    if (_this->egl_data && _this->gl_allow_no_surface && SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
+        if (interval < 0 || interval > 4) {
+            return SDL_SetError("Unsupported offscreen swap interval");
+        }
+        _this->egl_data->egl_swapinterval = interval;
+        return 0;
+    }
+    return SDL_EGL_SetSwapInterval(_this, interval);
 }''')
     old = '    int ret = SDL_EGL_LoadLibraryOnly(_this, path);'
     source = replace_once(source, old, '''    int ret;
@@ -85,6 +111,12 @@ void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name)
     }''')
     old = '    return SDL_EGL_SwapBuffers(_this, offscreen_wind->egl_surface);'
     source = replace_once(source, old, '''    if (offscreen_wind->egl_surface == EGL_NO_SURFACE) {
+        Uint32 frame_time = (Uint32)_this->egl_data->egl_swapinterval * 16;
+        Uint64 elapsed = SDL_GetTicks64() - offscreen_wind->xbox_last_swap;
+        if (elapsed < frame_time) {
+            SDL_Delay(frame_time - (Uint32)elapsed);
+        }
+        offscreen_wind->xbox_last_swap = SDL_GetTicks64();
         XboxSdlCaptureFrame(_this, offscreen_wind);
         return 0;
     }
