@@ -16,12 +16,17 @@ HOOKS = {
         ('SDL_AudioDeviceID', 'SDL_OpenAudioDevice', 'device, iscapture, desired, obtained, allowed_changes',
          'audio_device', 'value != 0'),
     ),
+    'filesystem/windows/SDL_sysfilesystem.c': (
+        ('char *', 'SDL_GetBasePath', '', 'base_path', 'value != NULL'),
+        ('char *', 'SDL_GetPrefPath', 'org, app', 'pref_path', 'value != NULL'),
+    ),
     'video/SDL_video.c': (
         ('int', 'SDL_VideoInit', 'driver_name', 'video_init', 'value == 0'),
         ('SDL_Window *', 'SDL_CreateWindow', 'title, x, y, w, h, flags', 'window', 'value != NULL'),
         ('int', 'SDL_GL_LoadLibrary', 'path', 'gl_library', 'value == 0'),
         ('SDL_GLContext', 'SDL_GL_CreateContext', 'window', 'gl_context', 'value != NULL'),
         ('int', 'SDL_GL_SetSwapInterval', 'interval', 'gl_swap_interval', 'value == 0'),
+        ('int', 'SDL_ShowMessageBox', 'messageboxdata, buttonid', 'message_box', 'value == 0'),
     ),
     'render/SDL_render.c': (
         ('SDL_Renderer *', 'SDL_CreateRenderer', 'window, index, flags', 'renderer', 'value != NULL'),
@@ -58,7 +63,7 @@ def add_startup_trace(tree):
     for filename, hooks in HOOKS.items():
         file = source_root / filename
         source = file.read_text(encoding='utf-8')
-        prefix = '../' if '/' in filename else './'
+        prefix = '../' * filename.count('/') or './'
         include = f'#include "{prefix}SDL_internal.h"'
         if source.count(include) != 1:
             raise ValueError(f'Expected one SDL internal header in {filename}.')
@@ -70,9 +75,17 @@ def add_startup_trace(tree):
                                     '\n    XboxSdlSetWorkingDirectory();', source, flags=re.MULTILINE)
             if count != 1:
                 raise ValueError('Expected the SDL2 main entrypoint in the pinned source.')
+        suffix = ''
+        if filename == 'filesystem/windows/SDL_sysfilesystem.c':
+            # SDL 2.26.2 also has unused Xbox filesystem stubs in this file.
+            windows_end = '#endif /* SDL_FILESYSTEM_WINDOWS */'
+            windows, ending, after = source.partition(windows_end)
+            if not ending:
+                raise ValueError('Expected an SDL filesystem implementation guarded for Windows.')
+            source, suffix = windows, ending + after
         for hook in hooks:
             source = wrap_definition(source, *hook)
-        file.write_text(source, encoding='utf-8')
+        file.write_text(source + suffix, encoding='utf-8')
 
 
 if __name__ == '__main__':
