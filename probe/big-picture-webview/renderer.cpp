@@ -70,6 +70,7 @@ struct View : implements<View, IFrameworkView> {
     std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
+    steam_display::Placement placement{{}, 1.f};
 
     void Initialize(CoreApplicationView const&) {}
     void SetWindow(CoreWindow const& value) {
@@ -88,18 +89,18 @@ struct View : implements<View, IFrameworkView> {
         float scale = static_cast<float>(Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
         auto bounds = window.Bounds();
         auto visible = ApplicationView::GetForCurrentView().VisibleBounds();
-        const auto layout = steam_display::viewport({bounds.X, bounds.Y, bounds.Width, bounds.Height},
-            {visible.X, visible.Y, visible.Width, visible.Height}, scale, safeBounds, gameForeground);
-        Rect pixels{0.f, 0.f, layout.width, layout.height};
-        controller.Bounds(pixels);
-        root.Size({bounds.Width * scale, bounds.Height * scale});
-        mainSurface.Offset({layout.x, layout.y, 0});
-        mainSurface.Size({layout.width, layout.height});
-        if (popup) {
-            popup.Bounds(pixels);
-            popupSurface.Offset(mainSurface.Offset());
-            popupSurface.Size(mainSurface.Size());
-        }
+        placement = {steam_display::viewport({bounds.X, bounds.Y, bounds.Width, bounds.Height},
+            {visible.X, visible.Y, visible.Width, visible.Height}, safeBounds, gameForeground), scale};
+        root.Size({bounds.Width, bounds.Height});
+        auto place = [&](CoreWebView2CompositionController const& browser, ContainerVisual const& surface) {
+            browser.BoundsMode(CoreWebView2BoundsMode::UseRawPixels);
+            browser.Bounds({0.f, 0.f, placement.pixelWidth(), placement.pixelHeight()});
+            surface.Offset({placement.view.x, placement.view.y, 0});
+            surface.Size({placement.pixelWidth(), placement.pixelHeight()});
+            surface.Scale({placement.visualScale(), placement.visualScale(), 1.f});
+        };
+        place(controller, mainSurface);
+        if (popup) place(popup, popupSurface);
     }
 
     fire_and_forget suspendHidden(CoreWebView2 browser) {
@@ -222,9 +223,7 @@ struct View : implements<View, IFrameworkView> {
         default: break;
         }
         auto pos = point.Position();
-        auto offset = popupSurface.Offset();
-        auto scale = static_cast<float>(Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
-        Point pixels{pos.X * scale - offset.x, pos.Y * scale - offset.y};
+        Point pixels{placement.localPixelX(pos.X), placement.localPixelY(pos.Y)};
         auto keys = props.IsLeftButtonPressed() ? CoreWebView2MouseEventVirtualKeys::LeftButton :
             CoreWebView2MouseEventVirtualKeys::None;
         if (props.IsRightButtonPressed()) keys = keys | CoreWebView2MouseEventVirtualKeys::RightButton;
