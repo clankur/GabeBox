@@ -58,10 +58,12 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
 #sdl-picture { position: relative; line-height: 0; }
 #sdl-frame { display: block; max-width: none; margin: 0; outline: none; background: #000; }
 #sdl-status { position: absolute; z-index: 1; top: 42%; left: 0; right: 0; text-align: center; pointer-events: none; }
-#sdl-menu {
+#sdl-menu, #sdl-text {
     position: absolute; z-index: 2; top: 0; right: 0; bottom: 0; left: 0;
     display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .65);
 }
+#sdl-text { gap: .6rem; flex-wrap: wrap; align-content: center; }
+#sdl-text-status { flex-basis: 100%; text-align: center; }
 #sdl-pointer {
     position: absolute;
     width: 10px;

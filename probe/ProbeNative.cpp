@@ -1972,6 +1972,26 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return steamSdlSurface ? steamSdlSurface->GamepadAck() : 0;
     }
 
+    bool SteamSdlKeyboardReady() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface && steamSdlSurface->KeyboardReady();
+    }
+
+    bool SendSteamSdlKey(std::uint32_t scan, bool down) {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface && steamSdlSurface->Key(scan, down);
+    }
+
+    bool SendSteamSdlText(winrt::hstring const& text) {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface && steamSdlSurface->Text(text);
+    }
+
+    void ResetSteamSdlKeyboard() {
+        std::lock_guard lock(steamSdlMutex);
+        if (steamSdlSurface) steamSdlSurface->ResetKeyboard();
+    }
+
     bool SteamSdlRunning() {
         std::lock_guard lock(steamSdlMutex);
         if (steamSdlSurface && !steamSdlSurface->Alive()) steamSdlSurface.reset();

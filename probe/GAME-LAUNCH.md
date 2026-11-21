@@ -21,6 +21,8 @@ Register an adapter only when a bundled runtime can execute the verified install
 
 The SDL player fills the Xbox viewport and fits the game's complete image at its original aspect ratio. Hold Menu and View together to open the player menu. Use the D-pad and A to choose Resume or Quit to library. The game keeps its regular Menu and View actions when each button is pressed individually.
 
+A hosted SDL game with the keyboard-capable SDL build receives physical keyboard keys through the same player. To type with a controller, focus the game's text field, hold Menu and View, and select **Keyboard**. Enter text with the Xbox keyboard, then choose **Send text**. Use the game's confirmation control to continue. The Xbox player closes the text overlay after sending and returns focus to the game.
+
 For DOS, the native component allowlists the exact supported AppID and directory. The fixed profile in `signin/xcom-dos.js` records the publisher's DOS mount, startup command, supported configuration and file exclusions. The host handles file copying, process lifetime, return to the library, and optional local trial snapshots. When adding a DOS title, verify its owned depot, define a separate fixed profile, and extend the native allowlist to that exact title and install path. Keep publication of the runtime separate from the user's game files. Input and save persistence also need their own validation for each supported backend.
 
 ## Verification
@@ -75,3 +77,5 @@ Supply `--slay-sdl-host "$runtime_dir"` with the built `SlayConsoleDiagnostic` c
 With `--launch-app-id 646570 --repeat-launch`, `1.0.213.0` reached Slay the Spire's save-slot selection in the live Xbox player and was still animating at the 40-second capture. `1.0.214.0` confirmed pointer delivery using a repeated test motion after input initialization. Keep the automated trial at the menu and validate save creation during a separate gameplay session. [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918568603) · [Slay bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918265865)
 
 Build the LWJGL adapter with the pinned libGDX 1.9.5 API inputs using `--gdx-api` and `--gdx-controllers-api` to supply its desktop gamepad provider. In `1.0.217.0`, the game recognized the bridged controller through libGDX and displayed its own Xbox button prompt in fullscreen. [Controller bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44920534966)
+
+Slay's text entry requires the keyboard-capable LWJGL adapter, native display bridge, and shared SDL2 build together. For the save-slot name prompt, test typing and Backspace with a physical keyboard, then use the player **Keyboard** action to send text using the controller. The game is responsible for accepting the name and creating the save slot.

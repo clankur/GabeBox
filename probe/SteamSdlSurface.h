@@ -67,6 +67,52 @@ public:
         return Alive() ? static_cast<std::uint32_t>(SdlHostLoad(&view_->gamepad.ack)) : 0;
     }
 
+    bool KeyboardReady() const {
+        return Alive() && !SdlHostLoad(&view_->quit) && SdlHostLoad(&view_->keyboard.available);
+    }
+
+    bool Key(std::uint32_t scan, bool down) const {
+        if (!KeyboardReady() || !scan || scan >= SDL_HOST_KEY_LIMIT) return false;
+        auto &keyboard = view_->keyboard;
+        const auto write = static_cast<std::uint32_t>(SdlHostLoad(&keyboard.write));
+        const auto read = static_cast<std::uint32_t>(SdlHostLoad(&keyboard.read));
+        if (write - read >= SDL_HOST_KEY_QUEUE_SIZE) {
+            ResetKeyboard();
+            return false;
+        }
+        keyboard.entries[write % SDL_HOST_KEY_QUEUE_SIZE] = {static_cast<std::uint16_t>(scan), down ? uint8_t{1} : uint8_t{0}, {}};
+        InterlockedExchange(&keyboard.write, static_cast<LONG>(write + 1));
+        return true;
+    }
+
+    bool Text(winrt::hstring const& text) const {
+        constexpr auto payload = SDL_HOST_TEXT_BYTES - 1;
+        if (!KeyboardReady() || text.empty() || text.size() > 96) return false;
+        const auto bytes = winrt::to_string(text);
+        if (bytes.find('\0') != std::string::npos) return false;
+        auto &keyboard = view_->keyboard;
+        auto write = static_cast<std::uint32_t>(SdlHostLoad(&keyboard.write));
+        const auto read = static_cast<std::uint32_t>(SdlHostLoad(&keyboard.read));
+        for (size_t start = 0; start < bytes.size();) {
+            if (write - read >= SDL_HOST_KEY_QUEUE_SIZE) return false;
+            auto end = std::min(start + payload, bytes.size());
+            while (end < bytes.size() && (static_cast<unsigned char>(bytes[end]) & 0xc0) == 0x80) --end;
+            auto &entry = keyboard.entries[write++ % SDL_HOST_KEY_QUEUE_SIZE];
+            entry = {};
+            std::memcpy(entry.text, bytes.data() + start, end - start);
+            start = end;
+        }
+        InterlockedExchange(&keyboard.write, static_cast<LONG>(write));
+        return true;
+    }
+
+    void ResetKeyboard() const {
+        if (KeyboardReady()) {
+            auto &keyboard = view_->keyboard;
+            InterlockedExchange(&keyboard.reset, SdlHostLoad(&keyboard.write));
+        }
+    }
+
     winrt::Windows::Storage::Streams::IBuffer Frame() const {
         if (!Alive() || InterlockedCompareExchange(&view_->frame_state, SDL_HOST_READING, SDL_HOST_READY) != SDL_HOST_READY) {
             return nullptr;

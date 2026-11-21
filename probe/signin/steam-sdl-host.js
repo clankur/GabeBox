@@ -6,6 +6,12 @@
     var exit = document.getElementById("sdl-exit");
     var resume = document.getElementById("sdl-resume");
     var menu = document.getElementById("sdl-menu");
+    var keyboard = document.getElementById("sdl-keyboard");
+    var textForm = document.getElementById("sdl-text");
+    var textValue = document.getElementById("sdl-text-value");
+    var textSend = document.getElementById("sdl-text-send");
+    var textCancel = document.getElementById("sdl-text-cancel");
+    var textStatus = document.getElementById("sdl-text-status");
     var status = document.getElementById("sdl-status");
     var title = document.getElementById("sdl-game-title");
     var canvas = document.getElementById("sdl-frame");
@@ -22,6 +28,45 @@
     var keys = { 27: 32, 32: 64, 143: 32, 196: 32 };
     var clickCodes = { 13: true, 142: true, 195: true };
     var titles = { 975370: "Dwarf Fortress", 413150: "Stardew Valley", 646570: "Slay the Spire" };
+    // SDL scancodes follow USB HID usage IDs. The virtual-key fallback is for older Xbox HTML hosts.
+    var scans = {
+        Enter: 40, Escape: 41, Backspace: 42, Tab: 43, Space: 44, Minus: 45, Equal: 46,
+        BracketLeft: 47, BracketRight: 48, Backslash: 49, Semicolon: 51, Quote: 52,
+        Backquote: 53, Comma: 54, Period: 55, Slash: 56, CapsLock: 57, Insert: 73,
+        Home: 74, PageUp: 75, Delete: 76, End: 77, PageDown: 78, ArrowRight: 79,
+        ArrowLeft: 80, ArrowDown: 81, ArrowUp: 82, NumpadEnter: 88, NumpadDecimal: 99,
+        NumpadDivide: 84, NumpadMultiply: 85, NumpadSubtract: 86, NumpadAdd: 87,
+        ControlLeft: 224, ShiftLeft: 225, AltLeft: 226, MetaLeft: 227,
+        ControlRight: 228, ShiftRight: 229, AltRight: 230, MetaRight: 231
+    };
+    var virtualKeys = {
+        8: "Backspace", 9: "Tab", 13: "Enter", 16: "ShiftLeft", 17: "ControlLeft",
+        18: "AltLeft", 20: "CapsLock", 27: "Escape", 32: "Space", 33: "PageUp",
+        34: "PageDown", 35: "End", 36: "Home", 37: "ArrowLeft", 38: "ArrowUp",
+        39: "ArrowRight", 40: "ArrowDown", 45: "Insert", 46: "Delete", 106: "NumpadMultiply",
+        107: "NumpadAdd", 109: "NumpadSubtract", 110: "NumpadDecimal", 111: "NumpadDivide",
+        186: "Semicolon", 187: "Equal", 188: "Comma", 189: "Minus", 190: "Period",
+        191: "Slash", 192: "Backquote", 219: "BracketLeft", 220: "Backslash",
+        221: "BracketRight", 222: "Quote"
+    };
+    function scanCode(event) {
+        var code = event.code, key = event.keyCode;
+        if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3) - 65 + 4;
+        if (/^Digit[0-9]$/.test(code)) return 30 + (Number(code[5]) + 9) % 10;
+        if (/^Numpad[0-9]$/.test(code)) return 89 + (Number(code[6]) + 9) % 10;
+        if (/^F([1-9]|1[0-2])$/.test(code)) return 57 + Number(code.slice(1));
+        if (scans[code]) return scans[code];
+        if (key >= 65 && key <= 90) return key - 65 + 4;
+        if (key >= 48 && key <= 57) return 30 + (key - 48 + 9) % 10;
+        if (key >= 96 && key <= 105) return 89 + (key - 96 + 9) % 10;
+        if (key >= 112 && key <= 123) return key - 112 + 58;
+        return scans[virtualKeys[key]];
+    }
+
+    function inputPane() {
+        try { return Windows.UI.ViewManagement.InputPane.getForCurrentView(); }
+        catch (_) { return null; }
+    }
 
     function start(runner, appId, attempt) {
         var previous = document.activeElement;
@@ -30,6 +75,7 @@
         var view, savedBounds, enteredFullscreen;
         var foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
         var blockedMenuButtons = 0;
+        var keyboardReady = false;
         var layoutWidth = 0, layoutHeight = 0;
         var held = {};
         var pointerHeld = false;
@@ -50,6 +96,10 @@
             cancelAnimationFrame(animation);
             exit.removeEventListener("click", quit);
             resume.removeEventListener("click", hideMenu);
+            keyboard.removeEventListener("click", openText);
+            textValue.removeEventListener("click", showInputPane);
+            textForm.removeEventListener("submit", sendText);
+            textCancel.removeEventListener("click", closeText);
             window.removeEventListener("keydown", setKey, true);
             window.removeEventListener("keyup", setKey, true);
             canvas.removeEventListener("pointermove", setPointer);
@@ -60,6 +110,8 @@
             window.removeEventListener("focus", onFocus);
             document.removeEventListener("visibilitychange", onVisibility);
             menu.hidden = true;
+            textForm.hidden = true;
+            textValue.value = "";
             screen.hidden = true;
             library.hidden = false;
             if (previousInputMode !== undefined) navigator.gamepadInputEmulation = previousInputMode;
@@ -92,10 +144,50 @@
             resume.focus();
         }
 
+        function showInputPane() {
+            var pane = inputPane();
+            try { if (pane && pane.tryShow) pane.tryShow(); }
+            catch (_) { textValue.focus(); }
+        }
+
+        function openText() {
+            if (!keyboardReady) return;
+            menu.hidden = true;
+            textForm.hidden = false;
+            textValue.value = "";
+            textStatus.textContent = "";
+            textValue.focus();
+            showInputPane();
+        }
+
+        function closeText() {
+            var pane = inputPane();
+            try { if (pane && pane.tryHide) pane.tryHide(); }
+            catch (_) { /* Returning focus to the game also dismisses the input pane. */ }
+            textForm.hidden = true;
+            textValue.value = "";
+            hideMenu();
+        }
+
+        function sendText(event) {
+            if (event) event.preventDefault();
+            if (!textValue.value || runner.sendSteamSdlText(textValue.value)) closeText();
+            else textStatus.textContent = "The game could not accept the text. Try again.";
+        }
+
+        function moveMenuFocus(items, pressed) {
+            var index = items.indexOf(document.activeElement);
+            if (pressed & (padButtons.up | padButtons.left)) items[Math.max(0, index - 1)].focus();
+            if (pressed & (padButtons.down | padButtons.right)) items[Math.min(items.length - 1, index + 1)].focus();
+        }
+
         function setKey(event) {
-            if (event.keyCode === 121 && event.type === "keydown" && !event.repeat) {
+            if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
-                if (menu.hidden) showMenu(); else hideMenu();
+                if (event.type === "keydown" && !event.repeat) {
+                    if (!textForm.hidden) closeText();
+                    else if (menu.hidden) showMenu(); else hideMenu();
+                }
                 return;
             }
             // Read Xbox buttons from Gamepad. Suppress the browser's duplicate navigation and Back actions.
@@ -103,7 +195,19 @@
                 event.preventDefault();
                 return;
             }
-            if (!menu.hidden) return;
+            if (!menu.hidden || !textForm.hidden || !foreground || closing) return;
+            if (keyboardReady) {
+                var scan = scanCode(event);
+                if (!scan) return;
+                event.preventDefault();
+                var down = event.type === "keydown";
+                if (runner.sendSteamSdlKey(scan, down) && down &&
+                        !event.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey &&
+                        typeof event.key === "string" && Array.from(event.key).length === 1) {
+                    runner.sendSteamSdlText(event.key);
+                }
+                return;
+            }
             if (!directions[event.keyCode] && !keys[event.keyCode] && !clickCodes[event.keyCode]) return;
             event.preventDefault();
             held[event.keyCode] = event.type === "keydown";
@@ -114,6 +218,7 @@
             pointerHeld = false;
             if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
             if (ready && nativePad) neutralPad();
+            if (keyboardReady) runner.resetSteamSdlKeyboard();
             lastPointer = -1;
         }
 
@@ -122,7 +227,7 @@
         function onVisibility() { if (document.hidden) onBlur(); else onFocus(); }
 
         function setPointer(event) {
-            if (!ready || !firstFrame || !menu.hidden) return;
+            if (!ready || !firstFrame || !menu.hidden || !textForm.hidden) return;
             var bounds = canvas.getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
             pointerX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
@@ -256,13 +361,19 @@
                     }
                 }
                 if (image && (screen.clientWidth !== layoutWidth || screen.clientHeight !== layoutHeight)) fitFrame();
+                if (firstFrame && !keyboardReady && runner.steamSdlKeyboardReady && runner.steamSdlKeyboardReady()) {
+                    keyboardReady = true;
+                    keyboard.hidden = false;
+                    releaseKeys();
+                }
                 var pad = foreground ? gamepad.read(window.Windows, navigator) : gamepad.idle;
                 var chord = padButtons.start | padButtons.back;
                 if ((pad[0] & chord) === chord) {
                     if (chordStarted === null) chordStarted = now;
                     if (!chordUsed && now - chordStarted >= 750) {
                         chordUsed = true;
-                        if (menu.hidden) showMenu(); else hideMenu();
+                        if (!textForm.hidden) closeText();
+                        else if (menu.hidden) showMenu(); else hideMenu();
                     }
                     pad = pad.slice();
                     pad[0] &= ~chord;
@@ -272,12 +383,24 @@
                 }
                 var pressed = pad[0] & ~lastButtons;
                 lastButtons = pad[0];
-                if (!menu.hidden) {
-                    if (pressed & (padButtons.left | padButtons.up)) resume.focus();
-                    if (pressed & (padButtons.right | padButtons.down)) exit.focus();
+                if (!textForm.hidden) {
+                    var pane = inputPane();
+                    if (!pane || !pane.occludedRect || !pane.occludedRect.height) {
+                        moveMenuFocus([textValue, textSend, textCancel], pressed);
+                        if (pressed & padButtons.b) closeText();
+                        else if (pressed & padButtons.a) {
+                            if (document.activeElement === textSend) sendText();
+                            else if (document.activeElement === textCancel) closeText();
+                            else showInputPane();
+                        }
+                    }
+                } else if (!menu.hidden) {
+                    moveMenuFocus(keyboardReady ? [resume, keyboard, exit] : [resume, exit], pressed);
                     if (pressed & padButtons.b) hideMenu();
                     else if (pressed & padButtons.a) {
-                        if (document.activeElement === exit) quit(); else hideMenu();
+                        if (document.activeElement === exit) quit();
+                        else if (document.activeElement === keyboard) openText();
+                        else hideMenu();
                     }
                 } else if (!closing && foreground) {
                     blockedMenuButtons &= pad[0];
@@ -322,12 +445,18 @@
         screen.hidden = false;
         cursor.hidden = nativePad;
         menu.hidden = true;
+        keyboard.hidden = true;
+        textForm.hidden = true;
         library.hidden = true;
         title.textContent = titles[appId];
         status.textContent = "Starting " + titles[appId] + "…";
         exit.disabled = true;
         exit.addEventListener("click", quit);
         resume.addEventListener("click", hideMenu);
+        keyboard.addEventListener("click", openText);
+        textValue.addEventListener("click", showInputPane);
+        textForm.addEventListener("submit", sendText);
+        textCancel.addEventListener("click", closeText);
         window.addEventListener("keydown", setKey, true);
         window.addEventListener("keyup", setKey, true);
         canvas.addEventListener("pointermove", setPointer);

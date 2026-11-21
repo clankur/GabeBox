@@ -56,8 +56,16 @@
             </div>
             <div id="sdl-menu" role="dialog" aria-label="Game controls" hidden>
                 <button id="sdl-resume">Resume</button>
+                <button id="sdl-keyboard" hidden>Keyboard</button>
                 <button id="sdl-exit">Quit to library</button>
             </div>
+            <form id="sdl-text" role="dialog" aria-label="Type into the game" hidden>
+                <label for="sdl-text-value">Type into the game</label>
+                <input id="sdl-text-value" type="text" maxlength="96" autocomplete="off">
+                <button id="sdl-text-send" type="submit">Send text</button>
+                <button id="sdl-text-cancel" type="button">Cancel</button>
+                <p id="sdl-text-status" role="status"></p>
+            </form>
         </section>
     </main>
     <script src="qrcode.js"></script>

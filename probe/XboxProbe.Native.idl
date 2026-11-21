@@ -22,6 +22,10 @@ namespace XboxProbe.Native
         static UInt32 SendSteamSdlGamepad(UInt32 buttons, Int32 leftX, Int32 leftY, Int32 rightX, Int32 rightY,
             Int32 leftTrigger, Int32 rightTrigger);
         static UInt32 SteamSdlGamepadAck();
+        static Boolean SteamSdlKeyboardReady();
+        static Boolean SendSteamSdlKey(UInt32 scan, Boolean down);
+        static Boolean SendSteamSdlText(String text);
+        static void ResetSteamSdlKeyboard();
         static Boolean SteamSdlRunning();
         static void QuitSteamSdl();
         static Windows.Foundation.IAsyncOperation<String> AuthorizeXcomDos(Windows.Storage.StorageFile file, String prefix);
