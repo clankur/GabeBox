@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Steam library | Xbox Dev Mode</title>
+    <link rel="stylesheet" href="steam-signin.css">
+</head>
+<body>
+    <main>
+        <section id="signin" aria-labelledby="title">
+            <div>
+                <h1 id="title">Steam sign-in</h1>
+                <p class="device">Xbox Developer Mode client</p>
+                <p id="status" role="status" aria-live="polite">Preparing Steam Guard sign-in…</p>
+                <label id="remember-session" hidden>
+                    <input id="remember" type="checkbox">
+                    Remember sign-in on this Xbox
+                </label>
+                <div class="actions">
+                    <button id="retry" hidden>Get a new code</button>
+                    <button id="cancel" hidden>Cancel</button>
+                </div>
+            </div>
+            <canvas id="code" aria-label="Steam Guard QR code" hidden></canvas>
+        </section>
+        <section id="library" aria-labelledby="library-title" hidden>
+            <header class="library-header">
+                <div>
+                    <h1 id="library-title">Steam library</h1>
+                    <p id="library-count" class="device" role="status"></p>
+                </div>
+                <button id="sign-out">Sign out</button>
+            </header>
+            <div class="library-columns">
+                <div class="catalog">
+                    <label for="library-search">Search games</label>
+                    <input id="library-search" type="search" autocomplete="off">
+                    <div id="library-list" aria-label="Library games"></div>
+                    <p id="library-empty" hidden></p>
+                </div>
+                <section class="entry" aria-labelledby="entry-name">
+                    <h2 id="entry-name"></h2>
+                    <button id="play" hidden>Play</button>
+                    <button id="download" hidden>Download</button>
+                    <p id="download-status" class="download-status" role="status" aria-live="polite"></p>
+                </section>
+            </div>
+        </section>
+    </main>
+    <script src="qrcode.js"></script>
+    <script src="library-art.js"></script>
+    <script src="steam-game-launch.js"></script>
+    <script src="steam-signin.js"></script>
+</body>
+</html>

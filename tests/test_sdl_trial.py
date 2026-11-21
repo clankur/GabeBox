@@ -1,0 +1,53 @@
+import hashlib
+import importlib.util
+from argparse import Namespace
+from pathlib import Path
+from struct import pack_into
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import Mock, patch
+
+
+spec = importlib.util.spec_from_file_location('xbox_deploy', Path(__file__).resolve().parents[1] / 'xbox-deploy.py')
+cli = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cli)
+
+
+class SdlTrialTests(unittest.TestCase):
+    def test_failed_launch_restores_original(self):
+        original = b'publisher SDL2 fixture'
+        original_hash = hashlib.sha256(original).hexdigest()
+        image = bytearray(256)
+        image[:2] = b'MZ'
+        pack_into('<I', image, 0x3c, 64)
+        image[64:68] = b'PE\0\0'
+        pack_into('<H', image, 68, 0x8664)
+        pack_into('<H', image, 84, 112)
+        pack_into('<H', image, 88, 0x20b)
+        pack_into('<IIII', image, 220, 0xFEEF04BD, 0x10000, 0x2001e, 0x90000)
+        candidate = bytes(image)
+        portal = Mock()
+        portal.request.return_value = (200, b'steam_launch_repeat_app_id=413150\r\n')
+
+        with TemporaryDirectory() as scratch:
+            artifact = Path(scratch) / 'artifact'
+            artifact.mkdir()
+            (artifact / 'SDL2.dll').write_bytes(candidate)
+            (artifact / 'SHA256SUMS').write_text(f'{hashlib.sha256(candidate).hexdigest()}  SDL2.dll\n')
+            backup_dir = Path(scratch) / 'backup'
+            args = Namespace(app_id=413150, version='1.0.140.0', artifact=artifact, backup_dir=backup_dir,
+                             timeout=20, restore_only=False)
+            with patch.dict(cli.SDL_TRIALS, {413150: ('Stardew Valley', '2.30.9', original_hash)}), \
+                 patch.object(cli, 'find_installed_probe', return_value={'PackageFullName': 'fixture'}), \
+                 patch.object(cli, 'read_game_file', side_effect=(original, candidate, candidate, original)), \
+                 patch.object(cli, 'wait_for_probe', side_effect=ValueError('launch timed out')):
+                with self.assertRaisesRegex(ValueError, 'launch timed out'):
+                    cli.trial_sdl(portal, args)
+            backup = backup_dir / f'413150-SDL2-{original_hash[:12]}.dll'
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertFalse(backup.with_suffix('.lock').exists())
+
+        uploads = [call.args[2] for call in portal.request.call_args_list if call.args[0] == 'POST']
+        self.assertEqual(len(uploads), 2)
+        self.assertIn(candidate, uploads[0])
+        self.assertIn(original, uploads[1])

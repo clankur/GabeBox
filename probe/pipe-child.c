@@ -9,6 +9,8 @@ void WINAPI PipeChildEntry(void) {
         if (*command == L' ') suffix = command + 1;
         ++command;
     }
+    BOOL lifetime = command - suffix == PROBE_PIPE_SUFFIX_LENGTH + 1 && *suffix == L'L';
+    if (lifetime) ++suffix;
     if (command - suffix != PROBE_PIPE_SUFFIX_LENGTH) ExitProcess(1);
 
     WCHAR name[ARRAYSIZE(PROBE_PIPE_PREFIX) + PROBE_PIPE_SUFFIX_LENGTH];
@@ -24,6 +26,12 @@ void WINAPI PipeChildEntry(void) {
     DWORD request = GetCurrentProcessId() ^ PROBE_PIPE_HELLO;
     DWORD reply = 0;
     DWORD length = 0;
+    if (lifetime) {
+        ProbeLifetimeHello hello = {request, (DWORD)GetTickCount64()};
+        if (!CallNamedPipeW(name, &hello, sizeof(hello), &reply, sizeof(reply), &length, 5000))
+            ExitProcess(GetLastError());
+        ExitProcess(length == sizeof(reply) ? PROBE_LIFETIME_EXIT(reply, hello.token) : 2u);
+    }
     if (!CallNamedPipeW(name, &request, sizeof(request), &reply, sizeof(reply), &length, 5000)) {
         ExitProcess(GetLastError());
     }

@@ -1,6 +1,6 @@
 # Steam on Xbox Series X Developer Mode
 
-This project tests Steam sign-in, owned-game downloads, and local game launches on an Xbox Series X in Developer Mode. `main` contains the signed Xbox diagnostic and Steam core loader probe. The interactive Steam library and X-COM runtime were tested from feature branches. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
+This project tests Steam sign-in, owned-game downloads, and local game launches on an Xbox Series X in Developer Mode. The source includes the Xbox diagnostic, Steam core loader, interactive Steam library, and the X-COM DOS runtime. The linked Series X results come from the original feature builds. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 
 ## Setup
 
@@ -19,9 +19,9 @@ You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on t
 
 ### Try the Steam prototype
 
-Check out the verified revision `547182a` and download its `xbox-steam-core-template` artifact. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Tested source](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae) · [Matching build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44881408709) · [Steam setup guide](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md)
+Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml) · [Steam setup guide](probe/STEAM-CORE.md)
 
-To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
+To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](probe/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
 
 ## Verified features
 
@@ -35,7 +35,7 @@ To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream 
 - Verify in-game Xbox controller input for X-COM and add persistent saves that survive an app restart. [X-COM follow-up](https://github.com/clankur/steam-xbox-devmode/issues/44)
 - Fix game-path resolution after the first shared prerequisite install and refresh the competing AppID when the Steam download queue changes. [Prerequisite path](https://github.com/clankur/steam-xbox-devmode/issues/54) · [Download queue reporting](https://github.com/clankur/steam-xbox-devmode/issues/55)
 - Investigate Windows game startup and graphics blockers. A playable window remains unverified for the Windows titles under test. Begin with controlled renderer tests and title-by-title launch checks. [Current compatibility issues](https://github.com/clankur/steam-xbox-devmode/issues) · [ANGLE experiment](https://github.com/clankur/steam-xbox-devmode/pull/53) · [Win32 experiment plan](https://github.com/clankur/steam-xbox-devmode/pull/51)
-- Bring the verified Steam prototype features into a reproducible build from `main`.
+- Repeat the library and X-COM acceptance tests on a single build from `main`.
 
 ## Research archive
 

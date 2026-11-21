@@ -1,0 +1,53 @@
+html { background: #131a24; color: #f5f7fb; font: 24px 'Segoe UI', sans-serif; }
+body { min-height: 100vh; margin: 0; }
+main { margin: 0 auto; max-width: 1480px; padding: 0 6vw; }
+#signin { display: flex; align-items: center; justify-content: space-between; min-height: 86vh; }
+#signin > div { max-width: 550px; }
+h1 { margin: 0; font-size: 2.6em; font-weight: 650; }
+p { line-height: 1.45; }
+.device { color: #aebbd0; margin: .25em 0 1.6em; }
+#remember-session { display: block; margin-bottom: 1em; }
+#remember { width: 1.05em; height: 1.05em; margin-right: .4em; vertical-align: middle; }
+.actions { min-height: 64px; }
+button { margin-right: .5em; border: 2px solid #7990ad; border-radius: 4px; padding: .5em .9em; font: inherit; color: #f5f7fb; background: #24334a; }
+button:focus, input:focus { outline: 3px solid #7cd5ff; outline-offset: 3px; }
+canvas { max-width: 40vw; margin-left: 2em; background: white; }
+[hidden] { display: none !important; }
+
+#library { padding: 6vh 0; }
+.library-header { display: flex; justify-content: space-between; align-items: baseline; }
+.library-header .device { margin-bottom: .8em; }
+.library-header button { margin-right: 0; }
+.library-columns { display: flex; }
+.catalog { width: 53%; padding-right: 2em; box-sizing: border-box; }
+.catalog label { display: block; margin-bottom: .35em; color: #c6d3e4; font-size: .82em; }
+.catalog input {
+    width: 100%; box-sizing: border-box; padding: .45em .65em; border: 1px solid #7186a0;
+    border-radius: 4px; background: #1b2a3e; color: inherit; font: inherit;
+}
+#library-list { max-height: 55vh; margin: .65em -.25em 0; padding: .25em; overflow-y: auto; }
+#library-list button {
+    display: flex; align-items: center; width: 100%; margin: 0 0 .25em; border: 1px solid transparent;
+    padding: .3em .65em .3em .3em; text-align: left; background: #1b2a3e; overflow-wrap: break-word;
+}
+#library-list button[aria-pressed="true"] { background: #2b4462; border-color: #7fafd5; }
+.entry {
+    width: 47%; box-sizing: border-box; align-self: stretch; min-height: 60vh;
+    padding: 2em; border: 1px solid #34465d; border-radius: 8px;
+    background: linear-gradient(145deg, #24374d, #192434 65%);
+}
+.entry h2 { margin: 0; font-weight: 650; font-size: 1.9em; overflow-wrap: break-word; }
+#download, #play { margin-top: 1.25em; background: #11658a; border-color: #77c3e4; }
+#download:disabled, #play:disabled { opacity: .5; }
+.download-status { color: #c6d3e4; font-size: .9em; }
+
+.game-art {
+    flex: 0 0 4.6em; height: 1.725em; margin-right: .65em; position: relative;
+    background: #34475f; color: #cfdeed; border-radius: 2px; overflow: hidden;
+    pointer-events: none;
+}
+.game-art::before {
+    content: attr(data-initial); position: absolute; top: 0; left: 0; width: 100%;
+    text-align: center; line-height: 1.725em;
+}
+.game-art img { position: relative; display: block; width: 100%; height: 100%; }
