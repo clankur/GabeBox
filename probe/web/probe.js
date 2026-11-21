@@ -22,12 +22,50 @@
 
     function controlProbe(storage) {
         var wasVisible = false;
+        var foregroundRun = "";
+        var folder = storage.ApplicationData.current.localFolder;
+
+        function watchReturnRequest(run, deadline) {
+            if (document.hidden || run !== foregroundRun || Date.now() >= deadline) return;
+            function retry() {
+                setTimeout(function () { watchReturnRequest(run, deadline); }, 500);
+            }
+
+            folder.tryGetItemAsync("lifetime-return.txt").then(function (file) {
+                if (!file) return null;
+                return storage.FileIO.readTextAsync(file);
+            }).done(function (request) {
+                if (request === null || request.trim() !== run) {
+                    retry();
+                    return;
+                }
+                if (document.hidden || run !== foregroundRun) return;
+
+                var header = "run_id=" + run + "\r\n";
+                writeReport(storage, "protocol-return.txt", header + "protocol_return=requested\r\n").then(function () {
+                    var uri = new Windows.Foundation.Uri("xbox-portability-probe-return:");
+                    return Windows.System.Launcher.launchUriAsync(uri);
+                }).done(function (launched) {
+                    if (!launched) {
+                        writeReport(storage, "protocol-return.txt", header + "protocol_return=declined\r\n"
+                        ).done(null, reportError);
+                    }
+                }, function (error) {
+                    writeReport(storage, "protocol-return.txt", header + "protocol_return=failed\r\n" +
+                        errorText(error)).done(null, reportError);
+                });
+            }, retry);
+        }
+
         function publishForeground() {
             var visible = !document.hidden;
             if (visible && !wasVisible) {
+                foregroundRun = String(Date.now());
                 writeReport(storage, "probe-report.txt", "probe=packaged-startup-control\r\n" +
-                    "run_id=" + Date.now() + "\r\ncontrol_visible=yes\r\nstatus=control-ready\r\n"
-                ).done(null, reportError);
+                    "run_id=" + foregroundRun + "\r\ncontrol_visible=yes\r\nstatus=control-ready\r\n"
+                ).done(function () {
+                    watchReturnRequest(foregroundRun, Date.now() + 120000);
+                }, reportError);
             }
             wasVisible = visible;
         }

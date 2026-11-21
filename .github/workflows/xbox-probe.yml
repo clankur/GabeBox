@@ -138,6 +138,15 @@ jobs:
             $lifetime.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Lifetime')
             $lifetime.Package.Properties.DisplayName = 'Packaged process lifetime test'
             $lifetime.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process lifetime test')
+            $lifetimeApp = $lifetime.Package.Applications.Application
+            $appExtensions = $lifetime.CreateElement('Extensions', $ns)
+            $uriExtension = $lifetime.CreateElement('uap', 'Extension', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
+            $uriExtension.SetAttribute('Category', 'windows.protocol')
+            $protocol = $lifetime.CreateElement('uap', 'Protocol', $uriExtension.NamespaceURI)
+            $protocol.SetAttribute('Name', 'xbox-portability-probe-return')
+            $uriExtension.AppendChild($protocol) | Out-Null
+            $appExtensions.AppendChild($uriExtension) | Out-Null
+            $lifetimeApp.AppendChild($appExtensions) | Out-Null
             $lifetime.Save("$lifetimeLayout/AppxManifest.xml")
             Write-ProbePackage $lifetimeLayout $lifetimeArtifacts $cert
             Write-ProbePackage $layout $artifacts $cert
