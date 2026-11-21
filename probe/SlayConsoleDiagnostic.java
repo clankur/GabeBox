@@ -43,7 +43,9 @@ public final class SlayConsoleDiagnostic {
         File mesaLibrary = new File(packageRoot, "mesa-jni-control.dll");
         if (!mesaLibrary.isFile()) return;
         try {
+            System.out.println("slay_mesa_child=loading");
             System.load(mesaLibrary.getAbsolutePath());
+            System.out.println("slay_mesa_child=entered");
             int[] result = runMesaControl();
             System.out.printf("slay_mesa_child_stage=%d%nslay_mesa_child_win32=0x%08X%nslay_mesa_child_egl=0x%08X%n" +
                               "slay_mesa_child_gl=0x%08X%nslay_mesa_child_fbo=0x%08X%n",
