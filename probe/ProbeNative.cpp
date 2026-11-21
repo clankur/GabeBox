@@ -1210,15 +1210,21 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
     co_return winrt::hstring(L"steam_java_probe=exited\r\nsteam_java_probe_exit=" + Hex(exitCode) + L"\r\n");
 }
 
+enum class GameBackend { SteamPlay, DosBox };
+static constexpr std::uint32_t xcomDosAppId = 7760;
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix,
-        bool authorizeXcomDos = false) {
+        GameBackend backend) {
     using namespace winrt::Windows::Storage;
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
     using GameQuery = bool (__cdecl *)(void *, const std::uint64_t *);
     using Launch = std::uint64_t (__cdecl *)(void *, const std::uint64_t *, std::uint32_t, std::uint32_t, const char *);
     using CallResult = bool (__cdecl *)(std::int32_t, std::uint64_t, void *, std::int32_t, std::int32_t, bool *);
     using RefreshLibrary = void (__cdecl *)(void *);
+    if (backend == GameBackend::DosBox && app != xcomDosAppId) {
+        co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
+    }
     if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"steam_launch=busy\r\n");
     struct ResetLaunch {
         ~ResetLaunch() { steamLaunchActive.clear(); }
@@ -1429,8 +1435,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
-    co_await checkpoint(authorizeXcomDos ? L"checking-dos-runtime" : L"submitting-play");
-    if (authorizeXcomDos && (app != 7760 || !co_await HasCompletedSteamManifest(folder, app))) {
+    co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
+    if (backend == GameBackend::DosBox && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
     {
@@ -1440,12 +1446,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (session->downloadApp || session->launchCall) co_return winrt::hstring(report + L"steam_launch=busy\r\n");
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
         auto methods = FindSteamAppManager(*session);
-        result = reinterpret_cast<CallResult>(GetProcAddress(session->module, "Steam_GetAPICallResult"));
-        if (!methods || methods[2] != base + 0x874f20 || session->userMethods[182] != base + 0x75d640 ||
-                session->userMethods[67] != base + 0x75a320 || session->userMethods[68] != base + 0x75a4d0 ||
-                session->userMethods[132] != base + 0x8794c0 || session->userMethods[133] != base + 0x7b3e30 ||
-                session->userMethods[134] != base + 0x7b3fc0 ||
-                reinterpret_cast<std::uintptr_t>(result) != base + 0x9abb80) {
+        if (!methods || session->userMethods[182] != base + 0x75d640 ||
+                session->userMethods[67] != base + 0x75a320) {
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
@@ -1467,12 +1469,19 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=already-running\r\n");
         }
         session->PumpCallbacks();
-        if (authorizeXcomDos) {
+        if (backend == GameBackend::DosBox) {
             const auto expected = libraryRoot + L"\\steamapps\\common\\XCom UFO Defense";
             if (CompareStringOrdinal(gameDirectory.c_str(), -1, expected.c_str(), -1, TRUE) != CSTR_EQUAL) {
                 co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
             }
             co_return winrt::hstring(report + L"steam_dos_install=verified\r\n");
+        }
+        result = reinterpret_cast<CallResult>(GetProcAddress(session->module, "Steam_GetAPICallResult"));
+        if (methods[2] != base + 0x874f20 || session->userMethods[68] != base + 0x75a4d0 ||
+                session->userMethods[132] != base + 0x8794c0 || session->userMethods[133] != base + 0x7b3e30 ||
+                session->userMethods[134] != base + 0x7b3fc0 ||
+                reinterpret_cast<std::uintptr_t>(result) != base + 0x9abb80) {
+            co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         GetSystemTimeAsFileTime(&launchTime);
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
@@ -1645,12 +1654,17 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
 
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> AuthorizeXcomDos(
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
-        return LaunchLocalSteamGame(7760, file, prefix, true);
+        return AuthorizeDosGame(xcomDosAppId, file, prefix);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> AuthorizeDosGame(std::uint32_t app,
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return LaunchLocalSteamGame(app, file, prefix, GameBackend::DosBox);
     }
 
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app,
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
-        return LaunchLocalSteamGame(app, file, prefix);
+        return LaunchLocalSteamGame(app, file, prefix, GameBackend::SteamPlay);
     }
 };
 
