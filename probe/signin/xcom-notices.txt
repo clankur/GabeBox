@@ -1,0 +1,12 @@
+js-dos 6.22.60 by Alexander Guryanov and the DOSBox Team
+
+The original js-dos.js and dosbox-emterp.js are the unmodified published browser API and asm.js emulator. The distributed license is included as LICENSE.js-dos. The emulator reports GNU GPL at startup. Its code and build instructions are available at the source revision declared by the npm publisher.
+
+Distribution
+https://registry.npmjs.org/js-dos/-/js-dos-6.22.60.tgz
+SHA512 (base64) 1EhfMftOhBZ34Gvz/RCLsAoEcgWcZ1pmumpG28Z+9oQ9oQVP90jckQpvS9NW7vvfwYJWmCj+PX+j3UO44iO6LA==
+
+Source and build scripts
+https://github.com/caiiiycuk/js-dos/tree/d9d1045ef321bcde3f061dc8e686ded890147d6a
+https://github.com/caiiiycuk/js-dos/tree/d9d1045ef321bcde3f061dc8e686ded890147d6a/dreamlayers-em-dosbox-em-dosbox-svn-sdl2
+https://github.com/caiiiycuk/js-dos/archive/d9d1045ef321bcde3f061dc8e686ded890147d6a.tar.gz

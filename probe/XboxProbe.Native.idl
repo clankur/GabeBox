@@ -15,5 +15,8 @@ namespace XboxProbe.Native
         static String SteamStorageInfo();
         static Windows.Foundation.IAsyncOperation<String> LaunchSteamGame(UInt32 app,
             Windows.Storage.StorageFile file, String prefix);
+        static Windows.Foundation.IAsyncOperation<String> AuthorizeXcomDos(Windows.Storage.StorageFile file, String prefix);
+        static Windows.Foundation.IAsyncOperation<String> AuthorizeDosGame(UInt32 app,
+            Windows.Storage.StorageFile file, String prefix);
     };
 }

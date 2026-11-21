@@ -24,6 +24,17 @@
     var transfer;
     var launching = false;
     var manifestFolder;
+    // Only packaged adapters can be selected. Steam library metadata supplies the AppID.
+    var hostedGames = window.xcomDosRuntime ? [{
+        appId: window.xcomDosRuntime.appId,
+        backend: "dosbox",
+        phaseField: "steam_dos_phase",
+        authorizedLine: "steam_dos_install=verified",
+        authorize: function (runner, appId, attempt) {
+            return runner.authorizeDosGame(appId, attempt.file, attempt.report);
+        },
+        start: window.xcomDosRuntime.start
+    }] : [];
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -214,11 +225,13 @@
         libraryArt.schedule();
     }
 
-    function runGameLaunch(attempt, entry) {
+    function runGameLaunch(attempt, entry, automaticTrial) {
         if (transfer || launching) return;
         var fileIO = Windows.Storage.FileIO;
         var complete = "status=steam-core-complete\r\n";
-        var report = attempt.libraryReport + "steam_launch_run_id=" + Date.now() + "\r\n";
+        var launch = steamGameLaunch.forGame(XboxProbe.Native.ProbeRunner, entry.id, hostedGames);
+        var report = attempt.libraryReport + "steam_launch_run_id=" + Date.now() + "\r\n" +
+            "steam_launch_app_id=" + entry.id + "\r\nsteam_launch_backend=" + launch.backend + "\r\n";
         launching = true;
         signOut.disabled = true;
         updateActions();
@@ -230,6 +243,7 @@
             updateActions();
             var message = " launch could not be confirmed.";
             if (result.indexOf("steam_launch=window-ready\r\n") >= 0) message = " started.";
+            if (result.indexOf("steam_dos=guest-started\r\n") >= 0) message = " started in DOSBox.";
             if (result.indexOf("steam_launch=not-installed\r\n") >= 0) {
                 message = " is on disk, but Steam could not reopen its install.";
             }
@@ -246,7 +260,14 @@
         }
 
         return fileIO.writeTextAsync(attempt.file, report + "status=steam-game-launch-starting\r\n").then(function () {
-            return XboxProbe.Native.ProbeRunner.launchSteamGame(entry.id, attempt.file, report);
+            return launch.start({
+                file: attempt.file,
+                report: report,
+                automaticTrial: automaticTrial === true,
+                checkpoint: function (detail) {
+                    return fileIO.writeTextAsync(attempt.file, report + detail + "status=steam-game-launch-starting\r\n");
+                }
+            });
         }).then(finish, function () { return finish("steam_launch=failed\r\n"); });
     }
 
@@ -263,17 +284,15 @@
         return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
             if (!file) return save(complete);
             return storage.FileIO.readTextAsync(file).then(function (text) {
-                var config = /^(\d{1,8})(?:\r?\n(repeat))?(?:\r?\n(install))?$/.exec(text.trim());
-                if (!config || +config[1] < 1 || +config[1] > 16777215) {
-                    return save("steam_launch=invalid-game\r\n" + complete);
-                }
-                if (!config[2]) {
+                var config = steamGameLaunch.parseTrial(text);
+                if (!config) return save("steam_launch=invalid-game\r\n" + complete);
+                if (!config.repeat) {
                     if (values.hasKey(versionKey) && values.lookup(versionKey) === packageInfo.id.fullName) return save(complete);
                     values.insert(versionKey, packageInfo.id.fullName);
                 }
-                var game = entries.filter(function (entry) { return entry.id === +config[1]; })[0];
+                var game = entries.filter(function (entry) { return entry.id === config.appId; })[0];
                 if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
-                if (!config[3]) return runGameLaunch(attempt, game);
+                if (!config.install) return runGameLaunch(attempt, game, true);
                 return save("status=steam-game-install-checking\r\n").then(function () {
                     return checkLocalInstall(game);
                 }).then(function (installed) {
@@ -284,7 +303,7 @@
                 }).then(function (stage) {
                     attempt.libraryReport += "steam_launch_install=" + stage + "\r\n";
                     if (stage !== "installed" && stage !== "already-installed") return save(complete);
-                    return runGameLaunch(attempt, game);
+                    return runGameLaunch(attempt, game, true);
                 });
             });
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
