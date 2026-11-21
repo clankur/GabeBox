@@ -76,7 +76,6 @@ jobs:
             /EXPORT:DllGetActivationFactory=ProbeGetActivationFactory /EXPORT:DllCanUnloadNow=ProbeCanUnloadNow
 
           $targets = @(
-            @{ Source = 'child'; Extension = 'exe'; Flags = @('/entry:ChildEntry') },
             @{ Source = 'child-process'; Extension = 'dll'; Flags = @('/dll', '/noentry') }
           )
           foreach ($target in $targets) {
@@ -88,6 +87,10 @@ jobs:
               /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro @options `
               "/out:$layout/$source.$($target.Extension)" "$work/$source.obj" $lib
           }
+
+          & cl.exe /nologo /c /O2 /GS- /Zl /TC "/Fo$work\child.obj" probe/child.c
+          & link.exe /nologo /machine:x64 /subsystem:windows /appcontainer /dynamicbase /nxcompat /highentropyva `
+            /nodefaultlib /entry:ChildEntry /manifest:embed /manifestuac:no "/out:$layout\child.exe" "$work\child.obj" $lib
 
           $controlLayout = Join-Path $work 'control-layout'
           $controlArtifacts = Join-Path $work 'control-artifacts'
@@ -119,6 +122,7 @@ jobs:
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe"
             Write-ProbePackage $layout $artifacts $cert
             Write-ProbePackage $controlLayout $controlArtifacts $cert
           } finally {
