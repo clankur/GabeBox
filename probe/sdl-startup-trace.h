@@ -7,7 +7,7 @@ static void XboxSdlTrace(const char *line) {
     WCHAR path[1024];
     DWORD length = GetEnvironmentVariableW(L"XBOX_SDL_TRACE_FILE", path, ARRAYSIZE(path));
     if (length > 0 && length < ARRAYSIZE(path)) {
-        HANDLE file = CreateFileW(path, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+        HANDLE file = CreateFileW(path, FILE_APPEND_DATA | GENERIC_READ,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (file != INVALID_HANDLE_VALUE) {
             LARGE_INTEGER size;
@@ -20,3 +20,15 @@ static void XboxSdlTrace(const char *line) {
     }
     SetLastError(last_error);
 }
+
+#ifdef XBOX_SDL_MAIN_TRACE
+static void XboxSdlSetWorkingDirectory(void) {
+    DWORD last_error = GetLastError();
+    WCHAR directory[1024];
+    DWORD length = GetEnvironmentVariableW(L"XBOX_SDL_WORKING_DIRECTORY", directory, ARRAYSIZE(directory));
+    if (length > 0 && length < ARRAYSIZE(directory)) {
+        XboxSdlTrace(SetCurrentDirectoryW(directory) ? "sdl_working_directory=ready\n" : "sdl_working_directory=error\n");
+    }
+    SetLastError(last_error);
+}
+#endif

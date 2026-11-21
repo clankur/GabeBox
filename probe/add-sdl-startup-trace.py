@@ -7,9 +7,15 @@ from pathlib import Path
 
 
 HOOKS = {
+    'SDL.c': (
+        ('int', 'SDL_Init', 'flags', 'init', 'value == 0'),
+        ('int', 'SDL_InitSubSystem', 'flags', 'subsystem_init', 'value == 0'),
+    ),
     'video/SDL_video.c': (
         ('int', 'SDL_VideoInit', 'driver_name', 'video_init', 'value == 0'),
         ('SDL_Window *', 'SDL_CreateWindow', 'title, x, y, w, h, flags', 'window', 'value != NULL'),
+        ('int', 'SDL_GL_LoadLibrary', 'path', 'gl_library', 'value == 0'),
+        ('SDL_GLContext', 'SDL_GL_CreateContext', 'window', 'gl_context', 'value != NULL'),
     ),
     'render/SDL_render.c': (
         ('SDL_Renderer *', 'SDL_CreateRenderer', 'window, index, flags', 'renderer', 'value != NULL'),
@@ -44,10 +50,18 @@ def add_startup_trace(tree):
     for filename, hooks in HOOKS.items():
         file = source_root / filename
         source = file.read_text(encoding='utf-8')
-        include = '#include "../SDL_internal.h"'
+        prefix = '../' if '/' in filename else './'
+        include = f'#include "{prefix}SDL_internal.h"'
         if source.count(include) != 1:
             raise ValueError(f'Expected one SDL internal header in {filename}.')
-        source = source.replace(include, include + '\n#include "../sdl-startup-trace.h"')
+        define = '\n#define XBOX_SDL_MAIN_TRACE' if filename == 'SDL.c' else ''
+        source = source.replace(include, include + define + f'\n#include "{prefix}sdl-startup-trace.h"')
+        if filename == 'SDL.c':
+            declaration = r'^(void\s+SDL_SetMainReady\(void\)\s*\{)'
+            source, count = re.subn(declaration, r'\1\n    XboxSdlTrace("sdl_main_ready=begin\\n");'
+                                    '\n    XboxSdlSetWorkingDirectory();', source, flags=re.MULTILINE)
+            if count != 1:
+                raise ValueError('Expected the SDL2 main entrypoint in the pinned source.')
         for hook in hooks:
             source = wrap_definition(source, *hook)
         file.write_text(source, encoding='utf-8')
