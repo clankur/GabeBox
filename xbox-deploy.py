@@ -494,6 +494,13 @@ def main():
                 return
             raw = read_game_file(portal, app, r'\LocalState', f'slay-console-{run[1]}.log', 1024 * 1024)
             print(slay_console_summary(raw))
+            trace = read_game_file(portal, app, r'\LocalState', f'slay-console-{run[1]}.sdl.txt', 4096)
+            if trace:
+                phases = re.findall(r'^sdl_(?:video_init|window|gl_library|gl_context|gl_swap_interval|'
+                                    r'surfaceless_egl|surfaceless_context|surfaceless_framebuffer|offscreen_frame|'
+                                    r'gl_call_(?:Viewport|Clear|TexImage2D|CompileShader|LinkProgram|DrawElements|DrawArrays))'
+                                    r'=(?:begin|ready|returned|unavailable|error)$', decode_report(trace), re.MULTILINE)
+                print('\n'.join(phases))
             return
         if args.report_file == 'slay-startup.log':
             _, launch = portal.request('GET', probe_report_path(app))

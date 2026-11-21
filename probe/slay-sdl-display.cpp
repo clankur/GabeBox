@@ -22,6 +22,13 @@ void (*swapWindow)(void *);
 int (*setInterval)(int);
 int (*pollEvent)(void *);
 unsigned (*mouseState)(int *, int *);
+void (*warpMouse)(void *, int, int);
+void *(*createSurface)(void *, int, int, int, int, unsigned, unsigned, unsigned, unsigned);
+void (*freeSurface)(void *);
+void *(*createCursor)(void *, int, int);
+void (*setCursor)(void *);
+void *(*defaultCursor)();
+void (*freeCursor)(void *);
 
 bool loadSdl() {
     if (sdl) return true;
@@ -39,8 +46,16 @@ bool loadSdl() {
     setInterval = resolve<decltype(setInterval)>("SDL_GL_SetSwapInterval");
     pollEvent = resolve<decltype(pollEvent)>("SDL_PollEvent");
     mouseState = resolve<decltype(mouseState)>("SDL_GetMouseState");
+    warpMouse = resolve<decltype(warpMouse)>("SDL_WarpMouseInWindow");
+    createSurface = resolve<decltype(createSurface)>("SDL_CreateRGBSurfaceFrom");
+    freeSurface = resolve<decltype(freeSurface)>("SDL_FreeSurface");
+    createCursor = resolve<decltype(createCursor)>("SDL_CreateColorCursor");
+    setCursor = resolve<decltype(setCursor)>("SDL_SetCursor");
+    defaultCursor = resolve<decltype(defaultCursor)>("SDL_GetDefaultCursor");
+    freeCursor = resolve<decltype(freeCursor)>("SDL_FreeCursor");
     if (mainReady && init && createWindow && destroyWindow && createContext && makeCurrent &&
-        currentContext && deleteContext && swapWindow && setInterval && pollEvent && mouseState) return true;
+        currentContext && deleteContext && swapWindow && setInterval && pollEvent && mouseState &&
+        warpMouse && createSurface && freeSurface && createCursor && setCursor && defaultCursor && freeCursor) return true;
     FreeLibrary(sdl);
     sdl = nullptr;
     return false;
@@ -120,5 +135,34 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollClose(JNIEnv
 JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_mouse(JNIEnv *env, jclass, jobject coordinates) {
     auto point = static_cast<int*>(env->GetDirectBufferAddress(coordinates));
     return point && env->GetDirectBufferCapacity(coordinates) >= 8 ? mouseState(point, point + 1) : 0;
+}
+
+JNIEXPORT jobject JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_makeCursor(
+    JNIEnv *env, jclass, jint width, jint height, jint hotX, jint hotY, jobject pixels) {
+    if (!window || !pixels || width <= 0 || height <= 0 || width > 256 || height > 256 ||
+        env->GetDirectBufferCapacity(pixels) < width * height) return nullptr;
+    auto data = env->GetDirectBufferAddress(pixels);
+    if (!data) return nullptr;
+    // LWJGL's Windows Cursor adapter supplies top-down ARGB pixels and hotspot.
+    auto surface = createSurface(data, width, height, 32, width * 4, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000);
+    if (!surface) return nullptr;
+    auto cursor = createCursor(surface, hotX, hotY);
+    freeSurface(surface);
+    if (!cursor) return nullptr;
+    auto handle = env->NewDirectByteBuffer(cursor, 1);
+    if (!handle) freeCursor(cursor);
+    return handle;
+}
+
+JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_selectCursor(JNIEnv *env, jclass, jobject handle) {
+    if (window) setCursor(handle ? env->GetDirectBufferAddress(handle) : defaultCursor());
+}
+
+JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_releaseCursor(JNIEnv *env, jclass, jobject handle) {
+    if (handle) freeCursor(env->GetDirectBufferAddress(handle));
+}
+
+JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_warpCursor(JNIEnv *, jclass, jint x, jint y) {
+    if (window) warpMouse(window, x, y);
 }
 }

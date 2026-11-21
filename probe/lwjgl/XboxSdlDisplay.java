@@ -6,11 +6,13 @@ import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import org.lwjgl.LWJGLException;
+import org.lwjgl.input.Cursor;
 
 /** SDL-backed display for the opt-in Xbox launch profile. */
 final class XboxSdlDisplay implements DisplayImplementation {
     static final String PACKAGE = "xbox.lwjgl.sdl.package";
     private static final DisplayMode INITIAL = new DisplayMode(1280, 720);
+    private static final int MAX_CURSOR_SIZE = 256;
     private static int width = INITIAL.getWidth();
     private static int height = INITIAL.getHeight();
     private static boolean visible;
@@ -25,6 +27,10 @@ final class XboxSdlDisplay implements DisplayImplementation {
     private static native void destroy();
     private static native boolean pollClose();
     private static native int mouse(ByteBuffer coordinates);
+    private static native ByteBuffer makeCursor(int width, int height, int hotX, int hotY, IntBuffer pixels);
+    private static native void selectCursor(ByteBuffer handle);
+    private static native void releaseCursor(ByteBuffer handle);
+    private static native void warpCursor(int x, int y);
     static native ByteBuffer openContext();
     static native boolean makeContextCurrent(ByteBuffer context);
     static native boolean contextIsCurrent(ByteBuffer context);
@@ -109,11 +115,11 @@ final class XboxSdlDisplay implements DisplayImplementation {
     }
     public void readMouse(ByteBuffer buffer) {}
     public void grabMouse(boolean grab) {}
-    public int getNativeCursorCapabilities() { return 0; }
-    public void setCursorPosition(int x, int y) {}
-    public void setNativeCursor(Object handle) {}
-    public int getMinCursorSize() { return 0; }
-    public int getMaxCursorSize() { return 0; }
+    public int getNativeCursorCapabilities() { return Cursor.CURSOR_ONE_BIT_TRANSPARENCY; }
+    public void setCursorPosition(int x, int y) { warpCursor(x, height - 1 - y); }
+    public void setNativeCursor(Object handle) { selectCursor((ByteBuffer)handle); }
+    public int getMinCursorSize() { return 1; }
+    public int getMaxCursorSize() { return MAX_CURSOR_SIZE; }
     public void createKeyboard() {}
     public void destroyKeyboard() {}
     public void pollKeyboard(ByteBuffer buffer) {
@@ -121,7 +127,15 @@ final class XboxSdlDisplay implements DisplayImplementation {
     }
     public void readKeyboard(ByteBuffer buffer) {}
     public Object createCursor(int w, int h, int x, int y, int count, IntBuffer images, IntBuffer delays)
-            throws LWJGLException { throw new LWJGLException("Native cursors are unavailable"); }
-    public void destroyCursor(Object handle) {}
+            throws LWJGLException {
+        if (count != 1 || w <= 0 || h <= 0 || w > MAX_CURSOR_SIZE || h > MAX_CURSOR_SIZE || images.remaining() < w * h) {
+            throw new LWJGLException("Invalid Xbox SDL cursor image");
+        }
+        ByteBuffer handle = makeCursor(w, h, x, y, images.slice());
+        if (handle == null) throw new LWJGLException("Xbox SDL could not create the color cursor");
+        System.out.println("slay_sdl_display=cursor");
+        return handle;
+    }
+    public void destroyCursor(Object handle) { releaseCursor((ByteBuffer)handle); }
     public boolean isInsideWindow() { return visible; }
 }
