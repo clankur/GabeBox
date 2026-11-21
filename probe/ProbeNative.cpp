@@ -2,8 +2,11 @@
 #include <winstring.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Security.Cryptography.Core.h>
+#include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/XboxProbe.Native.h>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <sstream>
@@ -209,6 +212,60 @@ static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstr
     return result + InspectSteamImports(inventory) + L"status=steam-core-complete\r\n";
 }
 
+using SteamFactory = void *(__cdecl *)(const char *, int *);
+
+static winrt::Windows::Foundation::IAsyncOperation<bool> IsPinnedSteamImage() {
+    using winrt::Windows::Security::Cryptography::CryptographicBuffer;
+    using winrt::Windows::Security::Cryptography::Core::HashAlgorithmProvider;
+    using winrt::Windows::Storage::FileIO;
+    auto package = winrt::Windows::ApplicationModel::Package::Current();
+    auto image = co_await package.InstalledLocation().GetFileAsync(L"steamclient64.dll");
+    auto bytes = co_await FileIO::ReadBufferAsync(image);
+    auto hash = HashAlgorithmProvider::OpenAlgorithm(L"SHA256").HashData(bytes);
+    auto expected = CryptographicBuffer::DecodeFromHexString(
+        L"5237b35064b7e1cf26754959643341fdf36c55ffefea54dcf20de6d62b46d822");
+    co_return CryptographicBuffer::Compare(hash, expected);
+}
+
+// These RVAs describe the audited Valve build 1794536281 after its one-byte import adaptation.
+static std::wstring ProbeSignedOutSteamUser(HMODULE image, SteamFactory factory, std::int32_t user, std::int32_t pipe) {
+    using GetUser = void *(__cdecl *)(void *, std::int32_t, std::int32_t);
+    using Query = bool (__cdecl *)(void *);
+    using ListApps = std::int32_t (__cdecl *)(void *, std::uint32_t *, std::int32_t, bool);
+    const auto base = reinterpret_cast<std::uintptr_t>(image);
+    auto table = [](void *object) {
+        return object ? *static_cast<std::uintptr_t const **>(object) : nullptr;
+    };
+    int code = -1;
+    auto engine = factory("CLIENTENGINE_INTERFACE_VERSION005", &code);
+    auto engineMethods = table(engine);
+    if (code != 0 || reinterpret_cast<std::uintptr_t>(engineMethods) != base + 0x138f580 ||
+            engineMethods[8] != base + 0x9aa4b0) {
+        return L"steam_session_abi=engine-mismatch\r\n";
+    }
+
+    auto clientUser = reinterpret_cast<GetUser>(engineMethods[8])(engine, user, pipe);
+    auto userMethods = table(clientUser);
+    if (reinterpret_cast<std::uintptr_t>(userMethods) != base + 0x1357d28 ||
+            userMethods[1] != base + 0x8772a0 || userMethods[4] != base + 0x75e0e0 ||
+            userMethods[6] != base + 0x7513f0 || userMethods[56] != base + 0x8a0450 ||
+            userMethods[183] != base + 0x7ba890) {
+        return L"steam_session_abi=user-mismatch\r\n";
+    }
+
+    bool loggedOn = reinterpret_cast<Query>(userMethods[4])(clientUser);
+    bool connected = reinterpret_cast<Query>(userMethods[6])(clientUser);
+    std::wstring report = L"steam_session_abi=verified\r\n";
+    report += std::wstring(L"steam_client_connected=") + (connected ? L"yes\r\n" : L"no\r\n");
+    if (!loggedOn) {
+        std::array<std::uint32_t, 64> apps{};
+        auto count = reinterpret_cast<ListApps>(userMethods[183])(
+            clientUser, apps.data(), static_cast<std::int32_t>(apps.size()), true);
+        report += L"steam_signed_out_subscriptions=" + std::to_wstring(count) + L"\r\n";
+    }
+    return report;
+}
+
 static winrt::Windows::Foundation::IAsyncAction SteamRuntime(
         winrt::Windows::Storage::StorageFile file, winrt::hstring prefix) {
     using winrt::Windows::Storage::FileIO;
@@ -284,6 +341,18 @@ static winrt::Windows::Foundation::IAsyncAction SteamRuntime(
     if (user > 0 && bootstrapPipe > 0) {
         report += std::wstring(L"steam_bootstrap=success\r\nsteam_logged_on=") +
                   (loggedOn(user, bootstrapPipe) ? L"yes\r\n" : L"no\r\n");
+        bool pinned = false;
+        try {
+            pinned = co_await IsPinnedSteamImage();
+        } catch (winrt::hresult_error const& error) {
+            report += L"steam_session_hash_error=" + Hex(static_cast<DWORD>(error.code())) + L"\r\n";
+        }
+        if (pinned) {
+            co_await FileIO::WriteTextAsync(file, winrt::hstring(report + L"status=steam-session-abi-starting\r\n"));
+            report += ProbeSignedOutSteamUser(module.get(), factory, user, bootstrapPipe);
+        } else {
+            report += L"steam_session_abi=image-mismatch\r\n";
+        }
         releaseUser(bootstrapPipe, user);
     } else {
         report += L"steam_bootstrap=failed\r\n";
