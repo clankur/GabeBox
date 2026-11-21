@@ -169,6 +169,49 @@
         select(list.firstElementChild);
     }
 
+    function completeLibrary(attempt, report) {
+        var storage = Windows.Storage;
+        var packageInfo = Windows.ApplicationModel.Package.current;
+        var values = storage.ApplicationData.current.localSettings.values;
+        var versionKey = "steamLaunchProbePackage";
+        var complete = "status=steam-core-complete\r\n";
+        function save(checkpoint) {
+            return storage.FileIO.writeTextAsync(attempt.file, report + checkpoint);
+        }
+
+        if (values.hasKey(versionKey) && values.lookup(versionKey) === packageInfo.id.fullName) return save(complete);
+        return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
+            if (!file) return save(complete);
+            return storage.FileIO.readTextAsync(file).then(function (text) {
+                var requested = text.trim();
+                if (!/^\d{1,8}$/.test(requested) || +requested < 1 || +requested > 16777215) {
+                    return save("steam_launch=invalid-game\r\n" + complete);
+                }
+                values.insert(versionKey, packageInfo.id.fullName);
+                var game = entries.filter(function (entry) { return entry.id === +requested; })[0];
+                var selectedName = game ? game.name : "Steam game";
+                downloadStatus.textContent = "Starting " + selectedName + "…";
+                signOut.disabled = true;
+                download.disabled = true;
+                return save("status=steam-game-launch-starting\r\n").then(function () {
+                    return XboxProbe.Native.ProbeRunner.launchSteamGame(+requested);
+                }).then(function (result) {
+                    downloadStatus.textContent = result.indexOf("steam_launch=window-ready\r\n") >= 0
+                        ? selectedName + " started." : selectedName + " launch could not be confirmed.";
+                    return save(result + complete);
+                }).then(function () {
+                    signOut.disabled = false;
+                    select(selected);
+                }, function () {
+                    signOut.disabled = false;
+                    select(selected);
+                    downloadStatus.textContent = selectedName + " launch failed.";
+                    return save("steam_launch=failed\r\n" + complete);
+                });
+            });
+        }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
+    }
+
     function finishNative(attempt, payload) {
         return Windows.Storage.FileIO.readTextAsync(attempt.file).then(function (report) {
             if (payload) {
@@ -182,9 +225,8 @@
                 list.firstElementChild.focus();
                 attempt.done = true;
                 attempt.client.close();
-                return Windows.Storage.FileIO.writeTextAsync(attempt.file,
-                    report.replace("status=steam-library-rendering\r\n",
-                        "steam_library_rendered=yes\r\nstatus=steam-core-complete\r\n"));
+                return completeLibrary(attempt, report.replace("status=steam-library-rendering\r\n",
+                    "steam_library_rendered=yes\r\n"));
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
                 finish(attempt, "Steam approved sign-in. The library did not finish loading.");
             } else {

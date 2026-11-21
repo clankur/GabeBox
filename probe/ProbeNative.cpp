@@ -14,6 +14,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -428,6 +429,7 @@ struct SteamSignInHandles {
     std::wstring libraryPath;
     std::uint64_t lastTransition = 0;
     std::uint32_t lastInstallState = 0;
+    std::uint64_t launchCall = 0;
 
     void PumpCallbacks() const {
         for (unsigned i = 0; i < 32; ++i) {
@@ -705,6 +707,40 @@ static std::uintptr_t const *FindSteamAppManager(SteamSignInHandles &session) {
     return methods;
 }
 
+struct SteamLibraryRegistration {
+    std::int32_t index;
+    std::int32_t result;
+};
+
+static SteamLibraryRegistration RegisterSteamLibrary(void *manager, std::uintptr_t const *methods,
+        winrt::hstring const& path) {
+    using LibraryCount = std::uint32_t (__cdecl *)(void *);
+    using AddFolder = std::int32_t (__cdecl *)(void *, const char *);
+    auto libraryCount = reinterpret_cast<LibraryCount>(methods[75]);
+    auto libraryPath = reinterpret_cast<SteamAppPath>(methods[76]);
+    auto findFolder = [&]() -> std::int32_t {
+        auto count = libraryCount(manager);
+        for (std::uint32_t i = 0; i < count && i < 1024; ++i) {
+            auto directory = SteamPath(libraryPath, manager, i);
+            if (CompareStringOrdinal(directory.c_str(), -1, path.c_str(), -1, TRUE) == CSTR_EQUAL) return i;
+        }
+        return -1;
+    };
+    auto index = findFolder();
+    if (index >= 0) return {index, 0};
+    auto addFolder = reinterpret_cast<AddFolder>(methods[77]);
+    auto result = addFolder(manager, winrt::to_string(path).c_str());
+    return {findFolder(), result};
+}
+
+static bool IsLocalSteamInstall(std::wstring const& directory, std::wstring const& root) {
+    auto prefix = root + L"\\";
+    return directory.size() > prefix.size() && CompareStringOrdinal(
+        directory.c_str(), static_cast<int>(prefix.size()), prefix.c_str(),
+        static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL &&
+        directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDownload(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     auto root = ApplicationData::Current().LocalFolder();
@@ -725,30 +761,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
 
     auto methods = FindSteamAppManager(*session);
     if (!methods) co_return winrt::hstring(L"interface-error");
-    using LibraryCount = std::uint32_t (__cdecl *)(void *);
-    using AddFolder = std::int32_t (__cdecl *)(void *, const char *);
-    auto libraryCount = reinterpret_cast<LibraryCount>(methods[75]);
-    auto libraryPath = reinterpret_cast<SteamAppPath>(methods[76]);
-    auto addFolder = reinterpret_cast<AddFolder>(methods[77]);
     auto manager = session->appManager;
-    auto findFolder = [&]() -> std::int32_t {
-        auto count = libraryCount(manager);
-        for (std::uint32_t i = 0; i < count && i < 1024; ++i) {
-            auto directory = SteamPath(libraryPath, manager, i);
-            if (CompareStringOrdinal(directory.c_str(), -1, path.c_str(), -1, TRUE) == CSTR_EQUAL) return i;
-        }
-        return -1;
-    };
-
-    auto index = findFolder();
-    if (index < 0) {
-        auto addResult = addFolder(manager, winrt::to_string(path).c_str());
-        index = findFolder();
-        if (index < 0) co_return winrt::hstring(L"library-folder-error:" + std::to_wstring(addResult));
+    auto registration = RegisterSteamLibrary(manager, methods, path);
+    if (registration.index < 0) {
+        co_return winrt::hstring(L"library-folder-error:" + std::to_wstring(registration.result));
     }
 
     auto install = reinterpret_cast<SteamInstall>(methods[0]);
-    auto result = install(manager, app, index, false);
+    auto result = install(manager, app, registration.index, false);
     if (result != 0) co_return winrt::hstring(L"install-rejected:" + std::to_wstring(result));
     session->downloadApp = app;
     session->libraryPath = path;
@@ -786,12 +806,7 @@ static winrt::hstring ReadSteamDownload() {
     if ((state & (fullyInstalled | updateRequired | missingOrCorrupt | downloading | stagingOrCommitting)) ==
             fullyInstalled) {
         auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, session->downloadApp);
-        auto prefix = session->libraryPath + L"\\";
-        const bool insideLibrary = directory.size() > prefix.size() && CompareStringOrdinal(
-            directory.c_str(), static_cast<int>(prefix.size()), prefix.c_str(),
-            static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL &&
-            directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
-        checkpoint = insideLibrary ? L"installed" : L"install-path-error";
+        checkpoint = IsLocalSteamInstall(directory, session->libraryPath) ? L"installed" : L"install-path-error";
         session->downloadApp = 0;
     } else if (now - session->lastTransition >= 90000) {
         checkpoint = L"stalled";
@@ -804,6 +819,129 @@ static winrt::hstring ReadSteamDownload() {
         checkpoint = L"queued";
     }
     return winrt::hstring(checkpoint + L":" + std::to_wstring(state));
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(std::uint32_t app) {
+    using namespace winrt::Windows::Storage;
+    using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
+    using GameQuery = bool (__cdecl *)(void *, const std::uint64_t *);
+    using Launch = std::uint64_t (__cdecl *)(void *, const std::uint64_t *, std::uint32_t, std::uint32_t, const char *);
+    using CallResult = bool (__cdecl *)(std::int32_t, std::uint64_t, void *, std::int32_t, std::int32_t, bool *);
+    auto root = ApplicationData::Current().LocalFolder();
+    auto item = co_await root.TryGetItemAsync(L"SteamLibrary");
+    auto folder = item.try_as<StorageFolder>();
+    if (!folder) co_return winrt::hstring(L"steam_launch=no-local-library\r\n");
+    auto path = folder.Path();
+
+    const std::uint64_t gameId = app;  // Regular Steam AppID in CGameID's 24-bit app field.
+    if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
+    std::uint64_t call = 0;
+    CallResult result = nullptr;
+    {
+        std::lock_guard lock(steamSessionMutex);
+        auto session = liveSteamSession;
+        if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
+        if (session->downloadApp || session->launchCall) co_return winrt::hstring(L"steam_launch=busy\r\n");
+        const auto base = reinterpret_cast<std::uintptr_t>(session->module);
+        auto methods = FindSteamAppManager(*session);
+        result = reinterpret_cast<CallResult>(GetProcAddress(session->module, "Steam_GetAPICallResult"));
+        if (!methods || methods[2] != base + 0x874f20 || session->userMethods[182] != base + 0x75d640 ||
+                session->userMethods[67] != base + 0x75a320 || session->userMethods[68] != base + 0x75a4d0 ||
+                reinterpret_cast<std::uintptr_t>(result) != base + 0x9abb80) {
+            co_return winrt::hstring(L"steam_launch=interface-error\r\n");
+        }
+        if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
+                !reinterpret_cast<IsSubscribed>(session->userMethods[182])(session->clientUser, app)) {
+            co_return winrt::hstring(L"steam_launch=no-license\r\n");
+        }
+        auto manager = session->appManager;
+        auto library = RegisterSteamLibrary(manager, methods, path);
+        if (library.index < 0) co_return winrt::hstring(L"steam_launch=library-folder-error\r\n");
+        constexpr std::uint32_t installMask = 0x7000a6;
+        constexpr std::uint32_t fullyInstalled = 4;
+        auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
+        if ((state & installMask) != fullyInstalled) {
+            co_return winrt::hstring(L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
+                std::to_wstring(state) + L"\r\n");
+        }
+        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
+            co_return winrt::hstring(L"steam_launch=install-path-error\r\n");
+        }
+        if (reinterpret_cast<GameQuery>(session->userMethods[67])(session->clientUser, &gameId)) {
+            co_return winrt::hstring(L"steam_launch=already-running\r\n");
+        }
+        session->PumpCallbacks();
+        call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
+        if (!call) co_return winrt::hstring(L"steam_launch=request-rejected\r\n");
+        session->launchCall = call;
+    }
+
+    struct CompletionEvent {
+        std::uint64_t call;
+        std::int32_t kind;
+        std::uint32_t size;
+    };
+    constexpr std::int32_t callCompleted = 703;
+    constexpr std::int32_t launchResult = 1270027;
+    std::array<std::uint8_t, 524> payload{};
+    auto verdict = L"timeout";
+    std::wstring report = L"steam_launch_submitted=yes\r\n";
+    winrt::apartment_context caller;
+    auto deadline = GetTickCount64() + 25000;
+    bool accepted = false;
+    bool observedRunning = false;
+    for (;;) {
+        {
+            std::lock_guard lock(steamSessionMutex);
+            auto session = liveSteamSession;
+            if (!session || session->launchCall != call) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+            bool responded = false;
+            for (unsigned i = 0; i < 32; ++i) {
+                SteamCallback callback{};
+                if (!session->getCallback(session->pipe, &callback)) break;
+                if (callback.message == callCompleted && callback.length == sizeof(CompletionEvent) && callback.data) {
+                    CompletionEvent completion{};
+                    std::memcpy(&completion, callback.data, sizeof(completion));
+                    if (completion.call == call) {
+                        responded = true;
+                        bool failed = false;
+                        if (completion.kind == launchResult && completion.size == payload.size() &&
+                                result(session->pipe, call, payload.data(), static_cast<std::int32_t>(payload.size()),
+                                    launchResult, &failed) && !failed) {
+                            std::uint64_t reportedGame = 0;
+                            std::int32_t code = -1;
+                            std::memcpy(&reportedGame, payload.data(), sizeof(reportedGame));
+                            std::memcpy(&code, payload.data() + sizeof(reportedGame), sizeof(code));
+                            if (reportedGame == gameId) {
+                                report += L"steam_launch_client_result=" + std::to_wstring(code) + L"\r\n";
+                                accepted = code == 0;
+                                verdict = accepted ? L"start-unconfirmed" : L"client-rejected";
+                            }
+                        }
+                        if (!accepted && verdict == std::wstring_view(L"timeout")) verdict = L"result-unreadable";
+                    }
+                }
+                session->freeCallback(session->pipe);
+            }
+            auto user = session->clientUser;
+            auto running = reinterpret_cast<GameQuery>(session->userMethods[67])(user, &gameId);
+            observedRunning = observedRunning || running;
+            auto windowReady = reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
+            if (accepted && windowReady && running) verdict = L"window-ready";
+            if ((responded && !accepted) || (accepted && windowReady && running) || GetTickCount64() >= deadline) {
+                if (accepted && observedRunning && verdict == std::wstring_view(L"start-unconfirmed")) {
+                    verdict = running ? L"running-window-unconfirmed" : L"exited-during-startup";
+                }
+                report += std::wstring(L"steam_launch_running_seen=") + (observedRunning ? L"yes\r\n" : L"no\r\n");
+                session->launchCall = 0;
+                break;
+            }
+        }
+        co_await winrt::resume_after(std::chrono::milliseconds(250));
+        co_await caller;
+    }
+    co_return winrt::hstring(report + L"steam_launch=" + verdict + L"\r\n");
 }
 
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
@@ -844,6 +982,10 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
 
     winrt::hstring SteamDownloadStatus() {
         return ReadSteamDownload();
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app) {
+        return LaunchLocalSteamGame(app);
     }
 };
 

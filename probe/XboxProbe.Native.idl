@@ -10,5 +10,6 @@ namespace XboxProbe.Native
         static void SignOutSteam();
         static Windows.Foundation.IAsyncOperation<String> QueueSteamDownload(UInt32 app);
         static String SteamDownloadStatus();
+        static Windows.Foundation.IAsyncOperation<String> LaunchSteamGame(UInt32 app);
     };
 }
