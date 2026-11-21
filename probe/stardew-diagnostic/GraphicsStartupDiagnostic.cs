@@ -53,7 +53,13 @@ internal static class GraphicsStartupDiagnostic
             if (error.IndexOf("WGL", StringComparison.OrdinalIgnoreCase) >= 0)
                 write("stardew_graphics_sdl_error=wgl");
             var driver = Marshal.PtrToStringAnsi(SDL_GetCurrentVideoDriver());
-            write("stardew_graphics_sdl_driver=" + (driver == "windows" ? "windows" : driver == null ? "none" : "other"));
+            write("stardew_graphics_sdl_driver=" + (driver switch
+            {
+                "windows" => "windows",
+                "offscreen" => "offscreen",
+                null => "none",
+                _ => "other",
+            }));
             write("stardew_graphics_gl_context=" + (SDL_GL_GetCurrentContext() == IntPtr.Zero ? "absent" : "present"));
         }
         catch (DllNotFoundException) { write("stardew_graphics_sdl_driver=unavailable"); }

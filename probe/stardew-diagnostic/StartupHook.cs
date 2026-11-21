@@ -14,6 +14,16 @@ internal static class StartupHook
         if (Environment.GetEnvironmentVariable("XBOX_SDL_TRACE_FILE") == null)
             Environment.SetEnvironmentVariable("XBOX_SDL_TRACE_FILE", Path.ChangeExtension(log, ".sdl.txt"));
 
+        var package = Path.GetDirectoryName(typeof(StartupHook).Assembly.Location);
+        if (package != null && File.Exists(Path.Combine(package, "stardew-sdl-surfaceless.txt")))
+        {
+            Environment.SetEnvironmentVariable("SDL_VIDEODRIVER", "offscreen");
+            Environment.SetEnvironmentVariable("SDL_VIDEO_GL_DRIVER", Path.Combine(package, "opengl32.dll"));
+            Environment.SetEnvironmentVariable("SDL_VIDEO_EGL_DRIVER", Path.Combine(package, "libEGL.dll"));
+            Environment.SetEnvironmentVariable("SDL_VIDEO_WIN_D3DCOMPILER", "none");
+            Environment.SetEnvironmentVariable("XBOX_SDL_SURFACELESS", "1");
+        }
+
         void Record(string entry)
         {
             try { File.AppendAllText(log, entry + "\n"); }
