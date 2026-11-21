@@ -1,6 +1,13 @@
 #pragma once
 
 namespace steam_capture {
+// For an operator-requested diagnostic image of the visible Steam shell.
+// The separately verified Library image always uses the stricter predicate below.
+inline constexpr wchar_t surface[] = LR"JS((() => {
+    const target = document.getElementById('popup_target');
+    return !document.hidden && window.opener?.origin === 'https://steamloopback.host' &&
+        !!target?.firstElementChild && target.getBoundingClientRect().width > 0;
+})())JS";
 // Read-only checks for the released Steam gamepad All Games page. A modal can
 // cover the mounted grid, so verify the foreground tile by browser hit testing.
 inline constexpr wchar_t library[] = LR"JS((() => {

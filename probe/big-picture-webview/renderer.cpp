@@ -426,13 +426,15 @@ struct View : implements<View, IFrameworkView> {
             web && document->signedMode && document->accepts(web.Source());
     }
 
-    fire_and_forget captureLibrary() {
+    fire_and_forget captureGamepad(bool libraryOnly) {
         using namespace Windows::Storage;
         using namespace Windows::Storage::Streams;
         if (capturePending) co_return;
         auto lifetime = get_strong();
         capturePending = true;
         auto surface = gamepadSurface();
+        const auto selector = libraryOnly ? steam_capture::library : steam_capture::surface;
+        const auto filename = libraryOnly ? L"big-picture-library.png" : L"big-picture-surface.png";
         const auto visibilityEpoch = popupVisibilityEpoch;
         StorageFile temporary{nullptr};
         std::wstring state = L"not-visible";
@@ -441,7 +443,7 @@ struct View : implements<View, IFrameworkView> {
         try {
             sourceView = ApplicationView::GetForCurrentView().Id();
             if (web) browserPid = web.BrowserProcessId();
-            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(steam_capture::library)) == L"true" &&
+            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector)) == L"true" &&
                 canCapture(surface, visibilityEpoch)) {
                 auto folder = ApplicationData::Current().LocalFolder();
                 temporary = co_await folder.CreateFileAsync(L"big-picture-library.capture.tmp", CreationCollisionOption::GenerateUniqueName);
@@ -461,9 +463,9 @@ struct View : implements<View, IFrameworkView> {
                     header.Close();
                 }
                 stream.Close();
-                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(steam_capture::library)) == L"true" &&
+                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(selector)) == L"true" &&
                     canCapture(surface, visibilityEpoch)) {
-                    co_await temporary.RenameAsync(L"big-picture-library.png", NameCollisionOption::ReplaceExisting);
+                    co_await temporary.RenameAsync(filename, NameCollisionOption::ReplaceExisting);
                     temporary = nullptr;
                     state = L"saved";
                 }
@@ -475,7 +477,8 @@ struct View : implements<View, IFrameworkView> {
         capturePending = false;
         if (!closed) {
             slim_lock_guard lock(gate);
-            captureResult = hstring(L"{\"method\":\"capture-library-result\",\"state\":\"" + state +
+            const std::wstring method = libraryOnly ? L"capture-library-result" : L"capture-surface-result";
+            captureResult = hstring(L"{\"method\":\"" + method + L"\",\"state\":\"" + state +
                 L"\",\"width\":" + std::to_wstring(state == L"saved" ? width : 0) +
                 L",\"height\":" + std::to_wstring(state == L"saved" ? height : 0) +
                 L",\"viewId\":" + std::to_wstring(sourceView) + L",\"browserPid\":" + std::to_wstring(browserPid) + L"}");
@@ -900,7 +903,8 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
             else if (message == L"{\"nativeGameForeground\":false}") view.setGameForeground(false);
             else if (message == L"{\"nativeRestartClient\":true}") view.restartClient();
-            else if (message == L"{\"nativeCaptureLibrary\":true}") view.captureLibrary();
+            else if (message == L"{\"nativeCaptureLibrary\":true}") view.captureGamepad(true);
+            else if (message == L"{\"nativeCaptureSurface\":true}") view.captureGamepad(false);
             else if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
