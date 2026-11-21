@@ -20,6 +20,7 @@
 #include <string>
 #include "cloud-cache.h"
 #include "display-layout.h"
+#include "process-failure.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -47,7 +48,8 @@ std::deque<hstring> requests;
 
 void checkpoint(std::wstring_view stage) {
     slim_lock_guard lock(gate);
-    status = hstring(stage);
+    // Keep the first terminal renderer observation until the host starts again.
+    if (!std::wstring_view(status).starts_with(L"process-error:")) status = hstring(stage);
 }
 
 struct View : implements<View, IFrameworkView> {
@@ -65,6 +67,7 @@ struct View : implements<View, IFrameworkView> {
     bool gameForeground = false;
     bool openingPopup = false;
     bool popupRequestedVisible = false;
+    bool ownerAttached = false, popupAttached = false;
     CoreWebView2 web{nullptr};
     std::shared_ptr<steam_document::Owner> document = std::make_shared<steam_document::Owner>();
     std::shared_ptr<SteamUiCloudCache> cloudCache;
@@ -116,16 +119,28 @@ struct View : implements<View, IFrameworkView> {
     void applyVisibility() {
         if (closed || !controller) return;
         const bool visible = !gameForeground && window.Visible();
+        const bool showPopup = visible && popup && popupRequestedVisible;
+        const bool showOwner = visible && !showPopup;
+        if (showOwner != ownerAttached) {
+            controller.RootVisualTarget(showOwner ? mainSurface : nullptr);
+            ownerAttached = showOwner;
+        }
+        if (popup && showPopup != popupAttached) {
+            popup.RootVisualTarget(showPopup ? popupSurface : nullptr);
+            popupAttached = showPopup;
+        }
+        // The owner runs Valve's scheduler, IPC and React portals. Keep its
+        // document active when just its drawing surface is obscured.
         controller.IsVisible(visible);
-        if (popup) popup.IsVisible(visible && popupRequestedVisible);
-        // A foreground game owns the GPU presenter. Keep the IPC renderer
-        // resident while Chromium trims and suspends background execution.
-        auto targetLevel = visible ? CoreWebView2MemoryUsageTargetLevel::Normal : CoreWebView2MemoryUsageTargetLevel::Low;
+        if (popup) popup.IsVisible(showPopup);
         for (auto const& view : {controller, popup}) {
             if (view) {
                 auto browser = view.CoreWebView2();
-                if (auto memory = browser.try_as<ICoreWebView2_19>())
-                    memory.MemoryUsageTargetLevel(targetLevel);
+                const bool presented = view == controller ? showOwner : showPopup;
+                if (auto memory = browser.try_as<ICoreWebView2_19>()) {
+                    memory.MemoryUsageTargetLevel(presented
+                        ? CoreWebView2MemoryUsageTargetLevel::Normal : CoreWebView2MemoryUsageTargetLevel::Low);
+                }
                 if (visible) {
                     if (browser.IsSuspended()) browser.Resume();
                 } else if (!browser.IsSuspended()) {
@@ -138,17 +153,8 @@ struct View : implements<View, IFrameworkView> {
     void setGameForeground(bool value) {
         if (closed || !controller || gameForeground == value) return;
         gameForeground = value;
-        if (value) {
-            applyVisibility();
-            controller.RootVisualTarget(nullptr);
-            if (popup) popup.RootVisualTarget(nullptr);
-            resize();
-        } else {
-            resize();
-            controller.RootVisualTarget(mainSurface);
-            if (popup) popup.RootVisualTarget(popupSurface);
-            applyVisibility();
-        }
+        resize();
+        applyVisibility();
         publishWindow();
     }
 
@@ -313,6 +319,21 @@ struct View : implements<View, IFrameworkView> {
         // WebView2 virtual hosts are scoped to one CoreWebView2. Valve's
         // independently composed SP BPM child loads its own CSS and fonts.
         browser.SetVirtualHostNameToFolderMapping(L"steamloopback.host", assets, CoreWebView2HostResourceAccessKind::Deny);
+        browser.ProcessFailed([owner = allowMessages](auto const&, auto const& args) {
+            auto kind = args.ProcessFailedKind();
+            if (kind == CoreWebView2ProcessFailedKind::GpuProcessExited) return; // Edge recreates this process.
+            std::wstring message = owner ? L"process-error:owner:" : L"process-error:popup:";
+            message += std::to_wstring(static_cast<int>(kind));
+            try {
+                message += L":";
+                message += steam_webview::failureReason(static_cast<int>(args.Reason()));
+                message += L":" + std::to_wstring(static_cast<uint32_t>(args.ExitCode())) + L":";
+                message += steam_webview::processDescription(args.ProcessDescription());
+            } catch (hresult_error const&) {
+                message += L":details-unavailable";
+            }
+            checkpoint(message);
+        });
         auto settings = browser.Settings();
         settings.IsWebMessageEnabled(allowMessages);
         settings.AreHostObjectsAllowed(false);
@@ -327,6 +348,8 @@ struct View : implements<View, IFrameworkView> {
         if (closing) closing.Close();
         if (popupSurface) root.Children().Remove(popupSurface);
         popupSurface = nullptr;
+        popupAttached = false;
+        applyVisibility();
         publishWindow();
     }
 
@@ -411,7 +434,6 @@ struct View : implements<View, IFrameworkView> {
                     popup = browser;
                     popupSurface = compositor.CreateContainerVisual();
                     root.Children().InsertAtTop(popupSurface);
-                    if (!gameForeground) popup.RootVisualTarget(popupSurface);
                     resize();
                     auto child = popup.CoreWebView2();
                     configure(child, false);
@@ -474,7 +496,6 @@ struct View : implements<View, IFrameworkView> {
             controller = browser;
             step = L"surface";
             checkpoint(step);
-            controller.RootVisualTarget(mainSurface);
             resize();
             applyVisibility();
             web = controller.CoreWebView2();
@@ -501,12 +522,6 @@ struct View : implements<View, IFrameworkView> {
                 if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
-            });
-            web.ProcessFailed([](auto const&, auto const& args) {
-                // Edge automatically recreates its GPU process. Preserve the
-                // live application session and original window across that event.
-                if (args.ProcessFailedKind() == CoreWebView2ProcessFailedKind::GpuProcessExited) return;
-                checkpoint(L"process-error:" + std::to_wstring(static_cast<int>(args.ProcessFailedKind())));
             });
             web.NavigationCompleted([this](auto const& sender, auto const& args) {
                 if (args.NavigationId() != document->navigation) return;

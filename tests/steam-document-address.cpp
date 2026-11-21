@@ -1,9 +1,16 @@
 #include "../probe/big-picture-webview/document-address.h"
 #include "../probe/big-picture-webview/display-layout.h"
+#include "../probe/big-picture-webview/process-failure.h"
 #include <cassert>
 
 int main() {
     using namespace steam_document;
+    assert(steam_webview::failureReason(5) == L"out-of-memory");
+    assert(steam_webview::failureReason(-1) == L"unknown");
+    assert(steam_webview::failureReason(100) == L"unknown");
+    assert(steam_webview::processDescription(L"Audio Service") == L"audio");
+    assert(steam_webview::processDescription(L"private account or path") == L"other");
+    assert(steam_webview::processDescription(L"") == L"none");
     // 1280x720 logical Xbox view at 150% fills 1920x1080. Input and
     // visual placement agree at the centre, including safe-area insets.
     const steam_display::Bounds screen{10, 5, 1280, 720}, safe{50, 25, 1200, 680};
