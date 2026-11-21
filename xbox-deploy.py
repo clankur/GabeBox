@@ -195,12 +195,16 @@ def read_game_file(portal, package, folder, filename, limit):
     return data
 
 
-def read_sdl_frame(portal, app, report, destination):
+def sdl_frame_stem(report):
     run = re.search(r'^steam_(launch_sdl|stardew_managed)_run=([0-9]{1,20})\r?$', report, re.MULTILINE)
     if not run:
         raise ValueError('The current console report has no SDL frame trial.')
-    name = f'sdl-startup-{run[2]}.bmp' if run[1] == 'launch_sdl' else f'stardew-managed-{run[2]}.sdl.bmp'
-    data = read_game_file(portal, app, r'\LocalState', name, 4096 * 4096 * 4 + 1024)
+    return f'sdl-startup-{run[2]}' if run[1] == 'launch_sdl' else f'stardew-managed-{run[2]}.sdl'
+
+
+def read_sdl_frame(portal, app, report, destination):
+    stem = sdl_frame_stem(report)
+    data = read_game_file(portal, app, r'\LocalState', stem + '.bmp', 4096 * 4096 * 4 + 1024)
     if not data or len(data) < 54 or data[:2] != b'BM':
         raise ValueError('The latest SDL trial has no captured BMP frame.')
     size, offset = unpack_from('<I4xI', data, 2)
@@ -212,6 +216,20 @@ def read_sdl_frame(portal, app, report, destination):
     with destination.open('xb') as output:
         output.write(data)
     print(f'Saved SDL frame ({width} by {abs(height)}) to {destination}.')
+
+
+def wait_for_sdl_frame(portal, package, destination):
+    _, raw = portal.request('GET', probe_report_path(package))
+    report = decode_report(raw)
+    stem = sdl_frame_stem(report)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        trace = read_game_file(portal, package, r'\LocalState', stem + '.txt', 4096)
+        if re.search(r'^sdl_(?:software|offscreen)_frame=ready\r?$', decode_report(trace or b''), re.MULTILINE):
+            read_sdl_frame(portal, package, report, destination)
+            return
+        time.sleep(0.5)
+    raise ValueError('No frame was captured after the game’s launch report.')
 
 
 def pe_summary(header):
@@ -371,6 +389,8 @@ def trial_sdl(portal, args):
                 print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
                 wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout,
                                require_app_id=args.app_id)
+                if args.frame is not None:
+                    wait_for_sdl_frame(portal, package, args.frame)
             finally:
                 try:
                     installed = read_sdl()
@@ -511,6 +531,7 @@ def main():
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
     sdl.add_argument('--artifact', required=True, type=Path, help='workflow artifact directory with SDL2.dll and SHA256SUMS')
+    sdl.add_argument('--frame', type=Path, metavar='BMP', help='wait for and save the trial’s frame before restoring SDL')
     sdl.add_argument('--backup-dir', required=True, type=Path, help='directory for the verified original DLL and trial lock')
     sdl.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
     sdl.add_argument('--timeout', type=int, default=100, help='seconds to wait for a fresh launch report')
