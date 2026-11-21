@@ -87,6 +87,8 @@ For an upgrade test, check the first report for `steam_session_cache=saved` afte
 
 A verified library result requires Valve’s native user interface to report online, its account ID to match the approved account, and its subscription query to return a positive count. The client reads title metadata for those AppIDs and passes it to the on-console page in memory. The page renders a searchable list and keeps the native session open until sign-out or app exit. `steam_library_named` is the number of entries with names returned by Steam. The library omits entries with the native Steam DLC app-type flag. `steam_library_visible` counts the titles available to browse after filtering. `steam_library_rendered=yes` confirms the view rendered. AppIDs, titles, account details and QR data stay off the CLI report. The QR renderer is the pinned MIT-licensed `qrcode-generator` browser bundle, included by the SDK workflow and used locally. [QR renderer source](https://github.com/kazuhikoarase/qrcode-generator)
 
+In the library, use the controller D-pad to move between games. Right focuses the selected title’s available **Download** or **Play** button. Press **A** to activate the focused button, and use **B** to return from an action to the list or from a title to search. From search, Up reaches **Sign out** and Down returns to the first visible title. [UWP gamepad navigation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
+
 Read an existing report without restarting the app or interrupting the session.
 
 ```sh
