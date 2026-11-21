@@ -20,6 +20,7 @@
 #include <string>
 #include "cloud-cache.h"
 #include "display-layout.h"
+#include "library-capture.h"
 #include "process-failure.h"
 
 using namespace winrt;
@@ -46,6 +47,7 @@ bool opening = false;
 bool closeRequested = false;
 hstring status = L"closed";
 std::deque<hstring> requests;
+hstring captureResult;
 
 void checkpoint(std::wstring_view stage) {
     slim_lock_guard lock(gate);
@@ -75,6 +77,8 @@ struct View : implements<View, IFrameworkView> {
     hstring assets;
     bool closed = false;
     bool usesPrimaryWindow = false;
+    bool capturePending = false;
+    uint64_t popupVisibilityEpoch = 0;
     CoreWindow::PointerMoved_revoker moved;
     CoreWindow::PointerPressed_revoker pressed;
     CoreWindow::PointerReleased_revoker released;
@@ -138,6 +142,7 @@ struct View : implements<View, IFrameworkView> {
         if (popup && showPopup != popupAttached) {
             popup.RootVisualTarget(showPopup ? popupSurface : nullptr);
             popupAttached = showPopup;
+            ++popupVisibilityEpoch;
         }
         // The owner runs Valve's scheduler, IPC and React portals. Keep its
         // document active when just its drawing surface is obscured.
@@ -353,6 +358,68 @@ struct View : implements<View, IFrameworkView> {
         browser.DownloadStarting([](auto const&, auto const& args) { args.Cancel(true); });
     }
 
+    bool canCapture(CoreWebView2CompositionController const& surface, uint64_t visibilityEpoch) {
+        return visibilityEpoch == popupVisibilityEpoch && !closed && surface && surface == popup && popupAttached && !gameForeground && window.Visible() &&
+            window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground && surface.IsVisible() &&
+            web && document->signedMode && document->accepts(web.Source());
+    }
+
+    fire_and_forget captureLibrary() {
+        using namespace Windows::Storage;
+        using namespace Windows::Storage::Streams;
+        if (capturePending) co_return;
+        auto lifetime = get_strong();
+        capturePending = true;
+        auto surface = popup;
+        const auto visibilityEpoch = popupVisibilityEpoch;
+        StorageFile temporary{nullptr};
+        std::wstring state = L"not-visible";
+        uint32_t width = 0, height = 0, browserPid = 0;
+        int32_t sourceView = 0;
+        try {
+            sourceView = ApplicationView::GetForCurrentView().Id();
+            if (web) browserPid = web.BrowserProcessId();
+            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(steam_capture::library) == L"true" &&
+                canCapture(surface, visibilityEpoch)) {
+                auto folder = ApplicationData::Current().LocalFolder();
+                temporary = co_await folder.CreateFileAsync(L"big-picture-library.capture.tmp", CreationCollisionOption::GenerateUniqueName);
+                auto stream = co_await temporary.OpenAsync(FileAccessMode::ReadWrite);
+                if (canCapture(surface, visibilityEpoch)) {
+                    co_await surface.CoreWebView2().CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat::Png, stream);
+                    co_await stream.FlushAsync();
+                    // Read the PNG IHDR dimensions without decoding or re-encoding any pixels.
+                    DataReader header(stream.GetInputStreamAt(0));
+                    header.ByteOrder(ByteOrder::BigEndian);
+                    if (co_await header.LoadAsync(24) != 24 || header.ReadUInt32() != 0x89504e47 ||
+                        header.ReadUInt32() != 0x0d0a1a0a || header.ReadUInt32() != 13 || header.ReadUInt32() != 0x49484452)
+                        throw hresult_error(E_FAIL);
+                    width = header.ReadUInt32();
+                    height = header.ReadUInt32();
+                    if (!width || !height) throw hresult_error(E_FAIL);
+                    header.Close();
+                }
+                stream.Close();
+                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(steam_capture::library) == L"true" &&
+                    canCapture(surface, visibilityEpoch)) {
+                    co_await temporary.RenameAsync(L"big-picture-library.png", NameCollisionOption::ReplaceExisting);
+                    temporary = nullptr;
+                    state = L"saved";
+                }
+            }
+        } catch (...) { state = L"error"; }
+        if (temporary) {
+            try { co_await temporary.DeleteAsync(StorageDeleteOption::PermanentDelete); } catch (...) {}
+        }
+        capturePending = false;
+        if (!closed) {
+            slim_lock_guard lock(gate);
+            captureResult = hstring(L"{\"method\":\"capture-library-result\",\"state\":\"" + state +
+                L"\",\"width\":" + std::to_wstring(state == L"saved" ? width : 0) +
+                L",\"height\":" + std::to_wstring(state == L"saved" ? height : 0) +
+                L",\"viewId\":" + std::to_wstring(sourceView) + L",\"browserPid\":" + std::to_wstring(browserPid) + L"}");
+        }
+    }
+
     void closePopup() {
         auto closing = std::exchange(popup, nullptr);
         if (closing) closing.Close();
@@ -530,6 +597,10 @@ struct View : implements<View, IFrameworkView> {
                 auto message = args.WebMessageAsJson();
                 if (cloudCache->consume(message)) return;
                 if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
+                Windows::Data::Json::JsonObject parsed{nullptr};
+                if (!Windows::Data::Json::JsonObject::TryParse(message, parsed) ||
+                    parsed.GetNamedString(L"method", L"") == L"capture-library-result") return;
+                message = parsed.Stringify(); // WWA receives exactly the object validated above.
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
             });
@@ -598,6 +669,7 @@ struct View : implements<View, IFrameworkView> {
     void onSize(CoreWindow const&, WindowSizeChangedEventArgs const&) { resize(); publishWindow(); }
     void onClosed(CoreWindow const&, CoreWindowEventArgs const&) { close(); }
     void onActivated(CoreWindow const&, WindowActivatedEventArgs const& args) {
+        if (args.WindowActivationState() == CoreWindowActivationState::Deactivated) ++popupVisibilityEpoch;
         if (controller && args.WindowActivationState() != CoreWindowActivationState::Deactivated)
             focusVisible();
         publishWindow();
@@ -627,6 +699,7 @@ struct View : implements<View, IFrameworkView> {
         dispatcher = nullptr;
         secondary = nullptr;
         primaryHost = nullptr;
+        captureResult = hstring{};
         opening = false;
         closeRequested = false;
         requests.clear();
@@ -694,6 +767,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     hstring Status() { slim_lock_guard lock(gate); return status; }
     hstring Read() {
         slim_lock_guard lock(gate);
+        if (!captureResult.empty()) return std::exchange(captureResult, hstring{});
         if (requests.empty()) return {};
         auto message = std::move(requests.front());
         requests.pop_front();
@@ -707,6 +781,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
             else if (message == L"{\"nativeGameForeground\":false}") view.setGameForeground(false);
             else if (message == L"{\"nativeRestartClient\":true}") view.restartClient();
+            else if (message == L"{\"nativeCaptureLibrary\":true}") view.captureLibrary();
             else if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
