@@ -3,7 +3,7 @@
  * Win32 C ABI and the small WinRT ABI declarations below.  It has no CRT,
  * desktop windowing, arbitrary child path, or fallback launch mechanism.
  *
- * CoreApplication / IFrameworkView and Storage interface UUIDs and vtable
+ * CoreApplication / IFrameworkView, CoreWindow, and Storage interface UUIDs and vtable
  * method ordering are taken from Windows SDK 10.0.26100.0 headers.
  */
 
@@ -106,6 +106,7 @@ typedef struct ICoreApplication ICoreApplication;
 typedef struct ICoreApplicationExit ICoreApplicationExit;
 typedef struct IFrameworkView IFrameworkView;
 typedef struct IFrameworkViewSource IFrameworkViewSource;
+typedef struct ICoreWindow ICoreWindow;
 typedef struct IApplicationDataStatics IApplicationDataStatics;
 typedef struct IApplicationData IApplicationData;
 typedef struct IStorageFolder IStorageFolder;
@@ -147,6 +148,18 @@ typedef struct ICoreApplicationExitVtbl {
     void *add_Exiting, *remove_Exiting;
 } ICoreApplicationExitVtbl;
 struct ICoreApplicationExit { const ICoreApplicationExitVtbl *lpVtbl; };
+
+typedef struct ICoreWindowVtbl {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(void *);
+    ULONG (STDMETHODCALLTYPE *Release)(void *);
+    void *GetIids, *GetRuntimeClassName, *GetTrustLevel;
+    void *get_AutomationHostProvider, *get_Bounds, *get_CustomProperties, *get_Dispatcher;
+    void *get_FlowDirection, *put_FlowDirection, *get_IsInputEnabled, *put_IsInputEnabled;
+    void *get_PointerCursor, *put_PointerCursor, *get_PointerPosition, *get_Visible;
+    HRESULT (STDMETHODCALLTYPE *Activate)(ICoreWindow *);
+} ICoreWindowVtbl;
+struct ICoreWindow { const ICoreWindowVtbl *lpVtbl; };
 
 typedef struct IFrameworkViewVtbl {
     HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *, REFIID, void **);
@@ -203,6 +216,7 @@ struct IStorageItem { const void *lpVtbl; };
 /* Slot numbers in the x64 WinRT ABI, independently checked against SDK 26100. */
 _Static_assert(sizeof(STARTUPINFOW) == 104 && sizeof(PROCESS_INFORMATION) == 24, "x64 process ABI");
 _Static_assert(__builtin_offsetof(ICoreApplicationVtbl, Run) == 13 * sizeof(void *), "ICoreApplication.Run");
+_Static_assert(__builtin_offsetof(ICoreWindowVtbl, Activate) == 18 * sizeof(void *), "ICoreWindow.Activate");
 _Static_assert(__builtin_offsetof(IApplicationDataVtbl, get_LocalFolder) == 12 * sizeof(void *), "IApplicationData.LocalFolder");
 enum { STORAGE_ITEM_GET_PATH = 12 };
 
@@ -216,6 +230,8 @@ static const IID IID_CORE_APPLICATION =
     {0x0aacf7a4, 0x5e1d, 0x49df, {0x80, 0x34, 0xfb, 0x6a, 0x68, 0xbc, 0x5e, 0xd1}};
 static const IID IID_CORE_APPLICATION_EXIT =
     {0xcf86461d, 0x261e, 0x4b72, {0x9a, 0xcd, 0x44, 0xed, 0x2a, 0xce, 0x6a, 0x29}};
+static const IID IID_CORE_WINDOW =
+    {0x79b9d5f2, 0x879e, 0x4b89, {0xb7, 0x98, 0x79, 0xe4, 0x75, 0x98, 0x03, 0x0c}};
 static const IID IID_FRAMEWORK_VIEW =
     {0xfaab5cd0, 0x8924, 0x45ac, {0xad, 0x0f, 0xa0, 0x8f, 0xae, 0x5d, 0x03, 0x24}};
 static const IID IID_FRAMEWORK_VIEW_SOURCE =
@@ -225,7 +241,11 @@ static const IID IID_APPLICATION_DATA_STATICS =
 static const IID IID_STORAGE_ITEM =
     {0x4207a996, 0xca2f, 0x42f7, {0xbd, 0xe8, 0x8b, 0x10, 0x45, 0x7a, 0x7f, 0x30}};
 
-typedef struct ViewObject { IFrameworkView iface; volatile LONG refs; } ViewObject;
+typedef struct ViewObject {
+    IFrameworkView iface;
+    volatile LONG refs;
+    ICoreWindow *window;
+} ViewObject;
 typedef struct ViewSourceObject { IFrameworkViewSource iface; volatile LONG refs; } ViewSourceObject;
 static ViewObject g_view;
 static ViewSourceObject g_source;
@@ -288,6 +308,8 @@ static ULONG STDMETHODCALLTYPE ViewRelease(void *self) {
 }
 
 static HRESULT RunProbe(void);
+static HRESULT WriteReport(PCWSTR content);
+static HRESULT ReportStartupError(PCWSTR status, HRESULT error);
 
 static HRESULT STDMETHODCALLTYPE ViewInitialize(IFrameworkView *self, IInspectableLike *applicationView) {
     (void)self; (void)applicationView;
@@ -295,7 +317,13 @@ static HRESULT STDMETHODCALLTYPE ViewInitialize(IFrameworkView *self, IInspectab
 }
 
 static HRESULT STDMETHODCALLTYPE ViewSetWindow(IFrameworkView *self, IInspectableLike *window) {
-    (void)self; (void)window;
+    ViewObject *view = (ViewObject *)self;
+    ICoreWindow *coreWindow = (ICoreWindow *)0;
+    HRESULT hr = window ? window->lpVtbl->QueryInterface(window, &IID_CORE_WINDOW,
+        (void **)&coreWindow) : E_POINTER;
+    if (FAILED(hr)) return ReportStartupError(L"window-query-error", hr);
+    if (view->window) view->window->lpVtbl->Release(view->window);
+    view->window = coreWindow;
     return S_OK;
 }
 
@@ -305,11 +333,12 @@ static HRESULT STDMETHODCALLTYPE ViewLoad(IFrameworkView *self, HSTRING entryPoi
 }
 
 static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
-    HRESULT hr;
+    ViewObject *view = (ViewObject *)self;
     static const WCHAR className[] = L"Windows.ApplicationModel.Core.CoreApplication";
     HSTRING hClass = (HSTRING)0;
     ICoreApplicationExit *coreExit = (ICoreApplicationExit *)0;
-    (void)self;
+    HRESULT hr = view->window ? view->window->lpVtbl->Activate(view->window) : E_POINTER;
+    if (FAILED(hr)) return ReportStartupError(L"window-activation-error", hr);
     hr = RunProbe();
     if (SUCCEEDED(WindowsCreateString(className,
         (DWORD)(sizeof(className) / sizeof(className[0]) - 1), &hClass))) {
@@ -322,7 +351,14 @@ static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE ViewUninitialize(IFrameworkView *self) { (void)self; return S_OK; }
+static HRESULT STDMETHODCALLTYPE ViewUninitialize(IFrameworkView *self) {
+    ViewObject *view = (ViewObject *)self;
+    if (view->window) {
+        view->window->lpVtbl->Release(view->window);
+        view->window = (ICoreWindow *)0;
+    }
+    return S_OK;
+}
 
 static const IFrameworkViewVtbl g_view_vtbl = {
     ViewQueryInterface, ViewAddRef, ViewRelease, GetIids, GetRuntimeClassName, GetTrustLevel,
@@ -457,6 +493,18 @@ static HRESULT WriteReport(PCWSTR content) {
     return hr;
 }
 
+static HRESULT ReportStartupError(PCWSTR status, HRESULT error) {
+    WCHAR report[128];
+    DWORD used = 0;
+    AppendText(report, 128, &used, L"probe=packaged-child-process\r\nstatus=");
+    AppendText(report, 128, &used, status);
+    AppendText(report, 128, &used, L"\r\nhresult=");
+    AppendHex(report, 128, &used, (DWORD)error);
+    AppendText(report, 128, &used, L"\r\n");
+    (void)WriteReport(report);
+    return error;
+}
+
 static HRESULT RunProbe(void) {
     WCHAR report[1024];
     WCHAR modulePath[MAX_PATH];
@@ -562,9 +610,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
 
     hr = RoInitialize(RO_INIT_MULTITHREADED);
     if (FAILED(hr)) return (int)hr;
+    (void)WriteReport(L"probe=packaged-child-process\r\nstatus=core-application-starting\r\n");
     hr = WindowsCreateString(coreClass, (DWORD)(sizeof(coreClass) / sizeof(coreClass[0]) - 1), &className);
     if (SUCCEEDED(hr)) hr = RoGetActivationFactory(className, &IID_CORE_APPLICATION, (void **)&coreApp);
-    if (SUCCEEDED(hr)) hr = coreApp->lpVtbl->Run(coreApp, &g_source.iface);
+    if (SUCCEEDED(hr)) {
+        hr = coreApp->lpVtbl->Run(coreApp, &g_source.iface);
+    } else {
+        ReportStartupError(L"core-application-error", hr);
+    }
     if (coreApp) coreApp->lpVtbl->Release(coreApp);
     if (className) WindowsDeleteString(className);
     RoUninitialize();

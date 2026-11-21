@@ -9,6 +9,24 @@ This x64 UWP diagnostic answers one question: can this console start a second ex
 3. Launch **Packaged process test** on the Xbox. It performs one test, writes its result and exits. In Device Portal’s **File explorer**, open **LocalAppData**, find the probe package, open **LocalState**, and download `probe-report.txt`. Check its modification time after each run.
 4. Report the console OS version, whether you ran in Developer Mode, and the reported result or exact error. A deployment or startup failure, or a missing report, is inconclusive about child execution.
 
+### Deploy from the command line
+
+From the repository root, copy `.env.example` to `.env` and set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username. Run `python3 xbox-deploy.py fingerprint` and compare its output with the SHA-256 fingerprint in the browser’s certificate viewer for the portal. Put the verified value in `XBOX_PORTAL_CERT_SHA256`. The CLI requires Python 3.9 or later and prompts for the Device Portal password at each invocation.
+
+```sh
+python3 xbox-deploy.py deploy probe/downloads/PackagedProcessProbe-x64.appx
+```
+
+Pass the path to your signed APPX when testing a rebuild. If the portal requires the package-signing certificate, pass `--certificate path/to/publisher.cer`. `python3 xbox-deploy.py status` shows the console’s latest installation result. [Device Portal app deployment API](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#app-deployment)
+
+## Series X launch investigation
+
+`process-probe-v0.1.0` registered successfully on Xbox Series X in Developer Mode, on OS build `26100.9673.amd64fre.xb_flt_2610ge.261116-2200`. Dev Home returned `0x80070002` when opening it and the package’s `LocalState` contained no report. The APPX contains both executables and all assets referenced by the manifest. The launch error does not identify the missing file or path. [Microsoft error reference](https://learn.microsoft.com/en-us/windows/win32/appxpkg/troubleshooting)
+
+The `1.0.1.0` source activates `CoreWindow` before running the probe. The original view left the window inactive. The candidate also attempts to write `status=core-application-starting` from the executable entry point and reports an HRESULT if obtaining or activating the window fails. Both x64 executables were linked against the pinned Windows SDK. The candidate still needs an Xbox launch test. [Microsoft CoreWindow example](https://learn.microsoft.com/en-us/uwp/api/windows.ui.core.corewindow?view=winrt-22621)
+
+For a launch retry, verify that the console has version `1.0.1.0` and check for a fresh `probe-report.txt` even if Dev Home shows an error. A startup checkpoint confirms that user code reached that stage. A missing report also leaves open a failure to write `LocalState`. If launch still fails, test the same staging files packaged and signed with Windows SDK `MakeAppx` and `SignTool` to isolate the packaging step. [Windows SDK signing guide](https://learn.microsoft.com/en-us/windows/msix/package/sign-app-package-using-signtool)
+
 ## Reading the result
 
 - A successful call and a matching helper exit code show that this packaged helper ran.
@@ -17,7 +35,7 @@ This x64 UWP diagnostic answers one question: can this console start a second ex
 
 The helper has a fixed path in the package. This experiment does not attempt to start downloaded software. It cannot establish that Valve’s browser helper can initialize, that Steam survives when a separate game takes foreground, or that a Steam depot can execute as an Xbox title.
 
-The released package was packed with Microsoft’s MSIX SDK, signed with a self-signed development certificate, verified with osslsigncode, unpacked and compared byte-for-byte with the build staging files. REA verified that both executables are x64, that the parent imports `CreateProcessW`, and that the helper imports only `ExitProcess`. The release has not been run on Xbox or Windows.
+The v0.1.0 package was packed with Microsoft’s MSIX SDK, signed with a self-signed development certificate, verified with osslsigncode, unpacked and compared byte-for-byte with the build staging files. REA verified that both executables are x64, that the parent imports `CreateProcessW`, and that the helper imports only `ExitProcess`.
 
 ## Rebuild
 
