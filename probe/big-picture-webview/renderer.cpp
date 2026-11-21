@@ -4,6 +4,7 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.Profile.h>
@@ -57,6 +58,7 @@ struct View : implements<View, IFrameworkView> {
     CoreWebView2CompositionController controller{nullptr};
     CoreWebView2CompositionController popup{nullptr};
     bool openingPopup = false;
+    bool popupRequestedVisible = false;
     CoreWebView2 web{nullptr};
     hstring assets;
     bool closed = false;
@@ -87,12 +89,33 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    void applyVisibility() {
+        if (closed || !controller) return;
+        const bool visible = window.Visible();
+        controller.IsVisible(visible);
+        if (popup) popup.IsVisible(visible && popupRequestedVisible);
+        // A foreground game owns the GPU presenter. Keep the IPC renderer
+        // responsive to RunGame while Chromium trims the background views.
+        auto targetLevel = visible ? CoreWebView2MemoryUsageTargetLevel::Normal : CoreWebView2MemoryUsageTargetLevel::Low;
+        for (auto const& view : {controller, popup}) {
+            if (view) {
+                if (auto memory = view.CoreWebView2().try_as<ICoreWebView2_19>())
+                    memory.MemoryUsageTargetLevel(targetLevel);
+            }
+        }
+    }
+
     // IDs 1 and 2 are local to this pair of WebViews. The PID is the
     // environment's actual Edge browser process, not a desktop Steam process.
     std::wstring windowState() {
         auto bounds = window.Bounds();
         auto visible = ApplicationView::GetForCurrentView().VisibleBounds();
         auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+        std::wstring keyboard;
+        try {
+            keyboard = L",\"keyboardPresent\":" + std::to_wstring(
+                Windows::Devices::Input::KeyboardCapabilities().KeyboardPresent());
+        } catch (hresult_error const&) {}
         return L"{\"viewId\":" + std::to_wstring(ApplicationView::GetForCurrentView().Id()) +
             L",\"pid\":" + std::to_wstring(web.BrowserProcessId()) +
             L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (window.Visible() ? L"true" : L"false") +
@@ -105,7 +128,7 @@ struct View : implements<View, IFrameworkView> {
             L",\"usableWidth\":" + std::to_wstring(visible.Width) + L",\"usableHeight\":" + std::to_wstring(visible.Height) +
             L",\"scale\":" + std::to_wstring(display.RawPixelsPerViewPixel()) +
             L",\"screenWidth\":" + std::to_wstring(display.ScreenWidthInRawPixels()) +
-            L",\"screenHeight\":" + std::to_wstring(display.ScreenHeightInRawPixels()) + L"}";
+            L",\"screenHeight\":" + std::to_wstring(display.ScreenHeightInRawPixels()) + keyboard + L"}";
     }
 
     std::wstring platformState() {
@@ -141,7 +164,8 @@ struct View : implements<View, IFrameworkView> {
         if (message == L"\"xbox-window-focus\"") focusVisible();
         else if (message == L"\"xbox-window-show\"" || message == L"\"xbox-window-hide\"") {
             if (popup) {
-                popup.IsVisible(message == L"\"xbox-window-show\"");
+                popupRequestedVisible = message == L"\"xbox-window-show\"";
+                applyVisibility();
                 focusVisible();
                 publishWindow();
             }
@@ -248,7 +272,8 @@ struct View : implements<View, IFrameworkView> {
                         }
                     });
                     args.NewWindow(child);
-                    popup.IsVisible(true);
+                    popupRequestedVisible = true;
+                    applyVisibility();
                     focusVisible();
                     publishWindow();
                     checkpoint(L"gamepad-window-created");
@@ -291,7 +316,7 @@ struct View : implements<View, IFrameworkView> {
             checkpoint(step);
             controller.RootVisualTarget(mainSurface);
             resize();
-            controller.IsVisible(true);
+            applyVisibility();
             web = controller.CoreWebView2();
 
             step = L"mapping";
@@ -311,6 +336,9 @@ struct View : implements<View, IFrameworkView> {
                 if (requests.size() < maxPending) requests.push_back(message);
             });
             web.ProcessFailed([](auto const&, auto const& args) {
+                // Edge automatically recreates its GPU process. Preserve the
+                // live application session and original window across that event.
+                if (args.ProcessFailedKind() == CoreWebView2ProcessFailedKind::GpuProcessExited) return;
                 checkpoint(L"process-error:" + std::to_wstring(static_cast<int>(args.ProcessFailedKind())));
             });
             web.NavigationCompleted([this](auto const& sender, auto const& args) {
@@ -357,7 +385,7 @@ struct View : implements<View, IFrameworkView> {
         try {
             { slim_lock_guard lock(gate); if (closeRequested) return; }
             window.SizeChanged({this, &View::onSize});
-            window.VisibilityChanged([this](auto const&, auto const&) { publishWindow(); });
+            window.VisibilityChanged([this](auto const&, auto const&) { applyVisibility(); publishWindow(); });
             window.Closed({this, &View::onClosed});
             window.Activated({this, &View::onActivated});
             window.Activate();
