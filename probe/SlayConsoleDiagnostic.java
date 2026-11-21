@@ -2,6 +2,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -164,7 +165,43 @@ public final class SlayConsoleDiagnostic {
         Class.forName(gameMain).getMethod("main", String[].class).invoke(null, (Object) new String[0]);
     }
 
+    private static void launchHosted(String game, String library, String jar, Path log) throws Exception {
+        File packageRoot = new File(library).getParentFile();
+        if (!new File(packageRoot, "slay-live-host.txt").isFile() || System.getenv("XBOX_SDL_HOST_MAILBOX") == null) {
+            throw new IOException("The signed Slay player environment is unavailable");
+        }
+        OutputStream file = Files.newOutputStream(log, StandardOpenOption.CREATE_NEW);
+        PrintStream output = new PrintStream(new OutputStream() {
+            private int remaining = OUTPUT_LIMIT;
+
+            @Override public synchronized void write(int value) throws IOException {
+                if (remaining > 0) {
+                    file.write(value);
+                    --remaining;
+                }
+            }
+
+            @Override public synchronized void write(byte[] bytes, int offset, int length) throws IOException {
+                int allowed = Math.min(remaining, length);
+                file.write(bytes, offset, allowed);
+                remaining -= allowed;
+            }
+
+            @Override public void flush() throws IOException { file.flush(); }
+            @Override public void close() throws IOException { file.close(); }
+        }, true, "UTF-8");
+        System.setOut(output);
+        System.setErr(output);
+        Runtime.getRuntime().addShutdownHook(new Thread(output::close));
+        System.out.println("slay_console=helper-started");
+        launchFromGameDirectory(game, library, jar);
+    }
+
     public static void main(String[] args) throws Exception {
+        if (args.length == 5 && args[0].equals("--launch-hosted")) {
+            launchHosted(args[1], args[2], args[3], Paths.get(args[4]));
+            return;
+        }
         if (args.length == 4 && args[0].equals("--launch-from-game-directory")) {
             launchFromGameDirectory(args[1], args[2], args[3]);
             return;
