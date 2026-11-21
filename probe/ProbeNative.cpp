@@ -936,6 +936,72 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     } while (true);
 
+    constexpr std::uint32_t commonRedistributables = 228980;
+    bool waitForSharedInstall = false;
+    {
+        std::lock_guard lock(steamSessionMutex);
+        auto session = liveSteamSession;
+        if (!session || !session->OwnsSession()) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+        auto manager = session->appManager;
+        auto methods = SteamMethods(manager);
+        const auto base = reinterpret_cast<std::uintptr_t>(session->module);
+        if (methods[18] != base + 0x77fe20) {
+            co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
+        }
+        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
+            co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
+        }
+
+        using GetDependencies = std::uint32_t (__cdecl *)(void *, std::uint32_t, std::uint32_t *, std::uint32_t);
+        std::array<std::uint32_t, 128> dependencies{};
+        auto count = reinterpret_cast<GetDependencies>(methods[18])(
+            manager, app, dependencies.data(), static_cast<std::uint32_t>(dependencies.size()));
+        report += L"steam_launch_dependency_count=" + std::to_wstring(count) + L"\r\n";
+        if (count > dependencies.size()) co_return winrt::hstring(report + L"steam_launch=dependency-list-truncated\r\n");
+        auto end = dependencies.begin() + count;
+        if (std::find(dependencies.begin(), end, commonRedistributables) != end) {
+            report += L"steam_launch_common_redistributables=required\r\n";
+            auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
+            report += L"steam_launch_redistributables_initial_state=" + std::to_wstring(state) + L"\r\n";
+            if ((state & installMask) != fullyInstalled) {
+                // Let Steam obtain the shared dependency of the game it just verified the account owns.
+                auto install = reinterpret_cast<SteamInstall>(methods[0]);
+                auto code = install(manager, commonRedistributables, libraryIndex, false);
+                report += L"steam_launch_redistributables_install_result=" + std::to_wstring(code) + L"\r\n";
+                if (code != 0) co_return winrt::hstring(report + L"steam_launch=dependency-install-rejected\r\n");
+                waitForSharedInstall = true;
+            }
+        }
+    }
+
+    if (waitForSharedInstall) {
+        auto deadline = GetTickCount64() + 90000;
+        for (;;) {
+            {
+                std::lock_guard lock(steamSessionMutex);
+                auto session = liveSteamSession;
+                if (!session || !session->OwnsSession()) {
+                    co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+                }
+                session->PumpCallbacks();
+                auto manager = session->appManager;
+                auto methods = SteamMethods(manager);
+                auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
+                if ((state & installMask) == fullyInstalled) {
+                    report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    break;
+                }
+                if (GetTickCount64() >= deadline) {
+                    report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    co_return winrt::hstring(report + L"steam_launch=dependency-install-incomplete\r\n");
+                }
+            }
+            co_await winrt::resume_after(std::chrono::milliseconds(500));
+            co_await caller;
+        }
+    }
+
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1009,6 +1075,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             std::memcpy(&code, payload.data() + sizeof(reportedGame), sizeof(code));
                             if (reportedGame == gameId) {
                                 report += L"steam_launch_client_result=" + std::to_wstring(code) + L"\r\n";
+                                if (code == 17) report += L"steam_launch_client_reason=dependency-not-ready\r\n";
+                                if (code == 29) report += L"steam_launch_client_reason=invalid-platform\r\n";
                                 accepted = code == 0;
                                 verdict = accepted ? L"start-unconfirmed" : L"client-rejected";
                             }

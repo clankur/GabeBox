@@ -216,6 +216,13 @@
                 message = " is on disk, but Steam could not reopen its install.";
             }
             if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            if (/steam_launch=(?:dependency-install-rejected|dependency-install-incomplete)\r\n/.test(result) ||
+                    result.indexOf("steam_launch_client_reason=dependency-not-ready\r\n") >= 0) {
+                message = " is waiting for a required Steam component.";
+            }
+            if (result.indexOf("steam_launch_client_reason=invalid-platform\r\n") >= 0) {
+                message = " has a Windows build that Steam refused on this Xbox.";
+            }
             downloadStatus.textContent = entry.name + message;
             return fileIO.writeTextAsync(attempt.file, report + result + complete);
         }
