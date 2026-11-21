@@ -1277,6 +1277,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool waitOnly = false;
     bool dummyVideo = false;
     bool sdlWorkingDirectory = false;
+    bool sdlLateFrame = false;
     std::wstring sdlPreferencesPath;
     std::wstring diagnosticRenderer;
     if (backend == GameBackend::SteamPlay) {
@@ -1290,6 +1291,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 L"steam-startup-sdl-dummy-video-" + std::to_wstring(app) + L".txt")));
             sdlWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                 L"steam-startup-sdl-working-directory-" + std::to_wstring(app) + L".txt")));
+            sdlLateFrame = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-startup-sdl-late-frame-" + std::to_wstring(app) + L".txt")));
             if (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-startup-sdl-local-preferences-" + std::to_wstring(app) + L".txt"))) {
                 try {
@@ -1324,7 +1327,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 co_return winrt::hstring(L"steam_launch=invalid-launch-option\r\n");
             }
         }
-        report = L"steam_launch_option_index=" + std::to_wstring(launchOption) + L"\r\n";
+        report += L"steam_launch_option_index=" + std::to_wstring(launchOption) + L"\r\n";
     }
     const bool installedManifest = co_await HasCompletedSteamManifest(folder, app);
     std::uint64_t call = 0;
@@ -1511,7 +1514,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (created) SetEnvironmentVariableW(name, nullptr);
         }
     } rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
-      gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"};
+      gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
+      frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"};
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1588,6 +1592,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (!sdlPreferencesPath.empty()) {
             report += preferencesHint.Set(sdlPreferencesPath.c_str()) ? L"steam_launch_sdl_preferences=requested\r\n" :
                 L"steam_launch_sdl_preferences=unavailable\r\n";
+        }
+        if (sdlLateFrame && frameDelayHint.Set(L"12000")) {
+            report += L"steam_launch_sdl_frame_delay_ms=12000\r\n";
         }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");

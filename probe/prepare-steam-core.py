@@ -127,7 +127,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
                    launch_options=(), startup_snapshot=False, startup_sdl_renderer=None, startup_sdl_dummy_video=False,
-                   startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False):
+                   startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
+                   startup_sdl_late_frame=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
@@ -138,6 +139,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('An SDL renderer trial needs a startup snapshot and a supported renderer name.')
     if (startup_sdl_dummy_video or startup_sdl_working_directory or startup_sdl_local_preferences) and not startup_snapshot:
         raise ValueError('The SDL startup compatibility trial needs a startup snapshot.')
+    if startup_sdl_late_frame and (startup_sdl_renderer != 'software' or not startup_sdl_dummy_video):
+        raise ValueError('The delayed SDL capture requires the dummy video and software renderer trial.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -199,6 +202,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / f'steam-startup-sdl-working-directory-{launch_app_id}.txt').touch()
         if startup_sdl_local_preferences:
             (layout / f'steam-startup-sdl-local-preferences-{launch_app_id}.txt').touch()
+        if startup_sdl_late_frame:
+            (layout / f'steam-startup-sdl-late-frame-{launch_app_id}.txt').touch()
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -255,6 +260,8 @@ def main():
                         help='set the native working directory to the verified app-local game install from SDL main')
     parser.add_argument('--startup-sdl-local-preferences', action='store_true',
                         help='offer SDL a writable preference directory within the package’s LocalState')
+    parser.add_argument('--startup-sdl-late-frame', action='store_true',
+                        help='wait 12 seconds after the first SDL software presentation before capturing')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -316,7 +323,8 @@ def main():
                    startup_sdl_renderer=args.startup_sdl_renderer,
                    startup_sdl_dummy_video=args.startup_sdl_dummy_video,
                    startup_sdl_working_directory=args.startup_sdl_working_directory,
-                   startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences)
+                   startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
+                   startup_sdl_late_frame=args.startup_sdl_late_frame)
 
 
 if __name__ == '__main__':
