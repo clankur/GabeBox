@@ -43,11 +43,50 @@ static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLCo
 
     offscreen->xbox_context = context;
     offscreen->xbox_framebuffer = framebuffer;
+    offscreen->xbox_color = color;
+    offscreen->xbox_depth_stencil = depth_stencil;
     offscreen->xbox_width = window->w;
     offscreen->xbox_height = window->h;
     offscreen->xbox_capture_attempted = SDL_FALSE;
     offscreen->xbox_first_swap = 0;
     return 0;
+}
+
+static void XboxSdlResizeFramebuffer(_THIS, OFFSCREEN_Window *offscreen)
+{
+    SDL_Window *window = offscreen->sdl_window;
+    if ((window->w == offscreen->xbox_width && window->h == offscreen->xbox_height) ||
+        window->w <= 0 || window->h <= 0 || window->w > 4096 || window->h > 4096 ||
+        !offscreen->xbox_context || offscreen->xbox_context != SDL_GL_GetCurrentContext()) return;
+
+    typedef void (APIENTRY *GetInteger)(GLenum, GLint *);
+    GetInteger get_integer = SDL_EGL_GetProcAddress(_this, "glGetIntegerv");
+    PFNGLBINDFRAMEBUFFERPROC bind_framebuffer = SDL_EGL_GetProcAddress(_this, "glBindFramebuffer");
+    PFNGLBINDRENDERBUFFERPROC bind_renderbuffer = SDL_EGL_GetProcAddress(_this, "glBindRenderbuffer");
+    PFNGLRENDERBUFFERSTORAGEPROC storage = SDL_EGL_GetProcAddress(_this, "glRenderbufferStorage");
+    PFNGLCHECKFRAMEBUFFERSTATUSPROC check = SDL_EGL_GetProcAddress(_this, "glCheckFramebufferStatus");
+    if (!get_integer || !bind_framebuffer || !bind_renderbuffer || !storage || !check) return;
+
+    GLint old_renderbuffer, old_draw;
+    get_integer(GL_RENDERBUFFER_BINDING, &old_renderbuffer);
+    get_integer(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
+    bind_renderbuffer(GL_RENDERBUFFER, offscreen->xbox_color);
+    storage(GL_RENDERBUFFER, GL_RGBA8, window->w, window->h);
+    bind_renderbuffer(GL_RENDERBUFFER, offscreen->xbox_depth_stencil);
+    storage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, window->w, window->h);
+    bind_framebuffer(GL_DRAW_FRAMEBUFFER, offscreen->xbox_framebuffer);
+    if (check(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        offscreen->xbox_width = window->w;
+        offscreen->xbox_height = window->h;
+        XboxSdlTrace("sdl_surfaceless_resize=ready\n");
+    } else {
+        storage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, offscreen->xbox_width, offscreen->xbox_height);
+        bind_renderbuffer(GL_RENDERBUFFER, offscreen->xbox_color);
+        storage(GL_RENDERBUFFER, GL_RGBA8, offscreen->xbox_width, offscreen->xbox_height);
+        XboxSdlTrace("sdl_surfaceless_resize=error\n");
+    }
+    bind_framebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
+    bind_renderbuffer(GL_RENDERBUFFER, old_renderbuffer);
 }
 
 static void APIENTRY XboxSdlBindFramebuffer(GLenum target, GLuint framebuffer)

@@ -20,6 +20,8 @@ def add_surfaceless(tree):
     source = video.read_text(encoding='utf-8')
     old = '#include "SDL_offscreenvideo.h"'
     source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "sdl-offscreen-cursor.h"')
+    old = '    device->GL_SwapWindow = OFFSCREEN_GLES_SwapWindow;'
+    source = replace_once(source, old, '    device->SetWindowSize = OFFSCREEN_GLES_SetWindowSize;\n' + old)
     old = '    /* We\'re done! */'
     source = replace_once(source, old, '''    if (SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
         XboxSdlInitOffscreenCursor();
@@ -53,6 +55,7 @@ def add_surfaceless(tree):
     source = replace_once(source, old, old + '''
     SDL_GLContext xbox_context;
     unsigned xbox_framebuffer;
+    unsigned xbox_color, xbox_depth_stencil;
     int xbox_width, xbox_height;
     Uint64 xbox_last_swap;
     Uint64 xbox_first_swap;
@@ -65,6 +68,8 @@ def add_surfaceless(tree):
                           'extern void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name);')
     source = replace_once(source, '#define OFFSCREEN_GLES_SetSwapInterval SDL_EGL_SetSwapInterval',
                           'extern int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval);')
+    old = 'extern int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval);'
+    source = replace_once(source, old, old + '\nextern void OFFSCREEN_GLES_SetWindowSize(_THIS, SDL_Window *window);')
     context_header.write_text(source, encoding='utf-8')
 
     context = offscreen / 'SDL_offscreenopengles.c'
@@ -78,6 +83,14 @@ def add_surfaceless(tree):
 void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name)
 {
     return XboxSdlGetProcAddress(_this, name);
+}
+
+void OFFSCREEN_GLES_SetWindowSize(_THIS, SDL_Window *window)
+{
+    OFFSCREEN_Window *offscreen = window->driverdata;
+    if (offscreen && offscreen->xbox_context && offscreen->xbox_context == SDL_GL_GetCurrentContext()) {
+        XboxSdlResizeFramebuffer(_this, offscreen);
+    }
 }
 
 int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
@@ -138,6 +151,7 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
             SDL_Delay(frame_time - (Uint32)elapsed);
         }
         offscreen_wind->xbox_last_swap = SDL_GetTicks64();
+        XboxSdlResizeFramebuffer(_this, offscreen_wind);
         XboxSdlPresentHostFrame(_this, offscreen_wind);
         XboxSdlCaptureFrame(_this, offscreen_wind);
         return 0;
