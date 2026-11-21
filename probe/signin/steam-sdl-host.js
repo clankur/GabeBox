@@ -293,18 +293,19 @@
             canvas.style.height = Math.round(canvas.height * scale) + "px";
         }
 
-        var imageWords;
+        var imageWords, appliedSequence = 0;
         function drawRgb() {
             var began = timing && performance.now();
-            var text = runner.steamSdlRgbFrame();
+            var text = runner.steamSdlRgbDeltaFrame(appliedSequence);
             if (!text) return null;
             var acquired = timing && performance.now();
             var headerEnd = text.indexOf("\n");
             var fields = text.slice(0, headerEnd).split(",");
             var width = +fields[0], height = +fields[1];
             var count = width * height, offset = headerEnd + 1;
-            if (fields.length !== 5 || !width || !height || width > 1920 || height > 1080 ||
-                    text.length - offset !== count * 2) throw new Error("Unexpected SDL RGB frame");
+            var delta = fields[5] === "D";
+            if (fields.length !== 6 || !width || !height || width > 1920 || height > 1080 ||
+                    (!delta && text.length - offset !== count * 2)) throw new Error("Unexpected SDL RGB frame");
             if (!image || canvas.width !== width || canvas.height !== height) {
                 canvas.width = width;
                 canvas.height = height;
@@ -312,10 +313,31 @@
                 imageWords = new Uint32Array(image.data.buffer);
                 fitFrame();
             }
-            for (var i = 0; i < count; i++, offset += 2) {
-                imageWords[i] = 0xff000000 | ((text.charCodeAt(offset + 1) & 4095) << 12) |
-                    (text.charCodeAt(offset) & 4095);
+            var i = 0;
+            if (delta) {
+                while (offset < text.length) {
+                    var code = text.charCodeAt(offset++);
+                    switch (code >> 12) {
+                    case 4: i += (code & 4095) + 1; break;
+                    case 2:
+                        imageWords[i] += (code & 15) - 8 + ((((code >> 4) & 15) - 8) << 8) +
+                            ((((code >> 8) & 15) - 8) << 16);
+                        i++;
+                        break;
+                    case 1:
+                        imageWords[i++] = 0xff000000 | ((text.charCodeAt(offset++) & 4095) << 12) | (code & 4095);
+                        break;
+                    default: throw new Error("Invalid SDL RGB delta");
+                    }
+                }
+                if (i !== count || offset !== text.length) throw new Error("Incomplete SDL RGB delta");
+            } else {
+                for (; i < count; i++, offset += 2) {
+                    imageWords[i] = 0xff000000 | ((text.charCodeAt(offset + 1) & 4095) << 12) |
+                        (text.charCodeAt(offset) & 4095);
+                }
             }
+            appliedSequence = +fields[2];
             var copied = timing && performance.now();
             context.putImageData(image, 0, 0);
             var frame = { sequence: +fields[2], ack: +fields[3], events: +fields[4] };
@@ -328,7 +350,7 @@
         }
 
         function draw() {
-            if (runner.steamSdlRgbFrame) return drawRgb();
+            if (runner.steamSdlRgbDeltaFrame) return drawRgb();
             var began = timing && performance.now();
             var buffer = runner.steamSdlFrame();
             if (!buffer) return null;

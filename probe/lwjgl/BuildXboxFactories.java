@@ -38,6 +38,16 @@ public final class BuildXboxFactories implements Opcodes {
             @Override
             public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
                 MethodVisitor base = super.visitMethod(access, name, desc, signature, exceptions);
+                if (type.equals("DisplayImplementation") && name.equals("sync") && desc.equals("(I)V")) {
+                    return new MethodVisitor(ASM9, base) {
+                        @Override public void visitCode() {
+                            super.visitCode();
+                            super.visitVarInsn(ILOAD, 0);
+                            super.visitMethodInsn(INVOKESTATIC, prefix + "XboxRenderProfile", "producerFps", "(I)I", false);
+                            super.visitVarInsn(ISTORE, 0);
+                        }
+                    };
+                }
                 if (!factory.equals(name) || !desc.equals("()L" + prefix + type + ";")) return base;
                 ++changes[0];
                 return new MethodVisitor(ASM9, base) {

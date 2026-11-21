@@ -25,3 +25,30 @@ inline void EncodeSdlRgb(std::uint16_t *output, const std::uint8_t *pixels, std:
         output[2 * i + 1] = 0x1000 | ((rgba >> 12) & 0xfff);
     }
 }
+
+// Predict against the last image acknowledged by the player. Unchanged runs
+// use a single code unit, and small per-channel changes use one unit per pixel.
+inline std::size_t EncodeSdlRgbDelta(std::uint16_t *out, const std::uint8_t *current,
+        const std::uint8_t *previous, std::size_t pixels) {
+    std::size_t used = 0, unchanged = 0;
+    const auto flush = [&]() {
+        if (unchanged) out[used++] = static_cast<std::uint16_t>(0x4000 | (unchanged - 1));
+        unchanged = 0;
+    };
+    for (std::size_t i = 0; i < pixels; ++i, current += 4, previous += 4) {
+        int r = current[0] - previous[0], g = current[1] - previous[1], b = current[2] - previous[2];
+        if (!(r | g | b)) {
+            if (++unchanged == 4096) flush();
+        } else {
+            flush();
+            if (((r + 8) | (g + 8) | (b + 8)) >= 0 && ((r + 8) | (g + 8) | (b + 8)) <= 15) {
+                out[used++] = static_cast<std::uint16_t>(0x2000 | ((b + 8) << 8) | ((g + 8) << 4) | (r + 8));
+            } else {
+                EncodeSdlRgb(out + used, current, 1);
+                used += 2;
+            }
+        }
+    }
+    flush();
+    return used;
+}

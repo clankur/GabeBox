@@ -2188,9 +2188,9 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return RestoreSlaySteamCloud(app, preview);
     }
 
-    winrt::hstring SteamSdlRgbFrame() {
+    winrt::hstring SteamSdlRgbDeltaFrame(std::uint32_t previousSequence) {
         std::lock_guard lock(steamSdlMutex);
-        return steamSdlSurface ? steamSdlSurface->RgbFrame() : winrt::hstring{};
+        return steamSdlSurface ? steamSdlSurface->RgbFrame(previousSequence) : winrt::hstring{};
     }
 
     winrt::Windows::Storage::Streams::IBuffer SteamSdlFrame() {
@@ -2217,6 +2217,26 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         }
         stream.Seek(0);
         co_return stream;
+    }
+
+    std::uint32_t SteamSdlFrameSize() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->FrameSize() : 0;
+    }
+
+    bool FillSteamSdlFrame(std::uint32_t size, winrt::array_view<std::uint32_t> pixels,
+                           winrt::array_view<std::uint32_t> metadata) {
+        const auto width = size >> 16;
+        const auto height = size & 0xffffu;
+        if (!width || width > SDL_HOST_MAX_WIDTH || !height || height > SDL_HOST_MAX_HEIGHT ||
+                pixels.size() != width * height || metadata.size() != 3)
+            throw winrt::hresult_invalid_argument();
+        std::lock_guard lock(steamSdlMutex);
+        if (steamSdlSurface && steamSdlSurface->FillFrame(size, pixels, metadata)) return true;
+        // All FillArray outputs must be initialized, including when a reader loses a race.
+        std::fill(pixels.begin(), pixels.end(), 0u);
+        std::fill(metadata.begin(), metadata.end(), 0u);
+        return false;
     }
 
     std::uint32_t SendSteamSdlInput(std::uint32_t pointer, std::uint32_t keys) {

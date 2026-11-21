@@ -23,6 +23,8 @@ def main():
     parser.add_argument('api', type=Path)
     parser.add_argument('asm', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--render-size', choices=('1280x720', '960x540', '854x480', '640x360'), default='1280x720',
+                        help='Slay virtual window size in the signed adapter (default: %(default)s)')
     parser.add_argument('--gdx-api', type=Path)
     parser.add_argument('--gdx-controllers-api', type=Path)
     args = parser.parse_args()
@@ -42,10 +44,18 @@ def main():
                 parser.error(f'{file.name} is not the pinned libGDX API.')
     with TemporaryDirectory() as scratch, ZipFile(args.sources) as sources, ZipFile(args.api) as api:
         root = Path(scratch)
-        inputs = [providers / name for name in ('XboxSdlDisplay.java', 'XboxSdlContext.java', 'XboxSdlGamepad.java')]
+        inputs = [providers / name for name in ('XboxSdlDisplay.java', 'XboxSdlContext.java', 'XboxSdlGamepad.java', 'XboxRenderProfile.java')]
+        mode_source = sources.read('org/lwjgl/opengl/DisplayMode.java').decode('utf-8')
+        original_window = 'this(width, height, 0, 0, false);'
+        if mode_source.count(original_window) != 1:
+            raise ValueError('Unexpected LWJGL windowed display constructor')
+        mode = root / 'DisplayMode.java'
+        mode.write_text(mode_source.replace(original_window, 'this(XboxRenderProfile.windowWidth(width), '
+                                            'XboxRenderProfile.windowHeight(height), 0, 0, false);'))
+        inputs.append(mode)
         classpath = [args.api]
         if all(gdx):
-            inputs.extend(providers / name for name in ('DesktopControllerManager.java', 'XboxSceneTexture.java'))
+            inputs.extend(providers / name for name in ('DesktopControllerManager.java', 'XboxSceneTexture.java', 'DisplayConfig.java'))
             classpath.extend(gdx)
         subprocess.run(['javac', '--release', '8', '-cp', os.pathsep.join(map(str, classpath)), '-d', str(root),
                         *map(str, inputs)], check=True)
@@ -71,11 +81,13 @@ def main():
                     contents = api.read(entry)
                     if all(gdx) and entry.filename == 'META-INF/MANIFEST.MF':
                         # This package also contains classes loaded from the publisher's game JAR.
-                        contents = contents.rstrip(b'\r\n') + b'\r\n\r\nName: com/badlogic/gdx/graphics/\r\nSealed: false\r\n\r\n'
+                        contents = contents.rstrip(b'\r\n') + (b'\r\n\r\nName: com/badlogic/gdx/graphics/\r\nSealed: false'
+                                                                b'\r\n\r\nName: com/megacrit/cardcrawl/core/\r\nSealed: false\r\n\r\n')
                     output.writestr(entry, contents)
             for name, path in sorted(replacements.items()):
                 output.write(path, name)
             output.writestr('LICENSE.lwjgl', license_body)
+            output.writestr('xbox-slay-render-size.txt', args.render_size + '\n')
             if all(gdx):
                 output.write(providers / 'LICENSE.libgdx', 'LICENSE.libgdx')
 

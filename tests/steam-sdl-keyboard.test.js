@@ -14,6 +14,7 @@ async function exercisePlayer(packed) {
     let frame;
     let frameAvailable = true;
     let presented = 0;
+    let expectedPixel = [0, 216, 255, 255];
 
     function element(id) {
         if (!elements.has(id)) {
@@ -25,7 +26,7 @@ async function exercisePlayer(packed) {
                 getContext() {
                     return { createImageData: () => ({ data: new Uint8Array(4) }), putImageData(image) {
                         presented++;
-                        if (packed) assert.deepEqual(Array.from(image.data), [0, 216, 255, 255]);
+                        if (packed) assert.deepEqual(Array.from(image.data), expectedPixel);
                     } };
                 }
             });
@@ -72,7 +73,15 @@ async function exercisePlayer(packed) {
         resetSteamSdlKeyboard() { calls.push(["reset"]); }
     };
     if (packed) {
-        runner.steamSdlRgbFrame = () => frameAvailable ? "1,1,1,0,0\n" + String.fromCharCode(0x1800, 0x1ffd) : "";
+        runner.steamSdlRgbDeltaFrame = previous => {
+            if (!frameAvailable) return "";
+            if (previous === 0) return "1,1,1,0,0,F\n" + String.fromCharCode(0x1800, 0x1ffd);
+            if (previous === 1) {
+                expectedPixel = [1, 215, 252, 255];
+                return "1,1,2,0,0,D\n" + String.fromCharCode(0x2579);
+            }
+            return "1,1," + (previous + 1) + ",0,0,D\n" + String.fromCharCode(0x4000);
+        };
         runner.steamSdlFrame = () => { throw new Error("Unexpected byte-array fallback"); };
     }
     vm.runInNewContext(source, {

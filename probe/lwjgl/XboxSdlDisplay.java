@@ -15,7 +15,7 @@ final class XboxSdlDisplay implements DisplayImplementation {
     static final String PACKAGE = "xbox.lwjgl.sdl.package";
     // The hosted display has one virtual fullscreen mode. libGDX leaves null
     // entries when a backend advertises windowed-only modes in this list.
-    private static final DisplayMode INITIAL = new DisplayMode(1280, 720, 32, 60);
+    private static final DisplayMode INITIAL = new DisplayMode(XboxRenderProfile.WIDTH, XboxRenderProfile.HEIGHT, 32, 60);
     private static final int MAX_CURSOR_SIZE = 256;
     private static int width = INITIAL.getWidth();
     private static int height = INITIAL.getHeight();

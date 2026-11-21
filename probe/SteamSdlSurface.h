@@ -9,6 +9,9 @@ class SteamSdlSurface {
     SdlHostMailbox *view_ = nullptr;
     mutable winrt::Windows::Storage::Streams::Buffer transfer_{nullptr};
     winrt::handle process_;
+    std::vector<std::uint8_t> previousPixels_;
+    std::vector<std::uint16_t> encodedPixels_;
+    SdlHostFrame previousHeader_{};
 
 public:
     SteamSdlSurface() = default;
@@ -41,6 +44,35 @@ public:
     void Attach(winrt::handle process) { process_ = std::move(process); }
     bool Alive() const { return process_ && WaitForSingleObject(process_.get(), 0) == WAIT_TIMEOUT; }
     bool HasFrame() const { return view_ && SdlHostLoad(&view_->frame_state) == SDL_HOST_READY; }
+
+    // Peek before passing a multi-megabyte output array through the JS projection.
+    std::uint32_t FrameSize() const {
+        if (!Alive() || InterlockedCompareExchange(&view_->frame_state, SDL_HOST_READING, SDL_HOST_READY) != SDL_HOST_READY)
+            return 0;
+        const auto header = view_->frame;
+        const auto valid = header.width && header.width <= SDL_HOST_MAX_WIDTH &&
+                           header.height && header.height <= SDL_HOST_MAX_HEIGHT;
+        InterlockedExchange(&view_->frame_state, valid ? SDL_HOST_READY : SDL_HOST_EMPTY);
+        return valid ? (header.width << 16) | header.height : 0;
+    }
+
+    bool FillFrame(std::uint32_t size, winrt::array_view<std::uint32_t> pixels,
+                   winrt::array_view<std::uint32_t> metadata) const {
+        if (!Alive() || InterlockedCompareExchange(&view_->frame_state, SDL_HOST_READING, SDL_HOST_READY) != SDL_HOST_READY)
+            return false;
+        const auto header = view_->frame;
+        // Older producers can replace an unread frame between the two calls.
+        if (header.width != (size >> 16) || header.height != (size & 0xffffu)) {
+            InterlockedExchange(&view_->frame_state, SDL_HOST_READY);
+            return false;
+        }
+        CopyOpaqueSdlFrame(reinterpret_cast<std::uint8_t*>(pixels.data()), view_->pixels, pixels.size());
+        metadata[0] = header.sequence;
+        metadata[1] = header.input_ack;
+        metadata[2] = header.input_events;
+        InterlockedExchange(&view_->frame_state, SDL_HOST_EMPTY);
+        return true;
+    }
 
     void Quit() const {
         if (view_) InterlockedExchange(&view_->quit, 1);
@@ -139,20 +171,29 @@ public:
         return transfer_;
     }
 
-    winrt::hstring RgbFrame() const {
+    winrt::hstring RgbFrame(std::uint32_t previousSequence) {
         if (!Frame()) return {};
         SdlHostFrame header{};
         const auto bytes = transfer_.data();
         std::memcpy(&header, bytes, sizeof(header));
-        wchar_t prefix[96];
-        const auto prefixLength = swprintf_s(prefix, L"%u,%u,%u,%u,%u\n", header.width, header.height,
-                                             header.sequence, header.input_ack, header.input_events);
         const auto count = header.width * header.height;
+        const auto pixels = bytes + sizeof(header);
+        const bool delta = previousHeader_.sequence == previousSequence && previousHeader_.width == header.width &&
+            previousHeader_.height == header.height;
+        wchar_t prefix[96];
+        const auto prefixLength = swprintf_s(prefix, L"%u,%u,%u,%u,%u,%c\n", header.width, header.height,
+                                             header.sequence, header.input_ack, header.input_events, delta ? L'D' : L'F');
+        encodedPixels_.resize(2 * count);
+        std::size_t units = 2 * count;
+        if (delta) units = EncodeSdlRgbDelta(encodedPixels_.data(), pixels, previousPixels_.data(), count);
+        else EncodeSdlRgb(encodedPixels_.data(), pixels, count);
+        previousPixels_.assign(pixels, pixels + 4 * count);
+        previousHeader_ = header;
         wchar_t *encoded;
         HSTRING_BUFFER storage;
-        winrt::check_hresult(WindowsPreallocateStringBuffer(prefixLength + 2 * count, &encoded, &storage));
+        winrt::check_hresult(WindowsPreallocateStringBuffer(prefixLength + static_cast<UINT32>(units), &encoded, &storage));
         std::memcpy(encoded, prefix, prefixLength * sizeof(wchar_t));
-        EncodeSdlRgb(reinterpret_cast<std::uint16_t *>(encoded + prefixLength), bytes + sizeof(header), count);
+        std::memcpy(encoded + prefixLength, encodedPixels_.data(), units * sizeof(wchar_t));
         HSTRING text;
         const auto hr = WindowsPromoteStringBuffer(storage, &text);
         if (FAILED(hr)) {

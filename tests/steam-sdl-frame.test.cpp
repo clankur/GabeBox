@@ -24,6 +24,17 @@ int main() {
             assert(((rgb >> 8) & 255) == input[2 + 4 * i]);
             assert(((rgb >> 16) & 255) == input[3 + 4 * i]);
         }
+        if (count) {
+            const auto unchanged = EncodeSdlRgbDelta(encoded.data(), input.data(), input.data(), count);
+            assert(unchanged == 1 && encoded.front() == 0x4000 + count - 1);
+            auto changed = input;
+            changed[0]++;
+            auto n = EncodeSdlRgbDelta(encoded.data(), changed.data(), input.data(), count);
+            assert(n >= 1 && encoded[0] == 0x2889);
+            changed[0] = 255;
+            n = EncodeSdlRgbDelta(encoded.data(), changed.data(), input.data(), count);
+            assert(n >= 2 && (encoded[0] >> 12) == 1);
+        }
         assert(input == original);
     }
 }

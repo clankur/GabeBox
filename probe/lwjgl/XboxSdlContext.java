@@ -29,6 +29,6 @@ final class XboxSdlContext implements ContextImplementation {
         if (!XboxSdlDisplay.makeContextCurrent(context)) throw new LWJGLException("Xbox SDL could not bind the context");
     }
     public boolean isCurrent(ByteBuffer context) { return XboxSdlDisplay.contextIsCurrent(context); }
-    public void setSwapInterval(int value) { XboxSdlDisplay.swapInterval(value); }
+    public void setSwapInterval(int value) { XboxSdlDisplay.swapInterval(XboxRenderProfile.swapInterval(value)); }
     public void destroy(PeerInfo peer, ByteBuffer context) { XboxSdlDisplay.closeContext(context); }
 }

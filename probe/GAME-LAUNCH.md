@@ -81,3 +81,15 @@ Build the LWJGL adapter with the pinned libGDX 1.9.5 API inputs using `--gdx-api
 Slay's text entry requires the keyboard-capable LWJGL adapter, native display bridge, and shared SDL2 build together. For the save-slot name prompt, test typing and Backspace with a physical keyboard, then use the player **Keyboard** action to send text using the controller. The game is responsible for accepting the name and creating the save slot.
 
 The Series X run of `1.0.221.0` reached save-slot selection and reported controller delivery. The live mailbox advertised keyboard support. Local tests checked LWJGL key transitions, editing and Unicode, and the player's controller text entry. Entering a name with the Xbox system keyboard still needs a console check. The regular library build `1.0.222.0` uses the same keyboard components. [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44923292933) · [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44922918078) · [Slay bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44922917181)
+
+Build the hosted adapter with JDK 11 or later and the pinned upstream JARs. Use a fresh output path. The selected virtual window size is embedded in the adapter. The player scales the window to fit the TV and maps input into the same dimensions.
+
+```sh
+python3 probe/build-lwjgl-sdl.py \
+  "$deps/lwjgl-2.9.2-sources.jar" "$deps/lwjgl-2.9.2.jar" "$deps/asm-9.7.1.jar" \
+  "$runtime_dir/slay-lwjgl-display.jar" \
+  --gdx-api "$deps/gdx-1.9.5.jar" --gdx-controllers-api "$deps/gdx-controllers-1.9.5.jar" \
+  --render-size 1280x720
+```
+
+Pass the resulting runtime directory to the existing `--slay-sdl-host` packaging option. Selecting **Play** starts the signed-in library launch. The offscreen game uses the TV player's presentation clock. A configured 60 FPS permits the renderer to produce up to 120 frames per second so fresh frames can be ready between TV refreshes. Lower frame limits retain their configured values. The adapter reads the player's existing FPS setting from `info.displayconfig` and stores subsequent Xbox FPS changes in app-local `slay-native-temp/xbox-slay-fps.txt`.
