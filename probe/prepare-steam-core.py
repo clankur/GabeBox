@@ -62,7 +62,7 @@ def adapt_pinned_keyboard(binary, objdump):
     print(f'Derived Steam client SHA-256: {hashlib.sha256(candidate).hexdigest()}.')
 
 
-def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard):
+def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -93,8 +93,12 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         old_version = f'Version="{base_version}"'.encode()
         if manifest.count(old_version) != 1:
             raise ValueError('Expected one package version attribute in the CI template.')
-        (layout / 'AppxManifest.xml').write_bytes(
-            manifest.replace(old_version, f'Version="{version}"'.encode()))
+        updated = manifest.replace(old_version, f'Version="{version}"'.encode())
+        if steam_sign_in:
+            if 'steam-signin.html' not in entries or updated.count(b'StartPage="index.html"') != 1:
+                raise ValueError('Use a Steam Core template containing the sign-in page.')
+            updated = updated.replace(b'StartPage="index.html"', b'StartPage="steam-signin.html"')
+        (layout / 'AppxManifest.xml').write_bytes(updated)
 
     if valve_archive:
         with ZipFile(valve_archive) as archive:
@@ -124,14 +128,18 @@ def main():
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
     parser.add_argument('--unicode-keyboard', action='store_true',
                         help='test a local Unicode import adaptation of the pinned Steam core')
+    parser.add_argument('--steam-sign-in', action='store_true', help='start the interactive Steam Guard page')
     args = parser.parse_args()
+    if args.steam_sign_in and not args.unicode_keyboard:
+        parser.error('--steam-sign-in requires --unicode-keyboard')
     if args.unicode_keyboard and not args.valve_archive:
         parser.error('--unicode-keyboard requires --valve-archive')
     if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', args.version):
         parser.error('--version must have four integer components')
     if any(int(part) > 65535 for part in args.version.split('.')):
         parser.error('--version components may not exceed 65535')
-    prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard)
+    prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
+                   args.steam_sign_in)
 
 
 if __name__ == '__main__':
