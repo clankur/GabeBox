@@ -1415,6 +1415,19 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    bool traceStardew = false;
+    if (app == 413150) {
+        auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+        traceStardew = static_cast<bool>(co_await package.TryGetItemAsync(L"stardew-host-trace.txt"));
+    }
+    struct HostTraceEnvironment {
+        bool file = false;
+        bool enabled = false;
+        ~HostTraceEnvironment() {
+            if (enabled) SetEnvironmentVariableW(L"COREHOST_TRACE", nullptr);
+            if (file) SetEnvironmentVariableW(L"COREHOST_TRACEFILE", nullptr);
+        }
+    } hostTrace;
     bool sharedManifestComplete = false;
     if (appliedSharedOverride) {
         // Steam can publish the installed state before the on-disk manifest is readable.
@@ -1471,6 +1484,22 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
         session->PumpCallbacks();
         GetSystemTimeAsFileTime(&launchTime);
+        if (traceStardew) {
+            auto unset = [](wchar_t const* name) {
+                wchar_t existing[1];
+                SetLastError(ERROR_SUCCESS);
+                return !GetEnvironmentVariableW(name, existing, 1) && GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+            };
+            if (unset(L"COREHOST_TRACE") && unset(L"COREHOST_TRACEFILE")) {
+                auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                    launchTime.dwLowDateTime);
+                auto tracePath = dataRoot + L"\\stardew-host-" + id + L".log";
+                hostTrace.file = SetEnvironmentVariableW(L"COREHOST_TRACEFILE", tracePath.c_str()) != FALSE;
+                hostTrace.enabled = hostTrace.file && SetEnvironmentVariableW(L"COREHOST_TRACE", L"1");
+                if (hostTrace.enabled) report += L"steam_stardew_host_run=" + id + L"\r\n";
+            }
+            if (!hostTrace.enabled) report += L"steam_stardew_host_trace=environment-unavailable\r\n";
+        }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
