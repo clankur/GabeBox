@@ -201,7 +201,7 @@ def slay_exception_types(text):
 def slay_console_summary(raw):
     if not raw:
         return 'slay_console=no-output'
-    text = raw.decode('utf-8', errors='replace')
+    text = raw.decode('utf-8', errors='replace').replace('\r\n', '\n')
     result = re.findall(r'^slay_console=(?:helper-started|create-error|running-at-timeout|exit--?\d+)\r?$', text, re.M)
     if not result or result[0] != 'slay_console=helper-started':
         return 'slay_console=unrecognized-output'
@@ -209,10 +209,13 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_capture=(?:truncated|read-error|incomplete)\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_cwd=(?:game-directory|unexpected-main-class|native-load-error)\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_cwd_error=0x[0-9A-F]{8}\r?$', text, re.M))
+    result.extend(re.findall(r'^slay_console_lwjgl_sha256=[0-9a-f]{64}$', text, re.M))
+    result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
               ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),
               ('Access is denied', 'file-access-denied'), ('DisplayConfig.writeDisplayConfigFile', 'display-config-write'),
+              ('lwjgl64.dll', 'lwjgl-native-load'), ("Can\'t find dependent libraries", 'native-dependency-missing'),
               ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation')]
     for marker, stage in stages:
         if marker in text:

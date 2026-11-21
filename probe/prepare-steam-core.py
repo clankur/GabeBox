@@ -86,7 +86,9 @@ def vclibs_dependency(appx):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, slay_startup_log=False, slay_console=False,
-                   slay_native_cwd=False):
+                   slay_native_cwd=False, slay_lwjgl_display=None):
+    if slay_lwjgl_display and not slay_native_cwd:
+        raise ValueError('The LWJGL display fallback needs the Slay native working-directory diagnostic.')
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -148,6 +150,11 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 raise ValueError('Use the Windows SDK template containing the Slay console diagnostic.')
             subprocess.run(['javac', '--release', '8', '-d', str(layout),
                             str(Path(__file__).with_name('SlayConsoleDiagnostic.java'))], check=True)
+        if slay_lwjgl_display:
+            with ZipFile(slay_lwjgl_display) as jar:
+                if 'org/lwjgl/opengl/WindowsDisplay.class' not in jar.namelist() or 'LICENSE.lwjgl' not in jar.namelist():
+                    raise ValueError('Use the fallback JAR built from the pinned LWJGL source.')
+            shutil.copyfile(slay_lwjgl_display, layout / 'slay-lwjgl-display.jar')
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
 
@@ -197,6 +204,8 @@ def main():
                         help='capture the publisher console diagnostic after Slay the Spire exits with code 1')
     parser.add_argument('--slay-native-cwd', action='store_true',
                         help='set the native working directory in the opt-in Slay console diagnostic')
+    parser.add_argument('--slay-lwjgl-display', type=Path, metavar='FALLBACK_JAR',
+                        help='use the pinned LWJGL windowed display fallback in the Slay diagnostic')
     args = parser.parse_args()
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
@@ -225,7 +234,7 @@ def main():
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework, args.slay_startup_log,
-                   args.slay_console, args.slay_native_cwd)
+                   args.slay_console, args.slay_native_cwd, args.slay_lwjgl_display)
 
 
 if __name__ == '__main__':

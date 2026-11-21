@@ -7,7 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 public final class SlayConsoleDiagnostic {
@@ -35,6 +37,21 @@ public final class SlayConsoleDiagnostic {
     }
 
     private static native int setGameDirectory(String path);
+
+    private static void reportBundledLwjgl(File gameJar, Path log) throws Exception {
+        try (JarFile archive = new JarFile(gameJar)) {
+            JarEntry entry = archive.getJarEntry("lwjgl64.dll");
+            if (entry == null || entry.getSize() <= 0 || entry.getSize() > 2 * 1024 * 1024) return;
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (InputStream input = archive.getInputStream(entry)) {
+                byte[] buffer = new byte[4096];
+                for (int count; (count = input.read(buffer)) != -1;) digest.update(buffer, 0, count);
+            }
+            StringBuilder entryHash = new StringBuilder("slay_console_lwjgl_sha256=");
+            for (byte value : digest.digest()) entryHash.append(String.format("%02x", value & 0xff));
+            Files.write(log, (entryHash + "\n").getBytes(StandardCharsets.UTF_8), StandardOpenOption.APPEND);
+        }
+    }
 
     private static void launchFromGameDirectory(String game, String library, String jar) throws Exception {
         final String gameMain = "com.megacrit.cardcrawl.desktop.DesktopLauncher";
@@ -76,8 +93,14 @@ public final class SlayConsoleDiagnostic {
         File workingDirectory = new File(packageRoot, "slay-working-directory.dll");
         ProcessBuilder builder;
         if (workingDirectory.isFile()) {
-            builder = new ProcessBuilder(launcher.getAbsolutePath(), "-Duser.dir=" + game.getAbsolutePath(), "-cp",
-                                         packageRoot + File.pathSeparator + jar.getAbsolutePath(), "SlayConsoleDiagnostic",
+            reportBundledLwjgl(jar, log);
+            Path runtimeTemp = Files.createDirectories(log.getParent().resolve("slay-native-temp"));
+            File displayFallback = new File(packageRoot, "slay-lwjgl-display.jar");
+            String classpath = packageRoot + File.pathSeparator;
+            if (displayFallback.isFile()) classpath += displayFallback.getAbsolutePath() + File.pathSeparator;
+            classpath += jar.getAbsolutePath();
+            builder = new ProcessBuilder(launcher.getAbsolutePath(), "-Duser.dir=" + game.getAbsolutePath(),
+                                         "-Djava.io.tmpdir=" + runtimeTemp.toAbsolutePath(), "-cp", classpath, "SlayConsoleDiagnostic",
                                          "--launch-from-game-directory", game.getAbsolutePath(),
                                          workingDirectory.getAbsolutePath(), jar.getAbsolutePath());
         } else {
