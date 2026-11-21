@@ -4,6 +4,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/XboxProbe.Native.h>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -130,7 +131,43 @@ static std::wstring PipeResult(std::wstring const& child) {
         L"ipc_request=" + Hex(request) + L"\r\nipc_reply=" + Hex(reply) + L"\r\nipc_child_exit=" + Hex(exit) + L"\r\n";
 }
 
-static std::wstring SteamCoreResult(std::wstring const& packagePath) {
+static std::wstring InspectSteamImports(winrt::hstring const& inventory) {
+    std::wstring result;
+    std::istringstream rows(winrt::to_string(inventory));
+    for (std::string row; std::getline(rows, row);) {
+        std::istringstream entries(row);
+        std::string library;
+        if (!(entries >> library)) continue;
+        auto name = winrt::to_hstring(library);
+        // The package inventory contains DLL basenames. Resolve system modules only.
+        if (library.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-.") != std::string::npos ||
+                !library.ends_with(".dll")) continue;
+
+        HMODULE module = LoadLibraryExW(name.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!module) {
+            result += std::wstring(name) + L"_system_load_error=" + Hex(GetLastError()) + L"\r\n";
+            continue;
+        }
+        unsigned seen = 0;
+        unsigned missing = 0;
+        for (std::string symbol; entries >> symbol;) {
+            auto nameOrOrdinal = symbol.starts_with('#') ?
+                MAKEINTRESOURCEA(std::stoul(symbol.substr(1))) : symbol.c_str();
+            ++seen;
+            if (!GetProcAddress(module, nameOrOrdinal)) {
+                ++missing;
+                result += L"missing_import=" + std::wstring(name) + L"!" +
+                          std::wstring(winrt::to_hstring(symbol)) + L"\r\n";
+            }
+        }
+        FreeLibrary(module);
+        result += std::wstring(name) + L"_imports_checked=" + std::to_wstring(seen) + L"\r\n";
+        result += std::wstring(name) + L"_imports_missing=" + std::to_wstring(missing) + L"\r\n";
+    }
+    return result;
+}
+
+static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstring const& inventory) {
     std::wstring result;
     HMODULE control = LoadPackagedLibrary(PROBE_CHILD_MODULE, 0);
     if (control) {
@@ -150,15 +187,23 @@ static std::wstring SteamCoreResult(std::wstring const& packagePath) {
     }
 
     HMODULE steam = LoadPackagedLibrary(L"steamclient64.dll", 0);
-    if (!steam) {
-        return result + L"steam_core=load-error\r\nsteam_error=" + Hex(GetLastError()) +
-               L"\r\nstatus=steam-core-complete\r\n";
+    if (steam) {
+        bool resolved = GetProcAddress(steam, "CreateInterface") != nullptr;
+        DWORD error = resolved ? ERROR_SUCCESS : GetLastError();
+        FreeLibrary(steam);
+        result += std::wstring(L"steam_core=loaded\r\ncreate_interface=") + (resolved ? L"present" : L"missing") +
+                  L"\r\nsteam_error=" + Hex(error) + L"\r\n";
+    } else {
+        result += L"steam_core=load-error\r\nsteam_error=" + Hex(GetLastError()) + L"\r\n";
     }
-    bool resolved = GetProcAddress(steam, "CreateInterface") != nullptr;
-    DWORD error = resolved ? ERROR_SUCCESS : GetLastError();
-    FreeLibrary(steam);
-    return result + L"steam_core=loaded\r\ncreate_interface=" + (resolved ? L"present" : L"missing") +
-           L"\r\nsteam_error=" + Hex(error) + L"\r\nstatus=steam-core-complete\r\n";
+
+    for (const auto *name : {L"tier0_s64.dll", L"vstdlib_s64.dll"}) {
+        HMODULE dependency = LoadPackagedLibrary(name, 0);
+        DWORD error = dependency ? ERROR_SUCCESS : GetLastError();
+        if (dependency) FreeLibrary(dependency);
+        result += std::wstring(name) + L"_load_error=" + Hex(error) + L"\r\n";
+    }
+    return result + InspectSteamImports(inventory) + L"status=steam-core-complete\r\n";
 }
 
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
@@ -168,13 +213,14 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     }
 
     winrt::hstring Run() {
-        auto package = winrt::Windows::ApplicationModel::Package::Current();
-        auto folder = package.InstalledLocation();
+        auto folder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
         std::wstring path = std::wstring(folder.Path()) + L"\\";
-        if (package.Id().Name() == L"XboxPortabilityProbe.ChildProcess.SteamCore") {
-            return winrt::hstring(SteamCoreResult(path));
-        }
         return winrt::hstring(ChildResult(path + L"child.exe") + PipeResult(path + L"pipe-child.exe"));
+    }
+
+    winrt::hstring RunSteamCore(winrt::hstring const& inventory) {
+        auto package = winrt::Windows::ApplicationModel::Package::Current();
+        return winrt::hstring(SteamCoreResult(std::wstring(package.InstalledLocation().Path()) + L"\\", inventory));
     }
 };
 

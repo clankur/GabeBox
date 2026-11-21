@@ -19,14 +19,24 @@
             "probe-report.txt", storage.CreationCollisionOption.replaceExisting
         ).then(function (file) {
             return storage.FileIO.writeTextAsync(file, header + "status=web-started\r\n").then(function () {
-                var result;
-                try {
-                    result = control ? "status=control-ready\r\n" : XboxProbe.Native.ProbeRunner.run();
-                } catch (error) {
-                    result = "status=native-component-error\r\n" + errorText(error);
+                function finish(inventory) {
+                    var result;
+                    try {
+                        var probe = steamCore ? XboxProbe.Native.ProbeRunner.runSteamCore(inventory) :
+                            (control ? "status=control-ready\r\n" : XboxProbe.Native.ProbeRunner.run());
+                        result = probe;
+                    } catch (error) {
+                        result = "status=native-component-error\r\n" + errorText(error);
+                    }
+                    output.textContent = result;
+                    return storage.FileIO.writeTextAsync(file, header + result);
                 }
-                output.textContent = result;
-                return storage.FileIO.writeTextAsync(file, header + result);
+
+                if (!steamCore) return finish("");
+                return Windows.ApplicationModel.Package.current.installedLocation
+                    .tryGetItemAsync("steam-core-imports.txt").then(function (inventory) {
+                        return inventory ? storage.FileIO.readTextAsync(inventory) : "";
+                    }).then(finish);
             });
         }).done(null, function (error) {
             output.textContent = "Unable to write the LocalState report.\r\n" + errorText(error);
