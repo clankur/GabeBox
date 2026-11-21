@@ -255,6 +255,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 profiles.append('646570')
             script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
             helper = '<script src="steam-sdl-gamepad.js"></script>'
+            if (layout / 'Fhd.Native.winmd').is_file():
+                if not (layout / 'steam-sdl-native-view.js').is_file():
+                    raise ValueError('The native SDL presenter requires its library view script.')
+                helper += '\n    <script src="steam-sdl-native-view.js"></script>'
             if measure_sdl_frames:
                 if not (layout / 'steam-sdl-timing.js').is_file():
                     raise ValueError('Use the SDK template containing the SDL frame timing script.')

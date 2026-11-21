@@ -87,13 +87,14 @@
         var ready = false, closing = false, stopped = false;
         var result = "";
         var timing = attempt.automaticTrial && window.steamSdlTiming && window.steamSdlTiming.create();
-        var trialReport, timingReport;
+        var trialReport, timingReport, nativeView;
         var complete;
         var finished = new Promise(function (resolve) { complete = resolve; });
 
         function stop(detail) {
             if (stopped) return;
             stopped = true;
+            if (nativeView) nativeView.close();
             ready = false;
             cancelAnimationFrame(animation);
             exit.removeEventListener("click", quit);
@@ -137,6 +138,7 @@
         function hideMenu() {
             blockedMenuButtons = lastButtons & (padButtons.a | padButtons.b);
             menu.hidden = true;
+            if (nativeView) nativeView.resume();
             canvas.focus();
         }
 
@@ -400,12 +402,17 @@
 
         function tick(now) {
             if (stopped) return;
+            // The secondary view owns rendering and live input until the user opens a player overlay.
+            if (nativeView && menu.hidden && textForm.hidden) {
+                animation = requestAnimationFrame(tick);
+                return;
+            }
             try {
                 if (!runner.steamSdlRunning()) {
                     stop("steam_sdl_host_frame=exited\r\n");
                     return;
                 }
-                var frame = draw();
+                var frame = nativeView ? null : draw();
                 if (timing && foreground && firstFrame !== undefined && now - firstFrame >= 8000) {
                     timingReport = timing.observe(performance.now(), frame);
                     if (timingReport) {
@@ -570,6 +577,21 @@
             }
             ready = true;
             exit.disabled = false;
+            if (window.steamSdlNativeView) {
+                nativeView = window.steamSdlNativeView.open(report, {
+                    running: function () { return runner.steamSdlRunning(); },
+                    menu: showMenu,
+                    exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
+                    fallback: function () { nativeView = null; },
+                    presented: function () {
+                        firstFrame = performance.now();
+                        status.textContent = "";
+                        keyboardReady = !!(runner.steamSdlKeyboardReady && runner.steamSdlKeyboardReady());
+                        keyboard.hidden = !keyboardReady;
+                        if (!attempt.automaticTrial) complete(report + "steam_sdl_host_frame=presented\r\n");
+                    }
+                });
+            }
             animation = requestAnimationFrame(tick);
         }, function () { stop("steam_sdl_host=launch-error\r\n"); });
         return finished;
