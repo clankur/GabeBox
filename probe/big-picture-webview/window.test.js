@@ -9,7 +9,7 @@ function fixture() {
     const origin = 'https://steamloopback.host';
     let receive, portal = false;
     const seed = {viewId: 41, pid: 3804, ownerId: 1, popupId: 2, visible: true,
-        popupVisible: false, popupOpen: false, x: 0, y: 0, width: 1280, height: 720,
+        focused: true, popupVisible: false, popupOpen: false, x: 0, y: 0, width: 1280, height: 720,
         usableX: 32, usableY: 18, usableWidth: 1216, usableHeight: 684, scale: 1.5,
         screenWidth: 1920, screenHeight: 1080};
     const window = {open: () => popup, postMessage() {}, chrome: {webview: {
@@ -81,4 +81,21 @@ test('real monitor snapshots drive geometry and display change subscription', as
     sub.unregister();
     f.snapshot({});
     assert.equal(calls, 1);
+});
+
+test('focus observers report the foreground application view and clear it when the game takes over', async () => {
+    const f = fixture();
+    const focused = [], modes = [], overlays = [];
+    const sys = f.client.System.UI;
+    const reg = sys.RegisterForFocusChangeEvents(e => focused.push(e.focusedApp.windowid));
+    f.client.UI.RegisterForUIModeChanged(mode => modes.push(mode));
+    sys.RegisterForOverlayGameWindowFocusChanged((app, pid) => overlays.push([app,pid]));
+    await Promise.resolve();
+    f.snapshot({focused: false});
+    f.snapshot({focused: true});
+    reg.unregister();
+    f.snapshot({focused: false});
+    assert.deepEqual(focused, [41, 0, 41]);
+    assert.deepEqual(modes, [4]);
+    assert.deepEqual(overlays, [[0,0],[0,0]]);
 });

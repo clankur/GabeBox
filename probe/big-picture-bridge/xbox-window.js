@@ -11,6 +11,7 @@ function installXboxWindow(client, send) {
     if (typeof xboxNativeWindow === 'undefined') return; // Only the WebView host can supply these bindings.
     const host = window.chrome.webview;
     const desired = new Set(), display = new Set();
+    const focus = new Set(), overlayFocus = new Set(), mode = new Set();
     let state = xboxNativeWindow;
     let notifiedPopup;
 
@@ -19,6 +20,17 @@ function installXboxWindow(client, send) {
         callbacks.add(fn);
         if (initial) queueMicrotask(() => { if (callbacks.has(fn)) fn(); });
         return {unregister() { callbacks.delete(fn); }};
+    }
+
+    function focused() {
+        return state.visible && (typeof state.focused === 'boolean' ? state.focused : window.document.hasFocus());
+    }
+
+    function focusInfo() {
+        // This WebView owns Steam's shell. Game processes run in a separate
+        // presenter and are not enumerable as game windows from this CoreWindow.
+        return {focusedApp: focused() ? {appid: 0, pid: state.pid, windowid: state.viewId, strExeName: 'msedgewebview2.exe'} :
+            {appid: 0, pid: 0, windowid: 0, strExeName: ''}, rgFocusable: []};
     }
 
     function notifyPopup() {
@@ -37,6 +49,11 @@ function installXboxWindow(client, send) {
         const previous = state;
         state = data.state;
         xboxGamepadVisible = state.visible && state.popupVisible;
+        if (previous.focused !== state.focused || previous.visible !== state.visible || previous.popupVisible !== state.popupVisible) {
+            for (const fn of focus) fn();
+            // Returning to the actual Steam surface clears overlay-game focus.
+            if (focused()) for (const fn of overlayFocus) fn();
+        }
         if (!state.popupOpen) notifiedPopup = undefined;
         if (previous.screenWidth !== state.screenWidth || previous.screenHeight !== state.screenHeight || previous.scale !== state.scale) {
             for (const fn of display) fn();
@@ -45,7 +62,20 @@ function installXboxWindow(client, send) {
         notifyPopup();
     });
 
+    const system = (client.System ||= {});
+    const systemUI = (system.UI ||= {});
+    function subscribeValue(callbacks, callback, deliver, initial) {
+        if (typeof callback !== 'function') throw new TypeError('Expected a window callback');
+        return subscribe(callbacks, () => deliver(callback), initial);
+    }
+    systemUI.RegisterForFocusChangeEvents = callback => subscribeValue(focus, callback, fn => fn(focusInfo()), true);
+    systemUI.RegisterForOverlayGameWindowFocusChanged = callback =>
+        subscribeValue(overlayFocus, callback, fn => { if (focused()) fn(0, 0); }, true);
+
     const ui = client.UI ||= {};
+    // The single Xbox window requests the pinned client's gamepad UI mode (4)
+    // for its entire lifetime, including while a game owns the foreground.
+    ui.RegisterForUIModeChanged = callback => subscribeValue(mode, callback, fn => fn(4), true);
     ui.GetDesiredSteamUIWindows = async () => [{
         unID: state.viewId, unPID: state.pid, nBrowserID: state.ownerId, appid: 0, windowType: 0 // MainGamepadUI
     }];

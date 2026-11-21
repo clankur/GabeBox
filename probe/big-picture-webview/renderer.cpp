@@ -6,6 +6,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.ViewManagement.h>
@@ -94,6 +95,7 @@ struct View : implements<View, IFrameworkView> {
         return L"{\"viewId\":" + std::to_wstring(ApplicationView::GetForCurrentView().Id()) +
             L",\"pid\":" + std::to_wstring(web.BrowserProcessId()) +
             L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (window.Visible() ? L"true" : L"false") +
+            L",\"focused\":" + (window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground ? L"true" : L"false") +
             L",\"popupOpen\":" + (popup ? L"true" : L"false") +
             L",\"popupVisible\":" + (popup && popup.IsVisible() ? L"true" : L"false") +
             L",\"x\":" + std::to_wstring(bounds.X) + L",\"y\":" + std::to_wstring(bounds.Y) +
@@ -103,6 +105,25 @@ struct View : implements<View, IFrameworkView> {
             L",\"scale\":" + std::to_wstring(display.RawPixelsPerViewPixel()) +
             L",\"screenWidth\":" + std::to_wstring(display.ScreenWidthInRawPixels()) +
             L",\"screenHeight\":" + std::to_wstring(display.ScreenHeightInRawPixels()) + L"}";
+    }
+
+    std::wstring platformState() {
+        std::wstring family = L"null", version = L"null";
+        try {
+            auto info = Windows::System::Profile::AnalyticsInfo::VersionInfo();
+            auto name = info.DeviceFamily();
+            if (name == L"Windows.Xbox" || name == L"Windows.Desktop")
+                family = L"\"" + std::wstring(name) + L"\"";
+            auto value = info.DeviceFamilyVersion();
+            std::wstring_view digits(value);
+            if (!digits.empty() && digits.size() <= 20 && digits.find_first_not_of(L"0123456789") == digits.npos &&
+                (digits.size() < 20 || digits <= L"18446744073709551615"))
+                version = L"\"" + std::wstring(digits) + L"\"";
+        } catch (hresult_error const&) {
+            // Some device contracts can withhold version information.
+        }
+        return L"{\"deviceFamily\":" + family + L",\"deviceFamilyVersion\":" + version +
+            L",\"devToolsEnabled\":" + (web.Settings().AreDevToolsEnabled() ? L"true" : L"false") + L"}";
     }
 
     void publishWindow() {
@@ -314,7 +335,7 @@ struct View : implements<View, IFrameworkView> {
                     window.chrome.webview.postMessage({method:"renderer-error", message});
                 });
             )JS";
-            auto seed = L"const xboxNativeWindow = Object.freeze(" + windowState() + L");\n";
+            auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() + L"));\n";
             co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
             if (closed) co_return;
             web.Navigate(entry);

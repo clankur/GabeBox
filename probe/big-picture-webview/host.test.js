@@ -67,20 +67,36 @@ test("a loaded document and an empty gamepad popup cannot resolve startup", asyn
     assert.equal(ready, true);
 });
 
-test("the signed-in caller receives the renderer error or bounded timeout", async () => {
-    const failed = fixture();
-    const rejection = assert.rejects(failed.start({}), /SteamClient is not defined/);
+test("an optional script failure is recorded while Valve continues opening its gamepad window", async () => {
+    const app = fixture();
+    const opened = app.start({});
     await drain();
-    failed.incoming.push(JSON.stringify({method: "renderer-error", message: "SteamClient is not defined"}));
-    await failed.advance("document-loaded");
-    await rejection;
+    app.incoming.push(JSON.stringify({method: "renderer-error", message: "optional service failed at https://example.com/personal"}));
+    await app.advance("document-loaded");
+    await app.advance("gamepad-window-created");
+    await app.advance("gamepad-ready");
+    await opened;
+    const report = app.reports.at(-1);
+    assert.match(report, /status=gamepad-ready/);
+    assert.match(report, /renderer_error=optional service failed at \[url\]/);
+    assert.doesNotMatch(report, /example.com/);
+});
 
-    const stalled = fixture();
-    const deadline = assert.rejects(stalled.start({}), /gamepad-timeout:document-loaded/);
+test("timeout retains the first script failure and last native milestone", async () => {
+    const app = fixture();
+    const deadline = assert.rejects(app.start({}), /gamepad-timeout:gamepad-window-created/);
     await drain();
-    await stalled.advance("document-loaded");
-    stalled.expire();
+    app.incoming.push(JSON.stringify({method: "renderer-error", message: "First failure"}));
+    app.incoming.push(JSON.stringify({method: "renderer-error", message: "Second failure"}));
+    await app.advance("document-loaded");
+    await app.advance("gamepad-window-created");
+    app.expire();
     await deadline;
+    await drain();
+    const report = app.reports.at(-1);
+    assert.match(report, /status=gamepad-timeout:gamepad-window-created/);
+    assert.match(report, /renderer_error=First failure/);
+    assert.doesNotMatch(report, /Second failure/);
 });
 
 test("the uncredentialed smoke host never dispatches a broker operation", async () => {

@@ -10,7 +10,7 @@
         var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
             storage.CreationCollisionOption.replaceExisting);
         var report = Promise.resolve(file);
-        var messages = [], last = "", servedGames;
+        var messages = [], last = "", servedGames, rendererError;
         var resolveReady, rejectReady, readinessTimer, settled = false, failed = false;
         var ready = new Promise(function (resolve, reject) {
             resolveReady = resolve; rejectReady = reject;
@@ -22,7 +22,8 @@
                 if (messages.length > 24) messages.shift();
             } else if (!refresh) return report;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
-                (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") + messages.join("\r\n") + "\r\n";
+                (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
+                (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") + messages.join("\r\n") + "\r\n";
             report = report.then(function (f) {
                 return storage.FileIO.writeTextAsync(f, text).then(function () { return f; });
             });
@@ -53,11 +54,11 @@
             if (!request || typeof request !== "object") return;
             if (request.method === "renderer-error") {
                 // Keep only the first short script failure. Exclude URLs or sign-in tokens.
-                if (!messages.some(function (m) { return m.indexOf("renderer-error:") === 0; })) {
-                    var detail = String(request.message || "script error").slice(0, 180)
+                if (!rendererError) {
+                    rendererError = String(request.message || "script error").slice(0, 180)
                         .replace(/https?:\/\/\S+/gi, "[url]").replace(/[\r\n]/g, " ");
-                    if (broker) return fail(new Error(detail), "renderer-error:" + detail);
-                    record("renderer-error:" + detail);
+                    // Independent stores can fail while the gamepad window goes on to render.
+                    record(last, true);
                 }
                 return;
             }
