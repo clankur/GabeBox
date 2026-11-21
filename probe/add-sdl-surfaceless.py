@@ -13,10 +13,20 @@ def replace_once(source, old, new):
 
 def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
-    framebuffer = Path(__file__).with_name('sdl-surfaceless-framebuffer.h')
-    shutil.copyfile(framebuffer, offscreen / framebuffer.name)
-    trace = Path(__file__).with_name('sdl-gl-trace.h')
-    shutil.copyfile(trace, offscreen / trace.name)
+    for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h'):
+        shutil.copyfile(Path(__file__).with_name(filename), offscreen / filename)
+
+    video = offscreen / 'SDL_offscreenvideo.c'
+    source = video.read_text(encoding='utf-8')
+    old = '#include "SDL_offscreenvideo.h"'
+    source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "sdl-offscreen-cursor.h"')
+    old = '    /* We\'re done! */'
+    source = replace_once(source, old, '''    if (SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
+        XboxSdlInitOffscreenCursor();
+    }
+
+''' + old)
+    video.write_text(source, encoding='utf-8')
 
     main = tree / 'src/SDL.c'
     source = main.read_text(encoding='utf-8')
@@ -37,6 +47,7 @@ def add_surfaceless(tree):
     unsigned xbox_framebuffer;
     int xbox_width, xbox_height;
     Uint64 xbox_last_swap;
+    Uint64 xbox_first_swap;
     SDL_bool xbox_capture_attempted;''')
     window_header.write_text(source, encoding='utf-8')
 

@@ -4,6 +4,7 @@
 #include "SDL_surface.h"
 #include "SDL_atomic.h"
 #include "sdl-gl-trace.h"
+#include "sdl-offscreen-cursor.h"
 
 /* This is a back buffer for one SDL window and its own GL context. */
 static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLContext context)
@@ -45,6 +46,7 @@ static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLCo
     offscreen->xbox_width = window->w;
     offscreen->xbox_height = window->h;
     offscreen->xbox_capture_attempted = SDL_FALSE;
+    offscreen->xbox_first_swap = 0;
     return 0;
 }
 
@@ -98,6 +100,14 @@ static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
     if (offscreen->xbox_capture_attempted || offscreen->xbox_context != SDL_GL_GetCurrentContext()) {
         return;
     }
+    if (!offscreen->xbox_first_swap) {
+        offscreen->xbox_first_swap = offscreen->xbox_last_swap;
+    }
+    const char *delay_hint = SDL_GetHint("XBOX_SDL_OPENGL_FRAME_DELAY_MS");
+    int delay = delay_hint ? SDL_clamp(SDL_atoi(delay_hint), 0, 15000) : 0;
+    if (offscreen->xbox_last_swap - offscreen->xbox_first_swap < (Uint64)delay) {
+        return;
+    }
     offscreen->xbox_capture_attempted = SDL_TRUE;
     if (!get_integer || !pixel_store || !read_pixels || !bind_framebuffer || !bind_buffer ||
         path_length <= 4 || path_length >= sizeof(path) || SDL_strcmp(trace + path_length - 4, ".txt") != 0) {
@@ -144,6 +154,9 @@ static void XboxSdlCaptureFrame(_THIS, OFFSCREEN_Window *offscreen)
     SDL_strlcpy(path + path_length - 4, ".bmp", 5);
     surface = SDL_CreateRGBSurfaceWithFormatFrom(pixels, offscreen->xbox_width, offscreen->xbox_height,
                                                  32, pitch, SDL_PIXELFORMAT_RGBA32);
+    if (surface) {
+        XboxSdlBlitOffscreenCursor(offscreen->sdl_window, surface);
+    }
     XboxSdlTrace(surface && SDL_SaveBMP(surface, path) == 0 ? "sdl_offscreen_frame=ready\n" : "sdl_offscreen_frame=error\n");
     SDL_FreeSurface(surface);
     SDL_free(pixels);
