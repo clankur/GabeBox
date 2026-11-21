@@ -107,3 +107,36 @@ test('the local Valve main menu owns a bounded, revocable DOM surface inside its
     assert.equal(result.frameCount,0);
     assert.equal(result.delegated,'delegated');
 });
+
+test('the signed Steam surface delivers local submit events and blocks form navigation', async t => {
+    const browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH, chromiumSandbox: true,
+        args: ['--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND']});
+    t.after(() => browser.close());
+    const context = await browser.newContext({offline: true});
+    const entry = 'https://steamloopback.host/index.html?IN_CLIENT=true';
+    await context.route(entry, route => route.fulfill({contentType: 'text/html', body: '<!doctype html><body></body>'}));
+    const page = await context.newPage();
+    let attempts = 0;
+    await context.route('https://example.invalid/**', route => { attempts++; return route.abort(); });
+    await page.goto(entry);
+    await page.addScriptTag({content: fs.readFileSync(require.resolve('../probe/big-picture-bridge/xbox-gamepad-surface.js'), 'utf8')});
+    await page.evaluate(() => {
+        const surface = createXboxGamepadSurface({pid: 100}, {postMessage() {}});
+        const win = surface.open('about:blank?createflags=6292754&minwidth=853&minheight=534&pid=100&browser=1&browserType=3&useragent=Valve%20Steam%20Gamepad', 'SP BPM');
+        win.document.write('<!doctype html><form action="https://example.invalid/blocked"><button>Confirm</button></form>');
+        win.document.close();
+        window.formChecks = {submitted: 0, blocked: false};
+        win.document.addEventListener('submit', () => formChecks.submitted++);
+        win.document.addEventListener('securitypolicyviolation', e => {
+            if (e.effectiveDirective === 'form-action') formChecks.blocked = true;
+        });
+    });
+    const frame = page.frameLocator('#xbox-steam-gamepad-surface');
+    await frame.getByRole('button', {name: 'Confirm'}).click();
+    await page.waitForFunction(() => formChecks.blocked, undefined, {timeout: 3000}).catch(async e => {
+        throw Error(e.message + JSON.stringify({attempts, checks:await page.evaluate(() => formChecks), frames:page.frames().map(f=>f.url())}));
+    });
+    assert.equal(await page.evaluate(() => formChecks.submitted), 1);
+    assert.equal(attempts, 0);
+    assert.equal(await frame.getByRole('button', {name: 'Confirm'}).isVisible(), true);
+});

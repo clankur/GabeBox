@@ -26,8 +26,9 @@ function createXboxGamepadSurface(seed, host) {
             element.name = name;
             element.title = 'Steam Big Picture';
             // The original owner schedules controller input in this window.
-            // allow-scripts enables its callbacks. The child needs no script assets.
-            element.setAttribute('sandbox', 'allow-same-origin allow-scripts');
+            // Valve's exit dialog handles a local HTML form submit. Allow its
+            // submit event while form-action and native navigation policy block destinations.
+            element.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-forms');
             element.setAttribute('csp', "default-src 'none'; script-src 'none'; style-src 'unsafe-inline' https://steamloopback.host; " +
                 "img-src data: https://steamloopback.host https://*.steamstatic.com; font-src https://steamloopback.host; " +
                 "media-src https://steamloopback.host https://*.steamstatic.com; frame-src about:; connect-src 'none'; form-action 'none'; base-uri 'none'");
@@ -35,6 +36,12 @@ function createXboxGamepadSurface(seed, host) {
             document.documentElement.appendChild(element);
             frame = element;
             const popup = frame.contentWindow;
+            // The initial about:blank document doesn't receive a network CSP
+            // header. Apply the form policy to the document before Valve writes its portal.
+            const policy = popup.document.createElement('meta');
+            policy.httpEquiv = 'Content-Security-Policy';
+            policy.content = "form-action 'none'";
+            popup.document.head.appendChild(policy);
             popup.opener = window;
             popup.close = () => close(element);
             host.postMessage('xbox-window-frame-open');

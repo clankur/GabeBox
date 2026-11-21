@@ -39,7 +39,10 @@ function setupHost(steamId, windowState, catalogs) {
     window.fixtureNativePad = {slot: 0, bits: 0, lt: 0, rt: 0, lx: 0, ly: 0, rx: 0, ry: 0};
     window.fixtureSteamId = sessionStorage.getItem('fixture-next-account') || steamId;
     window.fixtureReads = new Map();
-    window.hostEvent = data => events.dispatchEvent(new MessageEvent('message', {data}));
+    window.hostEvent = data => {
+        if (data.event === 'xbox-game') window.fixtureRunningApp = data.appId;
+        events.dispatchEvent(new MessageEvent('message', {data}));
+    };
     (window.chrome ||= {}).webview = {
         addEventListener: events.addEventListener.bind(events),
         postMessage(request) {
@@ -75,6 +78,10 @@ function setupHost(steamId, windowState, catalogs) {
                 case 'restart-client': reply = {result: window.fixtureSteamId ? 'restart' : 'signed-out'}; break;
                 case 'system-mode': reply = {result: false}; break;
                 case 'play': reply = games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: games ? 'not-installed' : 'signed-out'}; break;
+                case 'quit-game':
+                    reply = request.appId === window.fixtureRunningApp && games?.some(g => g.id === request.appId)
+                        ? {result: 'quit-requested'} : {error: 'unavailable'};
+                    break;
                 case 'resume-game': reply = window.fixtureSteamId === steamId && games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: 'unavailable'}; break;
                 default: reply = {error: 'unavailable'};
             }
@@ -134,6 +141,25 @@ async function checkRunningControls(page, popup) {
     const before = await page.evaluate(() => fixtureCalls.filter(c => c.method === 'resume-game').length);
     await resume.evaluate(button => button.click());
     await page.waitForFunction(count => fixtureCalls.filter(c => c.method === 'resume-game' && c.appId === 42).length > count, before);
+    if (accounts) {
+        await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 42, overlay: true}));
+        const exit = popup.getByText('Exit game', {exact: true});
+        const confirm = popup.getByText('Confirm', {exact: true});
+        const cancel = popup.getByText('Cancel', {exact: true});
+        await exit.click();
+        await confirm.waitFor({state: 'visible'});
+        assert.equal(await confirm.getAttribute('type'), 'submit');
+        assert.equal(await cancel.getAttribute('type'), 'button');
+        await cancel.click();
+        await confirm.waitFor({state: 'hidden'});
+        assert.equal(await page.evaluate(() => fixtureCalls.filter(c => c.method === 'quit-game').length), 0);
+        await exit.click();
+        await confirm.click();
+        await page.waitForFunction(() => fixtureCalls.filter(c => c.method === 'quit-game' && c.appId === 42).length === 1,
+            undefined, {timeout: 5000});
+        await confirm.waitFor({state: 'hidden'});
+        console.log('The original Exit dialog canceled without quitting, then confirmed one graceful quit for the active game.');
+    }
     await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 0, overlay: false}));
     if (accounts) {
         const predicates = await nativeLibraryPredicates();
