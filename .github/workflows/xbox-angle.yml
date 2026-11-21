@@ -40,8 +40,20 @@ jobs:
           set(VCPKG_BUILD_TYPE release)
           '@ | Set-Content -Encoding ascii "$triplets/x64-uwp-release.cmake"
           $installedRoot = Join-Path $work 'installed'
-          & "$vcpkg/vcpkg.exe" install angle:x64-uwp-release --classic `
-            "--overlay-triplets=$triplets" "--x-install-root=$installedRoot"
+          $env:VCPKG_FORCE_SYSTEM_BINARIES = '1'
+          & cmake --version
+          & ninja --version
+          try {
+            & "$vcpkg/vcpkg.exe" install angle:x64-uwp-release --classic `
+              "--overlay-triplets=$triplets" "--x-install-root=$installedRoot"
+          } catch {
+            Get-ChildItem "$vcpkg/buildtrees/detect_compiler", "$vcpkg/buildtrees/angle" -Filter '*.log' `
+              -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(out|err)\.log$' } | ForEach-Object {
+                Write-Output $_.Name
+                Get-Content $_.FullName -Tail 100
+              }
+            throw
+          }
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
