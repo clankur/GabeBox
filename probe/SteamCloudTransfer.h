@@ -2,6 +2,7 @@
 
 #include <winrt/Windows.System.Threading.h>
 #include <winrt/Windows.Web.Http.Filters.h>
+#include <winrt/Windows.Web.Http.Headers.h>
 #include <winrt/Windows.Web.Http.h>
 
 #include "SteamCloudManifest.h"
@@ -19,11 +20,15 @@ struct ListCall {
     using Release = bool (__cdecl *)(void *, std::uint64_t);
 
     SteamSignInHandles *session = nullptr;
+    std::uint64_t account = 0;
+    std::int32_t pipe = 0;
     void *adapter = nullptr;
     std::uintptr_t const *methods = nullptr;
     std::uint64_t handle = 0;
 
-    bool MatchesSession() const { return session != nullptr && session == liveSteamSession; }
+    bool MatchesSession() const {
+        return session && session == liveSteamSession && session->accountId == account && session->pipe == pipe;
+    }
 
     bool Open(SteamSignInHandles &active) {
         using GetInterface = void *(__cdecl *)(void *, std::int32_t, std::int32_t, const char *);
@@ -42,6 +47,8 @@ struct ListCall {
                 methods[0] != base + 0x734a80 || methods[1] != base + 0x734a60 ||
                 methods[2] != base + 0x734a40 || methods[3] != base + 0x734a70) return false;
         session = &active;
+        account = active.accountId;
+        pipe = active.pipe;
         return true;
     }
 
@@ -70,7 +77,9 @@ public:
     }
 
     ~CloudDeadline() {
-        if (timer_) timer_.Cancel();
+        try {
+            if (timer_) timer_.Cancel();
+        } catch (winrt::hresult_error const&) {}
     }
 };
 
@@ -90,7 +99,7 @@ inline bool ValidCloudUri(Uri const& uri) {
     return false;
 }
 
-inline IAsyncOperation<winrt::hstring> StageFile(HttpClient client, File const& candidate,
+inline IAsyncOperation<winrt::hstring> StageFile(HttpClient client, File candidate,
         winrt::Windows::Storage::StorageFile stageFile, ULONGLONG deadline) {
     using namespace winrt::Windows::Security::Cryptography;
     using namespace winrt::Windows::Security::Cryptography::Core;
@@ -133,7 +142,8 @@ inline IAsyncOperation<winrt::hstring> StageFile(HttpClient client, File const& 
         received += length;
     }
     if (received != candidate.bytes) co_return L"transfer-length-mismatch";
-    if (CryptographicBuffer::EncodeToHexString(hash.GetValueAndReset()) != winrt::to_hstring(candidate.sha1)) {
+    const auto expected = CryptographicBuffer::DecodeFromHexString(winrt::to_hstring(candidate.sha1));
+    if (!CryptographicBuffer::Compare(hash.GetValueAndReset(), expected)) {
         co_return L"transfer-hash-mismatch";
     }
     if (!(co_await output.FlushAsync())) co_return L"stage-write-error";
@@ -149,7 +159,7 @@ inline winrt::hstring Result(std::wstring_view status, std::int32_t steamResult 
     JsonObject reply;
     reply.SetNamedValue(L"status", JsonValue::CreateStringValue(winrt::hstring(status)));
     if (steamResult) reply.SetNamedValue(L"steamResult", JsonValue::CreateNumberValue(steamResult));
-    reply.SetNamedValue(L"files", files ? files : JsonArray{});
+    reply.SetNamedValue(L"files", (files ? files : JsonArray{}).as<IJsonValue>());
     return reply.Stringify();
 }
 
@@ -166,6 +176,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
 
     if (!app || !stage) co_return Result(L"invalid-request");
     try {
+        winrt::apartment_context caller;
         ListCall call;
         const auto request = ListRequest(app);
         {
@@ -207,6 +218,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
             }
             if (complete) break;
             co_await winrt::resume_after(std::chrono::milliseconds(150));
+            co_await caller;
         }
         if (!complete) co_return Result(L"cloud-timeout");
 
@@ -244,7 +256,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
             entry.SetNamedValue(L"stagedName", JsonValue::CreateStringValue(winrt::hstring(name)));
             files.Append(entry);
         }
+        {
+            std::lock_guard lock(steamSessionMutex);
+            if (!call.MatchesSession() || !call.session->OwnsSession()) co_return Result(L"session-unavailable");
+        }
         co_return Result(L"ready", 1, files);
+    } catch (winrt::hresult_canceled const&) {
+        co_return Result(L"transfer-timeout");
     } catch (winrt::hresult_error const&) {
         co_return Result(L"cloud-io-error");
     }
