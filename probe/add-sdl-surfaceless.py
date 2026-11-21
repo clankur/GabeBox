@@ -14,7 +14,7 @@ def replace_once(source, old, new):
 def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
     for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h',
-                     'sdl-gpu-producer.cpp', 'sdl-gpu-protocol.h', 'mesa-glinterop.h'):
+                     'sdl-gpu-producer.cpp', 'sdl-gpu-protocol.h', 'mesa-glinterop.h', 'sdl-swap-clock.h'):
         shutil.copyfile(Path(__file__).with_name(filename), offscreen / filename)
 
     cmake = tree / 'CMakeLists.txt'
@@ -84,6 +84,7 @@ def add_surfaceless(tree):
 
     window_header = offscreen / 'SDL_offscreenwindow.h'
     source = window_header.read_text(encoding='utf-8')
+    source = '#include "sdl-swap-clock.h"\n' + source
     old = '    EGLSurface egl_surface;'
     source = replace_once(source, old, old + '''
     SDL_GLContext xbox_context;
@@ -98,6 +99,7 @@ def add_surfaceless(tree):
     unsigned xbox_readback_samples;
     Uint64 xbox_readback_ticks;
     int xbox_width, xbox_height;
+    XboxSdlSwapClock xbox_swap_clock;
     Uint64 xbox_last_swap;
     Uint64 xbox_first_swap;
     SDL_bool xbox_capture_attempted;''')
@@ -140,6 +142,9 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
         if (interval < 0 || interval > 4) {
             return SDL_SetError("Unsupported offscreen swap interval");
         }
+        char value[40];
+        SDL_snprintf(value, sizeof(value), "sdl_swap_interval=%d\\n", interval);
+        XboxSdlTrace(value);
         _this->egl_data->egl_swapinterval = interval;
         return 0;
     }
@@ -186,10 +191,19 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
     }''')
     old = '    return SDL_EGL_SwapBuffers(_this, offscreen_wind->egl_surface);'
     source = replace_once(source, old, '''    if (offscreen_wind->egl_surface == EGL_NO_SURFACE) {
-        Uint32 frame_time = (Uint32)_this->egl_data->egl_swapinterval * 16;
-        Uint64 elapsed = SDL_GetTicks64() - offscreen_wind->xbox_last_swap;
-        if (elapsed < frame_time) {
-            SDL_Delay(frame_time - (Uint32)elapsed);
+        int interval = _this->egl_data->egl_swapinterval;
+        XboxSdlSwapClock *clock = &offscreen_wind->xbox_swap_clock;
+        if (interval > 0) {
+            if (!clock->frequency) clock->frequency = SDL_GetPerformanceFrequency();
+            Uint64 now = SDL_GetPerformanceCounter();
+            Uint64 deadline = XboxSdlNextSwap(clock, now, interval);
+            while (now < deadline) {
+                Uint64 remaining = deadline - now;
+                SDL_Delay((Uint32)((remaining * 1000 + clock->frequency - 1) / clock->frequency));
+                now = SDL_GetPerformanceCounter();
+            }
+        } else {
+            clock->interval = 0;
         }
         offscreen_wind->xbox_last_swap = SDL_GetTicks64();
         XboxSdlResizeFramebuffer(_this, offscreen_wind);
