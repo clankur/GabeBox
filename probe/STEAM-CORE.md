@@ -190,6 +190,8 @@ On Series X, `1.0.42.0` initially reported install state `1` after upgrading des
 
 ## Series X observations
 
+To identify an executable's architecture requirement on the console, use `inspect-game` with its installed path and AppID. Terraria's installed `Terraria.exe` reports `xbox_executable_requirement=requires-x86`. Managed IL without the 32-bit-required flag reports `managed-il`. Local play requires a publisher-supplied x64 build or an AnyCPU build with compatible runtime and native dependencies. The header check alone cannot establish that the game will launch.
+
 - Windows SDK template `1.0.13.0` and locally signed control `1.0.14.0` both loaded the owned library and found its export. With all three Valve files absent, `LoadPackagedLibrary` returned `0x7E` (`ERROR_MOD_NOT_FOUND`).
 - The locally built `1.0.15.0` package installed, and Xbox found the core and both supporting Valve files. The owned library still loaded. The Valve core load instead returned `0x7F` (`ERROR_PROC_NOT_FOUND`). The probe never reached its export lookup. [Template build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44860592666)
 
