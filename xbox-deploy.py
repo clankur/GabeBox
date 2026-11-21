@@ -339,6 +339,7 @@ def trial_sdl(portal, args):
                 raise ValueError('The installed SDL2 matches neither the original nor this trial artifact.')
             stop_probe_for_sdl_trial(portal, package)
             replace_sdl(original)
+            print(f'Verified the original SDL2 for {name}.', flush=True)
         else:
             _, raw = portal.request('GET', probe_report_path(package))
             if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
@@ -358,10 +359,10 @@ def trial_sdl(portal, args):
                             raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
                         stop_probe_for_sdl_trial(portal, package)
                         replace_sdl(original)
+                    print(f'Verified the original SDL2 for {name}.', flush=True)
                 except (OSError, ValueError):
                     print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
                     raise
-        print(f'Verified the original SDL2 for {name}.', flush=True)
     finally:
         lock.unlink()
 
