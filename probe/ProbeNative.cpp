@@ -1181,6 +1181,44 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManife
     co_return value != view.npos && view.substr(value, 3) == L"\"4\"";
 }
 
+// Observe the Java process we actually launched. The SDL surface can take
+// ownership of its original handle after the first frame and release it while
+// returning to Steam. This independent wait survives that handoff.
+winrt::fire_and_forget ObserveSlayChild(HANDLE child, std::wstring dataRoot, std::uint64_t launch) {
+    try {
+        static std::mutex reportMutex;
+        static std::uint64_t newestLaunch{};
+        const auto path = dataRoot + L"\\slay-child-status.txt";
+        auto write = [&](std::string const& state, bool starting) {
+            std::lock_guard lock(reportMutex);
+            if (starting) newestLaunch = launch;
+            if (newestLaunch != launch) return;
+            HANDLE rawFile = CreateFile2(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, nullptr);
+            if (rawFile == INVALID_HANDLE_VALUE) return;
+            winrt::handle file{rawFile};
+            const auto line = "steam_slay_console_run=" + std::to_string(launch) + "\r\n" + state;
+            DWORD written{};
+            WriteFile(file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+        };
+        winrt::handle process;
+        if (!DuplicateHandle(GetCurrentProcess(), child, GetCurrentProcess(), process.put(),
+                             SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+            write("child_status=observe-error\r\n", true);
+            co_return;
+        }
+        write("child_status=started\r\n", true);
+        co_await winrt::resume_on_signal(process.get());
+        DWORD code{};
+        if (GetExitCodeProcess(process.get(), &code)) {
+            write("child_status=exited\r\nchild_exit_code_u32=" + std::to_string(code) + "\r\n", false);
+        } else {
+            write("child_status=exit-code-unavailable\r\n", false);
+        }
+    } catch (...) {
+        // Recording an observation must never affect launching, returning or quitting.
+    }
+}
+
 struct SteamGameProcess {
     winrt::handle handle;
     std::wstring_view checkpoint = L"not-reported";
@@ -1914,6 +1952,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             }
             slayProcess.attach(child.hProcess);
             CloseHandle(child.hThread);
+            ObserveSlayChild(slayProcess.get(), dataRoot,
+                (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) | launchTime.dwLowDateTime);
             report += L"steam_slay_console_run=" + id + L"\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
