@@ -44,16 +44,22 @@ internal static class StartupHook
         {
             Record("stardew_managed=unhandled-exception");
             var fault = args.ExceptionObject as Exception;
-            for (int depth = 0; fault != null && depth < 5; depth++, fault = fault.InnerException)
+            var inner = fault;
+            for (int depth = 0; inner != null && depth < 5; depth++, inner = inner.InnerException)
             {
-                Record("stardew_managed_fault=" + fault.GetType().FullName);
-                if (fault.Message.IndexOf("opengl", StringComparison.OrdinalIgnoreCase) >= 0)
+                Record("stardew_managed_fault=" + inner.GetType().FullName);
+                if (inner.Message.IndexOf("opengl", StringComparison.OrdinalIgnoreCase) >= 0)
                     Record("stardew_managed_detail=opengl");
-                if (fault.Message.IndexOf("SDL", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (inner.Message.IndexOf("SDL", StringComparison.OrdinalIgnoreCase) >= 0)
                     Record("stardew_managed_detail=sdl");
-                if (fault.Message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    fault.Message.IndexOf("denied", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (inner.Message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    inner.Message.IndexOf("denied", StringComparison.OrdinalIgnoreCase) >= 0)
                     Record("stardew_managed_detail=access-denied");
+            }
+            if (fault?.GetType().FullName == "Microsoft.Xna.Framework.Graphics.NoSuitableGraphicsDeviceException")
+            {
+                try { GraphicsStartupDiagnostic.Record(fault, Record); }
+                catch (Exception) { Record("stardew_graphics_probe=incomplete"); }
             }
         };
         AppDomain.CurrentDomain.ProcessExit += (_, args) => Record("stardew_managed=process-exit");

@@ -230,7 +230,15 @@ def stardew_managed_summary(raw):
                r'stardew_managed_exception=(?:dll-not-found|entry-point-not-found|bad-image-format|platform-not-supported)|'
                r'stardew_managed_fault=[a-zA-Z0-9_.+]{1,128}|'
                r'stardew_managed_detail=(?:opengl|sdl|access-denied)|'
-               r'stardew_managed_library=(?:opengl32|sdl2)')
+               r'stardew_managed_library=(?:opengl32|sdl2)|'
+               r'stardew_graphics_frame=(?:MonoGame\.OpenGL\.|Microsoft\.Xna\.Framework\.Graphics\.)[a-zA-Z0-9_.+]{1,140}|'
+               r'stardew_graphics_sdl_error=(?:opengl|wgl)|'
+               r'stardew_graphics_sdl_driver=(?:windows|none|other|unavailable)|'
+               r'stardew_graphics_gl_context=(?:absent|present)|'
+               r'stardew_graphics_system_opengl=(?:loaded|0x[0-9A-F]{8})|'
+               r'stardew_graphics_d3d11_hresult=(?:unavailable|0x[0-9A-F]{8})|'
+               r'stardew_graphics_d3d11_feature_level=0x[0-9A-F]{4}|'
+               r'stardew_graphics_probe=incomplete')
     lines = (raw or b'').decode('ascii', errors='replace').splitlines()
     return '\n'.join(dict.fromkeys(line for line in lines if re.fullmatch(allowed, line))) or 'stardew_managed=no-output'
 
