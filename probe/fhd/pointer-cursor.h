@@ -15,9 +15,9 @@ constexpr auto image(bool pressed) {
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
             const int dx = distance(x - center), dy = distance(y - center);
-            const int near = dx < dy ? dx : dy, far = dx > dy ? dx : dy;
-            const bool outline = (near <= 2 && far >= 3) || far <= 2;
-            const bool fill = (near <= 1 && far >= 4 && far < center) || far <= 1;
+            const int minor = dx < dy ? dx : dy, major = dx > dy ? dx : dy;
+            const bool outline = (minor <= 2 && major >= 3) || major <= 2;
+            const bool fill = (minor <= 1 && major >= 4 && major < center) || major <= 1;
             const std::uint32_t ink = pressed ? 0xff00bfffU : 0xffffffffU;
             pixels[y * size + x] = fill ? ink : outline ? 0xff101010U : 0;
         }
