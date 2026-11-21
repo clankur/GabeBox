@@ -89,6 +89,8 @@ A verified library result requires Valve’s native user interface to report onl
 
 In the library, use the controller D-pad to move between games. Right focuses the selected title’s available **Download** or **Play** button. Press **A** to activate the focused button, and use **B** to return from an action to the list or from a title to search. From search, Up reaches **Sign out** and Down returns to the first visible title. [UWP gamepad navigation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
 
+For an installed copy of Slay the Spire, move Down from **Play** to **Cloud saves** and choose **Download and use saves**. The app uses the current Steam session to fetch and verify the Steam Cloud files. It backs up the existing game save folders under `LocalState/SteamCloud/646570/backup-*/backup`, installs the cloud files, and returns focus to **Play**. [Additional cloud save profiles](https://github.com/clankur/steam-xbox-devmode/issues/56)
+
 Game rows load Steam's public small capsule artwork as they approach the viewport. The client schedules up to three image loads at once and releases decoded artwork more than a viewport away. It caches up to 256 entries in IndexedDB, with an 8 MiB cap on JPEG payloads and a 30-day freshness window. Missing art shows the game’s initial. [Steam graphical assets](https://partner.steamgames.com/doc/store/assets)
 
 Read the library's aggregate artwork counters after the visible rows have loaded. `art_run_id` identifies the app process, and `art_active=0` marks a settled batch. A fresh app restart lets you compare `art_network_requests` with `art_disk_hits` on the same library viewport.
@@ -106,6 +108,20 @@ Read an existing report without restarting the app or interrupting the session.
 ```sh
 python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.38.0
 ```
+
+## Direct Steam Cloud research
+
+The Xbox sign-in sends the QR approval's Steam client refresh token to the pinned native client. Valve's partner `ICloudService` instead uses a Valve-issued OAuth client with `read_cloud` scoped to the requested AppID. The public `ISteamRemoteStorage::GetFileCount` API enumerates local files that Steam has synchronized. [Steam OAuth](https://partner.steamgames.com/doc/webapi_overview/oauth#steam_cloud) · [Steam Cloud Web API](https://partner.steamgames.com/doc/webapi/ICloudService) · [ISteamRemoteStorage](https://partner.steamgames.com/doc/api/ISteamRemoteStorage#GetFileCount)
+
+The Steam client protocol has a separate Cloud service. Its protobuf describes `EnumerateUserFiles`, `GetAppFileChangelist` and `ClientFileDownload`. The file listing can include hashes, path prefixes and persistence states. The download response can include an HTTPS destination, request headers, raw and transfer sizes, and an encryption marker. SteamKit shows how authenticated client messages assign a source job ID and correlate the matching response. [Steam client Cloud schema](https://github.com/SteamTracking/Protobufs/blob/master/steam/steammessages_cloud.steamclient.proto) · [SteamKit client messaging](https://github.com/SteamRE/SteamKit/blob/master/SteamKit2/SteamKit2/Steam/Handlers/SteamUnifiedMessages/SteamUnifiedMessages.cs)
+
+An offline inspection of the `1.0.220.0` package's `steamclient64.dll` (SHA-256 `5237b35064b7e1cf26754959643341fdf36c55ffefea54dcf20de6d62b46d822`) found RTTI-backed vtables with executable entries for `CAdapterSteamUnifiedMessages001`, `IClientUnifiedMessagesMap` and `IClientRemoteStorageMap`. It contains the two versioned client download and changelist method names and the `EnumerateUserFiles` request and response types. Valve's public client documentation still lists a unified messages getter, while its published Source SDK header labels it private and deprecated for `SteamClient020`. The Xbox package uses `SteamClient023`, so the getter signature and table need validation against the pinned build. [ISteamClient interface](https://partner.steamgames.com/doc/api/ISteamClient) · [Valve SDK header](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/steam/isteamclient.h)
+
+The adapter uses SteamClient023's generic getter and the image-pinned unified-message adapter. It polls the response handle for `Cloud.EnumerateUserFiles#1`, downloads the files over HTTPS, and verifies each byte count and SHA-1 before handing the files to the restore code. The transport never writes to Steam Cloud.
+
+The `1.0.223.0` Series X build authenticated with its saved Steam session and downloaded and verified 67 Slay the Spire files. A `1.0.224.0` run placed all 67 files in an isolated copy of the same save-folder layout and verified that an existing test file survived and was backed up. One earlier transfer returned an HTTP error and a fresh run succeeded. Both fixtures leave the real game folders untouched. [Xbox SDK build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44925402014)
+
+The app maps Slay the Spire's cloud paths to the verified install's `preferences` and `saves` directories. It prepares the new directories before moving any active files. If a restore is interrupted, the launcher uses the journal to recover the previous files before starting the game. Use `xbox-deploy.py report --version VERSION --steam-cloud` to read the latest status. For a one-time verification package, add an empty `steam-cloud-preview.txt` to the local layout before signing. It fetches and verifies the files and restores them into temporary app storage. [Mega Crit save folders](https://steamcommunity.com/app/646570/discussions/0/1743353164094689674/#c1771511442697212245)
 
 ## Test an owned game download
 

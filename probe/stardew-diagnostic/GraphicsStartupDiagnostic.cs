@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 
 internal static class GraphicsStartupDiagnostic
 {
@@ -18,6 +20,12 @@ internal static class GraphicsStartupDiagnostic
 
     [DllImport("kernel32.dll")]
     private static extern bool FreeLibrary(IntPtr module);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint GetModuleFileNameW(IntPtr module, StringBuilder filename, uint length);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern IntPtr LoadPackagedLibrary(string filename, uint reserved);
 
     [DllImport("d3d11.dll", ExactSpelling = true)]
     private static extern int D3D11CreateDevice(IntPtr adapter, uint driverType, IntPtr software, uint flags,
@@ -45,7 +53,13 @@ internal static class GraphicsStartupDiagnostic
             if (error.IndexOf("WGL", StringComparison.OrdinalIgnoreCase) >= 0)
                 write("stardew_graphics_sdl_error=wgl");
             var driver = Marshal.PtrToStringAnsi(SDL_GetCurrentVideoDriver());
-            write("stardew_graphics_sdl_driver=" + (driver == "windows" ? "windows" : driver == null ? "none" : "other"));
+            write("stardew_graphics_sdl_driver=" + (driver switch
+            {
+                "windows" => "windows",
+                "offscreen" => "offscreen",
+                null => "none",
+                _ => "other",
+            }));
             write("stardew_graphics_gl_context=" + (SDL_GL_GetCurrentContext() == IntPtr.Zero ? "absent" : "present"));
         }
         catch (DllNotFoundException) { write("stardew_graphics_sdl_driver=unavailable"); }
@@ -56,11 +70,32 @@ internal static class GraphicsStartupDiagnostic
         if (gl != IntPtr.Zero)
         {
             write("stardew_graphics_system_opengl=loaded");
+            var path = new StringBuilder(1024);
+            uint length = GetModuleFileNameW(gl, path, (uint)path.Capacity);
+            if (length > 0 && length < path.Capacity)
+            {
+                var directory = Path.GetDirectoryName(path.ToString());
+                var appDirectory = Path.GetDirectoryName(typeof(GraphicsStartupDiagnostic).Assembly.Location);
+                var source = string.Equals(directory, appDirectory, StringComparison.OrdinalIgnoreCase) ? "bundled" :
+                    string.Equals(directory, Environment.SystemDirectory, StringComparison.OrdinalIgnoreCase) ? "system" : "other";
+                write("stardew_graphics_opengl_origin=" + source);
+            }
             FreeLibrary(gl);
         }
         else
         {
             write("stardew_graphics_system_opengl=0x" + Marshal.GetLastWin32Error().ToString("X8"));
+        }
+
+        var packagedGl = LoadPackagedLibrary("opengl32.dll", 0);
+        if (packagedGl != IntPtr.Zero)
+        {
+            write("stardew_graphics_packaged_opengl=loaded");
+            FreeLibrary(packagedGl);
+        }
+        else
+        {
+            write("stardew_graphics_packaged_opengl=0x" + Marshal.GetLastWin32Error().ToString("X8"));
         }
 
         try

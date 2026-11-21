@@ -19,6 +19,10 @@ Check a failed launch against the installed executable's architecture, supported
 
 Register an adapter only when a bundled runtime can execute the verified installed format. An adapter declares its AppID, backend, native authorization method, success marker, and start function. The dispatcher opens a hosted runtime only after that method verifies the selected install. A refused or failed authorization returns to the library with its diagnostic.
 
+The SDL player fills the Xbox viewport and fits the game's complete image at its original aspect ratio. Hold Menu and View together to open the player menu. Use the D-pad and A to choose Resume or Quit to library. The game keeps its regular Menu and View actions when each button is pressed individually.
+
+A hosted SDL game with the keyboard-capable SDL build receives physical keyboard keys through the same player. To type with a controller, focus the game's text field, hold Menu and View, and select **Keyboard**. Enter text with the Xbox keyboard, then choose **Send text**. Use the game's confirmation control to continue. The Xbox player closes the text overlay after sending and returns focus to the game.
+
 For DOS, the native component allowlists the exact supported AppID and directory. The fixed profile in `signin/xcom-dos.js` records the publisher's DOS mount, startup command, supported configuration and file exclusions. The host handles file copying, process lifetime, return to the library, and optional local trial snapshots. When adding a DOS title, verify its owned depot, define a separate fixed profile, and extend the native allowlist to that exact title and install path. Keep publication of the runtime separate from the user's game files. Input and save persistence also need their own validation for each supported backend.
 
 ## Verification
@@ -31,3 +35,75 @@ python3 -m unittest discover -s tests
 ```
 
 The tests cover native Play and two synthetic hosted profiles, authorization refusal, launch-option layout, DOS files and empty save slots, and stale callbacks after a game is closed. On Xbox, verify each backend with a real installed title. For hosted games, capture a recognizable frame from the automatic trial and exercise input and return to the library before marking those behaviors verified. For Windows titles, keep the actual Steam result and process exit in the compatibility record.
+
+### Native process startup snapshot
+
+For a local native Steam Play trial, add `--launch-app-id 975370 --startup-snapshot` when preparing the package. The option binds the diagnostic to that AppID. Before submitting Play, the probe waits 50 ms on its own process and records the control outcome and the probe PID. A healthy control reports `steam_launch_snapshot_control=running`.
+
+Once Steam identifies a newly created process for the selected AppID, the probe writes its PID, creation time, available executable basename, and immediate Windows wait result at `captured-process`. It then waits up to one second on the same handle on a background thread and writes `sampled-process` before returning to Steam's callback and window polling. `running` describes an unsignaled handle at the sample time. `exited` includes the actual exit code. Neither outcome establishes a game window.
+
+For Dwarf Fortress, compare the stock and rebuilt SDL2 on the same installed package. Use the captured PID and creation time to correlate Device Portal observations. If only the first snapshot survives, record its exact fields and whether the probe PID still exists before restarting the app.
+
+The Series X control with the stock SDL2 and no Visual C++ framework dependency exited immediately with `0xC0000135`. Adding the official signed desktop Visual C++ framework as a package dependency changed the startup exit to `0xC0000139`. The loader control identified `imm32!ImmGetIMEFileNameA` as unavailable. Keep the framework dependency in both arms of an SDL comparison.
+
+With the version-matched SDL 2.26.2 rebuild using `SDL_DISABLE_WINDOWS_IME`, the same package captured `Dwarf Fortress.exe` and found its process handle still running at the one-second sample. The trial did not reach a confirmed game window. Restore the publisher's SDL2 after the experiment and verify its original hash. The next comparison should record whether the process reaches SDL window creation or renderer initialization. [Dwarf Fortress compatibility results](https://github.com/clankur/steam-xbox-devmode/issues/35)
+
+The shared SDL trial artifacts can write initialization, window, OpenGL and renderer checkpoints when started under `--startup-snapshot`. Read a run with `report --version "$version" --sdl-startup`. Use `--startup-sdl-renderer software` or `--startup-sdl-renderer direct3d11` to request a renderer in a separate signed test. `--startup-sdl-dummy-video` requests the SDL offscreen test driver. `--startup-sdl-working-directory` asks SDL's main entry point to set the child process's current directory to the verified app-local game installation. The native report records requested settings and the SDL trace records which startup calls returned.
+
+Use `--startup-wait-only` with `--startup-snapshot` and `--repeat-launch` to classify a fast exit on the captured Windows process handle. The probe writes up to twelve 500 ms samples and records its app memory usage and budget when available. It skips Steam's window query during that observation. The final status `process-wait-complete` describes the diagnostic, and the sampled Windows exit code describes the process.
+
+On `1.0.188.0`, Dwarf Fortress resolved the executable base path and initialized SDL's timer, then `SDL_GetPrefPath` returned an error before it initialized video. Add `--startup-sdl-local-preferences` to create `LocalState/SDLPreferences/<AppID>` for a repeatable comparison with the shared SDL fallback build. The child first calls the original SDL lookup. On failure it attempts the provided directory and logs `sdl_pref_path_local=ready` if it obtains a writable preference path. This stores the trial's preferences inside the sideloaded package's local data.
+
+Build `1.0.189.0` reached SDL video, window creation and the software renderer after applying that fallback. The first captured frame showed the game's loading screen. For a later frame, prepare with `--startup-sdl-late-frame --startup-sdl-dummy-video --startup-sdl-renderer software` and run the shared `sdl-trial` with `--frame "$frame_bmp" --frame-timeout 38`. Build `1.0.191.0` captured the full 1200 × 800 Dwarf Fortress main menu twelve seconds after the first presentation, with all twelve half-second process samples reporting `running`. [Xbox SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44909296379) · [Shared SDL build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44909296473)
+
+### Play Dwarf Fortress in the Steam library
+
+Prepare the regular sign-in package with `--startup-sdl-host` and the official desktop VC++ framework. Deploy it and install the checksum-verified shared SDL 2.26.2 artifact with `sdl-trial --install-only --app-id 975370`. The CLI confirms Steam's local manifest and the publisher DLL before replacement, verifies the installed replacement, and stores the original in the specified backup directory. Use the same artifact and backup directory with `sdl-trial --restore-only` to restore it.
+
+The library's Play action uses Steam to check the license and launch the installed executable. The SDL player receives software frames and uses controller-driven pointer input for Dwarf Fortress. Move with the left stick or D-pad and press A to click. The Series X trial `1.0.218.0` confirmed fullscreen presentation and pointer event delivery with the existing version-matched SDL adapter. [Live SDL workflow](https://github.com/clankur/steam-xbox-devmode/actions/runs/44910058092) · [Fullscreen Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44920639328)
+
+### Play Stardew Valley in the Steam library
+
+Build the Stardew startup hook from the managed diagnostic and supply its DLL to `--stardew-sdl-host`. Stage Mesa 26.2.2 with `--sdl-surfaceless --dxil-archive "$dxc_zip"` and deploy both official VC++ frameworks. Use the shared SDL `2.30.9` build with OpenGL frame delivery and resizing. Install that artifact for AppID `413150` with the same `sdl-trial --install-only` workflow and a dedicated backup directory. The library starts the verified Steam installation and reuses the SDL player, mailbox and pointer controls. [Stardew startup hook](https://github.com/clankur/steam-xbox-devmode/pull/50) · [Mesa and DXIL staging](https://github.com/clankur/steam-xbox-devmode/pull/53)
+
+For a console trial, add `--launch-app-id 413150 --repeat-launch` to the hosted Stardew layout and run `probe --steam-core` through the Xbox CLI. `1.0.211.0` presented the full title menu, acknowledged the host's test pointer event and remained on the title menu at the 40-second screenshot. The trial verifies startup, display and pointer delivery. Gameplay, audio and saves still need console validation. [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047) · [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965212)
+
+For controller play, use the shared SDL2 build with the virtual gamepad transport. The player forwards Xbox buttons, both sticks and both triggers as SDL game controller state. `steam_sdl_host_gamepad=delivered` verifies test input was readable through that SDL device on the console. [Controller SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44921504825)
+
+### Play Slay the Spire in the Steam library
+
+Supply `--slay-sdl-host "$runtime_dir"` with the built `SlayConsoleDiagnostic` classes, signed-template Java bridge DLLs, adapted LWJGL JAR, verified shared SDL 2.30.9 DLL and license, and `slay-font-atlas-limit.txt` containing `512`. Stage the same Mesa and DXIL release files alongside the Java and SDL adapters. The current library launch authorizes the installed Steam AppID `646570` before starting the original launcher in its packaged Java runtime. The Xbox SDL player owns the frame and pointer mailbox throughout the session. [Slay Java and LWJGL adapter](https://github.com/clankur/steam-xbox-devmode/pull/52) · [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047)
+
+With `--launch-app-id 646570 --repeat-launch`, `1.0.213.0` reached Slay the Spire's save-slot selection in the live Xbox player and was still animating at the 40-second capture. `1.0.214.0` confirmed pointer delivery using a repeated test motion after input initialization. Keep the automated trial at the menu and validate save creation during a separate gameplay session. [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918568603) · [Slay bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918265865)
+
+Build the LWJGL adapter with the pinned libGDX 1.9.5 API inputs using `--gdx-api` and `--gdx-controllers-api` to supply its desktop gamepad provider. In `1.0.217.0`, the game recognized the bridged controller through libGDX and displayed its own Xbox button prompt in fullscreen. [Controller bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44920534966)
+
+Slay's text entry requires the keyboard-capable LWJGL adapter, native display bridge, and shared SDL2 build together. For the save-slot name prompt, test typing and Backspace with a physical keyboard, then use the player **Keyboard** action to send text using the controller. The game is responsible for accepting the name and creating the save slot.
+
+The Series X run of `1.0.221.0` reached save-slot selection and reported controller delivery. The live mailbox advertised keyboard support. Local tests checked LWJGL key transitions, editing and Unicode, and the player's controller text entry. Entering a name with the Xbox system keyboard still needs a console check. The regular library build `1.0.222.0` uses the same keyboard components. [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44923292933) · [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44922918078) · [Slay bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44922917181)
+
+Build the hosted adapter with JDK 11 or later and the pinned upstream JARs. Use a fresh output path. The selected virtual window size is embedded in the adapter. The player scales the window to fit the TV and maps input into the same dimensions.
+
+```sh
+python3 probe/build-lwjgl-sdl.py \
+  "$deps/lwjgl-2.9.2-sources.jar" "$deps/lwjgl-2.9.2.jar" "$deps/asm-9.7.1.jar" \
+  "$runtime_dir/slay-lwjgl-display.jar" \
+  --gdx-api "$deps/gdx-1.9.5.jar" --gdx-controllers-api "$deps/gdx-controllers-1.9.5.jar" \
+  --render-size 854x480
+```
+
+Pass the resulting runtime directory to the existing `--slay-sdl-host` packaging option. Selecting **Play** starts the signed-in library launch. The offscreen game uses the TV player's presentation clock. A configured 60 FPS permits the renderer to produce up to 120 frames per second so fresh frames can be ready between TV refreshes. Lower frame limits retain their configured values. The adapter reads the player's existing FPS setting from `info.displayconfig` and stores subsequent Xbox FPS changes in app-local `slay-native-temp/xbox-slay-fps.txt`.
+
+On Series X, the original libGDX pixmap decoder failed on both `title/title.jpg` and `bottomScene/scene.jpg`. The hosted adapter decodes the title and act atlas pages at half size on each axis and retains the original atlas coordinates. The Series X loaded the title and entered an Act 1 encounter with those assets. Other game textures use the original loader.
+
+For a presentation trace, add `--launch-app-id 646570 --repeat-launch --measure-sdl-frames` to a hosted Slay test package. The player counts a frame after it submits a new SDL sequence to the fullscreen canvas. The report includes a 30-second average, the lowest rolling one-second count, and frame intervals. A slow load can lower that first sample. For steady-state gameplay comparisons, start each sample after the scene has finished loading. Capture Device Portal screenshots outside the sample period because a capture can stall the game for about half a second.
+
+The default hosted resolution is 854×480, scaled to fill the 16:9 player. In a Series X test with a fresh, isolated Ironclad profile, each scene warmed up for eight seconds before a 30-second sample. Fullscreen presentation used lossless RGB frame differences. A player with an older native bridge uses the existing full-frame transfer.
+
+| Scene | New frames presented per second | Lowest rolling one-second count | Longest frame interval |
+| --- | ---: | ---: | ---: |
+| Title menu | 61.98 | 58 | 34.0 ms |
+| Act 1 map | 62.42 | 60 | 34.3 ms |
+| Act 1 combat | 61.52 | 56 | 48.4 ms |
+
+The combat sample included two attacks, three blocks, enemy turns, and hand redraws. These counts measure the application submitting distinct frames to the canvas. At 960×540 the same transfer averaged 55.82 FPS during combat, including a Device Portal screenshot. The baseline title test with the original frame timers averaged 15.25 FPS at 1280×720.

@@ -195,7 +195,7 @@ def slay_exception_types(text):
 def slay_console_summary(raw):
     if not raw:
         return 'slay_console=no-output'
-    text = raw.decode('utf-8', errors='replace')
+    text = raw.decode('utf-8', errors='replace').replace('\r\n', '\n')
     result = re.findall(r'^slay_console=(?:helper-started|create-error|running-at-timeout|exit--?\d+)\r?$', text, re.M)
     if not result or result[0] != 'slay_console=helper-started':
         return 'slay_console=unrecognized-output'
@@ -203,11 +203,26 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_capture=(?:truncated|read-error|incomplete)\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_cwd=(?:game-directory|unexpected-main-class|native-load-error)\r?$', text, re.M))
     result.extend(re.findall(r'^slay_console_cwd_error=0x[0-9A-F]{8}\r?$', text, re.M))
+    result.extend(re.findall(r'^slay_console_lwjgl_sha256=[0-9a-f]{64}$', text, re.M))
+    result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
+    result.extend(re.findall(r'^slay_sdl_display=(?:ready|window|context|presented|cursor)$', text, re.M))
+    result.extend(re.findall(r'^slay_sdl_gamepad=connected$', text, re.M))
+    result.extend(re.findall(r'^slay_font_atlas_(?:initial|limit)=(?:-1|[0-9]{1,5}|unavailable)$', text, re.M))
+    result.extend(re.findall(r'^slay_jvm_(?:profile=low-memory|max_heap_bytes=[0-9]{1,16})$', text, re.M))
+    result.extend(re.findall(r'^slay_mesa_child=(?:loading|entered|load-error)$|^slay_mesa_child_(?:stage|checkpoint)=[0-8]$|'
+                             r'^slay_mesa_child_(?:win32|egl|gl|fbo)=0x[0-9A-F]{8}$', text, re.M))
+    result.extend(re.findall(r'^slay_lwjgl_egl_binding=(?:begin|natives-ready|no-version|gl-version|shader-created|no-shader|'
+                             r'native-search-path|native-dependency|release-error)$|'
+                             r'^slay_lwjgl_egl_binding_fault=[a-zA-Z0-9_.$]{1,128}$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
               ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),
               ('Access is denied', 'file-access-denied'), ('DisplayConfig.writeDisplayConfigFile', 'display-config-write'),
-              ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation')]
+              ('lwjgl64.dll', 'lwjgl-native-load'), ("Can\'t find dependent libraries", 'native-dependency-missing'),
+              ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation'),
+              ('Error loading pixmap.', 'pixmap-allocation'),
+              ('Native memory allocation (malloc) failed', 'native-allocation'),
+              ('java.lang.OutOfMemoryError: Java heap space', 'heap-allocation')]
     for marker, stage in stages:
         if marker in text:
             result.append('slay_console_observed=' + stage)
@@ -277,6 +292,48 @@ def stardew_managed_summary(raw):
                r'stardew_graphics_probe=incomplete')
     lines = (raw or b'').decode('ascii', errors='replace').splitlines()
     return '\n'.join(dict.fromkeys(line for line in lines if re.fullmatch(allowed, line))) or 'stardew_managed=no-output'
+
+
+def sdl_frame_stem(report):
+    run = re.search(r'^steam_(launch_sdl|stardew_managed|slay_console)_run=([0-9]{1,20})\r?$', report, re.MULTILINE)
+    if not run:
+        raise ValueError('The current console report has no SDL frame trial.')
+    template = {
+        'launch_sdl': 'sdl-startup-{}',
+        'stardew_managed': 'stardew-managed-{}.sdl',
+        'slay_console': 'slay-console-{}.sdl',
+    }
+    return template[run[1]].format(run[2])
+
+
+def read_sdl_frame(portal, app, report, destination):
+    stem = sdl_frame_stem(report)
+    data = read_game_file(portal, app, r'\LocalState', stem + '.bmp', 4096 * 4096 * 4 + 1024)
+    if not data or len(data) < 54 or data[:2] != b'BM':
+        raise ValueError('The latest SDL trial has no captured BMP frame.')
+    size, offset = unpack_from('<I4xI', data, 2)
+    width, height, planes, bits = unpack_from('<iiHH', data, 18)
+    stride = (width * bits + 31) // 32 * 4
+    if (size != len(data) or not 54 <= offset < size or not 1 <= width <= 4096 or not 1 <= abs(height) <= 4096
+            or planes != 1 or bits not in (24, 32) or size - offset < stride * abs(height)):
+        raise ValueError('The SDL frame was incomplete or had an unexpected bitmap layout.')
+    with destination.open('xb') as output:
+        output.write(data)
+    print(f'Saved SDL frame ({width} by {abs(height)}) to {destination}.')
+
+
+def wait_for_sdl_frame(portal, package, destination, timeout):
+    _, raw = portal.request('GET', probe_report_path(package))
+    report = decode_report(raw)
+    stem = sdl_frame_stem(report)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        trace = read_game_file(portal, package, r'\LocalState', stem + '.txt', 4096)
+        if re.search(r'^sdl_(?:software|offscreen)_frame=ready\r?$', decode_report(trace or b''), re.MULTILINE):
+            read_sdl_frame(portal, package, report, destination)
+            return
+        time.sleep(0.5)
+    raise ValueError('No frame was captured after the game’s launch report.')
 
 
 def pe_summary(header):
@@ -409,6 +466,14 @@ def trial_sdl(portal, args):
     version = f'{major_minor >> 16}.{major_minor & 0xffff}.{patch_build >> 16}'
     if version != upstream:
         raise ValueError(f'{name} requires the version-matched SDL {upstream} workflow artifact.')
+    if args.install_only:
+        raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{args.app_id}.acf', 65536)
+        manifest = decode_report(raw or b'')
+        flags = re.MULTILINE | re.IGNORECASE
+        if not (re.search(rf'^\s*"appid"\s+"{args.app_id}"\s*$', manifest, flags)
+                and re.search(rf'^\s*"installdir"\s+"{re.escape(name)}"\s*$', manifest, flags)
+                and re.search(r'^\s*"StateFlags"\s+"4"\s*$', manifest, flags)):
+            raise ValueError('Steam has not verified a complete installation for this SDL profile.')
 
     def read_sdl():
         data = read_game_file(portal, package, folder, 'SDL2.dll', SDL_LIMIT + 1)
@@ -437,6 +502,10 @@ def trial_sdl(portal, args):
         if args.restore_only and hashlib.sha256(current).hexdigest() == original_hash:
             print(f'Verified the original SDL2 for {name}.', flush=True)
             return
+        if (args.install_only and current == candidate and backup.exists()
+                and hashlib.sha256(backup.read_bytes()).hexdigest() == original_hash):
+            print(f'The verified SDL {upstream} runtime is already installed for {name}.', flush=True)
+            return
         if not args.restore_only:
             if hashlib.sha256(current).hexdigest() != original_hash:
                 raise ValueError('The installed SDL2 differs from the known original. Check the game version or restore a previous trial.')
@@ -453,15 +522,22 @@ def trial_sdl(portal, args):
                 raise ValueError('The installed SDL2 matches neither the original nor this trial artifact.')
             stop_probe_for_sdl_trial(portal, package)
             replace_sdl(original)
+            print(f'Verified the original SDL2 for {name}.', flush=True)
         else:
-            _, raw = portal.request('GET', probe_report_path(package))
-            if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
-                raise ValueError('First run the signed Xbox diagnostic for the selected AppID to establish its stock baseline.')
+            if not args.install_only:
+                _, raw = portal.request('GET', probe_report_path(package))
+                if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
+                    raise ValueError('First run the signed Xbox diagnostic for the selected AppID to establish its stock baseline.')
             stop_probe_for_sdl_trial(portal, package)
             applied = False
+            retain = False
             try:
                 replace_sdl(candidate)
                 applied = True
+                if args.install_only:
+                    retain = True
+                    print(f'Installed and verified SDL {upstream} for {name}. Original backup: {backup}', flush=True)
+                    return
                 print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
                 report = wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout)
                 fields = report_fields(report)
@@ -469,18 +545,21 @@ def trial_sdl(portal, args):
                 if app_id != str(args.app_id) or fields.get('steam_launch_submitted') != 'yes':
                     raise ValueError(f'The fresh report did not record Steam Play for AppID {args.app_id}. '
                                      'Prepare the diagnostic with --repeat-launch.')
+                if args.frame is not None:
+                    wait_for_sdl_frame(portal, package, args.frame, args.frame_timeout)
             finally:
-                try:
-                    installed = read_sdl()
-                    if installed != original:
-                        if installed != candidate and (applied or not candidate.startswith(installed)):
-                            raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
-                        stop_probe_for_sdl_trial(portal, package)
-                        replace_sdl(original)
-                except (OSError, ValueError):
-                    print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
-                    raise
-        print(f'Verified the original SDL2 for {name}.', flush=True)
+                if not retain:
+                    try:
+                        installed = read_sdl()
+                        if installed != original:
+                            if installed != candidate and (applied or not candidate.startswith(installed)):
+                                raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
+                            stop_probe_for_sdl_trial(portal, package)
+                            replace_sdl(original)
+                        print(f'Verified the original SDL2 for {name}.', flush=True)
+                    except (OSError, ValueError):
+                        print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
+                        raise
     finally:
         lock.unlink()
 
@@ -756,10 +835,15 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--steam-cloud', dest='report_file', action='store_const',
+                                const='steam-cloud-report.txt', help='read the Steam Cloud restore checkpoint')
+    report_variant.add_argument('--sdl-startup', dest='report_file', action='store_const',
+                                const='sdl-startup', help='read the SDL startup checkpoints for the current launch')
     report_variant.add_argument('--slay-console', dest='report_file', action='store_const',
                                 const='slay-console', help='summarize the publisher console diagnostic for this launch')
     report_variant.add_argument('--stardew-host', dest='report_file', action='store_const',
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
+    report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -769,8 +853,12 @@ def main():
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
     sdl.add_argument('--artifact', required=True, type=Path, help='workflow artifact directory with SDL2.dll and SHA256SUMS')
+    sdl.add_argument('--frame', type=Path, metavar='BMP', help='wait for and save the trial’s frame before restoring SDL')
+    sdl.add_argument('--frame-timeout', type=int, default=20, help='seconds to wait for a frame after the launch report')
     sdl.add_argument('--backup-dir', required=True, type=Path, help='directory for the verified original DLL and trial lock')
-    sdl.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
+    sdl_mode = sdl.add_mutually_exclusive_group()
+    sdl_mode.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
+    sdl_mode.add_argument('--install-only', action='store_true', help='leave the verified SDL runtime in the selected installed title')
     sdl.add_argument('--timeout', type=int, default=100, help='seconds to wait for a fresh launch report')
     lifetime = commands.add_parser('lifetime', help='verify a helper pipe across a foreground switch')
     lifetime.add_argument('--version', required=True, help='installed version of both lifetime and control')
@@ -791,6 +879,9 @@ def main():
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
+
+    if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
+        sdl.error('--frame-timeout must be between 1 and 120 seconds')
 
     settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
@@ -843,6 +934,19 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.report_file == 'sdl-startup':
+            _, raw = portal.request('GET', probe_report_path(app))
+            run = re.search(r'^steam_launch_sdl_run=([0-9]{1,20})\r?$', decode_report(raw), re.MULTILINE)
+            if not run:
+                print('sdl_startup=no-trace-request')
+                return
+            trace = read_game_file(portal, app, r'\LocalState', f'sdl-startup-{run[1]}.txt', 4096)
+            snapshots = re.findall(r'^sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
+                                   r'audio_init|audio_device|base_path|pref_path|pref_path_local|message_box|gl_library|gl_context|gl_swap_interval)'
+                                   r'=(?:begin|ready|error)|software_frame=(?:ready|error|uniform)|'
+                                   r'init_flags=0x[0-9A-F]{8})$', decode_report(trace or b''), re.MULTILINE)
+            print('\n'.join(snapshots) or 'sdl_startup=no-checkpoints')
+            return
         if args.report_file == 'slay-console':
             _, launch = portal.request('GET', probe_report_path(app))
             run = re.search(r'^steam_slay_console_run=([0-9]{1,20})\r?$', decode_report(launch), re.MULTILINE)
@@ -869,6 +973,8 @@ def main():
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
+        if args.sdl_frame is not None:
+            read_sdl_frame(portal, app, report, args.sdl_frame)
         print(report, end='')
         return
     if args.command == 'inspect-game':

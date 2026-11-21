@@ -11,17 +11,58 @@ from zipfile import ZipFile
 prepare = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'probe' / 'prepare-steam-core.py'))
 
 
-def write_template(root):
+def write_template(root, signin='', extra_entries=()):
     template = root / 'template.appx'
     with ZipFile(template, 'w') as archive:
         archive.writestr('AppxManifest.xml', '<Package><Identity Name="' + prepare['PROBE_ID'] +
                          '" ProcessorArchitecture="x64" Version="1.0.1.0"/>'
                          '<Applications><Application StartPage="index.html"/></Applications></Package>')
-        archive.writestr('steam-signin.html', '')
+        archive.writestr('steam-signin.html', signin)
+        for name in extra_entries:
+            archive.writestr(name, 'template')
     return template
 
 
 class LaunchOptionTests(unittest.TestCase):
+    def test_slay_host_packages_matching_bridges_only_for_the_hosted_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            template = write_template(root, '<script src="steam-signin.js"></script>',
+                                      ('steam-sdl-host.js', 'steam-sdl-gamepad.js',
+                                       'slay-working-directory.dll', 'slay-sdl-display.dll'))
+            runtime = root / 'runtime'
+            runtime.mkdir()
+            for name in ('SlayConsoleDiagnostic.class', 'SlayConsoleDiagnostic$1.class', 'slay-lwjgl-display.jar',
+                         'slay-working-directory.dll', 'slay-sdl-display.dll', 'slay-font-atlas-limit.txt',
+                         'SDL2.dll', 'LICENSE.SDL2'):
+                (runtime / name).write_text('runtime')
+            hosted = root / 'hosted'
+            prepare['prepare_layout'](template, hosted, '1.0.2.0', None, None, False, True, slay_sdl_host=runtime)
+            self.assertTrue((hosted / 'steam-sdl-host-646570.txt').is_file())
+            self.assertIn('data-apps="646570"', (hosted / 'steam-signin.html').read_text())
+            for name in runtime.iterdir():
+                self.assertEqual((hosted / name.name).read_text(), 'runtime')
+
+            standard = root / 'standard'
+            prepare['prepare_layout'](template, standard, '1.0.2.0', None, None, False, True)
+            for name in ('slay-working-directory.dll', 'slay-sdl-display.dll', 'steam-sdl-host-646570.txt'):
+                self.assertFalse((standard / name).exists())
+
+    def test_startup_snapshot_is_opt_in_and_title_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            template = write_template(root)
+            for enabled in (False, True):
+                layout = root / str(enabled)
+                prepare['prepare_layout'](template, layout, '1.0.2.0', None, None, False, True,
+                                          launch_app_id=975370, startup_snapshot=enabled)
+                markers = [p.name for p in layout.glob('steam-startup-snapshot-*.txt')]
+                self.assertEqual(markers, ['steam-startup-snapshot-975370.txt'] if enabled else [])
+            for app_id, archive in ((None, None), (7760, Path('hosted.tgz'))):
+                with self.assertRaisesRegex(ValueError, 'native Steam Play target'):
+                    prepare['prepare_layout'](template, root / 'invalid', '1.0.2.0', None, None, False, True,
+                                              launch_app_id=app_id, xcom_runtime_archive=archive, startup_snapshot=True)
+
     def test_target_specific_marker_and_legacy_launch_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

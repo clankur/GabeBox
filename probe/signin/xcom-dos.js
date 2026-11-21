@@ -8,6 +8,7 @@
     var xcom = {
         appId: 7760,
         title: "X-COM: UFO Defense",
+        pointerControls: true,
         installDirectory: "XCom UFO Defense",
         configFile: "dosbox.conf",
         mountDirectory: "XCOM",
@@ -127,6 +128,7 @@
         back.title = "This trial keeps saves in memory until you leave the game.";
         screen.appendChild(back);
         var library = document.querySelector("main");
+        var previousInputMode;
         var game;
         var closed = false;
         var complete;
@@ -147,6 +149,7 @@
             if (closed) return;
             closed = true;
             if (screen.parentNode) screen.parentNode.removeChild(screen);
+            if (previousInputMode !== undefined) navigator.gamepadInputEmulation = previousInputMode;
             library.hidden = false;
             // Let an already-submitted report write finish before another Play can start.
             function release() {
@@ -178,6 +181,10 @@
             }
             document.body.appendChild(screen);
             library.hidden = true;
+            if (profile.pointerControls && "gamepadInputEmulation" in navigator) {
+                previousInputMode = navigator.gamepadInputEmulation;
+                navigator.gamepadInputEmulation = "mouse";
+            }
             phase = "starting-emulator";
             return record(phase);
         }).then(function () {

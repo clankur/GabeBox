@@ -126,18 +126,50 @@ def title_launch_option(spec):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
-                   launch_options=(), inspect_binaries=(), slay_console=False,
-                   slay_native_cwd=False, stardew_host_trace=False, stardew_startup_diagnostic=None):
+                   launch_options=(), inspect_binaries=(), slay_console=False, slay_native_cwd=False,
+                   stardew_host_trace=False, stardew_startup_diagnostic=None, startup_snapshot=False,
+                   startup_sdl_renderer=None, startup_sdl_dummy_video=False,
+                   startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
+                   startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
+                   measure_sdl_frames=False):
     imports = {}
     for binary in inspect_binaries:
         for module, symbols in system_imports(objdump, binary).items():
             imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
+    startup_app_id = launch_app_id
+    if measure_sdl_frames and not (launch_app_id == 646570 and slay_sdl_host and repeat_launch):
+        raise ValueError('Frame measurement requires the hosted Slay repeat launch trial.')
+    if startup_sdl_host and launch_app_id is None:
+        startup_app_id = 975370
+        startup_snapshot = True
+        startup_sdl_renderer = 'software'
+        startup_sdl_dummy_video = True
+        startup_sdl_working_directory = True
+        startup_sdl_local_preferences = True
     configured_options = dict(launch_options)
     if launch_option is not None:
         configured_options[launch_app_id] = launch_option
     if stardew_startup_diagnostic and (not stardew_host_trace or launch_app_id != 413150):
         raise ValueError('The managed diagnostic requires a Stardew Valley host trace.')
+    if startup_snapshot and (not steam_sign_in or not startup_app_id or (xcom_runtime_archive and startup_app_id == 7760)):
+        raise ValueError('A startup snapshot needs a native Steam Play target.')
+    if startup_sdl_renderer and (not startup_snapshot or startup_sdl_renderer not in ('software', 'direct3d11')):
+        raise ValueError('An SDL renderer trial needs a startup snapshot and a supported renderer name.')
+    if (startup_sdl_dummy_video or startup_sdl_working_directory or startup_sdl_local_preferences) and not startup_snapshot:
+        raise ValueError('The SDL startup compatibility trial needs a startup snapshot.')
+    if startup_sdl_late_frame and (startup_sdl_renderer != 'software' or not startup_sdl_dummy_video):
+        raise ValueError('The delayed SDL capture requires the dummy video and software renderer trial.')
+    if startup_sdl_host and (startup_app_id != 975370 or not startup_snapshot or startup_sdl_renderer != 'software'
+                             or not startup_sdl_dummy_video or not startup_sdl_working_directory
+                             or not startup_sdl_local_preferences):
+        raise ValueError('The SDL host requires the licensed Dwarf Fortress software-rendering profile.')
+    if stardew_sdl_host is not None and (not steam_sign_in or not stardew_sdl_host.is_file()):
+        raise ValueError('The hosted Stardew profile requires sign-in and the built Stardew startup hook.')
+    slay_files = ('SlayConsoleDiagnostic.class', 'slay-working-directory.dll', 'slay-sdl-display.dll',
+                  'slay-lwjgl-display.jar', 'slay-font-atlas-limit.txt', 'SDL2.dll', 'LICENSE.SDL2')
+    if slay_sdl_host is not None and (not steam_sign_in or not all((slay_sdl_host / name).is_file() for name in slay_files)):
+        raise ValueError('The hosted Slay profile requires sign-in and the built Java and SDL adapters.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -152,6 +184,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             raise ValueError('The Slay native working-directory trial requires the matching SDK template and console diagnostic.')
         if not slay_native_cwd and 'slay-working-directory.dll' in entries:
             entries.remove('slay-working-directory.dll')
+        if 'slay-sdl-display.dll' in entries:
+            # Hosted builds copy the matching JNI bridge with the LWJGL adapter below.
+            entries.remove('slay-sdl-display.dll')
         if any(Path(name).name.lower() in VALVE_FILES for name in entries):
             raise ValueError('The template must contain only probe code and assets.')
         dependency = vclibs_dependency(vclibs_framework) if vclibs_framework else None
@@ -191,16 +226,63 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'steam-launch-app.txt').write_text('\n'.join(config), encoding='ascii')
         for app_id, index in configured_options.items():
             (layout / f'steam-launch-option-{app_id}.txt').write_text(str(index), encoding='ascii')
+        if startup_snapshot:
+            (layout / f'steam-startup-snapshot-{startup_app_id}.txt').touch()
+        if startup_wait_only:
+            (layout / f'steam-startup-wait-only-{startup_app_id}.txt').touch()
+        if startup_sdl_renderer:
+            (layout / f'steam-startup-sdl-renderer-{startup_app_id}.txt').write_text(startup_sdl_renderer, encoding='ascii')
+        if startup_sdl_dummy_video:
+            (layout / f'steam-startup-sdl-dummy-video-{startup_app_id}.txt').touch()
+        if startup_sdl_working_directory:
+            (layout / f'steam-startup-sdl-working-directory-{startup_app_id}.txt').touch()
+        if startup_sdl_local_preferences:
+            (layout / f'steam-startup-sdl-local-preferences-{startup_app_id}.txt').touch()
+        if startup_sdl_late_frame:
+            (layout / f'steam-startup-sdl-late-frame-{startup_app_id}.txt').touch()
+        if startup_sdl_host or stardew_sdl_host or slay_sdl_host:
+            html_path = layout / 'steam-signin.html'
+            html = html_path.read_text(encoding='utf-8')
+            original = '<script src="steam-signin.js"></script>'
+            if not all((layout / name).is_file() for name in ('steam-sdl-host.js', 'steam-sdl-gamepad.js')) or html.count(original) != 1:
+                raise ValueError('Use the SDK template with the live SDL host.')
+            profiles = []
+            if startup_sdl_host:
+                profiles.append('975370')
+            if stardew_sdl_host:
+                profiles.append('413150')
+            if slay_sdl_host:
+                profiles.append('646570')
+            script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
+            helper = '<script src="steam-sdl-gamepad.js"></script>'
+            if measure_sdl_frames:
+                if not (layout / 'steam-sdl-timing.js').is_file():
+                    raise ValueError('Use the SDK template containing the SDL frame timing script.')
+                helper += '\n    <script src="steam-sdl-timing.js"></script>'
+            html_path.write_text(html.replace(original, helper + '\n    ' + script + '\n    ' + original), encoding='utf-8')
+        if startup_sdl_host:
+            (layout / 'steam-sdl-host-975370.txt').touch()
+        if stardew_sdl_host:
+            shutil.copyfile(stardew_sdl_host, layout / 'StardewStartupDiagnostic.dll')
+            for name in ('steam-sdl-host-413150.txt', 'stardew-game-directory.txt', 'stardew-low-memory.txt'):
+                (layout / name).touch()
+        if slay_sdl_host:
+            for name in slay_files:
+                shutil.copyfile(slay_sdl_host / name, layout / name)
+            for java_class in slay_sdl_host.glob('SlayConsoleDiagnostic$*.class'):
+                shutil.copyfile(java_class, layout / java_class.name)
+            (layout / 'steam-sdl-host-646570.txt').touch()
+            (layout / 'slay-live-host.txt').touch()
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
-        if slay_console:
+        if slay_console and not slay_sdl_host:
             if 'SlayConsoleDiagnostic.class'.encode('utf-16le') not in (layout / 'ProbeNative.dll').read_bytes():
                 raise ValueError('Use the Windows SDK template containing the Slay console diagnostic.')
             subprocess.run(['javac', '--release', '8', '-d', str(layout),
                             str(Path(__file__).with_name('SlayConsoleDiagnostic.java'))], check=True)
         if stardew_host_trace:
             (layout / 'stardew-host-trace.txt').touch()
-        if stardew_startup_diagnostic:
+        if stardew_startup_diagnostic and not stardew_sdl_host:
             shutil.copyfile(stardew_startup_diagnostic, layout / 'StardewStartupDiagnostic.dll')
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
@@ -246,6 +328,27 @@ def main():
                         help='select a publisher launch option for the configured Steam AppID (default 0)')
     parser.add_argument('--repeat-launch', action='store_true',
                         help='run the launch test again each time the probe starts from a fresh process')
+    parser.add_argument('--startup-snapshot', action='store_true',
+                        help='sample the configured game process before polling Steam for a ready window')
+    parser.add_argument('--startup-wait-only', action='store_true',
+                        help='observe the captured process without asking Steam to find a window')
+    parser.add_argument('--startup-sdl-renderer', choices=('software', 'direct3d11'),
+                        help='request an SDL renderer for the configured startup trial')
+    parser.add_argument('--startup-sdl-dummy-video', action='store_true',
+                        help='test the SDL dummy video driver for the configured startup trial')
+    parser.add_argument('--startup-sdl-working-directory', action='store_true',
+                        help='set the native working directory to the verified app-local game install from SDL main')
+    parser.add_argument('--startup-sdl-local-preferences', action='store_true',
+                        help='offer SDL a writable preference directory within the package’s LocalState')
+    parser.add_argument('--startup-sdl-late-frame', action='store_true',
+                        help='wait 12 seconds after the first SDL software presentation before capturing')
+    parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
+    parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
+                        help='enable the hosted Stardew Valley SDL profile with its built startup hook')
+    parser.add_argument('--measure-sdl-frames', action='store_true',
+                        help='measure 30 seconds of presentation after an eight-second hosted Slay warmup')
+    parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
+                        help='enable the hosted Slay the Spire profile with its built Java and SDL adapters')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -297,6 +400,18 @@ def main():
         parser.error('--stardew-startup-diagnostic requires a built DLL and --stardew-host-trace')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
+    if args.startup_snapshot and (not args.launch_app_id or (args.xcom_dos_runtime and args.launch_app_id == 7760)):
+        parser.error('--startup-snapshot requires --launch-app-id with a native Steam Play target')
+    if args.startup_wait_only and not args.startup_snapshot:
+        parser.error('--startup-wait-only requires --startup-snapshot')
+    if args.startup_sdl_renderer and not args.startup_snapshot:
+        parser.error('--startup-sdl-renderer requires --startup-snapshot')
+    if args.startup_sdl_dummy_video and not args.startup_snapshot:
+        parser.error('--startup-sdl-dummy-video requires --startup-snapshot')
+    if args.startup_sdl_working_directory and not args.startup_snapshot:
+        parser.error('--startup-sdl-working-directory requires --startup-snapshot')
+    if args.startup_sdl_local_preferences and not args.startup_snapshot:
+        parser.error('--startup-sdl-local-preferences requires --startup-snapshot')
     if args.install_before_launch and args.launch_app_id is None:
         parser.error('--install-before-launch requires --launch-app-id')
     if args.library_inventory and not args.steam_sign_in:
@@ -311,7 +426,15 @@ def main():
                    xcom_runtime_archive=args.xcom_dos_runtime, launch_option=args.launch_option,
                    launch_options=title_options, inspect_binaries=args.inspect_pe,
                    slay_console=args.slay_console, slay_native_cwd=args.slay_native_cwd,
-                   stardew_host_trace=args.stardew_host_trace, stardew_startup_diagnostic=args.stardew_startup_diagnostic)
+                   stardew_host_trace=args.stardew_host_trace, stardew_startup_diagnostic=args.stardew_startup_diagnostic,
+                   startup_snapshot=args.startup_snapshot,
+                   startup_sdl_renderer=args.startup_sdl_renderer,
+                   startup_sdl_dummy_video=args.startup_sdl_dummy_video,
+                   startup_sdl_working_directory=args.startup_sdl_working_directory,
+                   startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
+                   startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
+                   stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
+                   measure_sdl_frames=args.measure_sdl_frames)
 
 
 if __name__ == '__main__':
