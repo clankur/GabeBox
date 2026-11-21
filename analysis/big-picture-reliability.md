@@ -1,6 +1,6 @@
 # Series X Big Picture reliability
 
-The second of three cold starts of `1.0.230.19` produced a raw 1920×1080 Xbox output capture of the populated Valve Library. The first startup exited before showing it and the third reported an out-of-memory failure. No production build in this ledger has passed the repeated-launch and game-return checks.
+Builds `1.0.230.19` and `1.0.230.20` each produced a raw 1920×1080 Xbox output capture of the populated Valve Library on one of three controlled launches. No production build in this ledger has passed the repeated-launch and game-return checks.
 
 ## Release checks
 
@@ -47,6 +47,18 @@ Signed APPX SHA-256 `b7b6d4f80f00f5fd705d0f75917cb22c26b367f3e2975ea40a8767093b6
 
 This yields 1/3 confirmed Library starts. The longest streak was one, and the last attempt failed. Later observations of the same live window count toward its interaction history.
 
+### Build 1.0.230.20
+
+Signed APPX SHA-256 `ae750cafd15a57f7c567ec7bba8dbf2408dd19f8efc5954193c2aa51e4cae9dd`. Xbox Dev Home showed the installed package as a Game. Each activation had an empty package-process baseline.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-20-181550 | ee8daa7a-6861-4172-af76-f88ddc2a1acb | Failed. At the timed foreground handoff, the usage was approximately 2.45 GB and the reported budget fell from 5 GiB to 1 GiB. App processes exited before the Library appeared. |
+| tour-20-181836 | e9ba2fe9-4bd6-4ad4-92f2-372098dc31a1 | Failed. The internal route was selected but the app exited before an unobscured Library capture. |
+| tour-20-182012 | fb60dedf-9749-43c4-88c8-4d24c25b9f08 | Passed. The official console output shows six columns of original Valve game tiles with tabs, search, clock and complete bottom controls. |
+
+The observed Library count is 1/3, with one consecutive success. The durable original is `production-230-20/steam-big-picture-library-1920x1080.png` under the local console evidence directory.
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -54,6 +66,7 @@ This yields 1/3 confirmed Library starts. The longest streak was one, and the la
 | 1.0.230.15 · tour-15-173517 | Dwarf Fortress | Player selected the game from Valve's Library. Matching game process started. | TV stayed black after launch. | Session ended. No verified return to the original Library or matched 30-second sample. |
 | 1.0.230.17 · tour-17-174558 | Dwarf Fortress | Populated grid scrolled to the Dwarf tile. Tile activation and confirm were attempted. Stock Play execution remained unverified. | No matching game process or visible title. | No game round trip or sample. |
 | 1.0.230.19 · tour-19-180057 | Dwarf Fortress | Original green Play button activated. Matching game process and presenter were present. | Raw 1920×1080 console image showed the Dwarf Fortress title and main menu. | 1,797 distinct presented frames over 30.013639 s (59.87 FPS). A new run ID and disappearance of the package processes interrupted the session before a visible return to Library. |
+| 1.0.230.20 · tour-20-182012 | Stardew Valley | Original game details led to a matched Stardew Valley game process. | Console output reached a white startup frame containing a pixel cursor and two icons. The title menu was unverified. | No matched 30-second presentation sample or visible return before the game and host processes disappeared. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -73,6 +86,8 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `physical-tv-1795302202507642000.png`, .19 whole-output stock Library | 1920×1080 | `b5b301247cc09624cbf48fc1ad2d2b954b11ec9a7a0c715c952eff3856e021ad` |
 | `physical-tv-1795302269582823000.png`, .19 Dwarf Fortress details with Play | 1920×1080 | `789c56b960630c98110802dc6f5380e3aa096beb6716ee09b53d97aa9659fc27` |
 | `physical-tv-1795302410685794000.png`, .19 Dwarf Fortress title and menu | 1920×1080 | `120584cf51757da46ee8b8917b2a1adb066b76ecd000cfc3770bac020c0c6c45` |
+| `valve-998.png`, .20 whole-output stock Library | 1920×1080 | `f58de98cadb889a6ab8571c8374c54b25fc41de987fa5f82b2d21739b429815b` |
+| `physical-tv-1795303418789208000.png`, .20 Stardew Valley early startup | 1920×1080 | `0b0d02baaa38c6b9aded2f7eeb97b74b8e1e1721e405958eee517912260bf7ba` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
