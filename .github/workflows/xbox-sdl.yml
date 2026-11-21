@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/xbox-sdl.yml'
       - 'probe/add-sdl-startup-trace.py'
+      - 'probe/add-sdl-surfaceless.py'
       - 'probe/sdl-startup-trace.h'
   workflow_dispatch:
 
@@ -48,6 +49,9 @@ jobs:
           tar -xf $archive
           if ($version -in @('2.26.2', '2.30.9')) {
             python "$env:GITHUB_WORKSPACE/probe/add-sdl-startup-trace.py" "SDL2-$version"
+          }
+          if ($version -eq '2.30.9') {
+            python "$env:GITHUB_WORKSPACE/probe/add-sdl-surfaceless.py" "SDL2-$version"
           }
           # CMake 4 needs a policy floor of at least 3.5 for older SDL releases.
           $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
