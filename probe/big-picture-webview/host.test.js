@@ -6,7 +6,7 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false} = {}) {
+function fixture({activationError = false, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0;
@@ -28,8 +28,8 @@ function fixture({activationError = false} = {}) {
             System: {MemoryManager: {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824}},
             Foundation: {GuidHelper: {createNewGuid: () => "test"}},
             Storage: {
-                ApplicationData: {current: {localFolder: {createFileAsync: async () => ({})}}},
-                CreationCollisionOption: {replaceExisting: 0},
+                ApplicationData: {current: {localFolder: {createFileAsync: openReport}}},
+                CreationCollisionOption: {openIfExists: 0},
                 FileIO: {writeTextAsync: async (_, report) => { reports.push(report); }}
             },
             UI: {ViewManagement: {
@@ -47,6 +47,20 @@ function fixture({activationError = false} = {}) {
         shell: window.steamBigPictureHost, opens: () => opens, switches, incoming, reports, replies
     };
 }
+
+test("opening Valve's window never waits on a locked startup report", async () => {
+    let release;
+    const app = fixture({openReport: () => new Promise(resolve => { release = resolve; })});
+    const ready = app.start({});
+    await drain();
+    assert.equal(app.opens(), 1);
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.deepEqual(app.reports, []);
+    release({});
+    await drain();
+    assert.match(app.reports.at(-1), /status=gamepad-ready/);
+});
 
 test("activation failure rejects signed-in startup and preserves the HRESULT", async () => {
     const testApp = fixture({activationError: true});

@@ -17,9 +17,7 @@
         if (session) return session.ready;
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
         var run = Windows.Foundation.GuidHelper.createNewGuid();
-        var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
-            storage.CreationCollisionOption.replaceExisting);
-        var report = Promise.resolve(file);
+        var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, memory = {};
         function sampleMemory(stage) {
             try {
@@ -40,7 +38,7 @@
                 last = stage;
                 messages.push(stage);
                 if (messages.length > 24) messages.shift();
-            } else if (!refresh) return report;
+            } else if (!refresh) return;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
@@ -48,10 +46,15 @@
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
-            report = report.then(function (f) {
-                return storage.FileIO.writeTextAsync(f, text).then(function () { return f; });
-            });
-            return report;
+            // Device Portal may be reading the report during a cold launch. Its
+            // file lifetime must never gate Steam startup, input or foregrounding.
+            report = report.then(function () {
+                return file || storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
+                    storage.CreationCollisionOption.openIfExists);
+            }).then(function (opened) {
+                file = opened;
+                return storage.FileIO.writeTextAsync(file, text);
+            }).catch(function () { file = null; });
         }
         var host, viewId, mainId, visible = false, activeSwitch, timer, playing = false;
         function show(to, from) {
@@ -82,6 +85,8 @@
                     return views.ApplicationViewSwitcher.switchAsync(viewId, mainId);
                 }) : show(viewId, from || mainId)).then(function () {
                 firstActivation = false;
+                sampleMemory("steam_view");
+                record(last, true);
                 visible = true; activeSwitch = null;
             }, function (error) { activeSwitch = null; if (wasGame) setGameForeground(true); throw error; });
             return activeSwitch;
@@ -155,6 +160,7 @@
             }
             if (request.method === "startup-route" && /^(waiting-user|waiting-store|waiting-window|waiting-portal|selecting-library|library-selected|selection-pending)$/.test(request.stage)) {
                 startupRoute = request.stage;
+                if (request.stage === "library-selected") sampleMemory("library_selected");
                 record(last, true);
                 return;
             }
@@ -205,7 +211,8 @@
                         if (outcome === "presented" || outcome === "window-ready") {
                             presented = playing && playingApp === appId && outcome === "presented";
                             sampleMemory("first_frame"); gameEvent(false);
-                            return record("game-" + outcome).then(function () { return outcome; });
+                            record("game-" + outcome);
+                            return outcome;
                         }
                         return resume().then(function () { return outcome; });
                     }, function (err) { return resume().then(function () { throw err; }); });
@@ -233,7 +240,7 @@
             failed = true;
             clearInterval(timer);
             clearTimeout(readinessTimer);
-            record(stage).catch(function () {});
+            record(stage);
             var wasReady = settled;
             if (!settled) { settled = true; rejectReady(new Error(stage)); }
             if (broker) {
@@ -261,7 +268,12 @@
         function poll() {
             try {
                 var stage = host.status();
-                if (stage !== lastNative) { record(stage); lastNative = stage; }
+                if (stage !== lastNative) {
+                    if (stage === "gamepad-window-created") sampleMemory("steam_popup");
+                    if (stage === "gamepad-ready") sampleMemory("steam_ready");
+                    record(stage);
+                    lastNative = stage;
+                }
                 if (broker && /-error(?:$|:)/.test(stage)) return fail(new Error(stage), stage);
                 if (!viewId) {
                     viewId = host.viewId();
@@ -284,19 +296,16 @@
             fail(new Error("Timed out waiting for Valve's gamepad window"), "gamepad-timeout:" + (lastNative || "starting"));
         }, 120000);
         sampleMemory("startup");
-        var startup = record("starting").then(function () {
+        record("starting");
+        var startup = Promise.resolve().then(function () {
             mainId = views.ApplicationView.getForCurrentView().id;
             host = BigPictureView.Native.Renderer;
-            return record("winrt-projected").then(function () {
-                var current = host.status();
-                return record("status-before-open:" + current);
-            }).then(function () {
-                host.open();
-                return record("open-returned");
-            }).then(function () {
-                timer = setInterval(poll, 80);
-                poll();
-            });
+            record("winrt-projected");
+            record("status-before-open:" + host.status());
+            host.open();
+            record("open-returned");
+            timer = setInterval(poll, 80);
+            poll();
         }).catch(fail);
         if (!broker) ready.catch(function () {});
         session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, ready: broker ? ready : startup};
