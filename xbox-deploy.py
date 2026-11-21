@@ -178,6 +178,24 @@ def decode_report(raw):
         return ''  # The report can be read while the app is replacing it.
 
 
+def slay_log_summary(report, raw):
+    run = re.search(r'^steam_slay_log_run=(\d+)\r?$', report, re.MULTILINE)
+    if not run:
+        return 'slay_startup_log=not-enabled-for-this-launch'
+    text = raw.decode('utf-8', errors='replace') if raw else ''
+    lines = text.splitlines()
+    if not lines or lines[0] != 'slay_run=' + run[1]:
+        return 'slay_startup_log=no-matching-log'
+    result = ['slay_startup_log=opened', f'slay_startup_log_bytes_read={len(raw)}']
+    if 'com.megacrit.cardcrawl.desktop.DesktopLauncher' in text:
+        result.append('slay_desktop_launcher=logged')
+    # Keep account names, local paths and arbitrary application messages out of the CLI report.
+    errors = re.findall(r'\b(?:[a-zA-Z_$][\w$]*\.)+(?:[A-Z][\w$]*)?(?:Error|Exception)\b', text)
+    for error in dict.fromkeys(errors):
+        result.append('slay_logged_exception=' + error)
+    return '\n'.join(result)
+
+
 def read_game_file(portal, package, folder, filename, limit):
     query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package['PackageFullName'],
                        'path': folder, 'filename': filename})
@@ -370,6 +388,8 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--slay-log', dest='report_file', action='store_const',
+                                const='slay-startup.log', help='summarize the current Slay the Spire diagnostic log')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
@@ -431,6 +451,11 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        if args.report_file == 'slay-startup.log':
+            _, launch = portal.request('GET', probe_report_path(app))
+            raw = read_game_file(portal, app, r'\LocalState', args.report_file, 65536)
+            print(slay_log_summary(decode_report(launch), raw))
+            return
         _, raw = portal.request('GET', probe_report_path(app, args.report_file))
         report = decode_report(raw)
         if not report.endswith('\n'):

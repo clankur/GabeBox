@@ -180,6 +180,16 @@ Version `1.0.64.0` reproduced exit code `1`. The UWP process diagnostics API ret
 
 For a local control build, add `--probe-java-runtime` with `--steam-sign-in --launch-app-id 646570`. After the normal Steam attempt exits during startup, this build runs the installed game's `jre/bin/java.exe -version` and records its process result. On Series X, `1.0.66.0` captured exit `1` from the Steam-reported process and exit `0` from the Java version command under the same 1 GiB app limit. The version command exercises Java startup. The game's Java arguments, graphics, and other runtime dependencies are still open. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44871184397) · [Game system requirements](https://store.steampowered.com/app/646570/Slay_the_Spire/#app_sysreq)
 
+The installed Windows depot contains Mega Crit’s troubleshooting batch file. It runs the bundled console Java launcher with `-jar desktop-1.0.jar` and saves stdout and stderr to `sendToDevs/troubleshoot.log`. The JAR bundles Log4j 2.17.0 and normally writes `sendToDevs/logs/SlayTheSpire.log` relative to the working directory. The console’s installed game directory contained neither log when inspected.
+
+For an Xbox test, add `--slay-startup-log --launch-app-id 646570 --repeat-launch` to the usual sign-in package. The probe supplies a local Log4j configuration through `JAVA_TOOL_OPTIONS` during Steam Play. It leaves an existing variable in place and reports `environment-unavailable` in that case. After Play, run:
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" report --version "$version" --slay-log
+```
+
+A matching run prints the observed application logger and exception class names from the first 64 KiB of the file. `no-matching-log` leaves environment inheritance, JVM startup, and Log4j initialization unresolved. The local log rotates at 1 MiB with one backup. The publisher’s desktop OpenGL requirement remains a separate check. [Java 8 diagnostic options](https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/envvars002.html) · [Apache Log4j configuration](https://logging.apache.org/log4j/2.12.x/manual/configuration.html)
+
 Version `1.0.68.0` completed the same experiment after deployment and after a CLI restart of the installed package. The second attempt restored Steam sign-in and wrote a new launch report. Both attempts measured a 1 GiB app limit and recorded exit `1` for Steam's startup process and exit `0` for Java's version command. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44871687494)
 
 After the console owner changed this package’s App type to Game in Dev Home, a CLI restart of the same `1.0.68.0` package measured a 5 GiB limit. The Steam startup process again exited `1` before a ready window, and the Java version command again exited `0`. After upgrading to `1.0.70.0`, the probe reported a 1 GiB limit again. Check the measured limit after upgrades when comparing App and Game runs. [Xbox resource allocation](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation)

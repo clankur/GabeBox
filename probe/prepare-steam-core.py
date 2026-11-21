@@ -85,7 +85,7 @@ def vclibs_dependency(appx):
 
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False, vclibs_framework=None):
+                   library_inventory=False, vclibs_framework=None, slay_startup_log=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -136,6 +136,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'steam-launch-app.txt').write_text('\n'.join(config), encoding='ascii')
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
+        if slay_startup_log:
+            shutil.copyfile(Path(__file__).with_name('slay-startup-log.xml'), layout / 'slay-startup-log.xml')
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
 
@@ -179,6 +181,8 @@ def main():
                         help='add a dependency on a signed Microsoft.VCLibs.140.00.UWPDesktop x64 framework APPX')
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
+    parser.add_argument('--slay-startup-log', action='store_true',
+                        help='collect Slay the Spire startup logging during normal Steam Play')
     args = parser.parse_args()
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
@@ -188,6 +192,8 @@ def main():
         parser.error('--launch-app-id requires --steam-sign-in and a Steam AppID from 1 to 16777215')
     if args.probe_java_runtime and args.launch_app_id != 646570:
         parser.error('--probe-java-runtime requires --launch-app-id 646570')
+    if args.slay_startup_log and args.launch_app_id != 646570:
+        parser.error('--slay-startup-log requires --launch-app-id 646570')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
     if args.install_before_launch and args.launch_app_id is None:
@@ -200,7 +206,7 @@ def main():
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
-                   args.install_before_launch, args.library_inventory, args.vclibs_framework)
+                   args.install_before_launch, args.library_inventory, args.vclibs_framework, args.slay_startup_log)
 
 
 if __name__ == '__main__':

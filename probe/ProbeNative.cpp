@@ -1412,6 +1412,24 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    std::wstring slayOptions, slayRun;
+    struct SlayLogEnvironment {
+        bool active = false;
+        ~SlayLogEnvironment() {
+            if (active) SetEnvironmentVariableW(L"JAVA_TOOL_OPTIONS", nullptr);
+        }
+    } slayLog;
+    if (app == 646570) {
+        auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+        if (auto config = co_await package.TryGetItemAsync(L"slay-startup-log.xml")) {
+            FILETIME now{};
+            GetSystemTimeAsFileTime(&now);
+            slayRun = std::to_wstring((static_cast<std::uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime);
+            slayOptions = L"\"-Dlog4j.configurationFile=" + std::wstring(config.Path()) +
+                L"\" \"-Dxbox.slay.log=" + dataRoot + L"\\slay-startup.log\" -Dxbox.slay.run=" + slayRun;
+            std::replace(slayOptions.begin(), slayOptions.end(), L'\\', L'/');
+        }
+    }
     co_await checkpoint(L"submitting-play");
     {
         std::lock_guard lock(steamSessionMutex);
@@ -1448,6 +1466,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
         session->PumpCallbacks();
         GetSystemTimeAsFileTime(&launchTime);
+        if (!slayOptions.empty()) {
+            wchar_t existing[1];
+            SetLastError(ERROR_SUCCESS);
+            if (!GetEnvironmentVariableW(L"JAVA_TOOL_OPTIONS", existing, 1) &&
+                    GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+                slayLog.active = SetEnvironmentVariableW(L"JAVA_TOOL_OPTIONS", slayOptions.c_str()) != FALSE;
+            }
+            if (slayLog.active) report += L"steam_slay_log_run=" + slayRun + L"\r\n";
+            else report += L"steam_slay_log=environment-unavailable\r\n";
+        }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
