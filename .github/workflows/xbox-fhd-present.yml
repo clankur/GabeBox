@@ -35,7 +35,7 @@ jobs:
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
 
-          & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo:$work\input-test.obj" "/Fe:$work\input-test.exe" tests/fhd-hosted-input.test.cpp
+          & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\input-test.obj" "/Fe$work\input-test.exe" tests/fhd-hosted-input.test.cpp
           & "$work\input-test.exe"
 
           & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" probe/fhd/Fhd.Native.idl
