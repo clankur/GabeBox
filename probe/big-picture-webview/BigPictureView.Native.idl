@@ -1,0 +1,13 @@
+namespace BigPictureView.Native
+{
+    [static_name("BigPictureView.Native.IRendererStatics", 603f5187-799f-4e13-94b4-e56a50ca964e)]
+    runtimeclass Renderer
+    {
+        static void Open();
+        static Int32 ViewId();
+        static String Status();
+        static String Read();
+        static void Reply(String message);
+        static void Close();
+    };
+}
