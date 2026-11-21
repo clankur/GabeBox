@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Build and sign an Xbox test package. The development key stays in a temporary directory.
 set -euo pipefail
-if (( $# != 2 )); then
-    echo 'Usage: package.sh /path/to/x64/WindowsApp.lib NEW_OUTPUT_DIR' >&2
-    exit 2
-fi
-
 src=$(cd "$(dirname "$0")" && pwd)
-library=$(realpath "$1")
-output=$2
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 umask 077
 
-bash "$src/build.sh" "$library" "$work/build"
-"${MAKEMSIX:-makemsix}" pack -d "$work/build/package" -p "$work/unsigned.appx"
+if (( $# == 3 )) && [[ $1 == --layout ]]; then
+    layout=$(realpath "$2")
+    output=$3
+elif (( $# == 2 )); then
+    library=$(realpath "$1")
+    output=$2
+    bash "$src/build.sh" "$library" "$work/build"
+    layout=$work/build/package
+else
+    echo 'Usage: package.sh /path/to/x64/WindowsApp.lib NEW_OUTPUT_DIR' >&2
+    echo '       package.sh --layout APPX_LAYOUT NEW_OUTPUT_DIR' >&2
+    exit 2
+fi
+
+"${MAKEMSIX:-makemsix}" pack -d "$layout" -p "$work/unsigned.appx"
 openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 365 \
     -subj '/CN=Xbox Portability Probe' -addext 'basicConstraints=critical,CA:FALSE' \
     -addext 'keyUsage=critical,digitalSignature' -addext 'extendedKeyUsage=codeSigning' \

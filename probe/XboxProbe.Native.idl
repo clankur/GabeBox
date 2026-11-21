@@ -3,5 +3,6 @@ namespace XboxProbe.Native
     runtimeclass ProbeRunner
     {
         static String Run();
+        static String RunSteamCore(String inventory);
     };
 }
