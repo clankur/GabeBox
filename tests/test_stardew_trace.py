@@ -3,7 +3,8 @@ import runpy
 import unittest
 
 
-summary = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.py'))['stardew_host_summary']
+cli = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.py'))
+summary = cli['stardew_host_summary']
 
 
 class StardewTraceTests(unittest.TestCase):
@@ -27,3 +28,10 @@ class StardewTraceTests(unittest.TestCase):
         report = summary(trace)
         self.assertIn('stardew_host_phase=managed-launch', report)
         self.assertIn('stardew_host_exit=0x1', report)
+
+    def test_managed_output_allows_only_known_values(self):
+        managed_summary = cli['stardew_managed_summary']
+        self.assertEqual(managed_summary(None), 'stardew_managed=no-output')
+        log = b'stardew_managed=entered\nstardew_managed_library=opengl32\n' \
+              b'stardew_managed_library=/private/user/opengl32\nstardew_managed=entered\n'
+        self.assertEqual(managed_summary(log), 'stardew_managed=entered\nstardew_managed_library=opengl32')

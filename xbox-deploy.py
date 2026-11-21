@@ -225,6 +225,14 @@ def stardew_host_summary(raw):
     return '\n'.join(fields)
 
 
+def stardew_managed_summary(raw):
+    allowed = (r'stardew_managed=(?:entered|unhandled-exception|process-exit)|'
+               r'stardew_managed_exception=(?:dll-not-found|entry-point-not-found|bad-image-format|platform-not-supported)|'
+               r'stardew_managed_library=(?:opengl32|sdl2)')
+    lines = (raw or b'').decode('ascii', errors='replace').splitlines()
+    return '\n'.join(dict.fromkeys(line for line in lines if re.fullmatch(allowed, line))) or 'stardew_managed=no-output'
+
+
 def pe_summary(header):
     if len(header) < 64 or header[:2] != b'MZ':
         return {'pe_header': 'unavailable'}
@@ -505,6 +513,10 @@ def main():
                 return
             raw = read_game_file(portal, app, r'\LocalState', f'stardew-host-{run[1]}.log', 4 * 1024 * 1024)
             print(stardew_host_summary(raw))
+            managed = re.search(r'^steam_stardew_managed_run=([0-9]{1,20})\r?$', decode_report(report), re.MULTILINE)
+            if managed:
+                raw = read_game_file(portal, app, r'\LocalState', f'stardew-managed-{managed[1]}.log', 8192)
+                print(stardew_managed_summary(raw))
             return
         _, raw = portal.request('GET', probe_report_path(app, args.report_file))
         report = decode_report(raw)
