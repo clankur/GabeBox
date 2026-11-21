@@ -1,0 +1,31 @@
+name: Trace Steam startup on Windows
+
+on:
+  push:
+    paths:
+      - analysis/trace-steam-startup.ps1
+      - .github/workflows/steam-windows-startup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: windows-2025
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install signed Steam and trace startup on a clean host
+        shell: pwsh
+        run: |
+          ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-startup"
+      - name: Upload Steam-only findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-windows-startup
+          path: ${{ runner.temp }}/steam-startup/evidence/
+          if-no-files-found: error
