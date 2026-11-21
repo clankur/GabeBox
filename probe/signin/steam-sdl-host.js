@@ -294,6 +294,7 @@
         }
 
         var imageWords, appliedSequence = 0;
+        var useRgbDelta = appId === 646570 && !!runner.steamSdlRgbDeltaFrame;
         function drawRgb() {
             var began = timing && performance.now();
             var text = runner.steamSdlRgbDeltaFrame(appliedSequence);
@@ -350,7 +351,14 @@
         }
 
         function draw() {
-            if (runner.steamSdlRgbDeltaFrame) return drawRgb();
+            if (useRgbDelta) {
+                try { return drawRgb(); }
+                catch (_) {
+                    // Resume with a complete frame if the Xbox projection cannot allocate a delta.
+                    useRgbDelta = false;
+                    image = imageWords = null;
+                }
+            }
             var began = timing && performance.now();
             var buffer = runner.steamSdlFrame();
             if (!buffer) return null;

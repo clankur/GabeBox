@@ -37,4 +37,16 @@ int main() {
         }
         assert(input == original);
     }
+
+    // Static stretches that span multiple run tokens, followed by both kinds of changed pixels.
+    constexpr std::size_t count = 8200;
+    std::vector<std::uint8_t> before(count * 4, 128), after(before);
+    after[8198 * 4 + 2] = 121;
+    after[8199 * 4] = 250;
+    std::vector<std::uint16_t> encoded(count * 2);
+    const auto units = EncodeSdlRgbDelta(encoded.data(), after.data(), before.data(), count);
+    assert(units == 6);
+    assert(encoded[0] == 0x4fff && encoded[1] == 0x4fff && encoded[2] == 0x4005);
+    assert(encoded[3] == 0x2188);
+    assert(((encoded[4] & 4095) | ((encoded[5] & 4095) << 12)) == 0x8080fa);
 }
