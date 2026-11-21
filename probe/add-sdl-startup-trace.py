@@ -11,11 +11,17 @@ HOOKS = {
         ('int', 'SDL_Init', 'flags', 'init', 'value == 0'),
         ('int', 'SDL_InitSubSystem', 'flags', 'subsystem_init', 'value == 0'),
     ),
+    'audio/SDL_audio.c': (
+        ('int', 'SDL_AudioInit', 'driver_name', 'audio_init', 'value == 0'),
+        ('SDL_AudioDeviceID', 'SDL_OpenAudioDevice', 'device, iscapture, desired, obtained, allowed_changes',
+         'audio_device', 'value != 0'),
+    ),
     'video/SDL_video.c': (
         ('int', 'SDL_VideoInit', 'driver_name', 'video_init', 'value == 0'),
         ('SDL_Window *', 'SDL_CreateWindow', 'title, x, y, w, h, flags', 'window', 'value != NULL'),
         ('int', 'SDL_GL_LoadLibrary', 'path', 'gl_library', 'value == 0'),
         ('SDL_GLContext', 'SDL_GL_CreateContext', 'window', 'gl_context', 'value != NULL'),
+        ('int', 'SDL_GL_SetSwapInterval', 'interval', 'gl_swap_interval', 'value == 0'),
     ),
     'render/SDL_render.c': (
         ('SDL_Renderer *', 'SDL_CreateRenderer', 'window, index, flags', 'renderer', 'value != NULL'),
@@ -32,10 +38,12 @@ def wrap_definition(source, return_type, function, arguments, stage, worked):
     match = matches[0]
     parameters = match[1]
     implementation = f'XboxSdlOriginal{function[4:]}'
+    flags = '    XboxSdlTraceInitFlags(flags);\n' if function == 'SDL_InitSubSystem' else ''
     wrapper = (
         f'static {return_type} {implementation}({parameters});\n\n'
         f'{return_type}\n{function}({parameters})\n{{\n'
         f'    XboxSdlTrace("sdl_{stage}=begin\\n");\n'
+        f'{flags}'
         f'    {return_type} value = {implementation}({arguments});\n'
         f'    XboxSdlTrace({worked} ? "sdl_{stage}=ready\\n" : "sdl_{stage}=error\\n");\n'
         '    return value;\n}\n\n'

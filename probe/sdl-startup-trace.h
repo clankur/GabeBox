@@ -22,6 +22,12 @@ static void XboxSdlTrace(const char *line) {
 }
 
 #ifdef XBOX_SDL_MAIN_TRACE
+static void XboxSdlTraceInitFlags(Uint32 flags) {
+    char marker[34];
+    SDL_snprintf(marker, SDL_arraysize(marker), "sdl_init_flags=0x%08X\n", (unsigned)flags);
+    XboxSdlTrace(marker);
+}
+
 static void XboxSdlSetWorkingDirectory(void) {
     DWORD last_error = GetLastError();
     WCHAR directory[1024];
