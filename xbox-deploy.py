@@ -368,6 +368,8 @@ def main():
                                 const='steam-download-report.txt', help='read the Steam download checkpoint')
     report_variant.add_argument('--artwork', dest='report_file', action='store_const',
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
+    report_variant.add_argument('--inventory', dest='report_file', action='store_const',
+                                const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
     report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')

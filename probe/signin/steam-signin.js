@@ -290,6 +290,19 @@
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
     }
 
+    function saveLibraryInventory() {
+        var storage = Windows.Storage;
+        return Windows.ApplicationModel.Package.current.installedLocation
+            .tryGetItemAsync("steam-library-inventory.txt").then(function (marker) {
+                if (!marker) return "";
+                var games = entries.map(function (entry) { return { id: entry.id, name: entry.name }; });
+                return storage.ApplicationData.current.localFolder.createFileAsync("steam-library-inventory.json",
+                    storage.CreationCollisionOption.replaceExisting).then(function (file) {
+                    return storage.FileIO.writeTextAsync(file, JSON.stringify(games) + "\r\n");
+                }).then(function () { return "steam_library_inventory=saved\r\n"; });
+            }).then(null, function () { return "steam_library_inventory=unavailable\r\n"; });
+    }
+
     function finishNative(attempt, payload) {
         return Windows.Storage.FileIO.readTextAsync(attempt.file).then(function (report) {
             if (payload) {
@@ -312,7 +325,10 @@
                     downloadStatus.textContent = "This Xbox could not save the Steam sign-in.";
                 }
                 attempt.libraryReport = report.replace("status=steam-library-rendering\r\n", "steam_library_rendered=yes\r\n");
-                return completeLibrary(attempt);
+                return saveLibraryInventory().then(function (checkpoint) {
+                    attempt.libraryReport += checkpoint;
+                    return completeLibrary(attempt);
+                });
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
                 finish(attempt, "Steam approved sign-in. The library did not finish loading.");
             } else {
@@ -362,7 +378,9 @@
 
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
-        var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(checkpoint);
+        var firstLineEnd = checkpoint.indexOf("\r\n");
+        var firstLine = firstLineEnd < 0 ? checkpoint : checkpoint.slice(0, firstLineEnd);
+        var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(firstLine);
         var stage = parts ? parts[1] : "failed";
         var detail = parts ? parts[2] : "";
         var active = stage === "starting" || stage === "queued" || stage === "resuming" ||
@@ -377,6 +395,7 @@
                     var metric = stage === "install-rejected" || stage === "library-folder-error" ? "result" : "state";
                     report += "steam_download_" + metric + "=" + detail + "\r\n";
                 }
+                if (firstLineEnd >= 0) report += checkpoint.slice(firstLineEnd + 2);
                 if (!active) report += storageCheckpoint("after");
                 report += "status=steam-download-" + (active ? "in-progress" : "complete") + "\r\n";
                 var write = function () { return Windows.Storage.FileIO.writeTextAsync(job.file, report); };
