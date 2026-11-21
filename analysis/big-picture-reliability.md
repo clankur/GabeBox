@@ -1,6 +1,6 @@
 # Series X Big Picture reliability
 
-The second cold start of `1.0.230.19` produced a raw 1920×1080 Xbox output capture of the populated Valve Library. The first cold start exited before showing it. No production build in this ledger has passed the repeated-launch and game-return checks.
+The second of three cold starts of `1.0.230.19` produced a raw 1920×1080 Xbox output capture of the populated Valve Library. The first startup exited before showing it and the third reported an out-of-memory failure. No production build in this ledger has passed the repeated-launch and game-return checks.
 
 ## Release checks
 
@@ -37,14 +37,15 @@ Earlier retained observations predate the controlled ledger. Integrated builds `
 
 ### Build 1.0.230.19
 
-Signed APPX SHA-256 `b7b6d4f80f00f5fd705d0f75917cb22c26b367f3e2975ea40a8767093b6479ee`. The operator recorded each activation before launching. Both attempts began with zero matching package processes.
+Signed APPX SHA-256 `b7b6d4f80f00f5fd705d0f75917cb22c26b367f3e2975ea40a8767093b6479ee`. The operator recorded each activation before launching. All three attempts began with zero matching package processes.
 
 | Attempt | Native run ID | Whole-output evidence |
 |---|---|---|
 | tour-19-175915 | c799c37f-b908-48d1-abac-1e018f33e217 | Failed. The original popup was empty when the host and browser exited. |
 | tour-19-180057 | 9c17f75d-1936-455d-944c-02c00c5ed7f2 | Passed. The Xbox showed a centered Welcome prompt, Valve's game details, then the unobscured Library with its selected tile and both footer corners visible. |
+| tour-19-181112 | ac954194-b60f-4dd6-b773-6ea8c7105ac5 | Failed. WebView2 reported an owner renderer out-of-memory failure at +61.4 s, before the Library became visible. |
 
-This yields 1/2 confirmed Library starts, with one consecutive success. Later observations of the live window within this same session count toward its interaction history.
+This yields 1/3 confirmed Library starts. The longest streak was one, and the last attempt failed. Later observations of the same live window count toward its interaction history.
 
 ## Game launches and returns
 
@@ -76,3 +77,18 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
 For `.19`, the operator fetched the raw PNG from Xbox Device Portal's `/ext/screenshot` endpoint. The Welcome heading spans x=806–1114, centered at x=960. The prompt block spans approximately y=512–575 on a 1080-pixel-high output. The later Library PNG includes the top search field, centered tab strip, clock, populated grid and complete bottom controls. Both source images remain uncropped.
+
+## Account and first-install coverage
+
+The `.19` TV and frame receipts use a previously authenticated Steam account on the test console. A cold process start preserves saved credentials, game installations and browser storage. They do not verify a fresh installation, a second real account, or an account with no games.
+
+The signed `.19` archive contains no Steam user directory, WebView2 profile, license catalog or automatic game-launch configuration. Inspection found no fixed individual SteamID in the app-authored JavaScript. The native client checks the live Steam identity against the requested identity before asking for its licenses. The broker rechecks the native owner around asynchronous library and launch operations. The three game-specific presenter adapters explain explicit AppIDs in the game path. [Native sign-in](../probe/ProbeNative.cpp) · [Broker](../probe/signin/steam-big-picture-broker.js)
+
+The independent source audit found these limitations on the tested build:
+
+- A zero license count cannot complete native sign-in. When metadata arrives for only some licenses before the 20-second deadline, the session library includes only named games. The array is acquired once for the session.
+- The source captures a populated Library by hit-testing a real game tile. A legitimate empty Library needs separate evidence of Valve's empty state and confirmed account ownership.
+- The native local cloud cache keys records by SteamID and checks the account again after storage access. Other stock browser storage uses a shared package WebView2 profile. The tested package also supplies completed device-setup defaults for Windows.Xbox on empty machine storage. Hardware account switching and truly fresh Steam first-run behavior remain unverified.
+- The stock Sign Out dialog invokes `SteamClient.User.SignOutAndRestart()`. In the tested package only the legacy package page invokes native sign-out. Opening Big Picture while an old session exists reuses the prior broker, and failed catalog reads alone do not clear previously rendered tiles.
+
+Fourteen local broker, startup and preference tests passed with isolated identities. A hardware account-switch check must confirm that the previous owner's titles disappear, that the new owner sees only their own catalog, and that unowned titles cannot launch. A first-install check must start with the test package's prior session and UI storage absent and proceed through actual QR authorization. No credentials or account identifiers are required in the resulting public receipt. [Broker tests](../tests/steam-big-picture-broker.test.js) · [Startup tests](../probe/big-picture-webview/core-startup.test.js) · [Preference tests](../probe/big-picture-webview/services.test.js)
