@@ -5,12 +5,16 @@ on:
     paths:
       - 'probe/signin/**'
       - 'probe/prepare-steam-core.py'
+      - 'probe/ProbeNative.cpp'
+      - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
       - '.github/workflows/steam-launch-tests.yml'
   pull_request:
     paths:
       - 'probe/signin/**'
       - 'probe/prepare-steam-core.py'
+      - 'probe/ProbeNative.cpp'
+      - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
       - '.github/workflows/steam-launch-tests.yml'
 
