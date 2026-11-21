@@ -67,7 +67,7 @@ jobs:
           $metadata = "$sdk\UnionMetadata\$sdkVersion\Windows.winmd"
           $projection = Join-Path $work 'projection'
           $winmd = "$layout/XboxProbe.Native.winmd"
-          & "$bin\midl.exe" /nologo /winrt /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
+          & "$bin\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
             /out $work /winmd $winmd probe/XboxProbe.Native.idl
           & "$bin\cppwinrt.exe" -input $winmd -reference $metadata -output $projection -include XboxProbe.Native -overwrite
           & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DUNICODE /D_UNICODE `
