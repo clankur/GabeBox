@@ -89,6 +89,8 @@ A verified library result requires Valve’s native user interface to report onl
 
 In the library, use the controller D-pad to move between games. Right focuses the selected title’s available **Download** or **Play** button. Press **A** to activate the focused button, and use **B** to return from an action to the list or from a title to search. From search, Up reaches **Sign out** and Down returns to the first visible title. [UWP gamepad navigation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
 
+On Series X, version `1.0.70.0` restored the saved Steam session after the CLI upgrade and rendered 134 games from 612 named entries. The preceding DLC-only filter had displayed 361 entries. The configured launch test found Slay the Spire in the filtered library and submitted it to Steam. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44872147072)
+
 Read an existing report without restarting the app or interrupting the session.
 
 ```sh
@@ -160,7 +162,7 @@ For a local control build, add `--probe-java-runtime` with `--steam-sign-in --la
 
 Version `1.0.68.0` completed the same experiment after deployment and after a CLI restart of the installed package. The second attempt restored Steam sign-in and wrote a new launch report. Both attempts measured a 1 GiB app limit and recorded exit `1` for Steam's startup process and exit `0` for Java's version command. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44871687494)
 
-After the console owner changed this package’s App type to Game in Dev Home, a CLI restart of the same `1.0.68.0` package measured a 5 GiB limit. The Steam startup process again exited `1` before a ready window, and the Java version command again exited `0`. [Xbox resource allocation](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation)
+After the console owner changed this package’s App type to Game in Dev Home, a CLI restart of the same `1.0.68.0` package measured a 5 GiB limit. The Steam startup process again exited `1` before a ready window, and the Java version command again exited `0`. After upgrading to `1.0.70.0`, the probe reported a 1 GiB limit again. Check the measured limit after upgrades when comparing App and Game runs. [Xbox resource allocation](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation)
 
 On Series X, `1.0.42.0` initially reported install state `1` after upgrading despite the existing completed Terraria manifest. A Steam install recheck recognized the files and reported zero bytes to download. Version `1.0.44.0` refreshed the library, recognized Terraria and submitted the launch request. Both the automatic attempt and a subsequent library launch received Steam result `29` (`Invalid platform`). The Steam running check stayed false, and Device Portal showed no Terraria process during the automatic attempt. The downloaded Terraria executable has PE machine `0x014c` and CLR flags `0x00000003`, identifying a managed Windows executable that requires 32-bit execution. Microsoft’s Xbox UWP guidance lists x86 as unsupported. [Launch SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44866820611) · [Xbox UWP architecture guidance](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/frequently-asked-questions#can-i-develop-and-publish-x86-apps-for-xbox)
 
