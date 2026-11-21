@@ -22,6 +22,12 @@ def add_surfaceless(tree):
     source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "sdl-offscreen-cursor.h"')
     old = '    device->GL_SwapWindow = OFFSCREEN_GLES_SwapWindow;'
     source = replace_once(source, old, '    device->SetWindowSize = OFFSCREEN_GLES_SetWindowSize;\n' + old)
+    old = '    mode.h = 768;'
+    source = replace_once(source, old, old + '''
+    if (SDL_GetHintBoolean("XBOX_SDL_HOST_GAMEPAD", SDL_FALSE)) {
+        mode.w = 1280;
+        mode.h = 720;
+    }''')
     old = '    /* We\'re done! */'
     source = replace_once(source, old, '''    if (SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
         XboxSdlInitOffscreenCursor();
