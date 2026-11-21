@@ -144,11 +144,23 @@
             canvas.focus();
         }
 
-        function showMenu() {
+        function showMenu(gameViewId) {
             releaseKeys();
             if (bigPictureMode) {
-                // Keep playing when the Steam overlay is unavailable on this host.
-                if (nativeView) nativeView.resume();
+                var steam = window.steamBigPictureHost;
+                if (steam && nativeView && gameViewId) {
+                    steam.showForGame(appId, gameViewId, function (steamViewId) {
+                        return nativeView && runner.steamSdlRunning() ? nativeView.resume(steamViewId) : false;
+                    }, function () {
+                        if (!nativeView || closing || !ready || !runner.steamSdlRunning()) return false;
+                        quit();
+                        return true;
+                    }).then(function (shown) {
+                        if (!shown && nativeView && runner.steamSdlRunning()) nativeView.resume();
+                    }, function () {
+                        if (nativeView && runner.steamSdlRunning()) nativeView.resume();
+                    });
+                } else if (nativeView) nativeView.resume();
                 return;
             }
             menu.hidden = false;

@@ -56,6 +56,26 @@ test('dispatches only supported screen routes to registered Valve listeners', ()
     assert.throws(() => client.URL.ExecuteSteamURL('steam://open/settings'), /unavailable/);
 });
 
+test('opens Valve running controls for the foregrounded game, including late registration', async () => {
+    const client = {}, state = {app: 975370}, seen = [];
+    const show = vm.runInNewContext(source('big-picture-bridge/xbox-url.js') +
+        '\ninstallXboxUrls(client, () => state.app)', {client, state, queueMicrotask});
+    show(state.app);
+    const subscribe = () => client.URL.RegisterForRunSteamURL('open/apprunningcontrols', (...args) => seen.push(args));
+    const sub = subscribe();
+    await Promise.resolve();
+    assert.deepEqual(seen, [[0, 'steam://open/apprunningcontrols/975370']]);
+    assert.throws(() => client.URL.ExecuteSteamURL('steam://open/apprunningcontrols/413150'), /Unsupported/);
+    sub.unregister();
+    show(state.app);
+    subscribe();
+    state.app = 0;
+    show(0);
+    await Promise.resolve();
+    assert.equal(seen.length, 1);
+    assert.throws(() => client.URL.ExecuteSteamURL('steam://open/apprunningcontrols/975370'), /Unsupported/);
+});
+
 test('routes local Valve screen messages and honors listener revocation', async () => {
     const client = {};
     vm.runInNewContext(source('big-picture-bridge/xbox-messaging.js') + '\ninstallXboxMessaging(client)', {client, queueMicrotask, performance});

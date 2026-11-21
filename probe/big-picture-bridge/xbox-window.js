@@ -69,12 +69,33 @@ function installXboxWindow(client, send) {
         return subscribe(callbacks, () => deliver(callback), initial);
     }
     systemUI.RegisterForFocusChangeEvents = callback => subscribeValue(focus, callback, fn => fn(focusInfo()), true);
+    // Hosted games render into one Xbox application view. The focus event above
+    // advertises no individually selectable desktop game windows.
+    systemUI.GetGameWindowsInfo = async (appId, ids) => {
+        if (!Number.isInteger(appId) || !Array.isArray(ids)) throw new TypeError('Expected an AppID and window IDs');
+        return [];
+    };
     systemUI.RegisterForOverlayGameWindowFocusChanged = callback =>
         subscribeValue(overlayFocus, callback, fn => { if (focused()) fn(0, 0); }, true);
+
+    async function gameWindowAction(gameId, method, expected) {
+        const id = Number(gameId);
+        if (!Number.isInteger(id) || id <= 0 || id > 0xffffff || String(id) !== String(gameId))
+            throw new Error('Invalid game ID');
+        if (await send(method, id) !== expected) throw new Error('The selected game window is unavailable');
+    }
+    const apps = client.Apps ||= {};
+    apps.RaiseWindowForGame = gameId => gameWindowAction(gameId, 'resume-game', 'presented');
+    apps.TerminateApp = (gameId, force) => {
+        if (force !== false) throw new Error('Only a graceful game exit is supported');
+        return gameWindowAction(gameId, 'quit-game', 'quit-requested');
+    };
 
     const ui = client.UI ||= {};
     // The single Xbox window requests the pinned client's gamepad UI mode (4)
     // for its entire lifetime, including while a game owns the foreground.
+    ui.GetUIMode = async () => 4;
+    ui.NotifyAppInitialized = () => host.postMessage('xbox-app-initialized');
     ui.RegisterForUIModeChanged = callback => subscribeValue(mode, callback, fn => fn(4), true);
     ui.GetDesiredSteamUIWindows = async () => [{
         unID: state.viewId, unPID: state.pid, nBrowserID: state.ownerId, appid: 0, windowType: 0 // MainGamepadUI

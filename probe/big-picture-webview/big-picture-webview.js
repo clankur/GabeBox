@@ -10,7 +10,17 @@
         var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
             storage.CreationCollisionOption.replaceExisting);
         var report = Promise.resolve(file);
-        var messages = [], last = "", servedGames, rendererError;
+        var messages = [], last = "", servedGames, rendererError, memory = {};
+        function sampleMemory(stage) {
+            try {
+                var manager = Windows.System.MemoryManager;
+                var usage = manager.appMemoryUsage, limit = manager.appMemoryUsageLimit;
+                if (typeof usage === "number" && isFinite(usage) && usage >= 0 &&
+                    typeof limit === "number" && isFinite(limit) && limit > 0)
+                    memory[stage] = "memory_" + stage + "_usage_bytes=" + usage + "\r\n" +
+                        "memory_" + stage + "_limit_bytes=" + limit + "\r\n";
+            } catch (_) {}
+        }
         var resolveReady, rejectReady, readinessTimer, settled = false, failed = false;
         var ready = new Promise(function (resolve, reject) {
             resolveReady = resolve; rejectReady = reject;
@@ -23,7 +33,8 @@
             } else if (!refresh) return report;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
-                (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") + messages.join("\r\n") + "\r\n";
+                (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
+                Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
             report = report.then(function (f) {
                 return storage.FileIO.writeTextAsync(f, text).then(function () { return f; });
             });
@@ -34,13 +45,54 @@
             function switchToView() { return views.ApplicationViewSwitcher.switchAsync(to, from); }
             return Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(to)).then(switchToView, switchToView);
         }
-        function resume() {
-            playing = false;
+        var playingApp = 0, presented = false, returnToGame, quitGame;
+        function gameEvent(overlay) {
+            if (!host || failed) return;
+            var hosted = playingApp === 646570 || playingApp === 975370 || playingApp === 413150;
+            host.reply(JSON.stringify({event: "xbox-game", appId: presented && hosted ? playingApp : 0, overlay: overlay}));
+        }
+        function showValve(from) {
             if (failed || !viewId || visible) return Promise.resolve();
-            if (!activeSwitch) activeSwitch = show(viewId, mainId).then(function () {
+            if (!activeSwitch) activeSwitch = show(viewId, from || mainId).then(function () {
                 visible = true; activeSwitch = null;
-            }, function (err) { activeSwitch = null; throw err; });
+            }, function (error) { activeSwitch = null; throw error; });
             return activeSwitch;
+        }
+        function showForGame(appId, from, restore, requestExit) {
+            if (!played(appId) || !from || typeof restore !== "function")
+                return Promise.resolve(false);
+            returnToGame = restore; quitGame = requestExit;
+            return showValve(from).then(function () {
+                if (!playing || playingApp !== appId) return false;
+                sampleMemory("overlay"); gameEvent(true); record("game-switch-to-steam");
+                return true;
+            });
+        }
+        function raiseGame(appId) {
+            if (!visible || !played(appId) || !returnToGame) return Promise.resolve("unavailable");
+            var restore = returnToGame;
+            returnToGame = null;
+            return Promise.resolve().then(function () { return restore(viewId); }).then(function (shown) {
+                if (!shown || !played(appId)) return "unavailable";
+                visible = false;
+                sampleMemory("resume_game"); gameEvent(false); record("game-switch-to-game");
+                return "presented";
+            }, function () {
+                if (played(appId)) returnToGame = restore;
+                return "failed";
+            });
+        }
+        function played(appId) { return !failed && playing && presented && appId === playingApp; }
+        function resume(exitedApp) {
+            if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
+            var returning = playing;
+            playing = presented = false;
+            playingApp = 0; returnToGame = quitGame = null;
+            return showValve(mainId).then(function () {
+                if (returning && !playing && !failed) {
+                    sampleMemory("return"); gameEvent(false); return record("game-returned-to-steam");
+                }
+            });
         }
         function respond(id, ok, value) {
             if (failed) return;
@@ -68,24 +120,56 @@
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
             else if (request.method === "session") action = function () { return broker.session(); };
+            else if (request.method === "restart-client") action = function () {
+                return broker.session().then(function (user) {
+                    if (!user || !user.steamId) return "signed-out";
+                    return settled && visible && !playing && !failed ? "restart" : "busy";
+                });
+            };
             else if (request.method === "system-mode") action = function () { return window.steamXboxSystemMode(Windows); };
-            else if ((request.method === "play" || request.method === "install") &&
+            else if ((request.method === "play" || request.method === "install" || request.method === "resume-game" || request.method === "quit-game") &&
                      typeof appId === "number" && appId > 0 && appId <= 0xffffffff && appId % 1 === 0) {
-                if (request.method === "install") action = function () { return broker.install(appId); };
+                if (request.method === "resume-game" || request.method === "quit-game") action = function () {
+                    return broker.session().then(function (user) {
+                        if (!user || !user.steamId) return "signed-out";
+                        if (request.method === "resume-game") return raiseGame(appId);
+                        if (!visible || !played(appId) || !quitGame) return "unavailable";
+                        if (!quitGame()) return "unavailable";
+                        quitGame = null;
+                        return "quit-requested";
+                    });
+                };
+                else if (request.method === "install") action = function () { return broker.install(appId); };
                 else action = function () {
-                    if (playing) return "busy";
-                    playing = true;
-                    return show(mainId, viewId).then(function () {
-                        visible = false;
-                        return broker.play(appId);
+                    if (playing) {
+                        if (!played(appId) || !returnToGame) return "busy";
+                        return broker.session().then(function (user) { return user && user.steamId ? raiseGame(appId) : "signed-out"; });
+                    }
+                    playing = true; playingApp = appId;
+                    // Make the expensive view handoff only after the broker has
+                    // verified this account, the title and its local installation.
+                    return broker.play(appId, function () {
+                        return show(mainId, viewId).then(function () {
+                            visible = false;
+                            sampleMemory("handoff");
+                            return record("game-window-backgrounded");
+                        });
                     }).then(function (outcome) {
-                        if (outcome === "presented" || outcome === "window-ready") return outcome;
+                        if (outcome === "presented" || outcome === "window-ready") {
+                            presented = playing && playingApp === appId && outcome === "presented";
+                            sampleMemory("first_frame"); gameEvent(false);
+                            return record("game-" + outcome).then(function () { return outcome; });
+                        }
                         return resume().then(function () { return outcome; });
                     }, function (err) { return resume().then(function () { throw err; }); });
                 };
             } else return respond(id, false, "unavailable");
             Promise.resolve().then(function () { if (!failed) return action(); }).then(function (result) {
                 respond(id, true, result);
+                if (request.method === "restart-client" && result === "restart" && !playing && !failed) {
+                    finish("client-restart", true);
+                    return;
+                }
                 if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
                     servedGames = result.length;
                     record(last, true);
@@ -93,12 +177,14 @@
             }, function () { respond(id, false, "failed"); });
         }
         function fail(error, stage) {
+            var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
+            finish(stage || "host-error:" + code, false);
+        }
+        function finish(stage, restart) {
             if (failed) return;
             failed = true;
             clearInterval(timer);
             clearTimeout(readinessTimer);
-            var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
-            stage = stage || "host-error:" + code;
             record(stage).catch(function () {});
             var wasReady = settled;
             if (!settled) { settled = true; rejectReady(new Error(stage)); }
@@ -119,7 +205,9 @@
                     return check();
                 }).catch(function () {}).then(function () {
                     if (session === current) session = null;
-                    if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
+                    if (restart) {
+                        open(broker, onFailure).catch(function (error) { if (onFailure) onFailure(error); });
+                    } else if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
                 });
             }
         }
@@ -133,7 +221,7 @@
                     viewId = host.viewId();
                     if (viewId) resume().catch(fail);
                 }
-                if (!settled && visible && stage === "gamepad-ready") {
+                if (!settled && visible && (stage === "gamepad-ready" || stage === "setup-ready")) {
                     settled = true; clearTimeout(readinessTimer); resolveReady();
                 }
                 for (var i = 0; i < 16; ++i) {
@@ -146,6 +234,7 @@
         if (broker) readinessTimer = setTimeout(function () {
             fail(new Error("Timed out waiting for Valve's gamepad window"), "gamepad-timeout:" + (lastNative || "starting"));
         }, 45000);
+        sampleMemory("startup");
         var startup = record("starting").then(function () {
             mainId = views.ApplicationView.getForCurrentView().id;
             host = BigPictureView.Native.Renderer;
@@ -161,11 +250,14 @@
             });
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, ready: broker ? ready : startup};
+        session = {resume: resume, showForGame: showForGame, ready: broker ? ready : startup};
         return session.ready;
     }
     window.steamBigPictureHost = {
         open: open,
-        resume: function () { return session ? session.resume() : Promise.resolve(); }
+        resume: function (appId) { return session ? session.resume(appId) : Promise.resolve(); },
+        showForGame: function (appId, viewId, restore, requestExit) {
+            return session ? session.showForGame(appId, viewId, restore, requestExit) : Promise.resolve(false);
+        }
     };
 }());

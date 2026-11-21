@@ -2,20 +2,31 @@
 // authentication, ownership checks, launch routing, and the game process.
 (() => {
     'use strict';
-    if (window !== window.top || location.href.split('#')[0] !== 'https://steamloopback.host/index.html' ||
+    if (window !== window.top || location.href.split('#')[0] !== 'https://steamloopback.host/index.html?IN_CLIENT=true' ||
         'SteamClient' in window) return;
     const host = window.chrome?.webview;
     if (!host) return;
 
     const pending = new Map();
     const listeners = new Set();
+    const detailListeners = new Set();
     let requestId = crypto.getRandomValues(new Uint32Array(1))[0] & 0x3fffffff;
     let runtime;
     let updating;
+    let refreshAgain = false;
+    let activeApp = 0;
     // Capture the release's serializer without replacing its entry, routes or modules.
     (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => { runtime = require; }]);
 
     host.addEventListener('message', ({data}) => {
+        if (data?.event === 'xbox-game') {
+            if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
+            const changed = activeApp !== data.appId;
+            activeApp = data.appId;
+            if (changed) refresh().catch(error => console.error('Steam library unavailable', error.message));
+            showGameOverlay(data.overlay ? activeApp : 0);
+            return;
+        }
         const request = pending.get(data?.id);
         if (!request) return;
         pending.delete(data.id);
@@ -48,7 +59,11 @@
     }
 
     function refresh() {
-        if (updating || !listeners.size) return updating;
+        if (updating) {
+            refreshAgain = true;
+            return updating;
+        }
+        if (!listeners.size && !detailListeners.size) return Promise.resolve();
         updating = send('library').then(games => {
             // Module 76142 in Valve release 1794536281 exports the protobuf
             // that Apps.RegisterForAppOverviewChanges supplies to UpdateAppOverview.
@@ -61,8 +76,9 @@
                 }
                 current.add(game.id);
                 const local = {clientid: '0', installed: game.installed};
-                if (game.canPlay && game.installed) local.display_status = status.W6; // Ready to launch
-                else if (!game.installed) local.display_status = status.pd; // Ready to install
+                if (game.id === activeApp && game.installed) local.display_status = status.Fi; // Running
+                else if (game.installed) local.display_status = game.canPlay ? status.hr : status.Yh; // ReadyToLaunch / NotLaunchable
+                else local.display_status = status.jw; // ReadyToInstall
                 return {appid: game.id, gameid: String(game.id), app_type: 1, display_name: game.name,
                     sort_as: game.name.toLowerCase(), visible_in_game_list: true, subscribed_to: true,
                     per_client_data: [local]};
@@ -74,11 +90,36 @@
                 subscription.callback(bytes);
                 subscription.ids = current;
             }
-        }).finally(() => { updating = undefined; });
+            const byId = new Map(apps.map(app => [app.appid, app]));
+            for (const sub of detailListeners) {
+                const app = byId.get(sub.id);
+                if (!app) continue;
+                const local = app.per_client_data[0];
+                if (sub.last === local.display_status && sub.name === app.display_name) continue;
+                sub.last = local.display_status;
+                sub.name = app.display_name;
+                sub.callback({unAppID: app.appid, strDisplayName: app.display_name, bIsSubscribedTo: true,
+                    bHasAnyLocalContent: local.installed, eDisplayStatus: local.display_status,
+                    vecChildConfigApps: [], achievements: {}});
+            }
+        }).finally(() => {
+            updating = undefined;
+            if (refreshAgain) {
+                refreshAgain = false;
+                return refresh();
+            }
+        });
         return updating;
     }
 
     window.SteamClient = {Apps: {
+        RegisterForAppDetails(id, callback) {
+            if (!validId(id) || typeof callback !== 'function') throw new TypeError('Expected an AppID and a details listener');
+            const sub = {id, callback};
+            detailListeners.add(sub);
+            refresh().catch(error => console.error('Steam app details unavailable', error.message));
+            return {unregister() { detailListeners.delete(sub); }};
+        },
         // This package has no Workshop event source. The pinned WorkshopStore
         // accepts an absent subscription handle and does not consume it further.
         RegisterForWorkshopChanges() { return undefined; },
@@ -101,20 +142,30 @@
     }};
     const client = window.SteamClient;
     const runAction = installXboxGameActions(client);
+    const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {
+        installXboxNotifications(runtime);
+        installXboxControllerService(runtime, gamepads);
         const mode = await send('system-mode');
         if (typeof mode !== 'boolean') throw new Error('Xbox presentation mode unavailable');
         return mode;
     }};
     installXboxWindow(client, send);
-    installXboxUser(client, send);
-    installXboxInput(client, send);
-    installXboxLifecycle(client);
+    installXboxBrowserView(client);
+    installXboxUser(client, send, () => runtime);
+    client.User.StartRestart = async force => {
+        if (force !== false || await send('restart-client') !== 'restart')
+            throw new Error('Steam client restart unavailable');
+    };
+    installXboxInput(client, gamepads);
+    installXboxLifecycle(client, () => runtime);
+    installXboxSettings(client, () => runtime);
     installXboxMessaging(client);
     installXboxCoreStartup(client, send);
     installXboxServices(client, send);
-    installXboxUrls(client);
+    installXboxCloudCache(client, send);
+    const showGameOverlay = installXboxUrls(client, () => activeApp);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && listeners.size) refresh().catch(error => console.error('Steam library unavailable', error.message));
+        if (!document.hidden) refresh().catch(error => console.error('Steam library unavailable', error.message));
     });
 })();

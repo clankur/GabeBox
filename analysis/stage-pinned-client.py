@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PureWindowsPath
 import re
+import runpy
 import shutil
 from tempfile import TemporaryDirectory
 from urllib.parse import urljoin
@@ -83,6 +84,8 @@ def stage_client(destination, archive_cache=None, ui_only=False, include_url_cat
         with ThreadPoolExecutor(max_workers=6) as executor:
             for archive in executor.map(fetch, archives):
                 if ui_only and archive.name.startswith("public_all.zip."):
+                    glyphs = Path(__file__).resolve().parents[1] / "probe/big-picture-bridge/stage-glyphs.py"
+                    runpy.run_path(str(glyphs))["stage_glyphs"](staged / "steamui", archive)
                     catalog = staged / "public/url_list.txt"
                     catalog.parent.mkdir()
                     with ZipFile(archive) as package:

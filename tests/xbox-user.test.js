@@ -6,7 +6,7 @@ const source = fs.readFileSync(require.resolve("../probe/big-picture-bridge/xbox
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const steamId = "76561197960268001";
 
-function setup(send) {
+function setup(send, runtime) {
     let refresh;
     const context = vm.createContext({
         setInterval(callback, ms) { assert.equal(ms, 5000); refresh = callback; return 1; },
@@ -14,7 +14,7 @@ function setup(send) {
     });
     vm.runInContext(source, context);
     const client = {};
-    context.installXboxUser(client, send);
+    context.installXboxUser(client, send, () => runtime);
     return { user: client.User, poll() { assert.ok(refresh); refresh(); }, active: () => !!refresh };
 }
 
@@ -68,4 +68,27 @@ test("unregistered pending callbacks stay revoked", async () => {
     await settle(); sub.unregister();
     resolve({ steamId }); await settle();
     assert.equal(active(), false);
+});
+
+
+test("public user config follows the verified session without changing CM state", async () => {
+    const config = {steamid: "", accountid: 0, logged_in: false, account_name: "", token: undefined};
+    class SteamID {
+        constructor(value) { this.value = BigInt(value); }
+        GetAccountID() { return Number(this.value & 0xffffffffn); }
+    }
+    const runtime = id => ({30610: {iA: config}, 55324: {b: SteamID}})[id];
+    let result = {steamId};
+    const {user, poll} = setup(() => result, runtime);
+    const sub = user.RegisterForCurrentUserChanges(() => {});
+    await settle();
+    assert.equal(config.steamid, steamId);
+    result = {steamId: "76561197960268002"};
+    poll(); await settle();
+    assert.equal(config.steamid, result.steamId);
+    assert.equal(config.accountid, Number(BigInt(result.steamId) & 0xffffffffn));
+    result = {steamId: null};
+    poll(); await settle();
+    assert.deepEqual(config, {steamid: "", accountid: 0, logged_in: false, account_name: "", token: undefined});
+    sub.unregister();
 });

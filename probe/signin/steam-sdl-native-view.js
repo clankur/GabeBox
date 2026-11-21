@@ -43,23 +43,26 @@
             close();
             events.fallback();
         }
-        function resume() {
-            if (!id || switching || closed) return;
+        function resume(fromView) {
+            if (!id || closed) return Promise.resolve(false);
+            if (switching) return pendingShow;
             if (overlayOpen) {
-                try { host.start(); } catch (_) { failed(); return; }
+                try { host.start(); } catch (_) { failed(); return Promise.resolve(false); }
                 overlayOpen = false;
             }
             switching = true;
             function switchToGame() {
-                if (!closed) return switcher.switchAsync(id, mainId);
+                if (!closed) return switcher.switchAsync(id, fromView || mainId);
             }
             pendingShow = Promise.resolve().then(function () {
                 if (!closed) return switcher.tryShowAsStandaloneAsync(id);
             }).then(switchToGame, switchToGame);
-            pendingShow.then(function () {
+            pendingShow = pendingShow.then(function () {
                 switching = false;
                 shown = !closed;
-            }, failed);
+                return shown;
+            }, function () { failed(); return false; });
+            return pendingShow;
         }
         function poll() {
             if (closed) return;
@@ -93,7 +96,7 @@
                 if (overlay && +overlay[1] && !overlayOpen) {
                     overlayOpen = true;
                     shown = false;
-                    events.menu();
+                    events.menu(id);
                 }
             } catch (_) { failed(); }
         }

@@ -33,7 +33,7 @@ var steamBigPictureBroker = (function () {
                 });
             });
         }
-        function action(appId, install) {
+        function action(appId, install, handoff) {
             if (!active()) return Promise.resolve("signed-out");
             if (typeof appId !== "number" || appId !== Math.floor(appId) || appId < 1 || appId > 0xffffff) {
                 return Promise.resolve("invalid-app");
@@ -48,7 +48,12 @@ var steamBigPictureBroker = (function () {
                 if (!active()) return "signed-out";
                 if (session.busy()) return "busy";
                 if (install) return installed ? "already-installed" : session.install(game);
-                return installed ? session.play(game) : "not-installed";
+                if (!installed) return "not-installed";
+                return Promise.resolve(handoff && handoff()).then(function () {
+                    if (!active()) return "signed-out";
+                    if (session.busy()) return "busy";
+                    return session.play(game);
+                });
             }).then(function (result) {
                 acting = false;
                 return result;
@@ -60,7 +65,7 @@ var steamBigPictureBroker = (function () {
         return {
             session: function () { return Promise.resolve().then(identity); },
             library: library,
-            play: function (appId) { return action(appId, false); },
+            play: function (appId, handoff) { return action(appId, false, handoff); },
             install: function (appId) { return action(appId, true); }
         };
     }

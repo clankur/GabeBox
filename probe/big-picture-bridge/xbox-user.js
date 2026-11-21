@@ -1,9 +1,33 @@
 // Called only by the package's top-level, origin-checked bridge.
-function installXboxUser(client, send) {
+function installXboxUser(client, send, getRuntime) {
     "use strict";
     const subscribers = new Set();
     let pending;
     let timer;
+    let projectedId;
+
+    function publishIdentity(id) {
+        const runtime = getRuntime?.();
+        if (!runtime) return;
+        // SharedConnection supplies these public UserConfig fields on desktop.
+        // The QR broker supplies the same SteamID here. Connection state,
+        // credentials, account names and private profile data remain Valve-owned.
+        const config = runtime(30610).iA;
+        if (config.logged_in || (config.steamid && config.steamid !== projectedId)) {
+            projectedId = undefined;
+            return;
+        }
+        if (id) {
+            const account = new (runtime(55324).b)(id);
+            config.steamid = id;
+            config.accountid = account.GetAccountID();
+            projectedId = id;
+        } else if (projectedId) {
+            config.steamid = '';
+            config.accountid = 0;
+            projectedId = undefined;
+        }
+    }
 
     function session() {
         if (!pending) {
@@ -20,6 +44,7 @@ function installXboxUser(client, send) {
 
     function refresh() {
         session().then(id => {
+            publishIdentity(id);
             for (const sub of subscribers) {
                 if (sub.last === id) continue;
                 sub.last = id;
@@ -31,7 +56,7 @@ function installXboxUser(client, send) {
                     else sub.callback("", id ? 5 : 1, id ? 1 : 0, 0, id ? 100 : 0, "");
                 });
             }
-        }, () => {}); // A transport failure does not confirm a login or logout.
+        }, () => publishIdentity(null)); // A failed check revokes this projection, without emitting a login decision.
     }
 
     function subscribe(callback, currentUser) {

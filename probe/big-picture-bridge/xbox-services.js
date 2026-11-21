@@ -28,6 +28,18 @@ function installXboxServices(client, send) {
         return result;
     }
 
+    // The stock UI registers these before it loads its localization or
+    // settings. The local client has no voice or remote settings events.
+    function channel() {
+        const listeners = new Set();
+        return callback => {
+            if (typeof callback !== 'function') throw new TypeError('Expected a client listener');
+            listeners.add(callback);
+            return {unregister() { listeners.delete(callback); }};
+        };
+    }
+    client.Friends = {RegisterForVoiceChatStatus: channel()};
+    client.FriendSettings = {RegisterForSettingsChanges: channel()};
     client.Storage = {
         GetString(key) {
             return operation(key, name => {

@@ -1,11 +1,11 @@
 // Steam's 1794536281 navigation provider consumes logical button edges. It
 // implements hold/repeat itself. These identifiers are from sp.js module 43251.
-function installXboxInput(client) {
-    const digital = new Set(), analog = new Set(), system = new Set(), unbound = new Set();
+function installXboxInput(client, gamepads) {
+    const digital = new Set(), analog = new Set(), system = new Set(), unbound = new Set(), keyboards = new Set();
     const states = new Map();
     // W3C standard buttons A, B, X, Y, bumpers, triggers, View, Menu and stick clicks.
     const buttonCodes = [0, 1, 2, 3, 30, 31, 28, 29, 35, 36, 25, 41];
-    let analogEnabled = false, unboundSignature, timer, timerWindow, stopped = false;
+    let analogEnabled = false, unboundSignature, deviceSignature, timer, timerWindow, stopped = false;
     const denied = new WeakSet();
 
     function dispatch(listeners, ...args) {
@@ -49,7 +49,12 @@ function installXboxInput(client) {
         state.y = y;
     }
     function read(view) {
-        const pads = [...view.navigator.getGamepads()].filter(pad => pad?.connected);
+        const pads = gamepads.read(view);
+        const inventory = JSON.stringify(pads.map(pad => [pad.index, pad.id, pad.mapping]));
+        if (inventory !== deviceSignature) {
+            if (deviceSignature !== undefined) notifyXboxControllerListChanged?.();
+            deviceSignature = inventory;
+        }
         const mapped = new Set();
         const unmapped = [];
         for (const pad of pads) {
@@ -94,7 +99,7 @@ function installXboxInput(client) {
             timer = undefined;
             try {
                 if (view.document.hidden) releaseAll();
-                else if (typeof view.navigator.getGamepads === 'function') read(view);
+                else read(view);
             } catch (error) {
                 if (error.name !== 'SecurityError') throw error;
                 releaseAll();
@@ -113,11 +118,28 @@ function installXboxInput(client) {
         return {unregister() { listeners.delete(callback); }};
     }
 
+    const seed = typeof xboxNativeWindow === 'undefined' ? undefined : xboxNativeWindow;
+    let keyboardPresent = seed?.keyboardPresent;
+    window.chrome?.webview?.addEventListener('message', ({data}) => {
+        const state = data?.state;
+        if (!seed || data?.event !== 'xbox-window' || state?.viewId !== seed.viewId || state.pid !== seed.pid ||
+            (state.keyboardPresent !== 0 && state.keyboardPresent !== 1) || state.keyboardPresent === keyboardPresent) return;
+        keyboardPresent = state.keyboardPresent;
+        dispatch(keyboards, keyboardPresent);
+    });
     client.Input = {
         RegisterForUnboundControllerListChanges: callback => listen(unbound, callback),
         RegisterForControllerInputMessages: callback => listen(digital, callback),
         RegisterForControllerAnalogInputMessages: callback => listen(analog, callback),
         EnableControllerAnalogInputMessages(enabled) { analogEnabled = !!enabled; },
+        RegisterForKeyboardDeviceChanges(callback) {
+            if (typeof callback !== 'function') throw new TypeError('Expected a keyboard listener');
+            keyboards.add(callback);
+            queueMicrotask(() => {
+                if (keyboards.has(callback) && (keyboardPresent === 0 || keyboardPresent === 1)) callback(keyboardPresent);
+            });
+            return {unregister() { keyboards.delete(callback); }};
+        },
         RegisterForDualSenseUpdateNotification() {
             // The constructor requests this unconditionally. Web Gamepad cannot
             // query controller firmware. Leave the subscription unavailable.

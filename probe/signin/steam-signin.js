@@ -346,8 +346,8 @@
                 })).then(function () { return installed; });
             });
         }
-        function resume() {
-            if (currentSession()) return Promise.resolve().then(function () { return host.resume(); }).catch(function () {
+        function resume(appId) {
+            if (currentSession()) return Promise.resolve().then(function () { return host.resume(appId); }).catch(function () {
                 showBigPictureStatus("Steam Big Picture could not resume. Reopen the app to retry.");
             });
         }
@@ -356,7 +356,7 @@
             function restore() {
                 if (resumed) return;
                 resumed = true;
-                return resume();
+                return resume(game.id);
             }
             return Promise.resolve(runGameLaunch(attempt, game, false, restore)).then(function (result) {
                 if (/^steam_sdl_host_frame=presented\r?$|^steam_dos=guest-started\r?$/m.test(result)) return "presented";

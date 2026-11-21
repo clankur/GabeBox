@@ -1,5 +1,5 @@
 // Bind the platform facts WebView2 actually exposes to the signed Steam context.
-function installXboxLifecycle(client) {
+function installXboxLifecycle(client, getRuntime) {
     if (typeof xboxNativeWindow === 'undefined') return;
     const {deviceFamily, deviceFamilyVersion, devToolsEnabled} = xboxNativeWindow;
     if (typeof devToolsEnabled === 'boolean') {
@@ -8,8 +8,10 @@ function installXboxLifecycle(client) {
 
     const zoneObservers = new Set();
     let timeZone, zoneTimer;
+    const zoneKey = 'xbox-steamui:machine:timezone', languageKey = 'xbox-steamui:machine:language';
+    function currentZone() { return localStorage.getItem(zoneKey) || new Intl.DateTimeFormat().resolvedOptions().timeZone; }
     function checkZone() {
-        const next = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const next = currentZone();
         if (next === timeZone) return;
         timeZone = next;
         for (const fn of zoneObservers) fn(next);
@@ -18,7 +20,7 @@ function installXboxLifecycle(client) {
         if (typeof callback !== 'function') throw new TypeError('Expected a time zone listener');
         zoneObservers.add(callback);
         if (!zoneTimer) {
-            timeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+            timeZone = currentZone();
             zoneTimer = setInterval(checkZone, 60000);
             window.addEventListener('focus', checkZone);
         }
@@ -42,6 +44,35 @@ function installXboxLifecycle(client) {
             throw new Error('Xbox window dimensions are unavailable');
         return Math.round(width * scale) < screenWidth || Math.round(height * scale) < screenHeight;
     };
+    client.Settings.GetTimeZone = async () => currentZone();
+    client.Settings.GetAvailableTimeZones = async () => {
+        const zones = new Set([currentZone(), 'UTC', ...Intl.supportedValuesOf('timeZone')]);
+        return [...zones].map(timezoneID => {
+            const title = new Intl.DateTimeFormat(undefined, {timeZone: timezoneID, timeZoneName: 'longGeneric'})
+                .formatToParts().find(p => p.type === 'timeZoneName')?.value;
+            return {timezoneID, timezoneLocalizationToken: title || timezoneID, regionsLocalizationToken: timezoneID};
+        });
+    };
+    client.Settings.SetTimeZone = zone => {
+        // The signed renderer owns its display preference. Other Xbox apps use the OS time zone.
+        const canonical = new Intl.DateTimeFormat(undefined, {timeZone: zone}).resolvedOptions().timeZone;
+        localStorage.setItem(zoneKey, canonical);
+        checkZone();
+    };
+    client.Settings.GetCurrentLanguage = async () => localStorage.getItem(languageKey) || steamXboxLanguage() || 'english';
+    client.Settings.GetAvailableLanguages = async () => {
+        const runtime = getRuntime();
+        await runtime.e(2561);
+        // The actual setup wizard gets its localized language names from 82561.
+        const catalog = runtime(82561).default;
+        return Object.keys(catalog).filter(runtime(4726).VD).map(strShortName => ({
+            language: runtime(94601).sfN(strShortName), strShortName
+        }));
+    };
+    client.Settings.SetCurrentLanguage = language => {
+        if (!getRuntime()(4726).VD(language)) throw new Error('Unsupported Steam language');
+        localStorage.setItem(languageKey, language);
+    };
 
     // Valve mounts these dialogs with the gamepad root and requires a removable
     // listener even when the host has no events. There is no event producer for
@@ -59,7 +90,28 @@ function installXboxLifecycle(client) {
     client.Apps.RegisterForDRMFailureResponse = dialogRegistration();
     client.User.RegisterShowSaveHardwareDialog = dialogRegistration();
     client.User.OnCloseSaveHardwareDialog = () => {}; // No native save dialog was presented.
+    // The native compositor owns only SharedJSContext and SP BPM. Local
+    // menus are frames in SP BPM. None of these is a WebChat overlay browser.
+    client.WebChat = {
+        RegisterOverlayChatBrowserInfoChanged: dialogRegistration(),
+        GetOverlayChatBrowserInfo: async () => []
+    };
     if (deviceFamily === 'Windows.Xbox') {
+        // Xbox Settings owns OS updates. Valve's first-run wizard consumes this
+        // capability and skips its SteamOS updater on systems it cannot update.
+        client.Updates = {
+            RegisterForUpdateStateChanges(callback) {
+                if (typeof callback !== 'function') throw new TypeError('Expected an update-state listener');
+                let active = true;
+                queueMicrotask(() => {
+                    if (!active) return;
+                    const runtime = getRuntime();
+                    const msg = runtime(78544).q.fromObject({state: runtime(25589)._U, supports_os_updates: false});
+                    callback(msg.serializeBinary());
+                });
+                return {unregister() { active = false; }};
+            }
+        };
         client.System.IsDeckFactoryImage = async () => false;
         if (typeof deviceFamilyVersion === 'string' && /^\d{1,20}$/.test(deviceFamilyVersion)) {
             const version = BigInt(deviceFamilyVersion);
