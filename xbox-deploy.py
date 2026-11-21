@@ -463,7 +463,12 @@ def trial_sdl(portal, args):
                 replace_sdl(candidate)
                 applied = True
                 print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
-                wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout)
+                report = wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout)
+                fields = report_fields(report)
+                app_id = fields.get('steam_launch_app_id') or fields.get('steam_launch_repeat_app_id')
+                if app_id != str(args.app_id) or fields.get('steam_launch_submitted') != 'yes':
+                    raise ValueError(f'The fresh report did not record Steam Play for AppID {args.app_id}. '
+                                     'Prepare the diagnostic with --repeat-launch.')
             finally:
                 try:
                     installed = read_sdl()
@@ -577,7 +582,7 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
                     return
                 if name == PROBE_STEAM_CORE_NAME and re.search(
                         r'^status=steam-core-complete\s*$', report, re.MULTILINE):
-                    return
+                    return report
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
                     if not require_ipc or re.search(r'^ipc=success\s*$', report, re.MULTILINE):
                         return

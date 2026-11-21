@@ -180,14 +180,14 @@ The workflow also builds SDL2 `2.26.2`, the version shipped with Dwarf Fortress,
 
 Use the same SDL2 source workflow for games with this loader dependency. It produces versioned x64 artifacts with a license and checksum. The current profiles pair Dwarf Fortress with `2.26.2` and Stardew Valley with `2.30.9`. Keep each profile tied to the installed original DLL digest and the corresponding upstream build. Verify later window, renderer, audio and input behavior per game before releasing a profile for regular Play. [SDL2 workflow](../.github/workflows/xbox-sdl.yml)
 
-Run the selected game's signed diagnostic with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. For example, the following command runs the Stardew profile on an already installed diagnostic package.
+Prepare the selected game's signed diagnostic with `--repeat-launch` and run it with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. For example, the following command runs the Stardew profile on an already installed diagnostic package.
 
 ```sh
 python3 xbox-deploy.py --env-file "$xbox_env" sdl-trial \
   --version "$version" --app-id 413150 --artifact "$sdl_artifact" --backup-dir "$trial_dir"
 ```
 
-The command verifies the x64 artifact checksum, embedded SDL version and installed original. It stores the original in the backup directory, applies the rebuilt DLL for a single restart, and restores and verifies the original even when the launch times out. Use the same directory on repeat runs. If the console connection fails during restoration, rerun with the same arguments and `--restore-only`. A process that is forcibly killed can leave the backup directory's `.lock` file. Check that the first process has stopped before removing the lock for recovery.
+The command verifies the x64 artifact checksum, embedded SDL version and installed original. It stores the original in the backup directory, applies the rebuilt DLL for a single restart, and checks that the fresh report records Steam Play submission for the selected game. It restores and verifies the original even when launch verification fails. Use the same directory on repeat runs. If the console connection fails during restoration, rerun with the same arguments and `--restore-only`. A process that is forcibly killed can leave the backup directory's `.lock` file. Check that the first process has stopped before removing the lock for recovery.
 
 The pinned app manager’s launch call takes a regular `CGameID`, a launch option index, a source value and an argument string. The probe defaults to index zero. To test Factorio’s publisher-configured x64 Windows executable, prepare the sign-in package with `--launch-app-id 427520 --launch-option 1 --repeat-launch`. The launch report records `steam_launch_option_index`. Other library games use index zero. The source stays zero and the argument string stays empty. The completion event must match the returned handle, game ID and pinned result layout. [Steam CGameID](https://partner.steamgames.com/doc/api/steam_api#CGameID) · [Earlier launch adapter observations](https://github.com/willfaust/madeira-dock/blob/main/docs/CLIENT_LAYOUTS.md)
 
