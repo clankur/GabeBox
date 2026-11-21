@@ -85,16 +85,29 @@ function fixture(config, options = {}) {
     };
     const game = {exit() { this.exited = true; }};
     const window = {exports: {WDOSBOX() {}}};
+    const navigator = options.noPointerMode ? {} : {gamepadInputEmulation: "keyboard"};
     let now = 25000;
     vm.runInNewContext(adapterSource, {
-        window, document, Promise, Uint8Array, Date: {now: () => now},
+        window, document, navigator, Promise, Uint8Array, Date: {now: () => now},
         setTimeout(callback, delay) { delays.push(delay); now += delay; callback(); },
         Windows: {Storage: storage, Security: {Cryptography: {CryptographicBuffer: {decodeFromBase64String: value => value}}}},
         Dos: async () => ({fs: runtimeFs, main: async args => { launches.push(Array.from(args)); return game; }})
     });
     const start = (automatic, checkpoint = () => Promise.resolve()) => window.xcomDosRuntime.start(checkpoint, automatic);
-    return {adapter: window.xcomDosRuntime, start, dirs, foldersRead, filesRead, copies, launches, frames, delays, game, body, library, playButton};
+    return {adapter: window.xcomDosRuntime, start, dirs, foldersRead, filesRead, copies, launches, frames, delays, game, body, library, playButton, navigator};
 }
+
+test("a pointer-driven title enables Xbox mouse mode until it returns to the library", async () => {
+    const sample = fixture(publishedConfig);
+    await sample.start(false);
+    assert.equal(sample.navigator.gamepadInputEmulation, "mouse");
+    sample.body.children[0].children[1].handlers.click();
+    assert.equal(sample.navigator.gamepadInputEmulation, "keyboard");
+
+    const withoutPointerMode = fixture(publishedConfig, {noPointerMode: true});
+    await withoutPointerMode.start(false);
+    assert.equal("gamepadInputEmulation" in withoutPointerMode.navigator, false);
+});
 
 test("X-COM profile mounts only installed DOS data and preserves the verified Play contract", async () => {
     const host = fixture(publishedConfig);
