@@ -1,6 +1,6 @@
 # Series X Big Picture reliability
 
-Build `1.0.230.21` produced raw 1920×1080 Xbox output captures of the populated Valve Library on three consecutive application launches. The two preceding builds each reached it on one of three starts. No production build in this ledger has passed the complete repeated-launch and game-return checks.
+Builds `1.0.230.21` and `1.0.230.22` each produced raw 1920×1080 Xbox output captures of the populated Valve Library on three consecutive application launches. The two preceding builds each reached it on one of three starts. No production build in this ledger has passed the complete repeated-launch and game-return checks.
 
 ## Release checks
 
@@ -78,8 +78,18 @@ Production APPX SHA-256 `246874ba556f2c3a6691f95be78e5c40a702d650fb7ea18540d5deb
 | Attempt | Native run ID | Whole-output evidence |
 |---|---|---|
 | tour-22-183719 | cc3da6fe-67cf-4b3c-b8b1-c0ae24d7b235 | Passed from an empty package-process baseline. The TV shows All Games 134, Installed 8, game art and controller footer. |
+| tour-22-184656 | 568050f9-687c-4076-8e35-aa3ea532ef8e | Passed from an empty package-process baseline. The raw TV image shows the game grid, top tabs and keyboard footer. |
+| tour-22-185256 | 884ab1b4-f7be-4f00-a565-6b9b78e594ff | Passed. TV shows All Games 134, Installed 8 and original game art. Only RuntimeBroker.exe remained at preflight. |
 
-The durable original is `production-230-22/steam-big-picture-library-controller-1920x1080.png`.
+Three of three consecutive app launches reached the populated original Library. Two preflights were strictly empty. The first durable original is `production-230-22/steam-big-picture-library-controller-1920x1080.png`.
+
+### Build 1.0.230.23
+
+Production APPX SHA-256 `a9547c288caebee7f1a245f675ecd0cf654665e2127384b922ed3c17ef858457`. Its 1,175 original Valve assets match build `.22` byte for byte.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-23-185454 | ae592bff-8715-485a-9b69-9d85628d634d | Passed from an empty package-process baseline. Raw TV output showed All Games 134, Installed 8, original artwork and controller footer. |
 
 ## Game launches and returns
 
@@ -91,7 +101,8 @@ The durable original is `production-230-22/steam-big-picture-library-controller-
 | 1.0.230.20 · tour-20-182012 | Stardew Valley | Original game details led to a matched Stardew Valley game process. | Console output reached a white startup frame containing a pixel cursor and two icons. The title menu was unverified. | No matched 30-second presentation sample or visible return before the game and host processes disappeared. |
 | 1.0.230.21 · tour-21-182442 | Slay the Spire | The operator activated the original green Play button. The expected game process appeared. | The first native frame was hidden and no Xbox capture established the game title. | The game process disappeared. No visible return or matched 30-second presentation sample. |
 | 1.0.230.21 · tour-21-182817 | Dwarf Fortress | The operator activated the original green Play button and the matching game process appeared. | The raw Xbox frame shows the title menu, including About DF, Settings and Quit. | 1,797 distinct presented frames in 30.013570 s (59.87 FPS). The operator terminated the game process, then used Back from game details to reach the Library. A normal exit and return remain unverified. |
-| 1.0.230.22 · tour-22-183719 | Slay the Spire | The original game details were captured and the matching JVM started. | No recognizable title frame was established by the foreground sample. | The primary media presenter advanced by two frames over 30.031600 s (0.067 FPS), reaching three total. The producer sequence remained at three across four later reads. A normal exit and return remain unverified. |
+| 1.0.230.22 · tour-22-183719 | Slay the Spire | The original green Play control launched the matching JVM. | No recognizable title frame was established by the foreground sample. F10 brought up Valve's running-game overlay, including Resume game and Exit game. | The primary media presenter advanced by two frames over 30.031600 s (0.067 FPS), reaching three total. The producer sequence remained at three across four later reads. The game and host disappeared before the operator selected Exit. |
+| 1.0.230.22 · tour-22-184656 | Dwarf Fortress | The original Play control launched the matching game process. | The media presenter reported two initial frames. The producer sequence stayed fixed in the observation window and a visible title was unverified. | Valve's original running overlay and Exit game confirmation appeared on TV. Keyboard and pointer attempts left the confirmation visible and the process running. The operator closed the matched process. No normal return was established. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -119,6 +130,10 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `physical-tv-1795303954859752000.png`, .21 Dwarf Fortress title and menu | 1920×1080 | `ef5b70058a6c36ae82c83fcc2f57b4b374d87a5fa901b8d1ea0d8fdc81f83c1d` |
 | `physical-tv-1795304092607387000.png`, .21 Library after assisted return | 1920×1080 | `58c0f1ea182e1f1ec02c051750c6c575030059c9b0342909679b93c76da9a5e5` |
 | `valve-846.png`, .22 first cold start whole-output Library | 1920×1080 | `5cb377878cf552832c82154e9d6234fea7b4ae8a42a42daf3b0aaca8f057de47` |
+| `physical-tv-1795304670690848000.png`, .22 Slay the Spire stock Steam overlay | 1920×1080 | `162027f6d4ec6007c9577a628b31ee701147131435b132ca6c80a8d9bb5991d6` |
+| `valve-841.png`, .22 second cold start whole-output Library | 1920×1080 | `f53a689ce589acbb6670ed4e31a8c239a2902cad23d09950f925fff0949f4284` |
+| `valve-841.png`, .22 third application start whole-output Library | 1920×1080 | `ac3dfbb634a5d23c3642a51e59a349e8257387dfd6c6183ec8bd71a9ef74f428` |
+| `valve-695.png`, .23 first cold start whole-output Library | 1920×1080 | `71c81b43f92502fc14bb652411dfd50167409cc03755210539f48ffcfc9eb397` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
