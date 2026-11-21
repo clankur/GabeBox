@@ -11,6 +11,7 @@
 static SdlHostMailbox *xbox_host_mailbox;
 static Uint32 xbox_host_window;
 static SDL_bool xbox_host_has_gamepad;
+static SDL_bool xbox_host_has_keyboard;
 static SDL_Joystick *xbox_host_gamepad;
 static SDL_JoystickID xbox_host_gamepad_id = -1;
 
@@ -20,6 +21,7 @@ static void XboxSdlOpenHost(void)
     WCHAR path[1024];
     DWORD length;
     HANDLE file, mapping;
+    LARGE_INTEGER size;
     if (tried) return;
     tried = SDL_TRUE;
     length = GetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", path, ARRAYSIZE(path));
@@ -32,7 +34,13 @@ static void XboxSdlOpenHost(void)
     }
     mapping = CreateFileMappingFromApp(file, NULL, PAGE_READWRITE, 0, NULL);
     if (mapping) {
-        xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, sizeof(SdlHostMailbox));
+        if (GetFileSizeEx(file, &size) && size.QuadPart >= sizeof(SdlHostMailbox)) {
+            xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, sizeof(SdlHostMailbox));
+            xbox_host_has_keyboard = xbox_host_mailbox != NULL;
+        }
+        if (!xbox_host_mailbox) {
+            xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, offsetof(SdlHostMailbox, keyboard));
+        }
         xbox_host_has_gamepad = xbox_host_mailbox != NULL;
         if (!xbox_host_mailbox) {
             xbox_host_mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, offsetof(SdlHostMailbox, gamepad));
@@ -45,6 +53,30 @@ static void XboxSdlOpenHost(void)
         xbox_host_mailbox = NULL;
     }
     XboxSdlTrace(xbox_host_mailbox ? "sdl_host=mapped\n" : "sdl_host=map-error\n");
+}
+
+static void XboxSdlPollHostKeyboard(SdlHostKeyboard *keyboard, SDL_Window *window)
+{
+    static Uint32 last_reset;
+    Uint32 reset = (Uint32)SdlHostLoad(&keyboard->reset);
+    Uint32 read = (Uint32)SdlHostLoad(&keyboard->read);
+    Uint32 write = (Uint32)SdlHostLoad(&keyboard->write);
+    if (!SdlHostLoad(&keyboard->available)) InterlockedExchange(&keyboard->available, 1);
+    if (last_reset != reset) {
+        SDL_ResetKeyboard();
+        last_reset = reset;
+        if ((Sint32)(reset - read) > 0) read = reset;
+    }
+    if (read != write) SDL_SetKeyboardFocus(window);
+    while (read != write) {
+        const SdlHostKey *entry = &keyboard->entries[read++ % SDL_HOST_KEY_QUEUE_SIZE];
+        if (entry->scan && entry->scan < SDL_NUM_SCANCODES) {
+            SDL_SendKeyboardKey(entry->down ? SDL_PRESSED : SDL_RELEASED, (SDL_Scancode)entry->scan);
+        } else if (!entry->scan && entry->text[0]) {
+            SDL_SendKeyboardText(entry->text);
+        }
+    }
+    InterlockedExchange(&keyboard->read, (LONG)read);
 }
 
 static void XboxSdlDetachGamepad(void)
@@ -169,10 +201,11 @@ void XboxSdlPollHostInput(void)
     }
     if (requested_quit) return;
     if (xbox_host_has_gamepad) XboxSdlPollHostGamepad(&mailbox->gamepad);
-    serial = SdlHostLoad(&mailbox->input_serial);
-    if (serial == last_serial || (serial & 1)) return;
     window = SDL_GetWindowFromID(xbox_host_window);
     if (!window) return;
+    if (xbox_host_has_keyboard) XboxSdlPollHostKeyboard(&mailbox->keyboard, window);
+    serial = SdlHostLoad(&mailbox->input_serial);
+    if (serial == last_serial || (serial & 1)) return;
     pointer = SdlHostLoad(&mailbox->input_pointer);
     pressed = SdlHostLoad(&mailbox->input_keys);
     if (SdlHostLoad(&mailbox->input_serial) != serial) return;

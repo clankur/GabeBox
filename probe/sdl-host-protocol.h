@@ -15,7 +15,10 @@ enum {
     SDL_HOST_POINTER_MAX = 4095,
     SDL_HOST_PAD_BUTTONS = 15,
     SDL_HOST_PAD_AXES = 6,
-    SDL_HOST_PAD_CONNECTED = 1 << 16
+    SDL_HOST_PAD_CONNECTED = 1 << 16,
+    SDL_HOST_KEY_LIMIT = 512,
+    SDL_HOST_KEY_QUEUE_SIZE = 256,
+    SDL_HOST_TEXT_BYTES = 32
 };
 
 typedef struct SdlHostFrame {
@@ -34,6 +37,21 @@ typedef struct SdlHostGamepad {
     volatile LONG ack;
 } SdlHostGamepad;
 
+/* The host publishes complete entries with write. SDL owns read. */
+typedef struct SdlHostKey {
+    uint16_t scan;
+    uint8_t down;
+    char text[SDL_HOST_TEXT_BYTES];
+} SdlHostKey;
+
+typedef struct SdlHostKeyboard {
+    volatile LONG available;
+    volatile LONG read;
+    volatile LONG write;
+    volatile LONG reset;
+    SdlHostKey entries[SDL_HOST_KEY_QUEUE_SIZE];
+} SdlHostKeyboard;
+
 typedef struct SdlHostMailbox {
     volatile LONG magic;
     volatile LONG frame_state;
@@ -47,6 +65,7 @@ typedef struct SdlHostMailbox {
     SdlHostFrame frame;
     uint8_t pixels[SDL_HOST_MAX_WIDTH * SDL_HOST_MAX_HEIGHT * 4];
     SdlHostGamepad gamepad;
+    SdlHostKeyboard keyboard;
 } SdlHostMailbox;
 
 static inline LONG SdlHostLoad(volatile LONG *word)
