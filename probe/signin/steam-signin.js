@@ -378,7 +378,9 @@
 
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
-        var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(checkpoint);
+        var firstLineEnd = checkpoint.indexOf("\r\n");
+        var firstLine = firstLineEnd < 0 ? checkpoint : checkpoint.slice(0, firstLineEnd);
+        var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(firstLine);
         var stage = parts ? parts[1] : "failed";
         var detail = parts ? parts[2] : "";
         var active = stage === "starting" || stage === "queued" || stage === "resuming" ||
@@ -393,6 +395,7 @@
                     var metric = stage === "install-rejected" || stage === "library-folder-error" ? "result" : "state";
                     report += "steam_download_" + metric + "=" + detail + "\r\n";
                 }
+                if (firstLineEnd >= 0) report += checkpoint.slice(firstLineEnd + 2);
                 if (!active) report += storageCheckpoint("after");
                 report += "status=steam-download-" + (active ? "in-progress" : "complete") + "\r\n";
                 var write = function () { return Windows.Storage.FileIO.writeTextAsync(job.file, report); };
