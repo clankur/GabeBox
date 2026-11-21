@@ -89,8 +89,8 @@ def add_xcom_runtime(layout, archive):
     expected = "d4485f31fb4e841677e06bf3fd108bb00a0472059c675a66ba6a46dbc67ef6843da1054ff748dc910a6f4bd356eefbdfc182569828fe3d7fa3dd43b8e223ba2c"
     if hashlib.sha512(archive.read_bytes()).hexdigest() != expected:
         raise ValueError("Provide the original js-dos 6.22.60 npm archive.")
-    if b'AuthorizeXcomDos' not in (layout / 'XboxProbe.Native.winmd').read_bytes():
-        raise ValueError("This option needs a template with the native X-COM entitlement check.")
+    if b'AuthorizeDosGame' not in (layout / 'XboxProbe.Native.winmd').read_bytes():
+        raise ValueError("This option needs a template with the native DOS entitlement check.")
     destination = layout / 'xcom-runtime'
     destination.mkdir()
     with tarfile.open(archive, mode='r:gz') as bundle:
@@ -101,13 +101,12 @@ def add_xcom_runtime(layout, archive):
     assets = Path(__file__).resolve().parent / 'signin'
     for name in ('xcom-dos.js', 'xcom-dos.css', 'xcom-notices.txt'):
         shutil.copyfile(assets / name, destination / name)
-    if 'window.xcomDosRuntime' not in (layout / 'steam-signin.js').read_text(encoding='utf-8'):
-        raise ValueError("Use a template containing the X-COM library Play handler.")
     page = layout / 'steam-signin.html'
     html = page.read_text(encoding='utf-8')
     marker = '<script src="steam-signin.js"></script>'
     scripts = ('js-dos.js', 'dosbox-emterp.js', 'xcom-dos.js')
-    if html.count(marker) != 1 or html.count('</head>') != 1:
+    if (html.count(marker) != 1 or html.count('</head>') != 1
+            or not (layout / 'steam-game-launch.js').is_file()):
         raise ValueError("Unexpected Steam sign-in template markup.")
     html = html.replace('</head>', '<link rel="stylesheet" href="xcom-runtime/xcom-dos.css">\n</head>')
     page.write_text(html.replace(marker, '\n    '.join(
