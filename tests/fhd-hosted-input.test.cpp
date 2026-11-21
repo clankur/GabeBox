@@ -161,13 +161,12 @@ int main() {
     assert(focused);
     physical.buttons = 0;
     FhdPollHostedInput(&box, &fakeWindow);
-    physical.buttons = 3;
+    physical.buttons = 2; // View alone is game input.
     clockMs = 100;
     assert(!FhdPollHostedInput(&box, &fakeWindow));
-    assert((box.gamepad.buttons & ((1 << 4) | (1 << 6))) == 0);
-    clockMs = 849;
-    assert(!FhdPollHostedInput(&box, &fakeWindow));
-    clockMs = 850;
+    assert(box.gamepad.buttons & (1 << 4));
+    physical.buttons = 3; // Menu joins View on the next controller sample.
+    clockMs += 16;
     assert(FhdPollHostedInput(&box, &fakeWindow) == 1);
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[4] == -32768);

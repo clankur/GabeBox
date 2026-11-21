@@ -63,8 +63,7 @@ OverlayState overlay;
 BOOL nativePad = TRUE, focused, visible, inputEnabled, blockChord;
 LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
-DWORD chordSince, lastTime;
-bool chordTiming;
+DWORD lastTime;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
 double cursorX, cursorY;
@@ -129,7 +128,6 @@ void neutral() {
     highSurrogate = 0;
     padClick = false;
     physicalClick = false;
-    chordTiming = false;
     blockChord = true;
 }
 void queueKey(UINT scan, bool down, const char *utf8 = nullptr) {
@@ -581,19 +579,12 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
     const LONG chord = (1 << 4) | (1 << 6);
     if ((value.bits & chord) == chord) {
         if (!blockChord) {
-            if (!chordTiming) {
-                chordTiming = true;
-                chordSince = now;
-            }
-            if (now - chordSince >= 750) {
-                requestOverlay();
-                overlay = Reported;
-                return 1;
-            }
+            requestOverlay();
+            overlay = Reported;
+            return 1;
         }
         value.bits &= ~chord;
     } else {
-        chordTiming = false;
         if (!(value.bits & chord))
             blockChord = false;
     }
