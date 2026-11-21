@@ -1,6 +1,8 @@
 (function () {
     "use strict";
 
+    var activeSession = 0;
+
     function open(report, events, nativePad) {
         var mailbox = /^steam_sdl_mailbox=(sdl-host-[0-9]+-[0-9]+\.bin)\r?$/m.exec(report);
         var host = window.Fhd && window.Fhd.Native && window.Fhd.Native.RenderHost;
@@ -8,7 +10,8 @@
 
         var manager = Windows.UI.ViewManagement, switcher = manager.ApplicationViewSwitcher;
         var mainId = manager.ApplicationView.getForCurrentView().id;
-        var id = 0, timer, closed = false, switching = false;
+        var id = 0, timer, closed = false, switching = false, pendingShow;
+        var session = 0;
         var overlayOpen = false, opened = false, shown = false, ready = false;
         var measured = false;
         var started = Date.now();
@@ -16,7 +19,23 @@
             if (closed) return;
             closed = true;
             clearInterval(timer);
-            if (opened) host.close();
+            if (opened) {
+                try { host.close(); } catch (_) {}
+            }
+            if (id && (shown || switching)) {
+                // A show may finish after the game exits. Restore the main view after
+                // that operation settles, unless a newer game has already taken over.
+                function restore() {
+                    if (session !== activeSession) return;
+                    function switchToLibrary() {
+                        if (session === activeSession) return switcher.switchAsync(mainId, id);
+                    }
+                    return Promise.resolve().then(function () {
+                        return switcher.tryShowAsStandaloneAsync(mainId);
+                    }).then(switchToLibrary, switchToLibrary).catch(function () {});
+                }
+                Promise.resolve(pendingShow).then(restore, restore);
+            }
         }
         function failed() {
             if (closed) return;
@@ -33,9 +52,12 @@
             function switchToGame() {
                 if (!closed) return switcher.switchAsync(id, mainId);
             }
-            Promise.resolve(switcher.tryShowAsStandaloneAsync(id)).then(switchToGame, switchToGame).then(function () {
+            pendingShow = Promise.resolve().then(function () {
+                if (!closed) return switcher.tryShowAsStandaloneAsync(id);
+            }).then(switchToGame, switchToGame);
+            pendingShow.then(function () {
                 switching = false;
-                shown = true;
+                shown = !closed;
             }, failed);
         }
         function poll() {
@@ -79,6 +101,7 @@
             var root = Windows.Storage.ApplicationData.current.localFolder.path;
             host.open(root + "\\" + mailbox[1]);
             opened = true;
+            session = ++activeSession;
             if (host.setNativeGamepad) host.setNativeGamepad(nativePad !== false);
             host.start();
             timer = setInterval(poll, 100);

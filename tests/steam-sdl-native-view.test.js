@@ -4,7 +4,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
-function fixture(accept = true) {
+function fixture(accept = true, gate = null) {
     const calls = [];
     let tick, stats = "presented=0\n";
     const host = { open: path => calls.push(path), start: () => calls.push("start"),
@@ -14,7 +14,11 @@ function fixture(accept = true) {
     const Windows = {
         UI: { ViewManagement: { ApplicationView: { getForCurrentView: () => ({ id: -73 }) }, ApplicationViewSwitcher: {
             tryShowAsStandaloneAsync: () => Promise.resolve(true),
-            switchAsync: (id, mainId) => { assert.equal(mainId, -73); calls.push(id); return accept ? Promise.resolve() : Promise.reject(Error()); }
+            switchAsync: (id, from) => {
+                if (id === -73) { assert.equal(from, -31); calls.push("library"); return Promise.resolve(); }
+                assert.equal(from, -73); calls.push(id);
+                return gate || (accept ? Promise.resolve() : Promise.reject(Error()));
+            }
         } } },
         Storage: { ApplicationData: { current: { localFolder: { path: "C:\\LocalState" } } } }
     };
@@ -51,5 +55,31 @@ test("a failed view switch releases the native resources and lets the existing p
     run.poll();
     await new Promise(resolve => setImmediate(resolve));
     run.poll("presented=1\n");
-    assert.deepEqual(run.calls.slice(-2), ["close", "fallback"]);
+    assert.deepEqual(run.calls.slice(-3), ["close", "fallback", "library"]);
+});
+
+test("closing during a pending switch restores the primary library after the late switch", async () => {
+    let finish;
+    const run = fixture(true, new Promise(resolve => { finish = resolve; }));
+    const control = run.open("steam_sdl_mailbox=sdl-host-2-3.bin\n");
+    run.poll();
+    await new Promise(resolve => setImmediate(resolve));
+    control.close();
+    assert.equal(run.calls.at(-1), "close");
+    finish();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(run.calls.at(-1), "library");
+});
+
+test("a superseded close cannot steal the next game's view", async () => {
+    let finish;
+    const run = fixture(true, new Promise(resolve => { finish = resolve; }));
+    const old = run.open("steam_sdl_mailbox=sdl-host-2-3.bin\n");
+    run.poll();
+    await new Promise(resolve => setImmediate(resolve));
+    old.close();
+    run.open("steam_sdl_mailbox=sdl-host-2-4.bin\n");
+    finish();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(!run.calls.includes("library"));
 });
