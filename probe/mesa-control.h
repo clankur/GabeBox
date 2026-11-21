@@ -13,7 +13,7 @@ struct MesaControlResult {
     unsigned char pixel[4]{};
 };
 
-static MesaControlResult RunMesaControl() {
+static MesaControlResult RunMesaControl(void (*checkpoint)(unsigned) = nullptr) {
     using Handle = void *;
     using Boolean = unsigned;
     using GetDisplay = Handle (WINAPI *)(Handle);
@@ -32,6 +32,11 @@ static MesaControlResult RunMesaControl() {
     using DeleteBuffers = void (WINAPI *)(int, const unsigned *);
 
     MesaControlResult result;
+    const auto stage = [&](unsigned next) {
+        result.stage = next;
+        if (checkpoint) checkpoint(next);
+    };
+    stage(0);
     auto egl = LoadPackagedLibrary(L"libEGL.dll", 0);
     if (!egl) {
         result.loadError = GetLastError();
@@ -82,16 +87,16 @@ static MesaControlResult RunMesaControl() {
     unsigned framebuffer = 0, colorBuffer = 0;
     DeleteBuffers deleteFramebuffers = nullptr, deleteRenderbuffers = nullptr;
     do {
-        result.stage = 1;
+        stage(1);
         display = getDisplay(nullptr);
         if (!display) break;
-        result.stage = 2;
+        stage(2);
         initialized = initialize(display, &result.eglMajor, &result.eglMinor) != 0;
         if (!initialized) break;
-        result.stage = 3;
+        stage(3);
         int count = 0;
         if (!bind(desktopOpenGl) || !choose(display, configAttributes, &config, 1, &count) || count != 1) break;
-        result.stage = 4;
+        stage(4);
         surface = createPbuffer(display, config, surfaceAttributes);
         if (!surface) {
             result.pbufferError = error();
@@ -100,13 +105,13 @@ static MesaControlResult RunMesaControl() {
             result.surfaceless = supported && std::strstr(supported, "EGL_KHR_surfaceless_context");
             if (!result.surfaceless) break;
         }
-        result.stage = 5;
+        stage(5);
         context = createContext(display, config, nullptr, contextAttributes);
         if (!context) break;
-        result.stage = 6;
+        stage(6);
         current = makeCurrent(display, surface, surface, context) != 0;
         if (!current) break;
-        result.stage = 7;
+        stage(7);
         if (result.surfaceless) {
             using Generate = void (WINAPI *)(int, unsigned *);
             using Bind = void (WINAPI *)(unsigned, unsigned);
@@ -140,7 +145,7 @@ static MesaControlResult RunMesaControl() {
         read(1, 1, 1, 1, 0x1908, 0x1401, result.pixel); // GL_RGBA, GL_UNSIGNED_BYTE
         result.glError = glError();
         if (result.glError == 0 && result.pixel[0] == 0 && result.pixel[1] == 255 &&
-                result.pixel[2] == 0 && result.pixel[3] == 255) result.stage = 8;
+                result.pixel[2] == 0 && result.pixel[3] == 255) stage(8);
     } while (false);
 
     result.eglError = error();
