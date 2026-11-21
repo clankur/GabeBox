@@ -822,6 +822,24 @@ static winrt::hstring ReadSteamDownload() {
     return winrt::hstring(checkpoint + L":" + std::to_wstring(state));
 }
 
+static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManifest(
+        winrt::Windows::Storage::StorageFolder library, std::uint32_t app) {
+    using namespace winrt::Windows::Storage;
+    auto appsItem = co_await library.TryGetItemAsync(L"steamapps");
+    auto appsFolder = appsItem.try_as<StorageFolder>();
+    if (!appsFolder) co_return false;
+    auto item = co_await appsFolder.TryGetItemAsync(winrt::hstring(L"appmanifest_" + std::to_wstring(app) + L".acf"));
+    auto manifest = item.try_as<StorageFile>();
+    if (!manifest) co_return false;
+    auto text = co_await FileIO::ReadTextAsync(manifest);
+    std::wstring_view view(text);
+    constexpr std::wstring_view key = L"\"StateFlags\"";
+    auto field = view.find(key);
+    if (field == view.npos) co_return false;
+    auto value = view.find_first_not_of(L" \t", field + key.size());
+    co_return value != view.npos && view.substr(value, 3) == L"\"4\"";
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
@@ -841,8 +859,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     const std::uint64_t gameId = app;  // Regular Steam AppID in CGameID's 24-bit app field.
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
+    const bool installedManifest = co_await HasCompletedSteamManifest(folder, app);
     std::uint64_t call = 0;
     CallResult result = nullptr;
+    std::int32_t libraryIndex = -1;
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -850,17 +870,24 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (session->downloadApp) co_return winrt::hstring(L"steam_launch=busy\r\n");
         auto managerMethods = FindSteamAppManager(*session);
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
-        if (!managerMethods || managerMethods[83] != base + 0x880030) {
+        if (!managerMethods || managerMethods[83] != base + 0x880030 ||
+                session->userMethods[182] != base + 0x75d640) {
             co_return winrt::hstring(L"steam_launch=interface-error\r\n");
+        }
+        if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
+                !reinterpret_cast<IsSubscribed>(session->userMethods[182])(session->clientUser, app)) {
+            co_return winrt::hstring(L"steam_launch=no-license\r\n");
         }
         auto library = RegisterSteamLibrary(session->appManager, managerMethods, path);
         if (library.index < 0) co_return winrt::hstring(L"steam_launch=library-folder-error\r\n");
+        libraryIndex = library.index;
         reinterpret_cast<RefreshLibrary>(managerMethods[83])(session->appManager);
     }
 
     std::wstring report = L"steam_launch_library_refreshed=yes\r\n";
     winrt::apartment_context caller;
-    auto installDeadline = GetTickCount64() + 12000;
+    auto installDeadline = GetTickCount64() + 6000;
+    bool attemptedRegistration = false;
     constexpr std::uint32_t installMask = 0x7000a6;
     constexpr std::uint32_t fullyInstalled = 4;
     do {
@@ -876,8 +903,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
             if ((state & installMask) == fullyInstalled) break;
             if (GetTickCount64() >= installDeadline) {
-                co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
-                    std::to_wstring(state) + L"\r\n");
+                if (attemptedRegistration || !installedManifest || state != 1) {
+                    co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
+                        std::to_wstring(state) + L"\r\n");
+                }
+                auto install = reinterpret_cast<SteamInstall>(methods[0]);
+                auto code = install(manager, app, libraryIndex, false);
+                report += L"steam_launch_reopen_result=" + std::to_wstring(code) + L"\r\n";
+                if (code != 0) co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+                attemptedRegistration = true;
+                installDeadline = GetTickCount64() + 30000;
             }
         }
         co_await winrt::resume_after(std::chrono::milliseconds(500));
