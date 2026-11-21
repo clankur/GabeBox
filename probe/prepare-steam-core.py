@@ -22,8 +22,8 @@ def system_imports(objdump, binary):
     output = subprocess.run([objdump, '--private-headers', str(binary)], check=True,
                             capture_output=True, text=True).stdout
     _, start, remainder = output.partition('The Import Tables:')
-    table, end, _ = remainder.partition('Export Table:')
-    if not start or not end:
+    table = remainder.partition('Export Table:')[0]
+    if not start:
         raise ValueError(f'Could not read the PE import table of {binary.name}.')
     parsed = {}
     library = None
@@ -85,7 +85,11 @@ def vclibs_dependency(appx):
 
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False, vclibs_framework=None):
+                   library_inventory=False, vclibs_framework=None, inspect_binaries=()):
+    imports = {}
+    for binary in inspect_binaries:
+        for module, symbols in system_imports(objdump, binary).items():
+            imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -148,10 +152,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         if unicode_keyboard:
             adapt_pinned_keyboard(layout / VALVE_FILES[0], objdump)
 
-        imports = {}
         for filename in VALVE_FILES:
             for module, symbols in system_imports(objdump, layout / filename).items():
                 imports.setdefault(module, set()).update(symbols)
+    if imports:
         (layout / 'steam-core-imports.txt').write_text(''.join(
             f"{module} {' '.join(sorted(symbols))}\n" for module, symbols in sorted(imports.items())),
             encoding='ascii')
@@ -165,6 +169,8 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--valve-archive', type=Path, help='pinned bins_win64 ZIP, omit for the repack control')
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
+    parser.add_argument('--inspect-pe', type=Path, action='append', default=[],
+                        help='report the system imports of a local PE file without packaging it')
     parser.add_argument('--unicode-keyboard', action='store_true',
                         help='test a local Unicode import adaptation of the pinned Steam core')
     parser.add_argument('--steam-sign-in', action='store_true', help='start the interactive Steam Guard page')
@@ -180,6 +186,8 @@ def main():
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
     args = parser.parse_args()
+    if args.inspect_pe and (args.valve_archive or args.steam_sign_in):
+        parser.error('--inspect-pe requires a control layout without Valve files or Steam sign-in')
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
     if args.unicode_keyboard and not args.valve_archive:
@@ -200,7 +208,7 @@ def main():
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
-                   args.install_before_launch, args.library_inventory, args.vclibs_framework)
+                   args.install_before_launch, args.library_inventory, args.vclibs_framework, args.inspect_pe)
 
 
 if __name__ == '__main__':
