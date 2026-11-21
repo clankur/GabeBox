@@ -212,6 +212,7 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_lwjgl_sha256=[0-9a-f]{64}$', text, re.M))
     result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
     result.extend(re.findall(r'^slay_sdl_display=(?:ready|window|context|presented|cursor)$', text, re.M))
+    result.extend(re.findall(r'^slay_sdl_gamepad=connected$', text, re.M))
     result.extend(re.findall(r'^slay_font_atlas_(?:initial|limit)=(?:-1|[0-9]{1,5}|unavailable)$', text, re.M))
     result.extend(re.findall(r'^slay_jvm_(?:profile=low-memory|max_heap_bytes=[0-9]{1,16})$', text, re.M))
     result.extend(re.findall(r'^slay_mesa_child=(?:loading|entered|load-error)$|^slay_mesa_child_(?:stage|checkpoint)=[0-8]$|'
