@@ -5,6 +5,7 @@
 class SteamSdlSurface {
     winrt::handle file_;
     SdlHostMailbox *view_ = nullptr;
+    mutable winrt::Windows::Storage::Streams::Buffer transfer_{nullptr};
     winrt::handle process_;
 
 public:
@@ -65,15 +66,17 @@ public:
         }
         const auto count = header.width * header.height * 4;
         const auto length = count + static_cast<std::uint32_t>(sizeof(header));
-        winrt::Windows::Storage::Streams::Buffer result(length);
-        result.Length(length);
-        auto bytes = result.data();
+        if (!transfer_ || transfer_.Capacity() < length) {
+            transfer_ = winrt::Windows::Storage::Streams::Buffer(length);
+        }
+        transfer_.Length(length);
+        auto bytes = transfer_.data();
         std::memcpy(bytes, &header, sizeof(header));
         std::memcpy(bytes + sizeof(header), view_->pixels, count);
         for (std::uint32_t offset = sizeof(header) + 3; offset < length; offset += 4) {
             bytes[offset] = 255;
         }
-        return result;
+        return transfer_;
     }
 };
 

@@ -26,7 +26,7 @@
         var pointerHeld = false;
         var pointerX = 0.5, pointerY = 0.5;
         var lastPointer = -1, lastKeys = -1;
-        var animation, image, firstFrame, trialSerial = 0, trialEvents = 0;
+        var animation, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0;
         var lastTime = 0, lastFrameTime = 0;
         var ready = false, closing = false, stopped = false;
         var result = "";
@@ -131,8 +131,9 @@
                     canvas.width = width;
                     canvas.height = height;
                     image = context.createImageData(width, height);
+                    imageBytes = new Uint8Array(image.data.buffer);
                 }
-                reader.readBytes(new Uint8Array(image.data.buffer));
+                reader.readBytes(imageBytes);
                 context.putImageData(image, 0, 0);
                 return { sequence: sequence, ack: ack, events: events };
             } finally {
