@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - analysis/trace-steam-startup.ps1
+      - analysis/stage-pinned-client.py
+      - analysis/valve-release.json
       - .github/workflows/steam-windows-startup.yml
   workflow_dispatch:
 
@@ -21,7 +23,7 @@ jobs:
       - name: Install signed Steam and trace startup on a clean host
         shell: pwsh
         run: |
-          ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-startup"
+          ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-startup" -PinnedClient
       - name: Upload Steam-only findings
         if: always()
         uses: actions/upload-artifact@v4
