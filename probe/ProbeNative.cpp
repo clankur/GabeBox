@@ -1274,12 +1274,18 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
     std::uint32_t launchOption = 0;
     bool snapshotRequested = false;
+    bool dummyVideo = false;
+    bool sdlWorkingDirectory = false;
     std::wstring diagnosticRenderer;
     if (backend == GameBackend::SteamPlay) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
         if (snapshotRequested) {
+            dummyVideo = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-startup-sdl-dummy-video-" + std::to_wstring(app) + L".txt")));
+            sdlWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-startup-sdl-working-directory-" + std::to_wstring(app) + L".txt")));
             auto renderer = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                 L"steam-startup-sdl-renderer-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
             if (renderer) {
@@ -1489,7 +1495,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         ~SdlTrialEnvironment() {
             if (created) SetEnvironmentVariableW(name, nullptr);
         }
-    } rendererHint{L"SDL_RENDER_DRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"};
+    } rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
+      gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"};
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1555,6 +1562,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (!diagnosticRenderer.empty()) {
             const auto applied = rendererHint.Set(diagnosticRenderer.c_str());
             report += L"steam_launch_sdl_renderer=" + (applied ? diagnosticRenderer : std::wstring(L"unavailable")) + L"\r\n";
+        }
+        if (dummyVideo) {
+            report += videoHint.Set(L"dummy") ? L"steam_launch_sdl_video=dummy\r\n" : L"steam_launch_sdl_video=unavailable\r\n";
+        }
+        if (sdlWorkingDirectory) {
+            report += gameDirectoryHint.Set(gameDirectory.c_str()) ? L"steam_launch_sdl_cwd=requested\r\n" :
+                L"steam_launch_sdl_cwd=unavailable\r\n";
         }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
