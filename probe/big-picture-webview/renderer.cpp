@@ -29,16 +29,9 @@ using namespace Windows::UI::ViewManagement;
 using namespace Microsoft::Web::WebView2::Core;
 
 namespace {
-constexpr wchar_t entry[] = L"https://steamloopback.host/index.html";
+using steam_document::entry;
+using steam_document::signedEntry;
 constexpr size_t maxPending = 32;
-
-constexpr wchar_t signedEntry[] = L"https://steamloopback.host/index.html?IN_CLIENT=true";
-
-bool isEntry(hstring const& uri) {
-    std::wstring_view address(uri);
-    auto page = address.substr(0, address.find(L'#'));
-    return page == entry || page == signedEntry;
-}
 
 slim_mutex gate;
 weak_ref<IFrameworkView> active;
@@ -69,6 +62,7 @@ struct View : implements<View, IFrameworkView> {
     bool openingPopup = false;
     bool popupRequestedVisible = false;
     CoreWebView2 web{nullptr};
+    std::shared_ptr<steam_document::Owner> document = std::make_shared<steam_document::Owner>();
     std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
@@ -177,7 +171,7 @@ struct View : implements<View, IFrameworkView> {
     }
 
     void publishWindow() {
-        if (!closed && web && isEntry(web.Source()))
+        if (!closed && web && document->accepts(web.Source()))
             web.PostWebMessageAsJson(hstring(L"{\"event\":\"xbox-window\",\"state\":" + windowState() + L"}"));
     }
 
@@ -287,11 +281,12 @@ struct View : implements<View, IFrameworkView> {
         apartment_context ui;
         try {
             bool setup = false;
-            for (int sample = 0; sample < 80 || setup; ++sample) {
+            for (int sample = 0; sample < 80 || setup;) {
                 co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
                 co_await ui;
                 if (closed || popup != browser) co_return;
                 if (!window.Visible()) continue;
+                if (!setup) ++sample;
                 auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(check);
                 if (result == L"1" && !setup) {
                     setup = true;
@@ -320,8 +315,8 @@ struct View : implements<View, IFrameworkView> {
             auto source = args.OriginalSourceFrameInfo();
             auto name = args.Name();
             auto scopedName = L"SP BPM_uid" + std::to_wstring(sender.BrowserProcessId());
-            if (!popup && !openingPopup && isEntry(sender.Source()) && source &&
-                source.FrameKind() == CoreWebView2FrameKind::MainFrame && isEntry(source.Source()) &&
+            if (!popup && !openingPopup && document->accepts(sender.Source()) && source &&
+                source.FrameKind() == CoreWebView2FrameKind::MainFrame && document->accepts(source.Source()) &&
                 (name == L"SP BPM" || name == scopedName) && url.size() <= 2048 && std::wstring_view(url).starts_with(L"about:blank?createflags=")) {
                 creating = openingPopup = true;
                 auto parent = CoreWebView2ControllerWindowReference::CreateFromCoreWindow(window);
@@ -403,17 +398,20 @@ struct View : implements<View, IFrameworkView> {
             step = L"mapping";
             assets = Package::Current().InstalledLocation().Path() + L"\\ValveClient\\steamui";
             configure(web, true);
-            cloudCache = std::make_shared<SteamUiCloudCache>(environment);
+            cloudCache = std::make_shared<SteamUiCloudCache>(environment, document);
             cloudCache->install(web);
             web.NavigationStarting([this](auto const&, auto const& args) {
-                if (!isEntry(args.Uri())) args.Cancel(true);
+                if (!document->start(args.Uri(), args.NavigationId())) args.Cancel(true);
                 else cloudCache->cancel();
+            });
+            web.ContentLoading([this](auto const&, auto const& args) {
+                document->content(args.NavigationId(), args.IsErrorPage());
             });
             web.NewWindowRequested({this, &View::onPopup});
             web.WebMessageReceived([this](auto const& sender, auto const& args) {
                 // Frame messages have a separate WebView2Frame event. The bridge
                 // only accepts bounded top-level messages from this exact document.
-                if (!isEntry(sender.Source()) || !isEntry(args.Source())) return;
+                if (!document->accepts(sender.Source()) || !document->accepts(args.Source())) return;
                 auto message = args.WebMessageAsJson();
                 if (cloudCache->consume(message)) return;
                 if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
@@ -427,7 +425,8 @@ struct View : implements<View, IFrameworkView> {
                 checkpoint(L"process-error:" + std::to_wstring(static_cast<int>(args.ProcessFailedKind())));
             });
             web.NavigationCompleted([this](auto const& sender, auto const& args) {
-                if (args.IsSuccess() && isEntry(sender.Source())) {
+                if (args.NavigationId() != document->navigation) return;
+                if (args.IsSuccess() && document->accepts(sender.Source())) {
                     checkpoint(L"document-loaded");
                     publishWindow();
                 } else checkpoint(L"navigation-error:" + std::to_wstring(static_cast<int>(args.WebErrorStatus())));
@@ -459,7 +458,8 @@ struct View : implements<View, IFrameworkView> {
             auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() + L"));\n";
             co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
             if (closed) co_return;
-            web.Navigate(adapter.empty() ? entry : signedEntry);
+            document->signedMode = !adapter.empty();
+            web.Navigate(document->signedMode ? signedEntry : entry);
             controller.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
         } catch (...) {
             if (!closed) checkpoint(std::wstring(step) + L"-error:" + std::to_wstring(to_hresult().value));
@@ -554,7 +554,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     void Reply(hstring const& message) {
         if (message.size() > 4 * 1024 * 1024) throw hresult_invalid_argument();
         onBrowserThread([message](View& view) {
-            if (view.web && isEntry(view.web.Source())) view.web.PostWebMessageAsJson(message);
+            if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
     void Close() {

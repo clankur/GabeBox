@@ -1,4 +1,5 @@
 #pragma once
+#include "document-address.h"
 #include <winrt/Microsoft.Web.WebView2.Core.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -22,7 +23,7 @@ class SteamUiCloudCache : public std::enable_shared_from_this<SteamUiCloudCache>
     uint32_t serial = 0;
     static constexpr uint32_t maxBytes = 3u * 1024u * 1024u;
     static constexpr std::wstring_view prefix = L"https://steamloopback.host/cloudstorage/";
-    static constexpr std::wstring_view entry = L"https://steamloopback.host/index.html?IN_CLIENT=true";
+    std::shared_ptr<steam_document::Owner> document;
 
     static bool valid(std::wstring_view key) {
         if (key == L"cloud-storage-namespaces") return true;
@@ -71,7 +72,8 @@ class SteamUiCloudCache : public std::enable_shared_from_this<SteamUiCloudCache>
     }
 
 public:
-    explicit SteamUiCloudCache(Environment const& value) : environment(value) {}
+    SteamUiCloudCache(Environment const& value, std::shared_ptr<steam_document::Owner> owner)
+        : environment(value), document(std::move(owner)) {}
     void install(Browser const& browser) {
         using namespace winrt::Microsoft::Web::WebView2::Core;
         browser.AddWebResourceRequestedFilter(L"https://steamloopback.host/cloudstorage/*", CoreWebView2WebResourceContext::All);
@@ -82,8 +84,8 @@ public:
                 if (!url.starts_with(prefix)) return;
                 const auto source = owner.Source();
                 const auto ref = args.Request().Headers().GetHeader(L"Referer");
-                if (std::wstring_view(source).substr(0, std::wstring_view(source).find(L'#')) != entry ||
-                    std::wstring_view(ref) != entry || args.Request().Method() != L"GET") {
+                if (!self->document->signedMode || !self->document->accepts(source) ||
+                    !self->document->accepts(ref) || args.Request().Method() != L"GET") {
                     self->respond(args, 403); return;
                 }
                 url.remove_prefix(prefix.size());
