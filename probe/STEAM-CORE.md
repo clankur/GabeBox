@@ -87,6 +87,18 @@ Read an existing report without restarting the app or interrupting the session.
 python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.38.0
 ```
 
+## Test an owned game download
+
+Deploy a download-enabled build through the same CLI and approve Steam Guard. In the library, select a small owned game and choose **Download**. The client rechecks the account, app type and Steam license. It submits the request to Steam’s app manager using the library registered at `LocalState/SteamLibrary`.
+
+```sh
+python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.40.0 --download
+```
+
+The app writes `steam-download-report.txt` when Steam changes state. `queued` records acceptance by Steam. `downloading` and `staging` reflect the app manager’s active title and install flags. `installed` requires Steam’s fully installed state and a reported install directory inside the app’s library. After an unsuccessful run, keep the last download report and check whether the library folder or any files appeared in Device Portal. The report records numeric state and error codes without exposing the selected title or account. [Steam depots](https://partner.steamgames.com/doc/store/application/depots) · [Device Portal file listing](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#get-files)
+
+Version `1.0.40.0` successfully installed a Steam title in app-local storage on Series X. The report progressed from `downloading` to `installed` with state `4`. The on-device manifest recorded 608,111,824 downloaded bytes and result `0`. A separate Device Portal directory count confirmed 16,017 installed files totaling 803,964,902 bytes. An earlier title reached state `514`, then stalled. Its manifest recorded disk-write result `11` and zero downloaded bytes. [Download SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44865311046)
+
 ## Series X observations
 
 - Windows SDK template `1.0.13.0` and locally signed control `1.0.14.0` both loaded the owned library and found its export. With all three Valve files absent, `LoadPackagedLibrary` returned `0x7E` (`ERROR_MOD_NOT_FOUND`).
