@@ -95,7 +95,7 @@ public:
         const auto read = static_cast<std::uint32_t>(SdlHostLoad(&keyboard.read));
         for (size_t start = 0; start < bytes.size();) {
             if (write - read >= SDL_HOST_KEY_QUEUE_SIZE) return false;
-            auto end = std::min(start + payload, bytes.size());
+            auto end = (std::min)(start + payload, bytes.size());
             while (end < bytes.size() && (static_cast<unsigned char>(bytes[end]) & 0xc0) == 0x80) --end;
             auto &entry = keyboard.entries[write++ % SDL_HOST_KEY_QUEUE_SIZE];
             entry = {};
