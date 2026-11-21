@@ -131,7 +131,12 @@ public final class SlayConsoleDiagnostic {
             System.exit(1);
         }
         System.out.println("slay_console_cwd=game-directory");
-        checkMesaInGameJvm(new File(library).getParentFile());
+        File packageRoot = new File(library).getParentFile();
+        if (new File(packageRoot, "slay-sdl-display.dll").isFile()) {
+            System.setProperty("xbox.lwjgl.sdl.package", packageRoot.getAbsolutePath());
+        } else {
+            checkMesaInGameJvm(packageRoot);
+        }
         Class.forName(gameMain).getMethod("main", String[].class).invoke(null, (Object) new String[0]);
     }
 
@@ -150,6 +155,7 @@ public final class SlayConsoleDiagnostic {
         Files.write(log, inputs.getBytes(StandardCharsets.UTF_8), StandardOpenOption.APPEND);
         String packageRoot = System.getProperty("java.class.path");
         File workingDirectory = new File(packageRoot, "slay-working-directory.dll");
+        boolean sdl = new File(packageRoot, "slay-sdl-display.dll").isFile();
         ProcessBuilder builder;
         if (workingDirectory.isFile()) {
             reportBundledLwjgl(jar, log);
@@ -167,6 +173,10 @@ public final class SlayConsoleDiagnostic {
                                          "-jar", jar.getAbsolutePath());
         }
         builder.directory(game).redirectErrorStream(true);
+        if (sdl) {
+            String trace = log.getFileName().toString().replaceFirst("\\.log$", ".sdl.txt");
+            builder.environment().put("XBOX_SDL_TRACE_FILE", log.resolveSibling(trace).toAbsolutePath().toString());
+        }
         Process child;
         try {
             child = builder.start();
@@ -179,7 +189,7 @@ public final class SlayConsoleDiagnostic {
         capture.start();
         String outcome;
         try {
-            if (child.waitFor(20, TimeUnit.SECONDS)) {
+            if (child.waitFor(sdl ? 28 : 20, TimeUnit.SECONDS)) {
                 outcome = "exit-" + child.exitValue();
             } else {
                 outcome = "running-at-timeout";

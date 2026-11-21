@@ -1,0 +1,57 @@
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+
+public final class BuildXboxFactories implements Opcodes {
+    public static void main(String[] args) throws Exception {
+        ClassReader reader = new ClassReader(Files.readAllBytes(Path.of(args[0])));
+        boolean frames = reader.readUnsignedShort(6) >= V1_6;
+        String prefix = "org/lwjgl/opengl/";
+        String factory, type, provider;
+        switch (reader.getClassName()) {
+            case "org/lwjgl/opengl/Display":
+                factory = "createDisplayImplementation";
+                type = "DisplayImplementation";
+                provider = "XboxSdlDisplay";
+                break;
+            case "org/lwjgl/opengl/ContextGL":
+                factory = "createImplementation";
+                type = "ContextImplementation";
+                provider = "XboxSdlContext";
+                break;
+            default: throw new IllegalArgumentException("Unexpected LWJGL class.");
+        }
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+        int[] changes = { 0 };
+        reader.accept(new ClassVisitor(ASM9, writer) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+                MethodVisitor base = super.visitMethod(access, name, desc, signature, exceptions);
+                if (!factory.equals(name) || !desc.equals("()L" + prefix + type + ";")) return base;
+                ++changes[0];
+                return new MethodVisitor(ASM9, base) {
+                    @Override
+                    public void visitCode() {
+                        super.visitCode();
+                        Label original = new Label();
+                        super.visitMethodInsn(INVOKESTATIC, prefix + "XboxSdlDisplay", "enabled", "()Z", false);
+                        super.visitJumpInsn(IFEQ, original);
+                        super.visitTypeInsn(NEW, prefix + provider);
+                        super.visitInsn(DUP);
+                        super.visitMethodInsn(INVOKESPECIAL, prefix + provider, "<init>", "()V", false);
+                        super.visitInsn(ARETURN);
+                        super.visitLabel(original);
+                        if (frames) super.visitFrame(F_SAME, 0, null, 0, null);
+                    }
+                };
+            }
+        }, 0);
+        if (changes[0] != 1) throw new IllegalStateException("Expected exactly one platform factory.");
+        Files.write(Path.of(args[1]), writer.toByteArray());
+    }
+}

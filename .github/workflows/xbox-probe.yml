@@ -141,6 +141,9 @@ jobs:
             & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
               "/out:$steamLayout\slay-working-directory.dll" "/implib:$work\slay-working-directory.lib" `
               "$work\slay-working-directory.obj" $lib
+            & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+              "/I$jni" "/I$jni\win32" "/Fo$work\slay-sdl-display.obj" "/Fe$steamLayout\slay-sdl-display.dll" `
+              probe/slay-sdl-display.cpp $lib /link /APPCONTAINER "/IMPLIB:$work\slay-sdl-display.lib"
             $user32 = "$sdk\Lib\$sdkVersion\um\x64\User32.lib"
             foreach ($variant in @('ansi', 'wide')) {
               $defines = @(if ($variant -eq 'wide') { '/DPROBE_WIDE_IMPORT' })
