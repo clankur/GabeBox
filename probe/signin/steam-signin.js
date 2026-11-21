@@ -214,11 +214,12 @@
         libraryArt.schedule();
     }
 
-    function runGameLaunch(attempt, entry) {
+    function runGameLaunch(attempt, entry, repeat) {
         if (transfer || launching) return;
         var fileIO = Windows.Storage.FileIO;
         var complete = "status=steam-core-complete\r\n";
         var report = attempt.libraryReport + "steam_launch_run_id=" + Date.now() + "\r\n";
+        if (repeat) report += "steam_launch_repeat_app_id=" + entry.id + "\r\n";
         launching = true;
         signOut.disabled = true;
         updateActions();
@@ -234,6 +235,9 @@
                 message = " is on disk, but Steam could not reopen its install.";
             }
             if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            if (result.indexOf("steam_launch=prerequisite-restart-required\r\n") >= 0) {
+                message = " finished installing a shared component. Restart this app to play.";
+            }
             if (/steam_launch=(?:dependency-install-rejected|dependency-install-incomplete)\r\n/.test(result) ||
                     result.indexOf("steam_launch_client_reason=dependency-not-ready\r\n") >= 0) {
                 message = " is waiting for a required Steam component.";
@@ -273,7 +277,7 @@
                 }
                 var game = entries.filter(function (entry) { return entry.id === +config[1]; })[0];
                 if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
-                if (!config[3]) return runGameLaunch(attempt, game);
+                if (!config[3]) return runGameLaunch(attempt, game, config[2]);
                 return save("status=steam-game-install-checking\r\n").then(function () {
                     return checkLocalInstall(game);
                 }).then(function (installed) {
@@ -284,7 +288,7 @@
                 }).then(function (stage) {
                     attempt.libraryReport += "steam_launch_install=" + stage + "\r\n";
                     if (stage !== "installed" && stage !== "already-installed") return save(complete);
-                    return runGameLaunch(attempt, game);
+                    return runGameLaunch(attempt, game, config[2]);
                 });
             });
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });

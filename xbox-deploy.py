@@ -313,7 +313,7 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
                     return
                 if name == PROBE_STEAM_CORE_NAME and re.search(
                         r'^status=steam-core-complete\s*$', report, re.MULTILINE):
-                    return
+                    return report
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
                     if not require_ipc or re.search(r'^ipc=success\s*$', report, re.MULTILINE):
                         return
@@ -331,6 +331,25 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
         raise ValueError('The probe wrote a startup checkpoint but did not finish the test.')
     raise ValueError('No fresh probe-report.txt appeared in LocalState.' +
                      (' The remote launch also failed.' if launch_error else ''))
+
+
+def wait_for_repeat_launch(portal, version, app_id, restart, timeout):
+    previous_run = None
+    for attempt in range(2):
+        report = wait_for_probe(portal, PROBE_STEAM_CORE_NAME, version, False, timeout, restart=restart)
+        fields = dict(line.split('=', 1) for line in report.splitlines() if '=' in line)
+        run_id = fields.get('steam_launch_run_id', '')
+        if fields.get('steam_launch_repeat_app_id') != str(app_id) or not run_id.isdecimal():
+            raise ValueError(f'Expected a repeat launch report for Steam AppID {app_id}.')
+        if run_id == previous_run:
+            raise ValueError('The restarted probe returned the previous launch report.')
+        if fields.get('steam_launch') != 'prerequisite-restart-required':
+            return
+        if attempt:
+            raise ValueError('The game directory still needs a restart after one recovery attempt.')
+        print('Shared prerequisite installed. Restarting the probe once to restore the game directory.', flush=True)
+        previous_run = run_id
+        restart = True
 
 
 def print_install_result(data):
@@ -355,6 +374,8 @@ def main():
     probe = commands.add_parser('probe', help='launch the installed probe and wait for a fresh report')
     probe.add_argument('--version', help='require a specific installed package version')
     probe.add_argument('--restart', action='store_true', help='stop the selected probe before launching it')
+    probe.add_argument('--recover-prerequisites', type=int, metavar='APPID',
+                       help='restart a repeat-launch Steam build once if a completed shared install changed the game directory')
     variant = probe.add_mutually_exclusive_group()
     variant.add_argument('--control', dest='probe_name', action='store_const', const=PROBE_CONTROL_NAME,
                          help='watch the clean-registration control')
@@ -386,6 +407,11 @@ def main():
         probe.error('--require-ipc applies to the main probe')
     if args.command == 'probe' and args.restart and args.manual_launch:
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
+    if args.command == 'probe' and args.recover_prerequisites is not None:
+        if args.probe_name != PROBE_STEAM_CORE_NAME or not args.version or args.manual_launch:
+            probe.error('--recover-prerequisites requires --steam-core, --version and a CLI launch')
+        if not 0 < args.recover_prerequisites <= 0x00ffffff:
+            probe.error('--recover-prerequisites requires a positive 24-bit Steam AppID')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
 
@@ -426,6 +452,9 @@ def main():
         password = getpass.getpass('Xbox Device Portal password: ')
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'probe':
+        if args.recover_prerequisites is not None:
+            wait_for_repeat_launch(portal, args.version, args.recover_prerequisites, args.restart, args.timeout)
+            return
         wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout,
                        args.require_ipc, restart=args.restart)
         return

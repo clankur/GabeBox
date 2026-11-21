@@ -1308,6 +1308,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const std::wstring dataRoot(root.Path());
     const std::wstring packageRoot(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
     bool waitForSharedInstall = false;
+    bool appliedSharedOverride = false;
+    std::wstring originalGameDirectory;
     co_await checkpoint(L"checking-prerequisites");
     {
         std::lock_guard lock(steamSessionMutex);
@@ -1320,8 +1322,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 methods[82] != base + 0x781040) {
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
-        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
+        originalGameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(originalGameDirectory, libraryRoot)) {
             co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
         }
 
@@ -1348,6 +1350,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     // Use the existing LocalState library as Steam's writable install root.
                     const auto destination = winrt::to_string(path);
                     reinterpret_cast<ForceInstallDirectory>(methods[86])(manager, destination.c_str());
+                    appliedSharedOverride = true;
                     report += ReadSteamDestination(manager, methods, commonRedistributables,
                         libraryRoot, dataRoot, packageRoot).Describe(L"after_override");
                     auto library = RegisterSteamLibrary(manager, methods, path);
@@ -1412,6 +1415,19 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    bool sharedManifestComplete = false;
+    if (appliedSharedOverride) {
+        // Steam can publish the installed state before the on-disk manifest is readable.
+        const auto deadline = GetTickCount64() + 5000;
+        do {
+            try {
+                sharedManifestComplete = co_await HasCompletedSteamManifest(folder, commonRedistributables);
+            } catch (winrt::hresult_error const&) {}
+            if (sharedManifestComplete || GetTickCount64() >= deadline) break;
+            co_await winrt::resume_after(std::chrono::milliseconds(250));
+            co_await caller;
+        } while (true);
+    }
     co_await checkpoint(L"submitting-play");
     {
         std::lock_guard lock(steamSessionMutex);
@@ -1439,7 +1455,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 std::to_wstring(state) + L"\r\n");
         }
         gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-        if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
+        if (appliedSharedOverride && CompareStringOrdinal(gameDirectory.c_str(), -1,
+                libraryRoot.c_str(), -1, TRUE) == CSTR_EQUAL && sharedManifestComplete) {
+            // The override affects every AppID in this process. A fresh process restores Steam's game directory.
+            co_return winrt::hstring(report + L"steam_launch_game_install_scope=library-root\r\n"
+                L"steam_launch=prerequisite-restart-required\r\n");
+        }
+        if (!IsLocalSteamInstall(gameDirectory, libraryRoot) || CompareStringOrdinal(gameDirectory.c_str(), -1,
+                originalGameDirectory.c_str(), -1, TRUE) != CSTR_EQUAL) {
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
         }
