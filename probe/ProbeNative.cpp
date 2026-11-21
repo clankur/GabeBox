@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <winstring.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
@@ -53,7 +54,7 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     winrt::hstring Run() { return winrt::hstring(ChildResult()); }
 };
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING classId, void **factory) noexcept try {
+extern "C" HRESULT WINAPI ProbeGetActivationFactory(HSTRING classId, void **factory) noexcept try {
     *factory = nullptr;
     UINT32 length;
     const wchar_t *name = WindowsGetStringRawBuffer(classId, &length);
@@ -64,6 +65,6 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING 
     return winrt::to_hresult();
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() noexcept {
+extern "C" HRESULT WINAPI ProbeCanUnloadNow() noexcept {
     return winrt::get_module_lock() ? S_FALSE : S_OK;
 }
