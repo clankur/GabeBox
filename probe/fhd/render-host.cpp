@@ -5,6 +5,11 @@
 #ifdef FHD_SDK_METADATA
 #include <winrt/Fhd.Native.h>
 #endif
+#ifdef FHD_SDK_METADATA
+extern "C" HRESULT FhdOpenMedia(HSTRING, BYTE, void**);
+extern "C" HRESULT FhdMediaStatus(HSTRING*);
+extern "C" HRESULT FhdCloseMedia();
+#endif
 extern "C" HRESULT FhdAttach(HSTRING);
 extern "C" HRESULT FhdPrepareStart(LONG*);
 extern "C" bool FhdCurrentSession(LONG);
@@ -48,6 +53,11 @@ struct Statics : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE Close()=0;
     virtual HRESULT STDMETHODCALLTYPE LaunchControl()=0;
     virtual HRESULT STDMETHODCALLTYPE SetNativeGamepad(BYTE)=0;
+#ifdef FHD_SDK_METADATA
+    virtual HRESULT STDMETHODCALLTYPE OpenMedia(HSTRING, BYTE, void**)=0;
+    virtual HRESULT STDMETHODCALLTYPE MediaStatus(HSTRING*)=0;
+    virtual HRESULT STDMETHODCALLTYPE CloseMedia()=0;
+#endif
 };
 volatile LONG secondaryId=0,primaryId=0,windowError=0;
 IInspectable *secondaryView;
@@ -104,6 +114,11 @@ public:
     HRESULT STDMETHODCALLTYPE Close() override {FhdCloseSession();FhdRequestReturn();return S_OK;}
     HRESULT STDMETHODCALLTYPE LaunchControl() override {return FhdLaunchTest();}
     HRESULT STDMETHODCALLTYPE SetNativeGamepad(BYTE b) override {FhdNativePad(b);return S_OK;}
+#ifdef FHD_SDK_METADATA
+    HRESULT STDMETHODCALLTYPE OpenMedia(HSTRING path, BYTE nativePad, void **out) override {return FhdOpenMedia(path,nativePad,out);}
+    HRESULT STDMETHODCALLTYPE MediaStatus(HSTRING *out) override {return FhdMediaStatus(out);}
+    HRESULT STDMETHODCALLTYPE CloseMedia() override {return FhdCloseMedia();}
+#endif
 };
 }
 extern "C" HRESULT FhdSecondaryWindowReady(void *window,LONG token) {

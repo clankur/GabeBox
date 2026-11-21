@@ -100,6 +100,23 @@ HRESULT attach(const WCHAR *path,bool create) {
     gpuStage="waiting-for-producer";sampleUs=sampleFrames=0;
     return S_OK;
 }
+LONG mediaToken;
+HRESULT drawMailbox(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
+                    bool nativeGamepad, UINT64 &sequence, bool &gpu) {
+    const LONG pointer = nativeGamepad ? -1 : SdlHostLoad(&box->input_pointer);
+    HRESULT hr = receiver->Draw(device, ctx, target, 1920, 1080, sequence, pointer);
+    gpuStage = receiver->Stage();
+    gpu = hr == S_OK;
+    if (gpu) return S_OK;
+    if (FAILED(hr)) gpuError = hr;
+    if (receiver->Active() ||
+        InterlockedCompareExchange(&box->frame_state, SDL_HOST_READING, SDL_HOST_READY) != SDL_HOST_READY) return S_FALSE;
+    auto header = box->frame;
+    hr = receiver->DrawCpu(device, ctx, target, 1920, 1080, box->pixels, header.width, header.height, pointer);
+    InterlockedExchange(&box->frame_state, SDL_HOST_EMPTY);
+    sequence = header.sequence;
+    return hr;
+}
 HRESULT validate(HSTRING h,const WCHAR **out) {
     UINT32 n;const WCHAR* name=WindowsGetStringRawBuffer(h,&n);
     WCHAR local[1024];HRESULT hr=FhdLocalPath(local,ARRAYSIZE(local));if(FAILED(hr))return hr;
@@ -115,10 +132,36 @@ extern "C" HRESULT FhdAttach(HSTRING h) {
     const WCHAR *path=nullptr;HRESULT hr=validate(h,&path);if(FAILED(hr))return hr;
     AcquireSRWLockExclusive(&stateLock);hr=attach(path,false);ReleaseSRWLockExclusive(&stateLock);return hr;
 }
+extern "C" HRESULT FhdClaimMedia(HSTRING h, LONG *token) {
+    const WCHAR *path = nullptr;
+    HRESULT hr = validate(h, &path);
+    if (FAILED(hr)) return hr;
+    AcquireSRWLockExclusive(&stateLock);
+    hr = (running || starting || (receiver && !stop)) ? E_PENDING : attach(path, false);
+    if (SUCCEEDED(hr)) { mediaToken = generation; *token = mediaToken; running = 1; }
+    ReleaseSRWLockExclusive(&stateLock);
+    return hr;
+}
+extern "C" void FhdReleaseMedia(LONG token) {
+    AcquireSRWLockExclusive(&stateLock);
+    if (token && mediaToken == token) {
+        mediaToken = 0; running = 0; stop = 1;
+        releaseBase();
+    }
+    ReleaseSRWLockExclusive(&stateLock);
+}
+extern "C" HRESULT FhdDrawMedia(LONG token, ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
+                                bool nativePad, UINT64 &sequence, bool &gpu) {
+    AcquireSRWLockShared(&stateLock);
+    HRESULT hr = (mediaToken == token && box && !SdlHostLoad(&box->quit)) ?
+        drawMailbox(dev,ctx,target,nativePad,sequence,gpu) : RO_E_CLOSED;
+    ReleaseSRWLockShared(&stateLock);
+    return hr;
+}
 extern "C" HRESULT FhdPrepareStart(LONG *token) {
     AcquireSRWLockExclusive(&stateLock);
     HRESULT hr = E_UNEXPECTED;
-    if (receiver && !stop) {
+    if (receiver && !stop && !mediaToken) {
         InterlockedExchange(&overlay,0);
         hr = running || starting ? S_FALSE : S_OK;
         starting = 1;
@@ -143,6 +186,7 @@ extern "C" void FhdViewFailed(LONG token,HRESULT hr) {
 extern "C" void FhdNativePad(BYTE v) {InterlockedExchange(&nativePad,v?1:0);}
 extern "C" void FhdCloseSession() {
     AcquireSRWLockExclusive(&stateLock);
+    if (mediaToken) { ReleaseSRWLockExclusive(&stateLock); return; }
     InterlockedExchange(&stop,1);
     starting=0;
     if (!running) releaseBase();
@@ -204,19 +248,10 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
         }
 #endif
         if (overlay) {if (wait) WaitForSingleObjectEx(wait,15,FALSE);continue;}
-        const LONG hostPointer = nativePad ? -1 : SdlHostLoad(&box->input_pointer);
-        UINT64 seq=0;hr=receiver->Draw(device,ctx,target,1920,1080,seq,hostPointer);
-        gpuStage=receiver->Stage();
-        if (FAILED(hr)){gpuError=hr;hr=S_FALSE;}
-        bool gpu=hr==S_OK;
-        if(!gpu && !receiver->Active() &&
-                InterlockedCompareExchange(&box->frame_state,SDL_HOST_READING,SDL_HOST_READY)==SDL_HOST_READY) {
-            const auto header=box->frame;
-            hr=receiver->DrawCpu(device,ctx,target,1920,1080,box->pixels,header.width,header.height,hostPointer);
-            InterlockedExchange(&box->frame_state,SDL_HOST_EMPTY);
-            if(FAILED(hr))break;
-            seq=header.sequence;
-        }
+        UINT64 seq = 0;
+        bool gpu = false;
+        hr = drawMailbox(device,ctx,target,nativePad != 0,seq,gpu);
+        if (FAILED(hr)) break;
         if(hr==S_OK) {
             hr=chain->Present(1,0);if(FAILED(hr))break;
             if(hr==S_OK) {
