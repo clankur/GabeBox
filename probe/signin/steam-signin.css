@@ -57,6 +57,13 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
 }
 #sdl-picture { position: relative; line-height: 0; }
 #sdl-frame { display: block; max-width: none; margin: 0; outline: none; background: #000; }
+.primary-game-video #sdl-picture, .primary-game-video #sdl-frame {
+    width: 100%; height: 100%;
+}
+.primary-game-video #sdl-pointer { display: none; }
+.sdl-primary-video {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none;
+}
 #sdl-status { position: absolute; z-index: 1; top: 42%; left: 0; right: 0; text-align: center; pointer-events: none; }
 #sdl-menu, #sdl-text {
     position: absolute; z-index: 2; top: 0; right: 0; bottom: 0; left: 0;

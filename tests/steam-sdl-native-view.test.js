@@ -4,6 +4,55 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
+
+test("the primary game video confirms rendered frames, resets its sample across an overlay and closes once", async () => {
+    let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
+    const measurements = [], switches = [], released = [], listeners = new Map();
+    const video = {
+        paused:false, readyState:2, videoWidth:1920, videoHeight:1080,
+        play:async () => {}, pause() {}, removeAttribute() {}, setAttribute() {},
+        addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({width:1920})
+    };
+    const screen = {hidden:false, classList:{add() {}, remove() {}},
+        appendChild(node) { node.parentNode = screen; }, removeChild(node) { node.parentNode = null; }};
+    const document = {hidden:false, createElement: () => video,
+        addEventListener: (event, callback) => listeners.set(event, callback),
+        removeEventListener: event => listeners.delete(event)};
+    const host = {
+        openMedia(path, nativePad) { assert.equal(path, "C:\\LocalState\\sdl-host-1-2.bin"); assert.equal(nativePad, false); return {}; },
+        closeMedia() { finished++; },
+        mediaStatus() { return "width=1920\r\nheight=1080\r\npresented=" + total + "\r\nsubmitted=9999\r\n"; }
+    };
+    const window = {Fhd:{Native:{RenderHost:host}},
+        steamBigPictureHost:{switchView:async (to, from) => { switches.push([to,from]); }}};
+    const Windows = {UI:{ViewManagement:{ApplicationView:{getForCurrentView:() => ({id:3})}}},
+        Storage:{ApplicationData:{current:{localFolder:{path:"C:\\LocalState"}}}}};
+    vm.runInNewContext(source, {window,document,Windows,performance:{now: () => now},
+        setInterval:callback => { tick = callback; return 1; }, clearInterval() {},
+        URL:{createObjectURL:() => "blob:media", revokeObjectURL:url => released.push(url)}});
+    const control = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-1-2.bin\r\n", {
+        running:() => running, presented:() => firstFrames++,
+        measured:(n,us) => measurements.push([n,us]), exited() {}, fallback:() => assert.fail("media failed")
+    }, false, screen);
+    assert(control.primary);
+    tick();
+    assert.equal(firstFrames, 0);
+    total = 1; tick();
+    assert.equal(firstFrames, 1);
+    now = 20000; total = 1201; tick();
+    document.hidden = true; listeners.get("visibilitychange")();
+    now = 40000; tick();
+    assert.deepEqual(measurements, []);
+    await control.resume(11);
+    assert.deepEqual(switches, [[3,11]]);
+    document.hidden = false; listeners.get("visibilitychange")();
+    now = 41000; total = 2003; tick();
+    now = 71000; total += 1798; tick();
+    assert.deepEqual(measurements, [[1798,30000000]]);
+    running = false; tick(); control.close();
+    assert.equal(finished, 1); assert.deepEqual(released, ["blob:media"]);
+});
+
 function fixture(accept = true, gate = null, withSteam = false) {
     const calls = [];
     let tick, stats = "presented=0\n";

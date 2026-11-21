@@ -3,13 +3,115 @@
 
     var activeSession = 0;
 
-    function open(report, events, nativePad) {
+    function openMedia(host, path, events, nativePad, screen, mainId) {
+        var video = document.createElement("video");
+        var timer, url, closed = false, opened = false, shown = false, measured = false;
+        var started = Date.now(), owner = ++activeSession, sampleStart, phase = "open";
+        function resetSample() { sampleStart = null; }
+        function close() {
+            if (closed) return;
+            closed = true;
+            clearInterval(timer);
+            document.removeEventListener("visibilitychange", resetSample);
+            video.removeEventListener("error", failed);
+            video.pause();
+            video.removeAttribute("src");
+            if (video.parentNode) video.parentNode.removeChild(video);
+            if (opened) { try { host.closeMedia(); } catch (_) {} }
+            if (url) URL.revokeObjectURL(url);
+            screen.classList.remove("primary-game-video");
+        }
+        function failed(error) {
+            if (closed) return;
+            var code = error && (error.number || error.code) || video.error && video.error.code || 0;
+            if (events.mediaError) events.mediaError(phase, code >>> 0);
+            close();
+            events.fallback();
+        }
+        function visible() {
+            if (document.hidden || screen.hidden) return false;
+            var core = Windows.UI.Core;
+            if (core && core.CoreWindow && typeof core.CoreWindow.getForCurrentThread === "function") {
+                var current = core.CoreWindow.getForCurrentThread();
+                if (current && core.CoreWindowActivationMode && typeof current.activationMode === "number" &&
+                    current.activationMode !== core.CoreWindowActivationMode.activatedInForeground) return false;
+            }
+            return !video.paused && video.readyState >= 2 &&
+                video.videoWidth > 0 && video.videoHeight > 0 && video.getBoundingClientRect().width > 0;
+        }
+        function poll() {
+            if (closed) return;
+            try {
+                if (!events.running()) { close(); events.exited(); return; }
+                var stats = host.mediaStatus();
+                if (/^error=/m.test(stats)) { failed(); return; }
+                if (visible()) {
+                    var count = /^presented=([0-9]+)\r?$/m.exec(stats);
+                    var foreground = "visible=1\r\nprimary_media=1\r\n";
+                    if (!shown && count && +count[1] > 0) {
+                        shown = true;
+                        events.presented(stats + "\r\n" + foreground);
+                    }
+                    if (shown && !measured && events.measured && count) {
+                        var now = performance.now(), rendered = +count[1];
+                        if (!sampleStart) sampleStart = {time: now, frames: rendered};
+                        var elapsed = Math.round((now - sampleStart.time) * 1000);
+                        var unique = rendered - sampleStart.frames;
+                        if (elapsed >= 30000000 && unique > 0) {
+                            measured = true;
+                            var visibleSample = stats.replace(/^sample_(?:us|frames)=.*\r?$/gm, "") + "\r\n" +
+                                "sample_us=" + elapsed + "\r\nsample_frames=" + unique + "\r\n" + foreground;
+                            events.measured(unique, elapsed, visibleSample);
+                        }
+                    }
+                } else resetSample();
+                if (!shown && Date.now() - started > 30000) failed();
+            } catch (_) { failed(); }
+        }
+        function resume(fromView) {
+            if (closed || owner !== activeSession) return Promise.resolve(false);
+            return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)
+                .then(function () {
+                    if (closed || owner !== activeSession) return false;
+                    return Promise.resolve(video.play()).then(function () { return !closed; });
+                });
+        }
+        try {
+            var source = host.openMedia(path, nativePad !== false);
+            opened = true;
+            phase = "attach";
+            url = URL.createObjectURL(source);
+            video.className = "sdl-primary-video";
+            video.autoplay = true;
+            video.muted = true; // The running game already owns audio playback.
+            video.setAttribute("aria-hidden", "true");
+            video.addEventListener("error", failed);
+            document.addEventListener("visibilitychange", resetSample);
+            screen.classList.add("primary-game-video");
+            screen.appendChild(video);
+            video.src = url;
+            phase = "playback";
+            Promise.resolve(video.play()).catch(failed);
+            timer = setInterval(poll, 100);
+            if (window.steamBigPictureHost.samplePresenter) {
+                window.steamBigPictureHost.samplePresenter("presenter_created");
+                window.steamBigPictureHost.samplePresenter("presenter_foreground");
+            }
+        } catch (error) { failed(error); return null; }
+        return {primary: true, close: close, resume: resume};
+    }
+
+    function open(report, events, nativePad, primaryScreen) {
         var mailbox = /^steam_sdl_mailbox=(sdl-host-[0-9]+-[0-9]+\.bin)\r?$/m.exec(report);
         var host = window.Fhd && window.Fhd.Native && window.Fhd.Native.RenderHost;
         if (!mailbox || !host) return null;
 
         var manager = Windows.UI.ViewManagement, switcher = manager.ApplicationViewSwitcher;
         var mainId = manager.ApplicationView.getForCurrentView().id;
+        if (primaryScreen && typeof host.openMedia === "function") {
+            var mediaPath = Windows.Storage.ApplicationData.current.localFolder.path + "\\" + mailbox[1];
+            return openMedia(host, mediaPath, events, nativePad, primaryScreen, mainId);
+        }
         var id = 0, timer, closed = false, switching = false, pendingShow, restored;
         var session = 0;
         var overlayOpen = false, opened = false, shown = false, ready = false, activated = false;

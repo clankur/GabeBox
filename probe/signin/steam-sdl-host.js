@@ -75,7 +75,7 @@
         var nativePad = appId !== 975370;
         var view, savedBounds, enteredFullscreen;
         var foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
-        var blockedMenuButtons = 0;
+        var blockedMenuButtons = bigPictureMode ? padButtons.a | padButtons.b : 0;
         var keyboardReady = false;
         var layoutWidth = 0, layoutHeight = 0;
         var held = {};
@@ -148,11 +148,14 @@
             releaseKeys();
             if (bigPictureMode) {
                 var steam = window.steamBigPictureHost;
-                if (steam && nativeView && gameViewId) {
+                if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
+                if (steam && gameViewId) {
                     steam.showForGame(appId, gameViewId, function (steamViewId) {
-                        return nativeView && runner.steamSdlRunning() ? nativeView.resume(steamViewId) : false;
+                        if (!runner.steamSdlRunning()) return false;
+                        return nativeView ? nativeView.resume(steamViewId) :
+                            steam.switchView(gameViewId, steamViewId).then(function () { return !stopped; });
                     }, function () {
-                        if (!nativeView || closing || !ready || !runner.steamSdlRunning()) return false;
+                        if (closing || !ready || !runner.steamSdlRunning()) return false;
                         quit();
                         return true;
                     }).then(function (shown) {
@@ -250,7 +253,10 @@
             if (timing) timing.reset();
             releaseKeys();
         }
-        function onFocus() { foreground = true; }
+        function onFocus() {
+            foreground = true;
+            if (bigPictureMode) blockedMenuButtons = padButtons.a | padButtons.b;
+        }
         function onVisibility() { if (document.hidden) onBlur(); else onFocus(); }
 
         function setPointer(event) {
@@ -422,7 +428,7 @@
         function tick(now) {
             if (stopped) return;
             // The secondary view owns rendering and live input until the user opens a player overlay.
-            if (nativeView && menu.hidden && textForm.hidden) {
+            if (nativeView && !nativeView.primary && menu.hidden && textForm.hidden) {
                 animation = requestAnimationFrame(tick);
                 return;
             }
@@ -489,7 +495,7 @@
                 var chord = padButtons.start | padButtons.back;
                 if ((pad[0] & chord) === chord) {
                     if (chordStarted === null) chordStarted = now;
-                    if (!chordUsed && now - chordStarted >= 750) {
+                    if (!chordUsed && (bigPictureMode || now - chordStarted >= 750)) {
                         chordUsed = true;
                         if (!textForm.hidden) closeText();
                         else if (menu.hidden) showMenu(); else hideMenu();
@@ -602,6 +608,11 @@
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
                     fallback: function () { nativeView = null; },
+                    mediaError: function (phase, code) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "fallback",
+                            "media_phase=" + phase + "\r\nmedia_error=" + code + "\r\n");
+                    },
                     measured: function (frames, microseconds, stats) {
                         if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
                             window.steamBigPictureHost.recordGameFrame(appId, "sample", stats);
@@ -621,7 +632,7 @@
                         keyboard.hidden = !keyboardReady;
                         if (!attempt.automaticTrial) complete(report + "steam_sdl_host_frame=presented\r\n");
                     }
-                }, nativePad);
+                }, nativePad, bigPictureMode ? screen : null);
             }
             animation = requestAnimationFrame(tick);
         }, function () { stop("steam_sdl_host=launch-error\r\n"); });
