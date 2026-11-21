@@ -64,17 +64,20 @@ def adapt_pinned_keyboard(binary, objdump):
 
 
 def vclibs_dependency(appx):
-    framework_name = 'Microsoft.VCLibs.140.00.UWPDesktop'
-    required_dlls = {'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'}
+    frameworks = {
+        'Microsoft.VCLibs.140.00.UWPDesktop': {'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'},
+        'Microsoft.VCLibs.140.00': {'msvcp140_app.dll', 'vccorlib140_app.dll', 'vcruntime140_app.dll'},
+    }
     with ZipFile(appx) as framework:
         names = {name.lower() for name in framework.namelist()}
-        if 'appxsignature.p7x' not in names or not required_dlls <= names:
-            raise ValueError('Use a signed Visual C++ framework containing the required x64 runtime DLLs.')
         manifest = ElementTree.fromstring(framework.read('AppxManifest.xml'))
         identity = manifest.find('{*}Identity')
-        if (identity is None or identity.get('Name') != framework_name
+        if (identity is None or identity.get('Name') not in frameworks
                 or identity.get('ProcessorArchitecture') != 'x64'):
-            raise ValueError(f'Use the {framework_name} x64 framework package.')
+            raise ValueError('Use an official x64 Microsoft Visual C++ framework package.')
+        framework_name = identity.get('Name')
+        if 'appxsignature.p7x' not in names or not frameworks[framework_name] <= names:
+            raise ValueError('Use a signed Visual C++ framework containing the required x64 runtime DLLs.')
         publisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
         version = identity.get('Version', '')
         if (identity.get('Publisher') != publisher or manifest.findtext('{*}Properties/{*}Framework') != 'true'
@@ -253,7 +256,7 @@ def main():
     parser.add_argument('--library-inventory', action='store_true',
                         help='save game names and AppIDs in the app’s local data for compatibility testing')
     parser.add_argument('--vclibs-framework', type=Path,
-                        help='add a dependency on a signed Microsoft.VCLibs.140.00.UWPDesktop x64 framework APPX')
+                        help='add a dependency on the matching signed Microsoft Visual C++ x64 framework APPX')
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
     parser.add_argument('--xcom-dos-runtime', type=Path, metavar='JS_DOS_TGZ',
