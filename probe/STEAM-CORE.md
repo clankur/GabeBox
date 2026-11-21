@@ -63,6 +63,24 @@ The runtime validates the derived library’s SHA-256 and the loaded vtable and 
 
 The pinned build uses user vtable slot 183 for `GetSubscribedApps`. Slot 182 belongs to `BIsSubscribedApp`. Their signatures differ. For an updated Valve DLL, confirm the image hash, RTTI table addresses, wrapper method names, and argument widths before updating the runtime table.
 
+## Run the on-console sign-in
+
+The sign-in stage needs the account owner to approve a QR code in Steam Mobile. Start the app through the CLI after they are ready. The on-TV screen creates a request directly with Valve and supplies the resulting approval to the verified native Steam core in the same app. The CLI sees the stage, outcome, and subscription count.
+
+```sh
+python3 probe/prepare-steam-core.py "$template" "$trial_dir/signin" --version 1.0.34.0 \
+  --valve-archive "$trial_dir/bins_win64.zip" --objdump "$objdump_path" \
+  --unicode-keyboard --steam-sign-in
+bash probe/package.sh --layout "$trial_dir/signin" "$trial_dir/signin-package"
+(cd "$trial_dir/signin-package" && shasum -a 256 -c SHA256SUMS)
+python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+  "$trial_dir/signin-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 245
+```
+
+`status=steam-approval-ready` shows that the app drew the Valve code. In Steam Mobile, open Steam Guard, scan the code, and approve the sign-in named **Xbox Dev Mode Steam client**. If it expires, **Get a new code** starts another request. The report contains neither the code nor the credentials returned by Valve. At completion, the probe signs out its native test session. [Steam Mobile](https://store.steampowered.com/mobile)
+
+A verified library result requires Valve’s native user interface to report online, its account ID to match the approved account, and its subscription query to return a positive count. The display and report expose only the count. The QR renderer is the pinned MIT-licensed `qrcode-generator` browser bundle, included by the SDK workflow and used locally. [QR renderer source](https://github.com/kazuhikoarase/qrcode-generator)
+
 ## Series X observations
 
 - Windows SDK template `1.0.13.0` and locally signed control `1.0.14.0` both loaded the owned library and found its export. With all three Valve files absent, `LoadPackagedLibrary` returned `0x7E` (`ERROR_MOD_NOT_FOUND`).
@@ -86,3 +104,5 @@ Running the same optional bootstrap with only the three core DLLs on the Windows
 On Series X, package `1.0.28.0` received a successful Valve directory response and established a WSS connection. Package `1.0.30.0` repeated the network result and verified the pinned engine and user interface addresses. The genuine signed-out subscription query returned `0` and the native user reported no active Steam connection. [Network SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44862803331) · [Session ABI SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44863003791)
 
 Package `1.0.32.0` verified the same native ABI and signed-out query, and Valve’s authentication endpoint returned HTTP `200` with a valid approval challenge. The package discarded the challenge. No sign-in, account data, entitlement query, or library retrieval occurred. [QR preflight SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44863218500)
+
+The interactive `1.0.34.0` build showed a live code on the Series X and received the account owner’s approval through Steam Mobile. The pinned native client accepted the request, reported an online session whose account matched the approval, and returned a positive subscription count through `GetSubscribedApps`. The probe then signed out its native session. The report marked `steam_signin=authenticated` and `steam_library=verified`. Content installation and local game launch remain open. [Interactive SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44863836352)
