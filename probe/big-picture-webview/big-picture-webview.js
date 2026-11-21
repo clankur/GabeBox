@@ -66,6 +66,8 @@
             if (!broker) return respond(id, false, "signed-out");
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
+            else if (request.method === "session") action = function () { return broker.session(); };
+            else if (request.method === "system-mode") action = function () { return window.steamXboxSystemMode(Windows); };
             else if ((request.method === "play" || request.method === "install") &&
                      typeof appId === "number" && appId > 0 && appId <= 0xffffffff && appId % 1 === 0) {
                 if (request.method === "install") action = function () { return broker.install(appId); };

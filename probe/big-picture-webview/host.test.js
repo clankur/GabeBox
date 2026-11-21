@@ -106,3 +106,21 @@ test("a failed startup can be retried and a later process failure reaches the tr
     await drain();
     assert.match(failure.message, /process-error:3/);
 });
+
+test("session and system policy requests require a signed-in broker and keep account data out of reports", async () => {
+    const app = fixture();
+    const identity = "76561199999999999";
+    const startup = app.start({session: async () => ({steamId: identity})});
+    await drain();
+    app.incoming.push('{"id":11,"method":"session"}');
+    await app.advance("gamepad-ready");
+    await startup;
+    assert.deepEqual(app.replies, [{id: 11, result: {steamId: identity}}]);
+    assert.ok(app.reports.every(report => !report.includes(identity)));
+
+    const smoke = fixture();
+    await smoke.start(null);
+    smoke.incoming.push('{"id":12,"method":"session"}', '{"id":13,"method":"system-mode"}');
+    await smoke.advance("document-loaded");
+    assert.deepEqual(smoke.replies, [{id: 12, error: "signed-out"}, {id: 13, error: "signed-out"}]);
+});

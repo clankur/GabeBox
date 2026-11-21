@@ -85,6 +85,51 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    // IDs 1 and 2 are local to this pair of WebViews. The PID is the
+    // environment's actual Edge browser process, not a desktop Steam process.
+    std::wstring windowState() {
+        auto bounds = window.Bounds();
+        auto visible = ApplicationView::GetForCurrentView().VisibleBounds();
+        auto display = Windows::Graphics::Display::DisplayInformation::GetForCurrentView();
+        return L"{\"viewId\":" + std::to_wstring(ApplicationView::GetForCurrentView().Id()) +
+            L",\"pid\":" + std::to_wstring(web.BrowserProcessId()) +
+            L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (window.Visible() ? L"true" : L"false") +
+            L",\"popupOpen\":" + (popup ? L"true" : L"false") +
+            L",\"popupVisible\":" + (popup && popup.IsVisible() ? L"true" : L"false") +
+            L",\"x\":" + std::to_wstring(bounds.X) + L",\"y\":" + std::to_wstring(bounds.Y) +
+            L",\"width\":" + std::to_wstring(bounds.Width) + L",\"height\":" + std::to_wstring(bounds.Height) +
+            L",\"usableX\":" + std::to_wstring(visible.X) + L",\"usableY\":" + std::to_wstring(visible.Y) +
+            L",\"usableWidth\":" + std::to_wstring(visible.Width) + L",\"usableHeight\":" + std::to_wstring(visible.Height) +
+            L",\"scale\":" + std::to_wstring(display.RawPixelsPerViewPixel()) +
+            L",\"screenWidth\":" + std::to_wstring(display.ScreenWidthInRawPixels()) +
+            L",\"screenHeight\":" + std::to_wstring(display.ScreenHeightInRawPixels()) + L"}";
+    }
+
+    void publishWindow() {
+        if (!closed && web && isEntry(web.Source()))
+            web.PostWebMessageAsJson(hstring(L"{\"event\":\"xbox-window\",\"state\":" + windowState() + L"}"));
+    }
+
+    void focusVisible() {
+        if (window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground)
+            (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
+    }
+
+    bool handleWindowCommand(hstring const& message) {
+        if (message == L"\"xbox-window-focus\"") focusVisible();
+        else if (message == L"\"xbox-window-show\"" || message == L"\"xbox-window-hide\"") {
+            if (popup) {
+                popup.IsVisible(message == L"\"xbox-window-show\"");
+                focusVisible();
+                publishWindow();
+            }
+        } else if (message == L"\"xbox-window-primary-display\"") {
+            resize();
+            publishWindow();
+        } else return false;
+        return true;
+    }
+
     static void configure(CoreWebView2 const& browser, bool allowMessages) {
         auto settings = browser.Settings();
         settings.IsWebMessageEnabled(allowMessages);
@@ -96,10 +141,11 @@ struct View : implements<View, IFrameworkView> {
     }
 
     void closePopup() {
-        if (popup) popup.Close();
-        popup = nullptr;
+        auto closing = std::exchange(popup, nullptr);
+        if (closing) closing.Close();
         if (popupSurface) root.Children().Remove(popupSurface);
         popupSurface = nullptr;
+        publishWindow();
     }
 
     fire_and_forget observeGamepad(CoreWebView2CompositionController browser) {
@@ -142,9 +188,11 @@ struct View : implements<View, IFrameworkView> {
         try {
             hstring url = args.Uri();
             auto source = args.OriginalSourceFrameInfo();
+            auto name = args.Name();
+            auto scopedName = L"SP BPM_uid" + std::to_wstring(sender.BrowserProcessId());
             if (!popup && !openingPopup && isEntry(sender.Source()) && source &&
                 source.FrameKind() == CoreWebView2FrameKind::MainFrame && isEntry(source.Source()) &&
-                args.Name() == L"SP BPM" && url.size() <= 2048 && std::wstring_view(url).starts_with(L"about:blank?createflags=")) {
+                (name == L"SP BPM" || name == scopedName) && url.size() <= 2048 && std::wstring_view(url).starts_with(L"about:blank?createflags=")) {
                 creating = openingPopup = true;
                 auto parent = CoreWebView2ControllerWindowReference::CreateFromCoreWindow(window);
                 auto browser = co_await environment.CreateCoreWebView2CompositionControllerAsync(parent);
@@ -164,11 +212,15 @@ struct View : implements<View, IFrameworkView> {
                     });
                     child.NewWindowRequested([](auto const&, auto const& event) { event.Handled(true); });
                     child.WindowCloseRequested([weak = get_weak()](auto const&, auto const&) {
-                        if (auto view = weak.get()) view->closePopup();
+                        if (auto view = weak.get(); view && !view->closed) {
+                            view->closePopup();
+                            checkpoint(L"gamepad-window-error:closed");
+                        }
                     });
                     args.NewWindow(child);
                     popup.IsVisible(true);
-                    popup.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
+                    focusVisible();
+                    publishWindow();
                     checkpoint(L"gamepad-window-created");
                     observeGamepad(popup);
                 }
@@ -220,21 +272,23 @@ struct View : implements<View, IFrameworkView> {
                 if (!isEntry(args.Uri())) args.Cancel(true);
             });
             web.NewWindowRequested({this, &View::onPopup});
-            web.WebMessageReceived([](auto const& sender, auto const& args) {
+            web.WebMessageReceived([this](auto const& sender, auto const& args) {
                 // Frame messages have a separate WebView2Frame event. The bridge
                 // only accepts bounded top-level messages from this exact document.
                 if (!isEntry(sender.Source()) || !isEntry(args.Source())) return;
                 auto message = args.WebMessageAsJson();
-                if (message.empty() || message.size() > 4096) return;
+                if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
             });
             web.ProcessFailed([](auto const&, auto const& args) {
                 checkpoint(L"process-error:" + std::to_wstring(static_cast<int>(args.ProcessFailedKind())));
             });
-            web.NavigationCompleted([](auto const& sender, auto const& args) {
-                if (args.IsSuccess() && isEntry(sender.Source())) checkpoint(L"document-loaded");
-                else checkpoint(L"navigation-error:" + std::to_wstring(static_cast<int>(args.WebErrorStatus())));
+            web.NavigationCompleted([this](auto const& sender, auto const& args) {
+                if (args.IsSuccess() && isEntry(sender.Source())) {
+                    checkpoint(L"document-loaded");
+                    publishWindow();
+                } else checkpoint(L"navigation-error:" + std::to_wstring(static_cast<int>(args.WebErrorStatus())));
             });
             step = L"navigation";
             checkpoint(step);
@@ -260,7 +314,8 @@ struct View : implements<View, IFrameworkView> {
                     window.chrome.webview.postMessage({method:"renderer-error", message});
                 });
             )JS";
-            co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + adapter + L"\n}");
+            auto seed = L"const xboxNativeWindow = Object.freeze(" + windowState() + L");\n";
+            co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
             if (closed) co_return;
             web.Navigate(entry);
             controller.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
@@ -273,6 +328,7 @@ struct View : implements<View, IFrameworkView> {
         try {
             { slim_lock_guard lock(gate); if (closeRequested) return; }
             window.SizeChanged({this, &View::onSize});
+            window.VisibilityChanged([this](auto const&, auto const&) { publishWindow(); });
             window.Closed({this, &View::onClosed});
             window.Activated({this, &View::onActivated});
             window.Activate();
@@ -280,11 +336,12 @@ struct View : implements<View, IFrameworkView> {
             window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessUntilQuit);
         } catch (...) { checkpoint(L"view-error:" + std::to_wstring(to_hresult().value)); }
     }
-    void onSize(CoreWindow const&, WindowSizeChangedEventArgs const&) { resize(); }
+    void onSize(CoreWindow const&, WindowSizeChangedEventArgs const&) { resize(); publishWindow(); }
     void onClosed(CoreWindow const&, CoreWindowEventArgs const&) { close(); }
     void onActivated(CoreWindow const&, WindowActivatedEventArgs const& args) {
         if (controller && args.WindowActivationState() != CoreWindowActivationState::Deactivated)
-            (popup ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
+            focusVisible();
+        publishWindow();
     }
     void close() {
         if (closed) return;
