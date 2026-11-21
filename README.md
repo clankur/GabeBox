@@ -1,6 +1,6 @@
 # Steam on Xbox Series X Developer Mode
 
-This branch runs Valve’s original Big Picture UI in Xbox WebView2 after the existing Steam QR sign-in. The Series X has displayed Valve’s first-run language screen. The compatibility layer keeps the Steam session resident while a game runs and maps Valve’s game controls to the Xbox presenter. Console results for each build and game are recorded in the guide. [Big Picture setup, background controls and Series X results](analysis/big-picture.md)
+This branch opens Valve’s original Big Picture UI in Xbox WebView2 after the existing Steam QR sign-in. On Series X, builds `.21` and `.22` each opened the populated Library on three consecutive cold application starts. The compatibility layer connects Valve’s Play, Resume and Exit controls to the Xbox game presenter. The release ledger tracks whether each title appears, sustains 1920×1080 playback and returns to the Library through those controls. [Big Picture setup and controls](analysis/big-picture.md) · [Per-build Series X verification](analysis/big-picture-reliability.md)
 
 The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 
