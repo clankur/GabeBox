@@ -17,6 +17,7 @@
 #include <array>
 #include <deque>
 #include <string>
+#include "cloud-cache.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -68,6 +69,7 @@ struct View : implements<View, IFrameworkView> {
     bool openingPopup = false;
     bool popupRequestedVisible = false;
     CoreWebView2 web{nullptr};
+    std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
 
@@ -97,18 +99,34 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    fire_and_forget suspendHidden(CoreWebView2 browser) {
+        auto lifetime = get_strong();
+        try {
+            // A view may be shown again before Chromium completes suspension.
+            if (co_await browser.TrySuspendAsync(); !closed && window.Visible()) browser.Resume();
+        } catch (hresult_error const&) {
+            // Chromium can decline suspension for an active browser operation.
+        }
+    }
+
     void applyVisibility() {
         if (closed || !controller) return;
         const bool visible = window.Visible();
         controller.IsVisible(visible);
         if (popup) popup.IsVisible(visible && popupRequestedVisible);
         // A foreground game owns the GPU presenter. Keep the IPC renderer
-        // responsive to RunGame while Chromium trims the background views.
+        // resident while Chromium trims and suspends background execution.
         auto targetLevel = visible ? CoreWebView2MemoryUsageTargetLevel::Normal : CoreWebView2MemoryUsageTargetLevel::Low;
         for (auto const& view : {controller, popup}) {
             if (view) {
-                if (auto memory = view.CoreWebView2().try_as<ICoreWebView2_19>())
+                auto browser = view.CoreWebView2();
+                if (auto memory = browser.try_as<ICoreWebView2_19>())
                     memory.MemoryUsageTargetLevel(targetLevel);
+                if (visible) {
+                    if (browser.IsSuspended()) browser.Resume();
+                } else if (!browser.IsSuspended()) {
+                    suspendHidden(browser);
+                }
             }
         }
     }
@@ -206,7 +224,11 @@ struct View : implements<View, IFrameworkView> {
 
     bool handleWindowCommand(hstring const& message) {
         if (message == L"\"xbox-read-gamepads\"") publishGamepads();
-        else if (message == L"\"xbox-window-focus\"") focusVisible();
+        else if (message == L"\"xbox-app-initialized\"") {
+            // Steam signals post-login service setup separately from a visible screen.
+            slim_lock_guard lock(gate);
+            if (status == L"document-loaded" || status == L"gamepad-window-created") status = L"app-initialized";
+        } else if (message == L"\"xbox-window-focus\"") focusVisible();
         else if (message == L"\"xbox-window-show\"" || message == L"\"xbox-window-hide\"") {
             if (popup) {
                 popupRequestedVisible = message == L"\"xbox-window-show\"";
@@ -247,21 +269,35 @@ struct View : implements<View, IFrameworkView> {
         // Valve's pinned build 1794536281. Ignore blank windows and loading views.
         constexpr wchar_t check[] = LR"JS((()=>{
             const target = document.getElementById('popup_target');
+            function visible(node) {
+                if (!node || getComputedStyle(node).visibility !== 'visible') return false;
+                const b = node.getBoundingClientRect();
+                return b.width > 0 && b.height > 0 && b.right > 0 && b.bottom > 0 && b.left < innerWidth && b.top < innerHeight;
+            }
             const shell = document.getElementById('Header.Main.Footer');
-            if (!target || !shell || !target.contains(shell) || !shell.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq')) return false;
-            const content = shell.querySelector('.ZBBhezbBR4VJYysmVhF3_, ._2_cRkGdbegoIbiRsy_-I7');
-            if (!content) return false;
-            const bounds = content.getBoundingClientRect();
-            return bounds.width > 0 && bounds.height > 0 && getComputedStyle(content).visibility === 'visible';
+            if (target?.contains(shell) && shell?.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq') &&
+                visible(shell.querySelector('.ZBBhezbBR4VJYysmVhF3_, ._2_cRkGdbegoIbiRsy_-I7'))) return 2;
+            const connect = target?.querySelector('._1wlvJjVURYzQHWJlITdVCA button[role=menuitem]._21kxLhOa-E8amdNn4Q_zBY');
+            if (visible(connect) && !connect.disabled && connect.querySelector('svg')) return 1;
+            const choices = target?.querySelectorAll('._2RjHR32VwDeGwslJx6LcCN[role=listbox] .zzXtdadESGEkT4IFqLvjm[role=option][lang]');
+            if (choices && new Set([...choices].filter(el => visible(el) && el.textContent.trim()).map(el => el.lang)).size > 1) return 1;
+            return 0;
         })())JS";
         auto lifetime = get_strong();
         apartment_context ui;
         try {
-            for (int sample = 0; sample < 80; ++sample) {
-                co_await resume_after(std::chrono::milliseconds(500));
+            bool setup = false;
+            for (int sample = 0; sample < 80 || setup; ++sample) {
+                co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
                 co_await ui;
                 if (closed || popup != browser) co_return;
-                if ((co_await browser.CoreWebView2().ExecuteScriptAsync(check)) == L"true") {
+                if (!window.Visible()) continue;
+                auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(check);
+                if (result == L"1" && !setup) {
+                    setup = true;
+                    checkpoint(L"setup-ready");
+                }
+                if (result == L"2") {
                     checkpoint(L"gamepad-ready");
                     co_return;
                 }
@@ -367,8 +403,11 @@ struct View : implements<View, IFrameworkView> {
             step = L"mapping";
             assets = Package::Current().InstalledLocation().Path() + L"\\ValveClient\\steamui";
             configure(web, true);
-            web.NavigationStarting([](auto const&, auto const& args) {
+            cloudCache = std::make_shared<SteamUiCloudCache>(environment);
+            cloudCache->install(web);
+            web.NavigationStarting([this](auto const&, auto const& args) {
                 if (!isEntry(args.Uri())) args.Cancel(true);
+                else cloudCache->cancel();
             });
             web.NewWindowRequested({this, &View::onPopup});
             web.WebMessageReceived([this](auto const& sender, auto const& args) {
@@ -376,6 +415,7 @@ struct View : implements<View, IFrameworkView> {
                 // only accepts bounded top-level messages from this exact document.
                 if (!isEntry(sender.Source()) || !isEntry(args.Source())) return;
                 auto message = args.WebMessageAsJson();
+                if (cloudCache->consume(message)) return;
                 if (message.empty() || message.size() > 4096 || handleWindowCommand(message)) return;
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
@@ -448,6 +488,7 @@ struct View : implements<View, IFrameworkView> {
     void close() {
         if (closed) return;
         closed = true;
+        if (cloudCache) cloudCache->cancel();
         closePopup();
         if (controller) controller.Close();
         web = nullptr;
