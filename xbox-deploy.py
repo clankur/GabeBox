@@ -281,7 +281,11 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
     else:
         if restart:
             package = base64.b64encode(app['PackageFullName'].encode()).decode('ascii')
-            portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': package}))
+            try:
+                portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': package}))
+            except PortalError as error:
+                if error.status != 404:
+                    raise
         # Match Xbox Device Portal's App Launcher, which sends the AUMID only.
         launch = {'appid': base64.b64encode(app['PackageRelativeId'].encode()).decode('ascii')}
         try:
