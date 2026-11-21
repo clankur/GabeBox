@@ -16,6 +16,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xbox-angle/binary-cache
+          key: windows-2022-angle-uwp-9967a8eb-release
       - name: Build pinned ANGLE and the pbuffer test
         shell: pwsh
         run: |
@@ -25,7 +29,9 @@ jobs:
           $vcpkg = Join-Path $work 'vcpkg'
           $triplets = Join-Path $work 'triplets'
           $artifacts = Join-Path $work 'artifacts'
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $work 'binary-cache'
           New-Item -ItemType Directory -Path $vcpkg, $triplets, $artifacts | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           git -C $vcpkg init
           git -C $vcpkg remote add origin https://github.com/microsoft/vcpkg.git
           git -C $vcpkg fetch --depth 1 origin 9967a8eb5f4f5cd7be2b6717d31ddb7ff84c4751
@@ -62,7 +68,7 @@ jobs:
           $installed = Join-Path $installedRoot 'x64-uwp-release'
           & cl.exe /nologo /LD /O2 /MD /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
             "/I$installed/include" "/Fo$work/angle-control.obj" "/Fe$artifacts/angle-control.dll" probe/angle-control.c `
-            "$installed/lib/libEGL.lib" "$installed/lib/libGLESv2.lib" /link /APPCONTAINER "/IMPLIB:$work/angle-control.lib"
+            /link /APPCONTAINER "/IMPLIB:$work/angle-control.lib" "$installed/lib/libEGL.lib" "$installed/lib/libGLESv2.lib"
           Copy-Item "$installed/bin/*.dll" $artifacts
           Copy-Item "$installed/share/angle/copyright" "$artifacts/LICENSE.angle"
           Copy-Item "$installed/share/zlib/copyright" "$artifacts/LICENSE.zlib"

@@ -226,6 +226,9 @@ static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstr
         return std::wstring(L"mesa_control=") + (green ? L"green-pixel" : L"failed") +
             L"\r\nmesa_stage=" + std::to_wstring(result.stage) + L"\r\nmesa_win32_error=" + Hex(result.loadError) +
             L"\r\nmesa_egl_error=" + Hex(result.eglError) + L"\r\nmesa_gl_error=" + Hex(result.glError) +
+            L"\r\nmesa_pbuffer_egl_error=" + Hex(result.pbufferError) +
+            L"\r\nmesa_surfaceless=" + (result.surfaceless ? L"yes" : L"no") +
+            L"\r\nmesa_framebuffer_status=" + Hex(result.framebufferStatus) +
             L"\r\nmesa_egl_version=" + std::to_wstring(result.eglMajor) + L"." + std::to_wstring(result.eglMinor) +
             L"\r\nmesa_rgba=" + std::to_wstring(result.pixel[0]) + L"," + std::to_wstring(result.pixel[1]) +
             L"," + std::to_wstring(result.pixel[2]) + L"," + std::to_wstring(result.pixel[3]) +
