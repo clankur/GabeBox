@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -155,6 +156,7 @@ public final class SlayConsoleDiagnostic {
         File packageRoot = new File(library).getParentFile();
         if (new File(packageRoot, "slay-sdl-display.dll").isFile()) {
             System.setProperty("xbox.lwjgl.sdl.package", packageRoot.getAbsolutePath());
+            System.out.println("slay_jvm_max_heap_bytes=" + Runtime.getRuntime().maxMemory());
             configureFontAtlas(packageRoot);
         } else {
             checkMesaInGameJvm(packageRoot);
@@ -200,6 +202,12 @@ public final class SlayConsoleDiagnostic {
             builder.environment().put("XBOX_SDL_TRACE_FILE", log.resolveSibling(trace).toAbsolutePath().toString());
             builder.environment().put("XBOX_SDL_OPENGL_FRAME_DELAY_MS", "8000");
             builder.environment().put("XBOX_SDL_TRACE_GL", "1");
+            if (new File(packageRoot, "slay-low-memory.txt").isFile()) {
+                builder.command().addAll(1, Arrays.asList("-Xms32m", "-Xmx256m", "-XX:+UseSerialGC",
+                        "-XX:TieredStopAtLevel=1", "-XX:ReservedCodeCacheSize=48m"));
+                Files.write(log, "slay_jvm_profile=low-memory\n".getBytes(StandardCharsets.US_ASCII),
+                            StandardOpenOption.APPEND);
+            }
         }
         Process child;
         try {

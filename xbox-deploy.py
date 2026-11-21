@@ -213,6 +213,7 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
     result.extend(re.findall(r'^slay_sdl_display=(?:ready|window|context|presented|cursor)$', text, re.M))
     result.extend(re.findall(r'^slay_font_atlas_(?:initial|limit)=(?:-1|[0-9]{1,5}|unavailable)$', text, re.M))
+    result.extend(re.findall(r'^slay_jvm_(?:profile=low-memory|max_heap_bytes=[0-9]{1,16})$', text, re.M))
     result.extend(re.findall(r'^slay_mesa_child=(?:loading|entered|load-error)$|^slay_mesa_child_(?:stage|checkpoint)=[0-8]$|'
                              r'^slay_mesa_child_(?:win32|egl|gl|fbo)=0x[0-9A-F]{8}$', text, re.M))
     result.extend(re.findall(r'^slay_lwjgl_egl_binding=(?:begin|natives-ready|no-version|gl-version|shader-created|no-shader|'
@@ -224,7 +225,9 @@ def slay_console_summary(raw):
               ('Access is denied', 'file-access-denied'), ('DisplayConfig.writeDisplayConfigFile', 'display-config-write'),
               ('lwjgl64.dll', 'lwjgl-native-load'), ("Can\'t find dependent libraries", 'native-dependency-missing'),
               ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation'),
-              ('Error loading pixmap.', 'pixmap-allocation')]
+              ('Error loading pixmap.', 'pixmap-allocation'),
+              ('Native memory allocation (malloc) failed', 'native-allocation'),
+              ('java.lang.OutOfMemoryError: Java heap space', 'heap-allocation')]
     for marker, stage in stages:
         if marker in text:
             result.append('slay_console_observed=' + stage)
