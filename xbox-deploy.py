@@ -442,7 +442,7 @@ def main():
             trace = read_game_file(portal, app, r'\LocalState', f'sdl-startup-{run[1]}.txt', 4096)
             snapshots = re.findall(r'^sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
                                    r'audio_init|audio_device|base_path|pref_path|pref_path_local|message_box|gl_library|gl_context|gl_swap_interval)'
-                                   r'=(?:begin|ready|error)|'
+                                   r'=(?:begin|ready|error)|software_frame=(?:ready|error|uniform)|'
                                    r'init_flags=0x[0-9A-F]{8})$', decode_report(trace or b''), re.MULTILINE)
             print('\n'.join(snapshots) or 'sdl_startup=no-checkpoints')
             return
