@@ -162,10 +162,14 @@
     }
 
     function updateActions() {
+        var focused = document.activeElement;
         var entry = selected && selected.entry;
         play.hidden = !entry || !entry.game || !entry.installed;
         download.hidden = !entry || !entry.game || !!entry.installed;
         play.disabled = download.disabled = launching || !!transfer;
+        if ((focused === play || focused === download) && (focused.hidden || focused.disabled)) {
+            (selected || search).focus();
+        }
     }
 
     function checkLocalInstall(entry) {
@@ -280,7 +284,8 @@
                 renderList();
                 signin.hidden = true;
                 library.hidden = false;
-                list.firstElementChild.focus();
+                if ("gamepadInputEmulation" in navigator) navigator.gamepadInputEmulation = "keyboard";
+                (list.firstElementChild || search).focus();
                 attempt.done = true;
                 attempt.client.close();
                 if (report.indexOf("steam_session_cache=unavailable\r\n") >= 0) {
@@ -380,7 +385,7 @@
         if (transfer || launching || !selected || !selected.entry.game || selected.entry.installed) return;
         var job = { entry: selected.entry, id: Date.now() };
         transfer = job;
-        download.disabled = true;
+        updateActions();
         signOut.disabled = true;
         updateDownload(job, "starting");
         Windows.Storage.ApplicationData.current.localFolder.createFileAsync(
@@ -482,57 +487,59 @@
         finish(current, "Sign-in cancelled.", "steam_approval=cancelled");
     });
     search.addEventListener("input", renderList);
-    search.addEventListener("keydown", function (event) {
-        if ((event.keyCode === 40 || event.keyCode === 204 || event.keyCode === 212) && list.firstElementChild) {
-            event.preventDefault();
-            list.firstElementChild.focus();
-        }
-    });
     list.addEventListener("focusin", function (event) {
         if (event.target.entry) select(event.target);
     });
     list.addEventListener("click", function (event) {
         if (event.target.entry) select(event.target);
     });
-    list.addEventListener("keydown", function (event) {
-        var button = event.target;
-        if (!button.entry) return;
+    var originalInputMode = navigator.gamepadInputEmulation;
+    // EdgeHTML can emit arrow keys, Navigation keys, or gamepad virtual keys.
+    var directions = {
+        37: "left", 140: "left", 205: "left", 214: "left",
+        38: "up", 138: "up", 203: "up", 211: "up",
+        39: "right", 141: "right", 206: "right", 213: "right",
+        40: "down", 139: "down", 204: "down", 212: "down"
+    };
+    library.addEventListener("keydown", function (event) {
+        var target = event.target;
+        var key = event.keyCode;
+        if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        if ((key === 142 || key === 195) && target.tagName === "BUTTON") {
+            event.preventDefault();
+            if (!event.repeat && !target.disabled) target.click();
+            return;
+        }
+        var direction = directions[key];
         var next;
-        switch (event.keyCode) {
-        case 38:
-        case 203:
-        case 211:
-            next = button.previousElementSibling || search;
-            break;
-        case 40:
-        case 204:
-        case 212:
-            next = button.nextElementSibling;
-            break;
-        case 39:
-        case 206:
-        case 213:
-            if (!play.hidden && !play.disabled) next = play;
-            else next = download.hidden || download.disabled ? signOut : download;
-            break;
-        default:
+        if (key === 27 || key === 143 || key === 196) {
+            if (target === search) return;
+            next = target.entry ? search : (selected || search);
+        } else if (!direction) {
+            return;
+        } else if (target === search) {
+            if (direction === "up") next = signOut;
+            else if (direction === "down") next = list.firstElementChild;
+            else return; // Keep horizontal caret movement and native search input.
+        } else if (target === signOut) {
+            if (direction === "down" || direction === "left") next = search;
+        } else if (target.entry) {
+            if (direction === "up") next = target.previousElementSibling || search;
+            if (direction === "down") next = target.nextElementSibling;
+            if (direction === "right") next = play.hidden ? download : play;
+        } else if (target === play || target === download) {
+            if (direction === "left") next = selected;
+            if (direction === "up") next = signOut;
+        } else {
             return;
         }
         event.preventDefault();
-        if (next) next.focus();
+        if (next && !next.hidden && !next.disabled) next.focus();
     });
     download.addEventListener("click", startDownload);
     play.addEventListener("click", function () {
         if (selected && selected.entry.installed) runGameLaunch(current, selected.entry);
     });
-    function backToLibrary(event) {
-        if (selected && (event.keyCode === 37 || event.keyCode === 205 || event.keyCode === 214)) {
-            event.preventDefault();
-            selected.focus();
-        }
-    }
-    download.addEventListener("keydown", backToLibrary);
-    play.addEventListener("keydown", backToLibrary);
     signOut.addEventListener("click", function () {
         if (transfer) updateDownload(transfer, "interrupted");
         launching = true;
@@ -545,6 +552,7 @@
             entries = [];
             manifestFolder = null;
             renderList();
+            if ("gamepadInputEmulation" in navigator) navigator.gamepadInputEmulation = originalInputMode;
             library.hidden = true;
             signin.hidden = false;
             downloadStatus.textContent = "";
