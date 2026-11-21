@@ -768,6 +768,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
         co_return winrt::hstring(L"library-folder-error:" + std::to_wstring(registration.result));
     }
 
+    constexpr std::uint32_t updatePaused = 0x200;
+    const bool wasPaused = (reinterpret_cast<SteamAppValue>(methods[4])(manager, app) & updatePaused) != 0;
+    const auto queuePlacement = methods[56];
+    if (wasPaused && queuePlacement != base + 0x766730) {
+        co_return winrt::hstring(L"interface-error");
+    }
     auto install = reinterpret_cast<SteamInstall>(methods[0]);
     auto result = install(manager, app, registration.index, false);
     if (result != 0) co_return winrt::hstring(L"install-rejected:" + std::to_wstring(result));
@@ -775,6 +781,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
     session->libraryPath = path;
     session->lastTransition = GetTickCount64();
     session->lastInstallState = 0;
+    if (wasPaused) {
+        // This is the explicit “Download now” action for the selected, already queued title.
+        using SetQueuePlacement = bool (__cdecl *)(void *, std::uint32_t, std::int32_t);
+        constexpr std::int32_t firstInQueue = 1;
+        if (reinterpret_cast<SetQueuePlacement>(queuePlacement)(manager, app, firstInQueue)) {
+            co_return winrt::hstring(L"resuming");
+        }
+    }
     co_return winrt::hstring(L"queued");
 }
 
@@ -791,6 +805,7 @@ static winrt::hstring ReadSteamDownload() {
     auto methods = SteamMethods(manager);
     constexpr std::uint32_t updateRequired = 0x2;
     constexpr std::uint32_t fullyInstalled = 0x4;
+    constexpr std::uint32_t updatePaused = 0x200;
     constexpr std::uint32_t missingOrCorrupt = 0xa0;
     constexpr std::uint32_t stagingOrCommitting = 0x600000;
     constexpr std::uint32_t downloading = 0x100000;
@@ -816,6 +831,8 @@ static winrt::hstring ReadSteamDownload() {
         checkpoint = L"staging";
     } else if (activeApp == session->downloadApp || (state & downloading)) {
         checkpoint = L"downloading";
+    } else if (state & updatePaused) {
+        checkpoint = L"paused";
     } else {
         checkpoint = L"queued";
     }

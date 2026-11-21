@@ -293,6 +293,8 @@
     var downloadMessages = {
         "starting": "Preparing the download",
         "queued": "Queued in Steam",
+        "resuming": "Steam is retrying the paused download",
+        "paused": "Steam reports the download is paused",
         "downloading": "Downloading from Steam",
         "staging": "Writing game files",
         "installed": "Download complete",
@@ -310,8 +312,8 @@
         var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(checkpoint);
         var stage = parts ? parts[1] : "failed";
         var detail = parts ? parts[2] : "";
-        var active = stage === "starting" || stage === "queued" ||
-            stage === "downloading" || stage === "staging";
+        var active = stage === "starting" || stage === "queued" || stage === "resuming" ||
+            stage === "paused" || stage === "downloading" || stage === "staging";
         if (checkpoint !== job.last) {
             job.last = checkpoint;
             var message = downloadMessages[stage] || "Steam could not start or track the download";
