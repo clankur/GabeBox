@@ -31,6 +31,8 @@ The [workflow report](analysis/xbox-workflows.md) maps the observed desktop depe
 
 The [porting investigation](analysis/native-port-path.md) records which measured Steam imports link against Microsoft’s UWP SDK, what still needs an Xbox runtime test, and how to interpret a successful result. The [packaged process test](probe/README.md) runs a single controlled experiment on a Series X in Developer Mode.
 
+The [Windows startup trace](analysis/windows-startup.md) follows the same Valve client build from launch to a web-helper window. It records the desktop libraries loaded at startup and the service state on the test VM.
+
 ## Reproduce the audit
 
 With Python 3.11 or later and the REA 6.10.1 CLI installed, run the following from the repository root. The client script downloads about 71 MB from Valve’s CDN. It verifies the pinned archive hashes and inspects the selected files in a temporary directory. It never launches them. A matching result produces no output from `diff`.
