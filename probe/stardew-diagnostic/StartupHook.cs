@@ -51,9 +51,26 @@ internal static class StartupHook
             else Record("stardew_game_directory=unexpected");
         }
         int remaining = 12;
+        int startupErrors = 8;
         AppDomain.CurrentDomain.FirstChanceException += (_, args) =>
         {
             var exception = args.Exception;
+            if (exception.HResult == unchecked((int)0x80070057) && Interlocked.Decrement(ref startupErrors) >= 0)
+            {
+                Record("stardew_invalid_argument=" + exception.GetType().FullName);
+                foreach (var frame in new StackTrace(exception).GetFrames() ?? Array.Empty<StackFrame>())
+                {
+                    var method = frame.GetMethod();
+                    var type = method?.DeclaringType?.FullName;
+                    if (type != null && (type.StartsWith("StardewValley.", StringComparison.Ordinal) ||
+                                         type.StartsWith("Microsoft.Xna.Framework.", StringComparison.Ordinal) ||
+                                         type.StartsWith("MonoGame.", StringComparison.Ordinal)))
+                    {
+                        Record("stardew_invalid_argument_frame=" + type + "." + method!.Name);
+                        break;
+                    }
+                }
+            }
             string? kind = exception switch
             {
                 DllNotFoundException _ => "dll-not-found",
