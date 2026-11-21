@@ -45,6 +45,8 @@ public final class SlayConsoleDiagnostic {
         Method useContext = null;
         boolean bound = false;
         try {
+            Class.forName("com.badlogic.gdx.backends.lwjgl.LwjglNativesLoader").getMethod("load").invoke(null);
+            System.out.println("slay_lwjgl_egl_binding=natives-ready");
             useContext = Class.forName("org.lwjgl.opengl.GLContext").getMethod("useContext", Object.class);
             useContext.invoke(null, new Object());
             bound = true;
@@ -60,8 +62,14 @@ public final class SlayConsoleDiagnostic {
                 System.out.println("slay_lwjgl_egl_binding=no-shader");
             }
         } catch (ReflectiveOperationException | LinkageError e) {
-            Throwable cause = e.getCause();
-            System.out.println("slay_lwjgl_egl_binding_fault=" + (cause == null ? e : cause).getClass().getName());
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            System.out.println("slay_lwjgl_egl_binding_fault=" + cause.getClass().getName());
+            String message = cause.getMessage();
+            if (message != null && message.contains("in java.library.path")) {
+                System.out.println("slay_lwjgl_egl_binding=native-search-path");
+            } else if (message != null && message.contains("Can't find dependent libraries")) {
+                System.out.println("slay_lwjgl_egl_binding=native-dependency");
+            }
         } finally {
             if (bound) {
                 try { useContext.invoke(null, (Object) null); }

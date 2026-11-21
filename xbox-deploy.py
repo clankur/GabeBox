@@ -213,7 +213,8 @@ def slay_console_summary(raw):
     result.extend(re.findall(r'^slay_console_display=windowed-fallback$', text, re.M))
     result.extend(re.findall(r'^slay_mesa_child=(?:loading|entered|load-error)$|^slay_mesa_child_(?:stage|checkpoint)=[0-8]$|'
                              r'^slay_mesa_child_(?:win32|egl|gl|fbo)=0x[0-9A-F]{8}$', text, re.M))
-    result.extend(re.findall(r'^slay_lwjgl_egl_binding=(?:begin|no-version|gl-version|shader-created|no-shader|release-error)$|'
+    result.extend(re.findall(r'^slay_lwjgl_egl_binding=(?:begin|natives-ready|no-version|gl-version|shader-created|no-shader|'
+                             r'native-search-path|native-dependency|release-error)$|'
                              r'^slay_lwjgl_egl_binding_fault=[a-zA-Z0-9_.$]{1,128}$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
