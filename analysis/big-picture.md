@@ -19,7 +19,7 @@ The builder verifies the archived Valve manifest and each client archive against
 
 ### Local verification
 
-On November 21, 2026, the x64 launcher cross-compiled and linked against WindowsApp.lib and uuid.lib on macOS. The local test template used ILAsm to generate the WinRT metadata for the two launcher methods. The Windows SDK workflow uses MIDL for that metadata and MakePri for the resource index. The local build verified the launcher DLL and APPX signatures. All 6,631 files under `ValveClient/` in the signed APPX matched the pinned payload byte for byte. Xbox activation, visible frames and controller navigation await a device run.
+On November 21, 2026, the x64 launcher cross-compiled and linked against WindowsApp.lib and uuid.lib on macOS. The local test template used ILAsm to generate the WinRT metadata for the two launcher methods. The Windows SDK workflow uses MIDL for that metadata and MakePri for the resource index. The local build verified the launcher DLL and APPX signatures. All 6,631 files under `ValveClient/` in the signed APPX matched the pinned payload byte for byte.
 
 ## Check startup on Xbox
 
@@ -38,6 +38,20 @@ The package opens a minimal packaged start page to activate the native launcher 
 | `client-created` followed by `client-running` | The initial Steam process survived the observation interval. Inspect the TV for the interface. |
 | `client-exited` | The initial process exited. The exit code and any visible handoff are needed to interpret the result. |
 | A status ending in `-error` | The report identifies the stage and error code for that attempt. |
+
+### Series X deployment and game checks
+
+On November 21, 2026, Device Portal installed Big Picture `1.0.0.0`. Both the initial launch and a cold restart created `ValveClient/steam.exe`, which exited with `0xffffff98` (−104). The pinned bootstrap executable associates that return value with failure to initialize the update UI or create its initial window. The console capture was blank, the subsequent process list showed the Xbox host with no surviving Steam client or web helper, and the app’s LocalState contained only the launcher report. The failure occurs before the library appears. Which Windows call failed is still unknown.
+
+In a separate check on the same console, Steam Core `1.0.230.0` restored the Steam session. All three games opened from their **Play** buttons in that library. A screen capture confirmed each title screen. Each test game process was closed through Device Portal at its title screen and the app returned to the library. The native presenter recorded a 1920×1080 source for all three. Its built-in 30-second sample begins five seconds after the first distinct frame, so it can include loading.
+
+| Game (Steam AppID) | Distinct frames | Sample seconds | Average FPS |
+| --- | ---: | ---: | ---: |
+| Slay the Spire (646570) | 1,645 | 30.014306 | 54.81 |
+| Dwarf Fortress (975370) | 1,797 | 30.014743 | 59.87 |
+| Stardew Valley (413150) | 1,797 | 30.006491 | 59.89 |
+
+The native branch contained shared FHD revision `b79d1be`. The regular Steam Core release artifact matched the presenter, SDL and managed-adapter build inputs. Reanalyzing the earlier settled Slay title trace gave 1,798 distinct frames in 30 seconds (59.93 FPS). All 76 shared application payload files matched between that trial and the regular release by SHA-256. The trial added launch-selection and timing markers. Earlier scene-specific measurements also cover gameplay. [FHD performance results](../probe/GAME-LAUNCH.md#native-fullscreen-presentation)
 
 ## Steam Machine experience on Series X
 
