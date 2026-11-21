@@ -1274,10 +1274,22 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     if (!app || app > 0x00ffffff) co_return winrt::hstring(L"steam_launch=invalid-game\r\n");
     std::uint32_t launchOption = 0;
     bool snapshotRequested = false;
+    std::wstring diagnosticRenderer;
     if (backend == GameBackend::SteamPlay) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
+        if (snapshotRequested) {
+            auto renderer = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-startup-sdl-renderer-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+            if (renderer) {
+                const auto choice = co_await FileIO::ReadTextAsync(renderer);
+                if (choice != L"software" && choice != L"direct3d11") {
+                    co_return winrt::hstring(L"steam_launch=invalid-sdl-renderer\r\n");
+                }
+                diagnosticRenderer = choice.c_str();
+            }
+        }
         auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-launch-option-" + std::to_wstring(app) + L".txt"));
         if (optionItem) {
@@ -1464,6 +1476,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    struct SdlRendererHint {
+        bool created = false;
+        ~SdlRendererHint() {
+            if (created) SetEnvironmentVariableW(L"SDL_RENDER_DRIVER", nullptr);
+        }
+    } rendererHint;
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1520,6 +1538,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         GetSystemTimeAsFileTime(&launchTime);
+        if (!diagnosticRenderer.empty()) {
+            wchar_t existing[1];
+            SetLastError(ERROR_SUCCESS);
+            if (GetEnvironmentVariableW(L"SDL_RENDER_DRIVER", existing, 1) == 0 &&
+                    GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+                rendererHint.created = SetEnvironmentVariableW(L"SDL_RENDER_DRIVER", diagnosticRenderer.c_str()) != FALSE;
+            }
+            report += L"steam_launch_sdl_renderer=" + (rendererHint.created ? diagnosticRenderer : std::wstring(L"unavailable")) + L"\r\n";
+        }
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;

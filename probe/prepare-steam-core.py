@@ -126,13 +126,15 @@ def title_launch_option(spec):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
-                   launch_options=(), startup_snapshot=False):
+                   launch_options=(), startup_snapshot=False, startup_sdl_renderer=None):
     version_parts = tuple(int(part) for part in version.split('.'))
     configured_options = dict(launch_options)
     if launch_option is not None:
         configured_options[launch_app_id] = launch_option
     if startup_snapshot and (not steam_sign_in or not launch_app_id or (xcom_runtime_archive and launch_app_id == 7760)):
         raise ValueError('A startup snapshot needs a native Steam Play target.')
+    if startup_sdl_renderer and (not startup_snapshot or startup_sdl_renderer not in ('software', 'direct3d11')):
+        raise ValueError('An SDL renderer trial needs a startup snapshot and a supported renderer name.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -184,6 +186,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / f'steam-launch-option-{app_id}.txt').write_text(str(index), encoding='ascii')
         if startup_snapshot:
             (layout / f'steam-startup-snapshot-{launch_app_id}.txt').touch()
+        if startup_sdl_renderer:
+            (layout / f'steam-startup-sdl-renderer-{launch_app_id}.txt').write_text(startup_sdl_renderer, encoding='ascii')
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -230,6 +234,8 @@ def main():
                         help='run the launch test again each time the probe starts from a fresh process')
     parser.add_argument('--startup-snapshot', action='store_true',
                         help='sample the configured game process before polling Steam for a ready window')
+    parser.add_argument('--startup-sdl-renderer', choices=('software', 'direct3d11'),
+                        help='request an SDL renderer for the configured startup trial')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -265,6 +271,8 @@ def main():
         parser.error('--repeat-launch requires --launch-app-id')
     if args.startup_snapshot and (not args.launch_app_id or (args.xcom_dos_runtime and args.launch_app_id == 7760)):
         parser.error('--startup-snapshot requires --launch-app-id with a native Steam Play target')
+    if args.startup_sdl_renderer and not args.startup_snapshot:
+        parser.error('--startup-sdl-renderer requires --startup-snapshot')
     if args.install_before_launch and args.launch_app_id is None:
         parser.error('--install-before-launch requires --launch-app-id')
     if args.library_inventory and not args.steam_sign_in:
@@ -277,7 +285,8 @@ def main():
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework,
                    xcom_runtime_archive=args.xcom_dos_runtime, launch_option=args.launch_option,
-                   launch_options=title_options, startup_snapshot=args.startup_snapshot)
+                   launch_options=title_options, startup_snapshot=args.startup_snapshot,
+                   startup_sdl_renderer=args.startup_sdl_renderer)
 
 
 if __name__ == '__main__':
