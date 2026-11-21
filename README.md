@@ -23,6 +23,10 @@ An import establishes a binary dependency. It cannot tell us whether Steam exerc
 3. **Local PC game compatibility.** Even an Xbox Steam UI that signs in and downloads an owned game would still need an execution environment for that game’s Windows or Linux build. The concrete acceptance test is Steam’s own library installing a game, launching it locally on a Series X, accepting input, saving, and reloading. Two games with different dependencies would provide initial evidence of library breadth. Neither test has been demonstrated here.
 4. **Distribution rights for a modified Steam client.** Valve’s subscriber agreement restricts modification and redistribution, subject to its stated exceptions and applicable law. We identified no public grant covering a repackaged Steam client for Xbox. [Steam Subscriber Agreement](https://store.steampowered.com/subscriber_agreement/)
 
+## Xbox workflow investigation
+
+The [workflow report](analysis/xbox-workflows.md) maps the observed desktop dependencies to Xbox Developer Mode and partner GDK APIs. It covers WebView2, prerequisites, package updates, Steam depot downloads and game activation.
+
 ## Reproduce the audit
 
 With Python 3.11 or later and the REA 6.10.1 CLI installed, run the following from the repository root. The client script downloads about 71 MB from Valve’s CDN. It verifies the pinned archive hashes and inspects the selected files in a temporary directory. It never launches them. A matching result produces no output from `diff`.
