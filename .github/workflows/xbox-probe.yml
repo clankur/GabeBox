@@ -1,0 +1,140 @@
+name: Build Xbox probe
+
+on:
+  push:
+    paths:
+      - 'probe/**'
+      - '.github/workflows/xbox-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-sdk-package:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and sign with the Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $sdkVersion = (Get-ChildItem "$sdk\bin" -Directory |
+            Where-Object { $_.Name -match '^10\.' -and
+              (Test-Path "$($_.FullName)\x64\MakeAppx.exe") -and
+              (Test-Path "$($_.FullName)\x64\MakePri.exe") -and
+              (Test-Path "$sdk\Lib\$($_.Name)\um\x64\WindowsApp.lib") } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$sdkVersion) { throw 'No Windows SDK with MakeAppx, MakePri, and WindowsApp.lib was found.' }
+          $bin = "$sdk\bin\$sdkVersion\x64"
+          $lib = "$sdk\Lib\$sdkVersion\um\x64\WindowsApp.lib"
+          $llvm = "$env:ProgramFiles\LLVM\bin"
+          $work = Join-Path $env:RUNNER_TEMP 'xbox-probe'
+          $layout = Join-Path $work 'layout'
+          $artifacts = Join-Path $work 'artifacts'
+          New-Item -ItemType Directory -Path $layout, $artifacts | Out-Null
+          Copy-Item -Recurse probe/Assets $layout
+          Copy-Item probe/web/* $layout
+
+          [xml]$manifest = Get-Content probe/Package.appxmanifest
+          $app = $manifest.Package.Applications.Application
+          $app.RemoveAttribute('Executable')
+          $app.RemoveAttribute('EntryPoint')
+          $app.SetAttribute('StartPage', 'index.html')
+          $ns = $manifest.DocumentElement.NamespaceURI
+          $extensions = $manifest.CreateElement('Extensions', $ns)
+          $extension = $manifest.CreateElement('Extension', $ns)
+          $extension.SetAttribute('Category', 'windows.activatableClass.inProcessServer')
+          $server = $manifest.CreateElement('InProcessServer', $ns)
+          $serverPath = $manifest.CreateElement('Path', $ns)
+          $serverPath.InnerText = 'ProbeNative.dll'
+          $class = $manifest.CreateElement('ActivatableClass', $ns)
+          $class.SetAttribute('ActivatableClassId', 'XboxProbe.Native.ProbeRunner')
+          $class.SetAttribute('ThreadingModel', 'both')
+          $server.AppendChild($serverPath) | Out-Null
+          $server.AppendChild($class) | Out-Null
+          $extension.AppendChild($server) | Out-Null
+          $extensions.AppendChild($extension) | Out-Null
+          $manifest.Package.AppendChild($extensions) | Out-Null
+          $manifest.Save("$layout/AppxManifest.xml")
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          $metadata = "$sdk\UnionMetadata\$sdkVersion\Windows.winmd"
+          $projection = Join-Path $work 'projection'
+          $winmd = "$layout/XboxProbe.Native.winmd"
+          & "$bin\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
+            /out $work /winmd $winmd probe/XboxProbe.Native.idl
+          & "$bin\cppwinrt.exe" -input $winmd -reference $metadata -output $projection -include XboxProbe.Native -overwrite
+          & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DUNICODE /D_UNICODE `
+            "/I$projection" "/I$sdk\Include\$sdkVersion\cppwinrt" "/Fo$work\ProbeNative.obj" "/Fe$layout\ProbeNative.dll" `
+            probe/ProbeNative.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/ProbeNative.lib" `
+            /EXPORT:DllGetActivationFactory=ProbeGetActivationFactory /EXPORT:DllCanUnloadNow=ProbeCanUnloadNow
+
+          $targets = @(
+            @{ Source = 'child-process'; Extension = 'dll'; Flags = @('/dll', '/noentry') }
+          )
+          foreach ($target in $targets) {
+            $source = $target.Source
+            $options = $target.Flags
+            & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
+              -c "probe/$source.c" -o "$work/$source.obj"
+            & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+              /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro @options `
+              "/out:$layout/$source.$($target.Extension)" "$work/$source.obj" $lib
+          }
+
+          & cl.exe /nologo /c /O2 /GS- /Zl /TC "/Fo$work\child.obj" probe/child.c
+          & link.exe /nologo /machine:x64 /subsystem:windows /appcontainer /dynamicbase /nxcompat /highentropyva `
+            /nodefaultlib /entry:ChildEntry /manifest:embed /manifestuac:no "/out:$layout\child.exe" "$work\child.obj" $lib
+
+          $controlLayout = Join-Path $work 'control-layout'
+          $controlArtifacts = Join-Path $work 'control-artifacts'
+          Copy-Item -Recurse $layout $controlLayout
+          New-Item -ItemType Directory -Path $controlArtifacts | Out-Null
+          [xml]$control = Get-Content "$controlLayout/AppxManifest.xml"
+          $control.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Control')
+          $control.Package.Properties.DisplayName = 'Packaged process startup control'
+          $control.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process startup control')
+          $control.Package.RemoveChild($control.Package.Extensions) | Out-Null
+          $control.Save("$controlLayout/AppxManifest.xml")
+          Remove-Item -LiteralPath "$controlLayout/ProbeNative.dll", "$controlLayout/XboxProbe.Native.winmd",
+            "$controlLayout/child.exe", "$controlLayout/child-process.dll"
+
+          function Write-ProbePackage($packageLayout, $outputDir, $cert) {
+            & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $packageLayout /of "$packageLayout/resources.pri"
+            $appx = "$outputDir/PackagedProcessProbe-x64.appx"
+            & "$bin\MakeAppx.exe" pack /d $packageLayout /p $appx
+            Export-Certificate -Cert $cert -FilePath "$outputDir/PackagedProcessProbe.cer" | Out-Null
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 $appx
+            $hashes = Get-ChildItem $outputDir -File | ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+            [IO.File]::WriteAllText("$outputDir/SHA256SUMS", ($hashes -join "`n") + "`n")
+          }
+
+          & "$bin\MakePri.exe" createconfig /cf "$work/priconfig.xml" /dq lang-en-US /pv 10.0.0
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe"
+            Write-ProbePackage $layout $artifacts $cert
+            Write-ProbePackage $controlLayout $controlArtifacts $cert
+          } finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-windows-sdk
+          path: ${{ runner.temp }}/xbox-probe/artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-fresh-identity
+          path: ${{ runner.temp }}/xbox-probe/control-artifacts/
+          if-no-files-found: error
