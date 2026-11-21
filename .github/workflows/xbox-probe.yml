@@ -60,25 +60,45 @@ jobs:
               "/out:$layout/$source.$($target.Extension)" "$work/$source.obj" $lib
           }
 
+          $controlLayout = Join-Path $work 'control-layout'
+          $controlArtifacts = Join-Path $work 'control-artifacts'
+          Copy-Item -Recurse $layout $controlLayout
+          New-Item -ItemType Directory -Path $controlArtifacts | Out-Null
+          [xml]$control = Get-Content "$controlLayout/AppxManifest.xml"
+          $control.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.Control')
+          $control.Package.Properties.DisplayName = 'Packaged process startup control'
+          $control.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Packaged process startup control')
+          $control.Save("$controlLayout/AppxManifest.xml")
+
+          function Write-ProbePackage($packageLayout, $outputDir, $cert) {
+            & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $packageLayout /of "$packageLayout/resources.pri"
+            $appx = "$outputDir/PackagedProcessProbe-x64.appx"
+            & "$bin\MakeAppx.exe" pack /d $packageLayout /p $appx
+            Export-Certificate -Cert $cert -FilePath "$outputDir/PackagedProcessProbe.cer" | Out-Null
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 $appx
+            $hashes = Get-ChildItem $outputDir -File | ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+            [IO.File]::WriteAllText("$outputDir/SHA256SUMS", ($hashes -join "`n") + "`n")
+          }
+
           & "$bin\MakePri.exe" createconfig /cf "$work/priconfig.xml" /dq lang-en-US /pv 10.0.0
-          & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $layout /of "$layout/resources.pri"
-          $appx = "$artifacts/PackagedProcessProbe-x64.appx"
-          & "$bin\MakeAppx.exe" pack /d $layout /p $appx
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
-            Export-Certificate -Cert $cert -FilePath "$artifacts/PackagedProcessProbe.cer" | Out-Null
-            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 $appx
+            Write-ProbePackage $layout $artifacts $cert
+            Write-ProbePackage $controlLayout $controlArtifacts $cert
           } finally {
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
           }
-          $hashes = Get-ChildItem $artifacts -File | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
-          }
-          [IO.File]::WriteAllText("$artifacts/SHA256SUMS", ($hashes -join "`n") + "`n")
       - uses: actions/upload-artifact@v4
         with:
           name: xbox-probe-windows-sdk
           path: ${{ runner.temp }}/xbox-probe/artifacts/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-fresh-identity
+          path: ${{ runner.temp }}/xbox-probe/control-artifacts/
           if-no-files-found: error

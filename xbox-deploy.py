@@ -23,6 +23,7 @@ from zipfile import BadZipFile, ZipFile
 
 PACKAGE_API = '/api/app/packagemanager'
 PROBE_NAME = 'XboxPortabilityProbe.ChildProcess'
+PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
 PROBE_REPORT = 'probe-report.txt'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
@@ -136,18 +137,19 @@ class DevicePortal:
         self.request('POST', f'{PACKAGE_API}/package?{query}', body(), headers)
 
 
-def probe_version(file):
+def probe_identity(file):
     with ZipFile(file) as archive:
         manifest = ElementTree.fromstring(archive.read('AppxManifest.xml'))
     identity = manifest.find('{*}Identity')
-    if identity is None or identity.get('Name') != PROBE_NAME or identity.get('ProcessorArchitecture') != 'x64':
+    if (identity is None or identity.get('Name') not in (PROBE_NAME, PROBE_CONTROL_NAME)
+            or identity.get('ProcessorArchitecture') != 'x64'):
         raise ValueError('--test-probe requires the x64 packaged process probe APPX.')
-    return identity.attrib['Version']
+    return identity.attrib['Name'], identity.attrib['Version']
 
 
-def wait_for_probe(portal, version, manual, timeout):
+def wait_for_probe(portal, name, version, manual, timeout):
     _, data = portal.request('GET', f'{PACKAGE_API}/packages')
-    prefix = f'{PROBE_NAME}_{version}_x64__' if version else f'{PROBE_NAME}_'
+    prefix = f'{name}_{version}_x64__' if version else f'{name}_'
     candidates = [package for package in json.loads(data)['InstalledPackages']
                   if package['PackageFullName'].startswith(prefix)]
     if len(candidates) != 1:
@@ -171,7 +173,8 @@ def wait_for_probe(portal, version, manual, timeout):
     baseline = read_report()
     launch_error = ''
     if manual:
-        print('Launch Packaged process test once from Xbox Dev Home.', flush=True)
+        label = 'Packaged process startup control' if name == PROBE_CONTROL_NAME else 'Packaged process test'
+        print(f'Launch {label} once from Xbox Dev Home.', flush=True)
     else:
         # Match Xbox Device Portal's App Launcher, which sends the AUMID only.
         launch = {'appid': base64.b64encode(app['PackageRelativeId'].encode()).decode('ascii')}
@@ -235,6 +238,7 @@ def main():
     deploy.add_argument('--test-probe', action='store_true', help='launch this probe and wait for its report')
     probe = commands.add_parser('probe', help='launch the installed probe and wait for a fresh report')
     probe.add_argument('--version', help='require a specific installed package version')
+    probe.add_argument('--control', action='store_true', help='watch the clean-registration control')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
@@ -261,7 +265,8 @@ def main():
         for file in files:
             if not file.is_file():
                 raise ValueError(f'File not found: {file}')
-        version = probe_version(args.package) if args.test_probe else None
+        if args.test_probe:
+            name, version = probe_identity(args.package)
     if args.command in ('deploy', 'probe') and args.timeout <= 0:
         raise ValueError('--timeout must be a positive number of seconds.')
 
@@ -274,7 +279,8 @@ def main():
         password = getpass.getpass('Xbox Device Portal password: ')
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'probe':
-        wait_for_probe(portal, args.version, args.manual_launch, args.timeout)
+        name = PROBE_CONTROL_NAME if args.control else PROBE_NAME
+        wait_for_probe(portal, name, args.version, args.manual_launch, args.timeout)
         return
     if args.command == 'deploy':
         portal.upload(files)
@@ -287,7 +293,7 @@ def main():
         if status == 200:
             print_install_result(data)
             if args.command == 'deploy' and args.test_probe:
-                wait_for_probe(portal, version, args.manual_launch, args.timeout)
+                wait_for_probe(portal, name, version, args.manual_launch, args.timeout)
             return
         if args.command == 'status':
             print('Xbox Device Portal reports an install in progress.')
