@@ -1055,12 +1055,12 @@ struct SteamGameProcess {
     DWORD error = ERROR_SUCCESS;
 
     void Observe(void *clientUser, std::uintptr_t const *methods, std::uint64_t gameId,
-            std::wstring const& gameDirectory) {
+            FILETIME const& launchTime) {
         if (handle) return;
         using GameCount = std::uint32_t (__cdecl *)(void *);
         using GetGameID = std::uint64_t * (__cdecl *)(void *, std::uint64_t *, std::uint32_t);
         using GetGamePID = DWORD (__cdecl *)(void *, std::uint32_t);
-        const auto count = std::min(reinterpret_cast<GameCount>(methods[132])(clientUser), 16u);
+        const auto count = (std::min)(reinterpret_cast<GameCount>(methods[132])(clientUser), 16u);
         for (std::uint32_t index = 0; index < count; ++index) {
             std::uint64_t runningId = 0;
             reinterpret_cast<GetGameID>(methods[133])(clientUser, &runningId, index);
@@ -1073,17 +1073,15 @@ struct SteamGameProcess {
                 checkpoint = L"open-error";
                 continue;
             }
-            std::wstring image(32768, L'\0');
-            DWORD size = static_cast<DWORD>(image.size());
-            if (!QueryFullProcessImageNameW(process.get(), 0, image.data(), &size)) {
+            FILETIME created{}, exited{}, kernel{}, user{};
+            if (!GetProcessTimes(process.get(), &created, &exited, &kernel, &user)) {
                 error = GetLastError();
-                checkpoint = L"image-query-error";
+                checkpoint = L"times-error";
                 continue;
             }
-            image.resize(size);
             error = ERROR_SUCCESS;
-            if (!IsLocalSteamInstall(image, gameDirectory)) {
-                checkpoint = L"outside-game";
+            if (CompareFileTime(&created, &launchTime) < 0) {
+                checkpoint = L"pre-existing";
                 continue;
             }
             handle = std::move(process);
@@ -1292,7 +1290,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     }
 
-    std::wstring gameDirectory;
+    FILETIME launchTime{};
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1318,7 +1316,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
                 std::to_wstring(state) + L"\r\n");
         }
-        gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        const auto gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
         if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
@@ -1327,6 +1325,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=already-running\r\n");
         }
         session->PumpCallbacks();
+        GetSystemTimeAsFileTime(&launchTime);
         call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, 0, 0, "");
         if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
         session->launchCall = call;
@@ -1385,7 +1384,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto user = session->clientUser;
             auto running = reinterpret_cast<GameQuery>(session->userMethods[67])(user, &gameId);
             observedRunning = observedRunning || running;
-            if (running) process.Observe(user, session->userMethods, gameId, gameDirectory);
+            if (running) process.Observe(user, session->userMethods, gameId, launchTime);
             auto windowReady = reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
             if (accepted && windowReady && running) verdict = L"window-ready";
             if ((responded && !accepted) || (accepted && windowReady && running) || GetTickCount64() >= deadline) {
