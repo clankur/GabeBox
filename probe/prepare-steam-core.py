@@ -40,7 +40,29 @@ def system_imports(objdump, binary):
     return parsed
 
 
-def prepare_layout(template, layout, version, valve_archive, objdump):
+def adapt_pinned_keyboard(binary, objdump):
+    audit = json.loads((ANALYSIS / 'client-imports.json').read_text())
+    pin = next(component for component in audit['components'] if component['member'] == binary.name)
+    original = binary.read_bytes()
+    if hashlib.sha256(original).hexdigest() != pin['sha256']:
+        raise ValueError('The keyboard adaptation applies only to the audited Steam core.')
+    before = system_imports(objdump, binary)
+    ansi, wide = 'MapVirtualKeyExA', 'MapVirtualKeyExW'
+    old_name = ansi.encode('ascii') + b'\0'
+    new_name = wide.encode('ascii') + b'\0'
+    if (original.count(old_name) != 1 or ansi not in before.get('user32.dll', ())
+            or wide in before['user32.dll']):
+        raise ValueError('Expected one audited ANSI keyboard import.')
+    candidate = original.replace(old_name, new_name, 1)
+    binary.write_bytes(candidate)
+    before['user32.dll'].remove(ansi)
+    before['user32.dll'].add(wide)
+    if system_imports(objdump, binary) != before:
+        raise ValueError('The derived library changed more than the expected keyboard import.')
+    print(f'Derived Steam client SHA-256: {hashlib.sha256(candidate).hexdigest()}.')
+
+
+def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -80,6 +102,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump):
                 with archive.open(filename) as source, (layout / filename).open('xb') as output:
                     shutil.copyfileobj(source, output)
 
+        if unicode_keyboard:
+            adapt_pinned_keyboard(layout / VALVE_FILES[0], objdump)
+
         imports = {}
         for filename in VALVE_FILES:
             for module, symbols in system_imports(objdump, layout / filename).items():
@@ -97,12 +122,16 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--valve-archive', type=Path, help='pinned bins_win64 ZIP, omit for the repack control')
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
+    parser.add_argument('--unicode-keyboard', action='store_true',
+                        help='test a local Unicode import adaptation of the pinned Steam core')
     args = parser.parse_args()
+    if args.unicode_keyboard and not args.valve_archive:
+        parser.error('--unicode-keyboard requires --valve-archive')
     if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', args.version):
         parser.error('--version must have four integer components')
     if any(int(part) > 65535 for part in args.version.split('.')):
         parser.error('--version components may not exceed 65535')
-    prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump)
+    prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard)
 
 
 if __name__ == '__main__':
