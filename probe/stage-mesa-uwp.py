@@ -50,16 +50,19 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
         raise ValueError('Use an x64 Steam Core diagnostic layout.')
     target = []
     hosted_stardew = (layout / 'steam-sdl-host-413150.txt').is_file()
+    hosted_slay = (layout / 'steam-sdl-host-646570.txt').is_file()
     if (layout / 'steamclient64.dll').exists():
         launch_marker = layout / 'steam-launch-app.txt'
         if launch_marker.is_file():
             target = launch_marker.read_text(encoding='ascii').splitlines()
-        if (not target and not hosted_stardew) or (target and target[0] not in ('413150', '646570')):
+        if (not target and not hosted_stardew and not hosted_slay) or (target and target[0] not in ('413150', '646570')):
             raise ValueError('Scope this Mesa game trial to Stardew Valley or Slay the Spire.')
-    if indexed_control and (target or hosted_stardew):
+    if indexed_control and (target or hosted_stardew or hosted_slay):
         raise ValueError('Run the indexed Mesa control without Steam or game files.')
     if hosted_stardew and (not sdl_surfaceless or dxil_archive is None):
         raise ValueError('The hosted Stardew profile requires SDL surfaceless GL and the pinned DXIL validator.')
+    if hosted_slay and dxil_archive is None:
+        raise ValueError('The hosted Slay profile requires the pinned DXIL validator.')
     if sdl_surfaceless and ((not hosted_stardew and (target[:1] != ['413150'] or 'repeat' not in target))
                             or not (layout / 'StardewStartupDiagnostic.dll').is_file()):
         raise ValueError('Use the repeatable Stardew Valley managed diagnostic for the SDL surfaceless trial.')
