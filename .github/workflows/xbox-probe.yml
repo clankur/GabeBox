@@ -146,6 +146,9 @@ jobs:
             }
             [xml]$steam = Get-Content "$steamLayout/AppxManifest.xml"
             $steam.Package.Identity.SetAttribute('Name', 'XboxPortabilityProbe.ChildProcess.SteamCore')
+            $internet = $steam.CreateElement('Capability', $ns)
+            $internet.SetAttribute('Name', 'internetClient')
+            $steam.Package.SelectSingleNode("*[local-name()='Capabilities']").AppendChild($internet) | Out-Null
             $steam.Package.Properties.DisplayName = 'Steam Core Loader Probe'
             $steam.GetElementsByTagName('VisualElements', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')[0].SetAttribute('DisplayName', 'Steam Core Loader Probe')
             $steam.Save("$steamLayout/AppxManifest.xml")
