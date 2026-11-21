@@ -210,18 +210,27 @@ def pe_summary(header):
                'pe_format': 'PE32' if magic == 0x10b else 'PE32+'}
     clr_entry = directory + 14 * 8
     count = unpack_from('<I', header, optional + directory - 4)[0]
-    if count < 15 or optional_size < clr_entry + 8:
+    if count < 15:
         return summary
+    if optional_size < clr_entry + 8:
+        return {**summary, 'clr_flags': 'unavailable'}
     clr_rva, clr_size = unpack_from('<II', header, optional + clr_entry)
-    if not clr_rva or clr_size < 20:
+    if not clr_rva and not clr_size:
         return summary
 
     summary['clr_flags'] = 'unavailable'
+    clr_header_size = 72
+    if not clr_rva or clr_size < clr_header_size:
+        return summary
     for section in range(min(sections, (len(header) - section_table) // 40)):
         _, address, raw_size, offset = unpack_from('<IIII', header, section_table + 40 * section + 8)
         relative = clr_rva - address
-        if 0 <= relative <= raw_size - 20 and offset + relative + 20 <= len(header):
-            flags = unpack_from('<I', header, offset + relative + 16)[0]
+        start = offset + relative
+        if 0 <= relative <= raw_size - clr_header_size and start + clr_header_size <= len(header):
+            declared_size = unpack_from('<I', header, start)[0]
+            if not clr_header_size <= declared_size <= min(clr_size, raw_size - relative, len(header) - start):
+                break
+            flags = unpack_from('<I', header, start + 16)[0]
             summary['clr_flags'] = f'0x{flags:08x}'
             summary['clr_requires_x86'] = 'yes' if flags & 2 and not flags & 0x20000 else 'no'
             break
@@ -234,7 +243,12 @@ def xbox_executable_requirement(summary):
         flags = summary.get('clr_flags')
         if flags == 'unavailable':
             return 'unknown'
-        if flags is None or summary['clr_requires_x86'] == 'yes' or not int(flags, 16) & 1:
+        if flags is None:
+            return 'requires-x86'
+        clr = int(flags, 16)
+        if (clr & 0x20002) == 0x20000:
+            return 'unknown'
+        if summary['clr_requires_x86'] == 'yes' or not clr & 1:
             return 'requires-x86'
         return 'managed-il'
     if summary.get('pe_machine') == 'x64':
