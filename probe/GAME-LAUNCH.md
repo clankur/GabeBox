@@ -107,3 +107,5 @@ The default hosted resolution is 854×480, scaled to fill the 16:9 player. In a 
 | Act 1 combat | 61.52 | 56 | 48.4 ms |
 
 The combat sample included two attacks, three blocks, enemy turns, and hand redraws. These counts measure the application submitting distinct frames to the canvas. At 960×540 the same transfer averaged 55.82 FPS during combat, including a Device Portal screenshot. The baseline title test with the original frame timers averaged 15.25 FPS at 1280×720.
+
+A hosted launcher can request a shared virtual desktop with the environment variables `XBOX_SDL_RENDER_WIDTH` and `XBOX_SDL_RENDER_HEIGHT`. Supply both as decimal pixel counts between 640×360 and 1920×1080. The SDL dummy and offscreen backends advertise the virtual desktop at 60 Hz and use it for resizable windows. Games retain control of fixed-size windows, exclusive display modes and logical rendering sizes. Slay uses the same dimensions for its libGDX viewport, offscreen display and input. With no valid request, the game uses its packaged display profile.

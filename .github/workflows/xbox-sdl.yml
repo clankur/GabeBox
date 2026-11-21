@@ -9,6 +9,7 @@ on:
       - 'probe/sdl-startup-trace.h'
       - 'probe/sdl-local-preferences.h'
       - 'probe/sdl-software-frame.h'
+      - 'probe/sdl-host-display-size.h'
       - 'probe/sdl-host-protocol.h'
       - 'probe/sdl-host-runtime.h'
       - 'probe/sdl-surfaceless-framebuffer.h'
