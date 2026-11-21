@@ -613,6 +613,10 @@
                         if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "fallback",
                             "media_phase=" + phase + "\r\nmedia_error=" + code + "\r\n");
                     },
+                    mediaProgress: function (stats) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "media", stats);
+                    },
                     measured: function (frames, microseconds, stats) {
                         if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
                             window.steamBigPictureHost.recordGameFrame(appId, "sample", stats);

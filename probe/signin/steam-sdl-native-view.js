@@ -6,7 +6,7 @@
     function openMedia(host, path, events, nativePad, screen, mainId) {
         var video = document.createElement("video");
         var timer, url, closed = false, opened = false, shown = false, measured = false;
-        var started = Date.now(), owner = ++activeSession, sampleStart, phase = "open";
+        var started = Date.now(), owner = ++activeSession, sampleStart, nextReport = 0, phase = "open";
         function resetSample() { sampleStart = null; }
         function close() {
             if (closed) return;
@@ -44,7 +44,12 @@
             try {
                 if (!events.running()) { close(); events.exited(); return; }
                 var stats = host.mediaStatus();
-                if (/^error=/m.test(stats)) { failed(); return; }
+                var error = /^error=([0-9]+)\r?$/m.exec(stats);
+                if (error) { failed({code:Number(error[1])}); return; }
+                if (events.mediaProgress && Date.now() >= nextReport) {
+                    nextReport = Date.now() + 5000;
+                    events.mediaProgress(stats);
+                }
                 if (visible()) {
                     var count = /^presented=([0-9]+)\r?$/m.exec(stats);
                     var foreground = "visible=1\r\nprimary_media=1\r\n";

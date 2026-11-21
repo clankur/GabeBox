@@ -122,7 +122,15 @@ Xbox Dev Home showed **App type → Game** for the installed Steam Core package.
 
 Keeping the primary Xbox window in front during startup on build `.20` preserved a measured 5 GiB limit while Steam opened its secondary window and received the signed-in library. In two cold starts, the host then brought that window forward by timeout, at 2,447,257,600 and 2,481,258,496 bytes of total app usage. The limit immediately after the switch was 1,073,741,824 bytes. Both sessions ended before an unobscured Library capture. Build `.21` samples memory before switching windows and lets WebView2 release unused data while it prepares the Library. The release ledger tracks the result of hardware trials on that package.
 
+Build `.21` reached the original Library on three consecutive application launches on Series X. The third preflight contained a runtime broker. All three started with the previous game's process, browser and application host absent. [Per-run observations](big-picture-reliability.md)
+
+### First sign-in and subsequent sessions
+
+The existing Xbox QR flow authenticates the account. The host passes its validated SteamID to the renderer and opens a separate WebView2 profile for that account. Valve records its own guided-tour preference. Startup waits for the player to finish the original tour before switching to All Games. Valve’s Sign Out confirmation returns to the existing sign-in screen. The native client can retain a valid remembered sign-in when Steam temporarily fails to return the catalog. [QR host](../probe/signin/steam-signin.js) · [WebView2 profiles](../probe/big-picture-webview/renderer.cpp) · [Account tests](../tests/steam-big-picture-shell.cjs)
+
 ### Background Steam and the running game
+
+Build `.22` adds a presentation path that draws real 1920×1080 SDL frames onto Direct3D surfaces and supplies them to a live video element in the primary Xbox window. The existing FHD receiver handles GPU and CPU frames. The verifier checks the media pipeline’s rendered-frame counter and a separate TV capture of the game. [Primary-window playback](../probe/signin/steam-sdl-native-view.js) · [Native media source](../probe/fhd/media-source.cpp) · [Microsoft MediaStreamSource](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.mediastreamsource)
 
 With an authenticated fixture in offline Chromium, Valve's own game list accepted a running AppID, navigated to `/app/42/overlay/controller` and displayed Resume game, Controller settings, View game details and Exit game. Activating the original Resume button issued the Xbox foreground request for AppID 42. When the host reported the process had exited, Valve cleared its running-game state and returned to the previous screen. This test uses Valve's pinned client UI with a simulated Xbox host. [Original-shell test](../tests/steam-big-picture-shell.cjs)
 
