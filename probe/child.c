@@ -4,6 +4,13 @@ typedef unsigned int UINT;
 
 __declspec(dllimport) void WINAPI ExitProcess(UINT exitCode);
 
+static UINT ExpectedExitCode(void) {
+    return 0x51A7u;
+}
+
+/* Retain a real base relocation even in this tiny position-independent x64 image. */
+static UINT (*volatile exitCodeAtEntry)(void) = ExpectedExitCode;
+
 void WINAPI ChildEntry(void) {
-    ExitProcess(0x51A7u);
+    ExitProcess(exitCodeAtEntry());
 }
