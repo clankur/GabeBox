@@ -1415,9 +1415,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::wstring slayOptions, slayRun;
     struct SlayLogEnvironment {
         bool active = false;
-        ~SlayLogEnvironment() {
-            if (active) SetEnvironmentVariableW(L"JAVA_TOOL_OPTIONS", nullptr);
+        void Restore() {
+            if (active) {
+                SetEnvironmentVariableW(L"JAVA_TOOL_OPTIONS", nullptr);
+                active = false;
+            }
         }
+        ~SlayLogEnvironment() { Restore(); }
     } slayLog;
     if (app == 646570) {
         auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
@@ -1572,6 +1576,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await winrt::resume_after(std::chrono::milliseconds(GetTickCount64() - started < 3000 ? 50 : 250));
         co_await caller;
     }
+    slayLog.Restore();
     report += L"steam_launch=" + std::wstring(verdict) + L"\r\n";
     if (app == 646570 && verdict == std::wstring_view(L"exited-during-startup")) {
         try {
