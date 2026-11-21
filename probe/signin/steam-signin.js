@@ -14,7 +14,6 @@
     var search = document.getElementById("library-search");
     var empty = document.getElementById("library-empty");
     var entryName = document.getElementById("entry-name");
-    var entryType = document.getElementById("entry-type");
     var signOut = document.getElementById("sign-out");
     var play = document.getElementById("play");
     var download = document.getElementById("download");
@@ -156,7 +155,6 @@
         selected = button;
         if (button) button.setAttribute("aria-pressed", "true");
         entryName.textContent = button ? button.entry.name : "";
-        entryType.textContent = button ? button.entry.type : "";
         updateActions();
         if (button && button.entry.game) checkLocalInstall(button.entry);
     }
@@ -205,6 +203,7 @@
         list.textContent = "";
         list.appendChild(fragment);
         empty.hidden = !!list.firstElementChild;
+        empty.textContent = entries.length ? "No matching games." : "No games in this library.";
         select(list.firstElementChild);
     }
 
@@ -281,7 +280,7 @@
                     .tryGetItemAsync("SteamLibrary").then(function (folder) {
                         return folder ? folder.tryGetItemAsync("steamapps") : null;
                     });
-                libraryCount.textContent = entries.length + (entries.length === 1 ? " title" : " titles");
+                libraryCount.textContent = entries.length + (entries.length === 1 ? " game" : " games");
                 search.value = "";
                 renderList();
                 signin.hidden = true;

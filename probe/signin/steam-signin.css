@@ -36,7 +36,6 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
     padding: 2em; border: 1px solid #34465d; border-radius: 8px;
     background: linear-gradient(145deg, #24374d, #192434 65%);
 }
-.entry .device { margin: 0 0 .5em; }
 .entry h2 { margin: 0; font-weight: 650; font-size: 1.9em; overflow-wrap: break-word; }
 #download, #play { margin-top: 1.25em; background: #11658a; border-color: #77c3e4; }
 #download:disabled, #play:disabled { opacity: .5; }
