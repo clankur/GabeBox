@@ -46,7 +46,7 @@ class SdlTrialTests(unittest.TestCase):
             (artifact / 'SHA256SUMS').write_text(f'{hashlib.sha256(candidate).hexdigest()}  SDL2.dll\n')
             backup_dir = Path(scratch) / 'backup'
             args = Namespace(app_id=413150, version='1.0.140.0', artifact=artifact, backup_dir=backup_dir,
-                             timeout=20, restore_only=False, frame=None)
+                             timeout=20, restore_only=False, frame=None, install_only=False)
             with patch.dict(cli.SDL_TRIALS, {413150: ('Stardew Valley', '2.30.9', original_hash)}), \
                  patch.object(cli, 'find_installed_probe', return_value={'PackageFullName': 'fixture'}), \
                  patch.object(cli, 'read_game_file', side_effect=(original, candidate, candidate, original)), \

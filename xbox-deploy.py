@@ -332,6 +332,14 @@ def trial_sdl(portal, args):
     version = f'{major_minor >> 16}.{major_minor & 0xffff}.{patch_build >> 16}'
     if version != upstream:
         raise ValueError(f'{name} requires the version-matched SDL {upstream} workflow artifact.')
+    if args.install_only:
+        raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{args.app_id}.acf', 65536)
+        manifest = decode_report(raw or b'')
+        flags = re.MULTILINE | re.IGNORECASE
+        if not (re.search(rf'^\s*"appid"\s+"{args.app_id}"\s*$', manifest, flags)
+                and re.search(rf'^\s*"installdir"\s+"{re.escape(name)}"\s*$', manifest, flags)
+                and re.search(r'^\s*"StateFlags"\s+"4"\s*$', manifest, flags)):
+            raise ValueError('Steam has not verified a complete installation for this SDL profile.')
 
     def read_sdl():
         data = read_game_file(portal, package, folder, 'SDL2.dll', SDL_LIMIT + 1)
@@ -360,6 +368,10 @@ def trial_sdl(portal, args):
         if args.restore_only and hashlib.sha256(current).hexdigest() == original_hash:
             print(f'Verified the original SDL2 for {name}.', flush=True)
             return
+        if (args.install_only and current == candidate and backup.exists()
+                and hashlib.sha256(backup.read_bytes()).hexdigest() == original_hash):
+            print(f'The verified SDL {upstream} runtime is already installed for {name}.', flush=True)
+            return
         if not args.restore_only:
             if hashlib.sha256(current).hexdigest() != original_hash:
                 raise ValueError('The installed SDL2 differs from the known original. Check the game version or restore a previous trial.')
@@ -378,31 +390,38 @@ def trial_sdl(portal, args):
             replace_sdl(original)
             print(f'Verified the original SDL2 for {name}.', flush=True)
         else:
-            _, raw = portal.request('GET', probe_report_path(package))
-            if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
-                raise ValueError('First run the signed Xbox diagnostic for the selected AppID to establish its stock baseline.')
+            if not args.install_only:
+                _, raw = portal.request('GET', probe_report_path(package))
+                if not re.search(rf'^steam_launch_(?:repeat_)?app_id={args.app_id}\r?$', decode_report(raw), re.MULTILINE):
+                    raise ValueError('First run the signed Xbox diagnostic for the selected AppID to establish its stock baseline.')
             stop_probe_for_sdl_trial(portal, package)
             applied = False
+            retain = False
             try:
                 replace_sdl(candidate)
                 applied = True
+                if args.install_only:
+                    retain = True
+                    print(f'Installed and verified SDL {upstream} for {name}. Original backup: {backup}', flush=True)
+                    return
                 print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
                 wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout,
                                require_app_id=args.app_id)
                 if args.frame is not None:
                     wait_for_sdl_frame(portal, package, args.frame, args.frame_timeout)
             finally:
-                try:
-                    installed = read_sdl()
-                    if installed != original:
-                        if installed != candidate and (applied or not candidate.startswith(installed)):
-                            raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
-                        stop_probe_for_sdl_trial(portal, package)
-                        replace_sdl(original)
-                    print(f'Verified the original SDL2 for {name}.', flush=True)
-                except (OSError, ValueError):
-                    print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
-                    raise
+                if not retain:
+                    try:
+                        installed = read_sdl()
+                        if installed != original:
+                            if installed != candidate and (applied or not candidate.startswith(installed)):
+                                raise ValueError('SDL2 changed during the trial. The backup was kept without overwriting the change.')
+                            stop_probe_for_sdl_trial(portal, package)
+                            replace_sdl(original)
+                        print(f'Verified the original SDL2 for {name}.', flush=True)
+                    except (OSError, ValueError):
+                        print(f'SDL restore needs a retry with --restore-only. Backup: {backup}', file=sys.stderr)
+                        raise
     finally:
         lock.unlink()
 
@@ -534,7 +553,9 @@ def main():
     sdl.add_argument('--frame', type=Path, metavar='BMP', help='wait for and save the trial’s frame before restoring SDL')
     sdl.add_argument('--frame-timeout', type=int, default=20, help='seconds to wait for a frame after the launch report')
     sdl.add_argument('--backup-dir', required=True, type=Path, help='directory for the verified original DLL and trial lock')
-    sdl.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
+    sdl_mode = sdl.add_mutually_exclusive_group()
+    sdl_mode.add_argument('--restore-only', action='store_true', help='restore a previously tested artifact without launching')
+    sdl_mode.add_argument('--install-only', action='store_true', help='leave the verified SDL runtime in the selected installed title')
     sdl.add_argument('--timeout', type=int, default=100, help='seconds to wait for a fresh launch report')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
