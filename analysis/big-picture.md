@@ -1,6 +1,6 @@
 # Steam Big Picture on Xbox
 
-Valve ships Big Picture as a mode of the Steam client. This branch packages the complete worldwide Windows x64 release and asks Steam to start in gamepad mode. Steam owns the sign-in, library, settings, overlays and controller interface. The Xbox launcher’s job is to start the client and report what happens. [Valve’s Big Picture guide](https://help.steampowered.com/en/faqs/view/3725-76D3-3F31-FB63)
+Valve ships Big Picture as a mode of the Steam client. The integrated Xbox app keeps the existing QR sign-in and opens Valve's original UI in WebView2 after authentication. The complete shell still needs Valve's native client services. A separate diagnostic packages the worldwide Windows x64 release and starts it in gamepad mode to test whether the desktop client can supply those services on Xbox. [Valve’s Big Picture guide](https://help.steampowered.com/en/faqs/view/3725-76D3-3F31-FB63)
 
 ## Build the native Big Picture package
 
@@ -66,6 +66,8 @@ On November 21, 2026, Device Portal installed Big Picture `1.0.0.0`. Both the in
 
 The standalone WebView2 package `1.0.0.3` ran on the same Series X. The Microsoft-built renderer activated, created the composition controller and loaded Valve’s original `/index.html`. Device Portal reported live `msedgewebview2.exe` processes. Valve's first JavaScript exception in this account-free test was `SteamClient is not defined`. All 866 UI, sound and movie files matched Valve's pinned archives. [Windows renderer build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44943347786)
 
+The integrated `1.0.230.1` package restored the existing QR-authenticated session, verified the Steam library, found 134 visible games and handed control to the WebView2 host. On that console the original Valve page reached `document-loaded` and raised `Cannot read properties of undefined (reading 'IsSteamInTournamentMode')`. The adapter implements app overviews and game launch. The shell's native System interface and additional services described below remain unresolved. The host returned to a startup error message. Valve's home, library, menus, and Play button were unavailable. [Windows build for the signed-in test](https://github.com/clankur/steam-xbox-devmode/actions/runs/44943721428)
+
 In a separate check on the same console, Steam Core `1.0.230.0` restored the Steam session. All three games opened from their **Play** buttons in that library. A screen capture confirmed each title screen. Each test game process was closed through Device Portal at its title screen and the app returned to the library. The native presenter recorded a 1920×1080 source for all three. Its built-in 30-second sample begins five seconds after the first distinct frame, so it can include loading.
 
 | Game (Steam AppID) | Distinct frames | Sample seconds | Average FPS |
@@ -75,6 +77,14 @@ In a separate check on the same console, Steam Core `1.0.230.0` restored the Ste
 | Stardew Valley (413150) | 1,797 | 30.006491 | 59.89 |
 
 The native branch contained shared FHD revision `b79d1be`. The regular Steam Core release artifact matched the presenter, SDL and managed-adapter build inputs. Reanalyzing the earlier settled Slay title trace gave 1,798 distinct frames in 30 seconds (59.93 FPS). All 76 shared application payload files matched between that trial and the regular release by SHA-256. The trial added launch-selection and timing markers. Earlier scene-specific measurements also cover gameplay. [FHD performance results](../probe/GAME-LAUNCH.md#native-fullscreen-presentation)
+
+After testing the Valve shell, the console received the regular FHD payload as an in-place update to `1.0.230.2`. Every application file matched the signed `1.0.230.0` release. Only the versioned manifest, block map and signature differed. Steam restored its session and 134 visible games. From a fresh launch of the regular library for each game, selecting **Play** reached all three title screens. Each game returned to the library after its test process closed. The Series X remained signed in.
+
+| Fresh run on `1.0.230.2` | Resolution | Distinct frames | Sample seconds | Average FPS |
+| --- | --- | ---: | ---: | ---: |
+| Slay the Spire | 1920×1080 | 1,686 | 30.000430 | 56.20 |
+| Dwarf Fortress | 1920×1080 | 1,799 | 30.013815 | 59.94 |
+| Stardew Valley | 1920×1080 | 1,798 | 30.001369 | 59.93 |
 
 ## Steam Machine experience on Series X
 
@@ -90,7 +100,7 @@ Feature parity also requires a signed-in session to survive restart, a library t
 
 ### Chromium on Xbox
 
-Microsoft supports embedding Chromium in an Xbox UWP app through the WinUI 2 WebView2 control. A WebView2 host is a viable way to display web content in an Xbox-owned window. Steam’s gamepad bundle also expects Valve’s native `SteamClient` object to supply session state, create windows, dispatch controller events and issue library commands. A WebView2 port would need to connect that object to the running client. This branch first tests Valve’s existing `steamwebhelper.exe` and its bridge together. [Microsoft’s Xbox WebView2 announcement](https://github.com/MicrosoftEdge/WebView2Announcements/issues/78) · [WinUI 2 WebView2 setup for Xbox](https://learn.microsoft.com/en-us/microsoft-edge/webview2/get-started/winui2)
+Microsoft supports embedding Chromium in an Xbox UWP app through WinUI 2 WebView2. The renderer on this branch creates a WebView2 composition controller in an Xbox-owned window. Steam’s gamepad bundle expects Valve’s native `SteamClient` object to supply session state, create windows, dispatch controller events and issue library commands. The standalone and signed-in trials above measure how far each layer runs on Series X. [Microsoft’s Xbox WebView2 announcement](https://github.com/MicrosoftEdge/WebView2Announcements/issues/78) · [WinUI 2 WebView2 setup for Xbox](https://learn.microsoft.com/en-us/microsoft-edge/webview2/get-started/winui2)
 
 ### Pinned Steam client
 
