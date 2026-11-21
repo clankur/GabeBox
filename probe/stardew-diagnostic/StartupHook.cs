@@ -25,6 +25,7 @@ internal static class StartupHook
             Environment.SetEnvironmentVariable("SDL_VIDEO_WIN_D3DCOMPILER", "none");
             Environment.SetEnvironmentVariable("SDL_JOYSTICK_RAWINPUT", "0");
             Environment.SetEnvironmentVariable("XBOX_SDL_SURFACELESS", "1");
+            Environment.SetEnvironmentVariable("XBOX_SDL_TRACE_GL", "1");
         }
 
         void Record(string entry)

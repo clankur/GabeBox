@@ -562,7 +562,9 @@ def main():
                 snapshots = re.findall(r'^sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
                                        r'audio_init|audio_device|gl_library|gl_context|gl_swap_interval|surfaceless_egl|'
                                        r'surfaceless_context|surfaceless_framebuffer|offscreen_frame)=(?:begin|ready|error)|'
-                                       r'init_flags=0x[0-9A-F]{8}|offscreen_helper_window=skipped)$',
+                                       r'init_flags=0x[0-9A-F]{8}|offscreen_helper_window=skipped|'
+                                       r'gl_call_(?:Viewport|Clear|TexImage2D|CompileShader|LinkProgram|DrawElements|DrawArrays)'
+                                       r'=(?:begin|returned|unavailable))$',
                                        decode_report(trace or b''), re.MULTILINE)
                 if snapshots:
                     print('\n'.join(snapshots))
