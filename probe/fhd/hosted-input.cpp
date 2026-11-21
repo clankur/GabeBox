@@ -14,6 +14,7 @@ enum WindowMethod {
     Visible = 17,
     Activated = 24,
     CharacterReceived = 28,
+    InputEnabledChanged = 32,
     KeyDown = 34,
     KeyUp = 36,
     CaptureLost = 38,
@@ -35,6 +36,8 @@ constexpr GUID handlerCharacterReceivedEventArgs = {
     0x73f846a8, 0x0af6, 0x5872, {0x8f, 0xb8, 0xae, 0x2f, 0x56, 0xd8, 0x55, 0x3e}};
 constexpr GUID handlerVisibilityChangedEventArgs = {
     0x14b7f692, 0x5583, 0x52a1, {0xaa, 0x42, 0xfc, 0x18, 0x43, 0xc0, 0xf7, 0x48}};
+constexpr GUID handlerInputEnabledEventArgs = {
+    0xe230a64a, 0x506a, 0x59c3, {0xbb, 0x61, 0x55, 0x59, 0xff, 0x99, 0x56, 0x63}};
 constexpr GUID iidICoreWindow = {0x79b9d5f2, 0x879e, 0x4b89, {0xb7, 0x98, 0x79, 0xe4, 0x75, 0x98, 0x03, 0x0c}};
 constexpr GUID iidIGamepadStatics = {0x8bbce529, 0xd49c, 0x39e9, {0x95, 0x60, 0xe4, 0x7d, 0xde, 0x96, 0xb7, 0xc8}};
 struct Point {
@@ -57,7 +60,8 @@ SdlHostMailbox *mail;
 IUnknown *window, *pads;
 enum OverlayState { Playing, Requested, Reported };
 OverlayState overlay;
-BOOL nativePad = TRUE, focused, visible, blockChord;
+BOOL nativePad = TRUE, focused, visible, inputEnabled, blockChord;
+LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
 DWORD chordSince, lastTime;
 bool chordTiming;
@@ -74,7 +78,7 @@ Pad previousPad;
 bool sentPad;
 
 bool alive() { return mail && !SdlHostLoad(&mail->quit); }
-bool foreground() { return alive() && focused && visible && !overlay; }
+bool foreground() { return alive() && focused && visible && inputEnabled && !overlay; }
 bool keyboard() { return alive() && SdlHostLoad(&mail->keyboard.available); }
 void setPad(Pad const &pad) {
     if (!alive())
@@ -113,7 +117,13 @@ void neutral() {
         previousPad = idle;
     if (keyboard())
         InterlockedExchange(&mail->keyboard.reset, SdlHostLoad(&mail->keyboard.write));
-    pointer(mouse & 0xffffff, 0);
+    if (alive()) {
+        mouse = SdlHostLoad(&mail->input_pointer);
+        legacyKeys = SdlHostLoad(&mail->input_keys);
+        pointer(mouse & 0xffffff, 0);
+    }
+    // A or B used in the library must be released before the game sees it.
+    blockedMenuButtons = 3;
     for (auto &key : heldVirtual)
         key = 0;
     highSurrogate = 0;
@@ -314,11 +324,14 @@ void event(unsigned type, IUnknown *args) {
         }
         return;
     }
-    if (type == VisibilityChanged) {
+    if (type == VisibilityChanged || type == InputEnabledChanged) {
         BYTE value = 0;
         if (SUCCEEDED(method(args, 6, &value))) {
-            visible = value;
-            if (!visible)
+            if (type == VisibilityChanged)
+                visible = value;
+            else
+                inputEnabled = value;
+            if (!value)
                 neutral();
         }
         return;
@@ -339,8 +352,8 @@ void event(unsigned type, IUnknown *args) {
         return;
     if (type == CharacterReceived) {
         if (!heldVirtual[VK_CONTROL] && !heldVirtual[VK_LCONTROL] && !heldVirtual[VK_RCONTROL] &&
-            !heldVirtual[VK_MENU] && !heldVirtual[VK_LMENU] && !heldVirtual[VK_RMENU] &&
-            !heldVirtual[VK_LWIN] && !heldVirtual[VK_RWIN])
+            !heldVirtual[VK_MENU] && !heldVirtual[VK_LMENU] && !heldVirtual[VK_RMENU] && !heldVirtual[VK_LWIN] &&
+            !heldVirtual[VK_RWIN])
             character(key);
         return;
     }
@@ -406,6 +419,7 @@ HRESULT STDMETHODCALLTYPE invokeHandler(Handler *h, IUnknown *, IUnknown *args) 
 const HandlerVtable events = {queryHandler, retainHandler, releaseHandler, invokeHandler};
 Handler handlers[] = {{&events, &handlerWindowActivatedEventArgs, Activated},
                       {&events, &handlerVisibilityChangedEventArgs, VisibilityChanged},
+                      {&events, &handlerInputEnabledEventArgs, InputEnabledChanged},
                       {&events, &handlerKeyEventArgs, KeyDown},
                       {&events, &handlerKeyEventArgs, KeyUp},
                       {&events, &handlerCharacterReceivedEventArgs, CharacterReceived},
@@ -439,7 +453,16 @@ bool readPad(Reading *out) {
 }
 } // namespace
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
-    nativePad = gamepad;
+    if (!!nativePad != !!gamepad) {
+        if (alive()) {
+            const Pad disconnected = {0, {0, 0, 0, 0, -32768, -32768}};
+            if (!gamepad)
+                setPad(disconnected);
+            neutral();
+        }
+        nativePad = gamepad;
+        sentPad = false;
+    }
     if (width && height) {
         gameW = width;
         gameH = height;
@@ -488,6 +511,9 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     BYTE shown = 1;
     method(window, Visible, &shown);
     visible = shown;
+    BYTE enabled = 1;
+    method(window, InputEnabled, &enabled);
+    inputEnabled = enabled;
     mouse = SdlHostLoad(&box->input_pointer);
     legacyKeys = SdlHostLoad(&box->input_keys);
     cursorX = (mouse & 4095) / 4095.;
@@ -539,6 +565,8 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         value.axes[4] = axis(2 * reading.lt - 1);
         value.axes[5] = axis(2 * reading.rt - 1);
     }
+    blockedMenuButtons &= value.bits;
+    value.bits &= ~blockedMenuButtons;
     const LONG chord = (1 << 4) | (1 << 6);
     if ((value.bits & chord) == chord) {
         if (!blockChord) {
