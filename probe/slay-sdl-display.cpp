@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <jni.h>
 #include <array>
+#include <cstring>
+#include <deque>
 #include <string>
 
 namespace {
@@ -23,6 +25,71 @@ void queueMouseEvent(MouseEvent event) {
     ++mouseEventCount;
 }
 
+// SDL scancodes follow USB HID usage IDs. LWJGL 2 exposes PC set-1 key IDs.
+int lwjglKey(int scan) {
+    static constexpr unsigned char letters[] = {
+        30,48,46,32,18,33,34,35,23,36,37,38,50,49,24,25,16,19,31,20,22,47,17,45,21,44
+    };
+    static constexpr unsigned char editing[] = {
+        28,1,14,15,57,12,13,26,27,43,43,39,40,41,51,52,53,58
+    };  // Return through Caps Lock.
+    static constexpr unsigned char navigation[] = {
+        183,70,197,210,199,201,211,207,209,205,203,208,200,69,181,55,74,78,156,
+        79,80,81,75,76,77,71,72,73,82,83,43,221,222,141
+    };  // Print Screen through keypad equals.
+    static constexpr unsigned char modifiers[] = {29,42,56,219,157,54,184,220};
+    if (scan >= 4 && scan <= 29) return letters[scan - 4];
+    if (scan >= 30 && scan <= 39) return scan - 28;
+    if (scan >= 40 && scan <= 57) return editing[scan - 40];
+    if (scan >= 58 && scan <= 67) return scan + 1;  // F1-F10
+    if (scan == 68 || scan == 69) return scan + 19;  // F11-F12
+    if (scan >= 70 && scan <= 103) return navigation[scan - 70];
+    if (scan >= 224 && scan <= 231) return modifiers[scan - 224];
+    return 0;
+}
+
+struct KeyEvent { jint key, pressed, character, timestamp, repeat; };
+std::deque<KeyEvent> keyboardEvents;
+std::array<unsigned char, 256> keyboardState{};
+bool keyboardActive;
+
+void queueKey(KeyEvent event) {
+    if (keyboardEvents.size() == 4096) keyboardEvents.pop_front();
+    keyboardEvents.push_back(event);
+}
+
+void receiveKey(int scan, bool pressed, unsigned timestamp, int repeat) {
+    const int key = lwjglKey(scan);
+    if (!key) return;
+    keyboardState[key] = pressed;
+    int character = 0;
+    if (pressed) {
+        switch (scan) {
+            case 40: case 88: character = 13; break;
+            case 42: character = 8; break;
+            case 43: character = 9; break;
+            case 76: character = 127; break;
+        }
+    }
+    queueKey({key, pressed, character, static_cast<jint>(timestamp), repeat});
+}
+
+void receiveText(const char (&text)[32], unsigned timestamp, bool followsKeyDown) {
+    const auto end = static_cast<const char *>(std::memchr(text, 0, sizeof(text)));
+    if (!end || end == text) return;
+    wchar_t characters[32];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, static_cast<int>(end - text),
+                                    characters, 32);
+    int first = 0;
+    if (count && followsKeyDown && !keyboardEvents.empty() && !keyboardEvents.back().character) {
+        keyboardEvents.back().character = characters[first++];
+    }
+    for (int i = first; i < count; ++i) {
+        // KEY_NONE events carry composed text independently of keyboard layout.
+        queueKey({0, 1, characters[i], static_cast<jint>(timestamp), 0});
+    }
+}
+
 template<class Function>
 Function resolve(const char *name) {
     return reinterpret_cast<Function>(GetProcAddress(sdl, name));
@@ -39,6 +106,8 @@ void (*swapWindow)(void *);
 int (*setInterval)(int);
 void *(*glAddress)(const char *);
 int (*pollEvent)(void *);
+void (*startTextInput)();
+void (*stopTextInput)();
 unsigned (*mouseState)(int *, int *);
 void (*warpMouse)(void *, int, int);
 void *(*createSurface)(void *, int, int, int, int, unsigned, unsigned, unsigned, unsigned);
@@ -71,6 +140,8 @@ bool loadSdl() {
     setInterval = resolve<decltype(setInterval)>("SDL_GL_SetSwapInterval");
     glAddress = resolve<decltype(glAddress)>("SDL_GL_GetProcAddress");
     pollEvent = resolve<decltype(pollEvent)>("SDL_PollEvent");
+    startTextInput = resolve<decltype(startTextInput)>("SDL_StartTextInput");
+    stopTextInput = resolve<decltype(stopTextInput)>("SDL_StopTextInput");
     mouseState = resolve<decltype(mouseState)>("SDL_GetMouseState");
     warpMouse = resolve<decltype(warpMouse)>("SDL_WarpMouseInWindow");
     createSurface = resolve<decltype(createSurface)>("SDL_CreateRGBSurfaceFrom");
@@ -87,7 +158,7 @@ bool loadSdl() {
     gameControllerAxis = resolve<decltype(gameControllerAxis)>("SDL_GameControllerGetAxis");
     gameControllerButton = resolve<decltype(gameControllerButton)>("SDL_GameControllerGetButton");
     if (mainReady && init && createWindow && destroyWindow && createContext && makeCurrent &&
-        currentContext && deleteContext && swapWindow && setInterval && glAddress && pollEvent && mouseState &&
+        currentContext && deleteContext && swapWindow && setInterval && glAddress && pollEvent && startTextInput && stopTextInput && mouseState &&
         warpMouse && createSurface && freeSurface && createCursor && setCursor && defaultCursor && freeCursor &&
         numJoysticks && isGameController && openGameController && closeGameController && gameControllerAttached &&
         gameControllerAxis && gameControllerButton) return true;
@@ -126,6 +197,10 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_create(JNIEnv *,
 }
 
 JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_destroy(JNIEnv *, jclass) {
+    if (keyboardActive) stopTextInput();
+    keyboardActive = false;
+    keyboardEvents.clear();
+    keyboardState.fill(0);
     if (window) destroyWindow(window);
     if (gamepad) closeGameController(gamepad);
     gamepad = nullptr;
@@ -176,9 +251,17 @@ JNIEXPORT jlong JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_lookupGl(JNIEnv *en
 JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollClose(JNIEnv *, jclass) {
     struct Motion { unsigned type, timestamp, windowId, which, state; int x, y; };
     struct Button { unsigned type, timestamp, windowId, which; unsigned char button, state, clicks, padding; int x, y; };
-    union alignas(void*) { unsigned type; Motion motion; Button button; unsigned char event[56]; } input{};
+    struct Key { unsigned type, timestamp, windowId; unsigned char state, repeat, padding[2]; int scan; };
+    struct Text { unsigned type, timestamp, windowId; char text[32]; };
+    union alignas(void*) { unsigned type; Motion motion; Button button; Key key; Text text; unsigned char event[56]; } input{};
+    bool followsKeyDown = false;
     while (pollEvent(&input) > 0) {
         if (input.type == 0x100) return JNI_TRUE;  // SDL_QUIT
+        if (keyboardActive && (input.type == 0x300 || input.type == 0x301)) {
+            receiveKey(input.key.scan, input.type == 0x300, input.key.timestamp, input.key.repeat);
+        }
+        if (keyboardActive && input.type == 0x303) receiveText(input.text.text, input.text.timestamp, followsKeyDown);
+        followsKeyDown = keyboardActive && input.type == 0x300 && lwjglKey(input.key.scan) != 0;
         if (input.type == 0x400) {  // SDL_MOUSEMOTION
             const auto &motion = input.motion;
             queueMouseEvent({-1, 0, motion.x, motion.y, static_cast<jint>(motion.timestamp)});
@@ -193,6 +276,38 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollClose(JNIEnv
         }
     }
     return JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_setKeyboardActive(JNIEnv *, jclass, jboolean active) {
+    if (!window || keyboardActive == (active != JNI_FALSE)) return;
+    keyboardActive = active != JNI_FALSE;
+    keyboardEvents.clear();
+    keyboardState.fill(0);
+    if (keyboardActive) startTextInput(); else stopTextInput();
+}
+
+JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollKeyboard(JNIEnv *env, jobject, jobject buffer) {
+    void *output = env->GetDirectBufferAddress(buffer);
+    if (output && env->GetDirectBufferCapacity(buffer) >= 256)
+        std::memcpy(output, keyboardState.data(), keyboardState.size());
+}
+
+JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_readKeyEvents(
+    JNIEnv *env, jclass, jobject events, jint requested) {
+    auto output = static_cast<jint*>(env->GetDirectBufferAddress(events));
+    if (!output || requested <= 0 || env->GetDirectBufferCapacity(events) / 5 < requested) return 0;
+    jint count = 0;
+    while (count < requested && !keyboardEvents.empty()) {
+        const auto event = keyboardEvents.front();
+        keyboardEvents.pop_front();
+        *output++ = event.key;
+        *output++ = event.pressed;
+        *output++ = event.character;
+        *output++ = event.timestamp;
+        *output++ = event.repeat;
+        ++count;
+    }
+    return count;
 }
 
 JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_readMouseEvents(

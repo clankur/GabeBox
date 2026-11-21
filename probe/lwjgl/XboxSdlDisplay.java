@@ -8,6 +8,7 @@ import java.nio.IntBuffer;
 import org.lwjgl.LWJGLException;
 import org.lwjgl.input.Cursor;
 import org.lwjgl.input.Mouse;
+import org.lwjgl.input.Keyboard;
 
 /** SDL-backed display for the opt-in Xbox launch profile. */
 final class XboxSdlDisplay implements DisplayImplementation {
@@ -164,12 +165,25 @@ final class XboxSdlDisplay implements DisplayImplementation {
     public void setNativeCursor(Object handle) { selectCursor((ByteBuffer)handle); }
     public int getMinCursorSize() { return 1; }
     public int getMaxCursorSize() { return MAX_CURSOR_SIZE; }
-    public void createKeyboard() {}
-    public void destroyKeyboard() {}
-    public void pollKeyboard(ByteBuffer buffer) {
-        for (int key = 0; key < buffer.capacity(); ++key) buffer.put(key, (byte)0);
+    private final IntBuffer keyEvents = ByteBuffer.allocateDirect(50 * 5 * Integer.BYTES)
+            .order(java.nio.ByteOrder.nativeOrder()).asIntBuffer();
+    private static native void setKeyboardActive(boolean active);
+    private static native int readKeyEvents(IntBuffer events, int count);
+    public void createKeyboard() { setKeyboardActive(true); }
+    public void destroyKeyboard() { setKeyboardActive(false); }
+    public native void pollKeyboard(ByteBuffer buffer);
+    public void readKeyboard(ByteBuffer buffer) {
+        int capacity = Math.min(buffer.remaining() / Keyboard.EVENT_SIZE, keyEvents.capacity() / 5);
+        int count = readKeyEvents(keyEvents, capacity);
+        for (int i = 0; i < count; ++i) {
+            int offset = i * 5;
+            buffer.putInt(keyEvents.get(offset));
+            buffer.put((byte)keyEvents.get(offset + 1));
+            buffer.putInt(keyEvents.get(offset + 2));
+            buffer.putLong(Integer.toUnsignedLong(keyEvents.get(offset + 3)) * 1_000_000L);
+            buffer.put((byte)keyEvents.get(offset + 4));
+        }
     }
-    public void readKeyboard(ByteBuffer buffer) {}
     public Object createCursor(int w, int h, int x, int y, int count, IntBuffer images, IntBuffer delays)
             throws LWJGLException {
         if (count != 1 || w <= 0 || h <= 0 || w > MAX_CURSOR_SIZE || h > MAX_CURSOR_SIZE || images.remaining() < w * h) {
