@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const source = fs.readFileSync(require.resolve('../big-picture-bridge/xbox-window.js'), 'utf8');
 
-function fixture() {
+function fixture(lookupPopup) {
     const messages = [], posted = [], timers = [];
     const origin = 'https://steamloopback.host';
     let receive, portal = false;
@@ -19,12 +19,27 @@ function fixture() {
         getElementById: id => portal && id === 'popup_target', hidden: false
     }, postMessage: (...args) => posted.push(args)};
     const client = {};
-    const context = {window, client, location: {origin}, queueMicrotask, setTimeout: f => timers.push(f), xboxNativeWindow: seed};
-    vm.runInNewContext(source + '\ninstallXboxWindow(client); this.active = getXboxGamepadWindow;', context);
+    const context = {window, client, lookupPopup, location: {origin}, queueMicrotask, setTimeout: f => timers.push(f), xboxNativeWindow: seed};
+    vm.runInNewContext(source + '\ninstallXboxWindow(client, undefined, lookupPopup); this.active = getXboxGamepadWindow;', context);
     return {window, popup, client, seed, messages, posted, active: context.active,
         portal() { portal = true; timers.splice(0).forEach(f => f()); },
         snapshot(extra) { receive({data: {event: 'xbox-window', state: {...seed, ...extra}}}); }};
 }
+
+test('delivers native creation after Valve registers a previously empty popup', () => {
+    let registered;
+    const f = fixture(() => registered);
+    f.window.open('about:blank?createflags=2', 'SP BPM_uid3804');
+    f.snapshot({popupOpen: true, popupVisible: true});
+    f.portal();
+    assert.equal(f.posted.length, 0);
+    registered = {m_bCreated: false};
+    f.portal();
+    assert.equal(f.posted.length, 1);
+    registered.m_bCreated = true;
+    f.portal();
+    assert.equal(f.posted.length, 1);
+});
 
 test('the Valve window manager requests the gamepad UI for the owning CoreWindow and browser', async () => {
     const f = fixture();

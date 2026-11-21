@@ -192,37 +192,61 @@
         return mode;
     }};
     let startupLibraryRequested = false;
-    function openStartupLibrary() {
+    // A full ownership snapshot is delivered only after the Xbox QR broker
+    // validates the session. Valve's BHasCurrentUser() additionally waits on
+    // unrelated online services, including Friends, during InitAfterLogin.
+    async function openStartupLibrary() {
         if (startupLibraryRequested) return;
         startupLibraryRequested = true;
-        // Valve's own Go to Library action uses Navigator.LibraryTab("AllGames").
-        // Its popup and navigation history mount asynchronously after store initialization.
+        try {
+            const owner = (await send('session'))?.steamId;
+            if (typeof owner !== 'string' || !/^[1-9][0-9]{16,19}$/.test(owner)) {
+                startupLibraryRequested = false;
+                return;
+            }
+        } catch (_) { startupLibraryRequested = false; return; }
         const deadline = Date.now() + 110000;
-        let previous;
+        let previous, previousPopup, selected = false;
         function trace(stage) {
             if (stage === previous) return;
             previous = stage;
             host.postMessage({method: 'startup-route', stage});
         }
         function whenMounted() {
-            if (activeApp) return;
+            if (activeApp || Date.now() > deadline) return;
             const gamepad = runtime(5757).oy.WindowStore.GamepadUIMainWindowInstance;
-            const target = xboxGamepadPopup?.document.getElementById('popup_target');
-            if (!window.App?.BHasCurrentUser()) trace('waiting-user');
-            else if (!runtime(90544).tw.m_bIsInitialized) trace('waiting-store');
-            else if (!gamepad?.History?.location?.pathname || !gamepad.Navigator) trace('waiting-window');
-            else if (!target?.firstElementChild) trace('waiting-portal');
-            else {
+            const path = gamepad?.History?.location?.pathname;
+            const popup = xboxGamepadPopup;
+            const tracked = popup && runtime(16724).Of.GetPopupForWindow(popup);
+            const waiting = tracked?.m_renderWhenReady?.m_rgLoadingLinks || [];
+            const styles = popup?.document.querySelectorAll('link[rel=stylesheet]') || [];
+            function loaded(link) {
+                try { return link.isConnected && !!link.sheet?.cssRules.length; }
+                catch (_) { return false; }
+            }
+            const phase = [!!popup, !!tracked, !!tracked?.m_bCreated, !!tracked?.m_onCreateRender,
+                waiting.length, waiting.filter(loaded).length, styles.length, [...styles].filter(loaded).length,
+                !!gamepad, !!path, !!gamepad?.Navigator].map(value => Math.min(99, Number(value))).join('-');
+            if (phase !== previousPopup) {
+                previousPopup = phase;
+                host.postMessage({method: 'startup-popup', phase});
+            }
+            if (!path || !gamepad.Navigator) trace('waiting-window');
+            else if (path === '/library/tab/AllGames') {
+                trace('library-selected');
+                // Once the original tiles mount, further routes belong to the player.
+                if (xboxGamepadPopup?.document.querySelector('[role=tabpanel][id$="AllGames_Content"] [role=gridcell]')) return;
+            } else if (!selected || /^\/(?:init|login|oobe(?:\/.*)?|library\/home)$/.test(path)) {
+                selected = true;
                 trace('selecting-library');
                 gamepad.Navigator.LibraryTab('AllGames', {bReplace: true});
                 trace(gamepad.History.location.pathname === '/library/tab/AllGames' ? 'library-selected' : 'selection-pending');
-                return;
-            }
-            if (Date.now() < deadline) setTimeout(whenMounted, 100);
+            } else return;
+            setTimeout(whenMounted, 150);
         }
         whenMounted();
     }
-    installXboxWindow(client, send, openStartupLibrary);
+    installXboxWindow(client, send, popup => runtime?.(16724).Of.GetPopupForWindow(popup));
     installXboxBrowserView(client);
     installXboxUser(client, send, () => runtime);
     client.User.StartRestart = async force => {

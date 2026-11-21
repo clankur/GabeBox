@@ -20,7 +20,7 @@
         var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
             storage.CreationCollisionOption.replaceExisting);
         var report = Promise.resolve(file);
-        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, memory = {};
+        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, memory = {};
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -44,6 +44,7 @@
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
+                (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
@@ -59,22 +60,6 @@
         var playingApp = 0, presented = false, returnToGame, quitGame;
         var gameForeground = false;
         var firstActivation = true;
-        var composed = false;
-        function gameSurface() {
-            if (!composed || !playing || failed) return null;
-            return {
-                viewId: viewId,
-                start: function () { return host.startGameSurfaceAsync(); },
-                show: function (value) { return host.setGameSurfaceVisibleAsync(value); },
-                overlayRequested: function () { return host.takeGameOverlayRequest(); },
-                close: function () { return host.closeGameSurfaceAsync(); },
-                standalone: function () {
-                    // Only after the composition worker has released this mailbox.
-                    composed = false;
-                    return show(mainId, viewId);
-                }
-            };
-        }
         function setGameForeground(value) {
             if (!host || failed || value === gameForeground) return;
             gameForeground = value;
@@ -89,10 +74,6 @@
             if (failed || !viewId || visible) return Promise.resolve();
             var wasGame = gameForeground;
             setGameForeground(false);
-            if (composed) {
-                visible = true;
-                return Promise.resolve();
-            }
             // The initial Steam window needs its own Xbox foreground allocation.
             // Replacing the QR view directly can retire the primary WWA host.
             if (!activeSwitch) activeSwitch = (firstActivation ?
@@ -138,7 +119,6 @@
             playingApp = 0; returnToGame = quitGame = null;
             return showValve(mainId).then(function () {
                 if (returning && !playing && !failed) {
-                    composed = false;
                     sampleMemory("return"); gameEvent(false); return record("game-returned-to-steam");
                 }
             });
@@ -165,6 +145,11 @@
             }
             if (request.method === "surface-state" && Number.isInteger(request.state) && request.state >= 1 && request.state <= 8) {
                 surfaceState = ["", "setup", "library-or-home", "no-portal", "empty-portal", "error-boundary", "grid", "content", "empty-content"][request.state];
+                record(last, true);
+                return;
+            }
+            if (request.method === "startup-popup" && /^(?:[01]-){4}(?:[0-9]{1,2}-){4}[01]-[01]-[01]$/.test(request.phase)) {
+                popupPhase = request.phase;
                 record(last, true);
                 return;
             }
@@ -210,10 +195,7 @@
                     return broker.play(appId, function () {
                         // Slay exceeded the foreground budget on the separate FHD view.
                         // Keep its game's swapchain in the existing Valve CoreWindow.
-                        composed = appId === 646570 && typeof host.startGameSurfaceAsync === "function" &&
-                            typeof host.setGameSurfaceVisibleAsync === "function" && typeof host.closeGameSurfaceAsync === "function" &&
-                            typeof host.takeGameOverlayRequest === "function";
-                        return (composed ? Promise.resolve() : show(mainId, viewId)).then(function () {
+                        return show(mainId, viewId).then(function () {
                             visible = false;
                             setGameForeground(true);
                             sampleMemory("handoff");
@@ -286,7 +268,10 @@
                     if (viewId) resume().catch(fail);
                 }
                 if (!settled && visible && (stage === "gamepad-ready" || stage === "setup-ready")) {
-                    settled = true; clearTimeout(readinessTimer); resolveReady();
+                    settled = true; clearTimeout(readinessTimer);
+                    sampleMemory("steam_foreground");
+                    record(last, true);
+                    resolveReady();
                 }
                 for (var i = 0; i < 16; ++i) {
                     var request = host.read();
@@ -314,12 +299,11 @@
             });
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, showForGame: showForGame, gameSurface: gameSurface, sampleMemory: sampleMemory, ready: broker ? ready : startup};
+        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, ready: broker ? ready : startup};
         return session.ready;
     }
     window.steamBigPictureHost = {
         open: open,
-        gameSurface: function () { return session ? session.gameSurface() : null; },
         switchView: switchView,
         samplePresenter: function (stage) {
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);

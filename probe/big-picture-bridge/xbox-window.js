@@ -7,7 +7,7 @@ function getXboxGamepadWindow() {
     return window;
 }
 
-function installXboxWindow(client, send, onInitialized) {
+function installXboxWindow(client, send, lookupPopup) {
     if (typeof xboxNativeWindow === 'undefined') return; // Only the WebView host can supply these bindings.
     const host = window.chrome.webview;
     const desired = new Set(), display = new Set();
@@ -40,8 +40,10 @@ function installXboxWindow(client, send, onInitialized) {
         // The pinned window manager defers its first React render until it
         // receives this CEF lifecycle message. WebView2 has now attached the
         // approved composition controller and Valve has written its portal.
-        notifiedPopup = popup;
-        popup.postMessage('popup-created', location.origin);
+        const registered = lookupPopup?.(popup);
+        if (lookupPopup && !registered) return;
+        if (!registered?.m_bCreated) popup.postMessage('popup-created', location.origin);
+        if (!lookupPopup || registered?.m_bCreated) notifiedPopup = popup;
     }
 
     host.addEventListener('message', ({data}) => {
@@ -99,10 +101,7 @@ function installXboxWindow(client, send, onInitialized) {
     // The single Xbox window requests the pinned client's gamepad UI mode (4)
     // for its entire lifetime, including while a game owns the foreground.
     ui.GetUIMode = async () => 4;
-    ui.NotifyAppInitialized = () => {
-        host.postMessage('xbox-app-initialized');
-        onInitialized?.();
-    };
+    ui.NotifyAppInitialized = () => host.postMessage('xbox-app-initialized');
     ui.RegisterForUIModeChanged = callback => subscribeValue(mode, callback, fn => fn(4), true);
     ui.GetDesiredSteamUIWindows = async () => [{
         unID: state.viewId, unPID: state.pid, nBrowserID: state.ownerId, appid: 0, windowType: 0 // MainGamepadUI
@@ -181,7 +180,13 @@ function installXboxWindow(client, send, onInitialized) {
             popup.SteamClient = bindings(popup, true);
             // Valve writes the target and attaches its listener immediately
             // after window.open returns. Native publication can race that write.
-            setTimeout(notifyPopup, 0);
+            const deadline = Date.now() + 110000;
+            function awaitCreation() {
+                if (popup !== xboxGamepadPopup || popup.closed || popup === notifiedPopup) return;
+                notifyPopup();
+                if (popup !== notifiedPopup && Date.now() < deadline) setTimeout(awaitCreation, 100);
+            }
+            setTimeout(awaitCreation, 0);
         } catch (_) {
             // Browser-enforced origin boundaries also apply to named targets.
         }
