@@ -174,7 +174,7 @@ The workflow also builds SDL2 `2.26.2`, the version shipped with Dwarf Fortress,
 
 Use the same SDL2 source workflow for games with this loader dependency. It produces versioned x64 artifacts with a license and checksum. The current profiles pair Dwarf Fortress with `2.26.2` and Stardew Valley with `2.30.9`. Keep each profile tied to the installed original DLL digest and the corresponding upstream build. Verify later window, renderer, audio and input behavior per game before releasing a profile for regular Play. [SDL2 workflow](../.github/workflows/xbox-sdl.yml)
 
-Run the selected game's signed diagnostic with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. For example, the following command runs the Stardew profile on an already installed diagnostic package.
+Prepare the selected game's signed diagnostic with `--repeat-launch` and run it with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. The trial requires a fresh report for the selected game before it counts a completed run. The following command uses the Stardew profile on an already installed diagnostic package.
 
 ```sh
 python3 xbox-deploy.py --env-file "$xbox_env" sdl-trial \

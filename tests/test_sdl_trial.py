@@ -14,6 +14,16 @@ spec.loader.exec_module(cli)
 
 
 class SdlTrialTests(unittest.TestCase):
+    def test_probed_library_is_not_a_successful_game_trial(self):
+        portal = Mock()
+        portal.request.side_effect = ((200, b'old report'), (200, b''),
+                                      (200, b'steam_library_rendered=yes\r\nstatus=steam-core-complete\r\n'))
+        package = {'PackageFullName': 'fixture', 'PackageRelativeId': 'fixture!App'}
+        with patch.object(cli, 'find_installed_probe', return_value=package), \
+             patch.object(cli, 'probe_report_path', return_value='/report'):
+            with self.assertRaisesRegex(ValueError, '--repeat-launch'):
+                cli.wait_for_probe(portal, cli.PROBE_STEAM_CORE_NAME, '1.0.168.0', False, 20, require_app_id=975370)
+
     def test_failed_launch_restores_original(self):
         original = b'publisher SDL2 fixture'
         original_hash = hashlib.sha256(original).hexdigest()

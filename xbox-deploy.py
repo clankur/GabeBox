@@ -350,7 +350,8 @@ def trial_sdl(portal, args):
                 replace_sdl(candidate)
                 applied = True
                 print(f'Testing the SDL {upstream} rebuild for {name}.', flush=True)
-                wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout)
+                wait_for_probe(portal, PROBE_STEAM_CORE_NAME, args.version, False, args.timeout,
+                               require_app_id=args.app_id)
             finally:
                 try:
                     installed = read_sdl()
@@ -367,7 +368,7 @@ def trial_sdl(portal, args):
         lock.unlink()
 
 
-def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
+def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False, require_app_id=None):
     app = find_installed_probe(portal, name, version)
     print(f'Installed package: {app["PackageFullName"]}', flush=True)
     report_url = probe_report_path(app)
@@ -420,6 +421,10 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
                     return
                 if name == PROBE_STEAM_CORE_NAME and re.search(
                         r'^status=steam-core-complete\s*$', report, re.MULTILINE):
+                    if require_app_id is not None and not re.search(
+                            rf'^steam_launch_(?:repeat_)?app_id={require_app_id}\r?$', report, re.MULTILINE):
+                        raise ValueError('The library loaded without launching the requested game. '
+                                         'Prepare the diagnostic with --repeat-launch.')
                     return
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
                     if not require_ipc or re.search(r'^ipc=success\s*$', report, re.MULTILINE):
