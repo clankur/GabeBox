@@ -30,6 +30,34 @@
             });
     }
 
+    function checkSteamApproval(client) {
+        var http = Windows.Web.Http;
+        var name = "Xbox Dev Mode Steam client";
+        // Authentication.BeginAuthSessionViaQR device_details, with SteamClient platform type.
+        var device = String.fromCharCode(10, name.length) + name + String.fromCharCode(16, 1);
+        var request = btoa(String.fromCharCode(26, device.length) + device);
+        var form = new http.HttpStringContent(
+            "input_protobuf_encoded=" + encodeURIComponent(request),
+            Windows.Storage.Streams.UnicodeEncoding.utf8, "application/x-www-form-urlencoded"
+        );
+        var url = new Windows.Foundation.Uri(
+            "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/?format=json"
+        );
+        return bounded(client.postAsync(url, form)).then(function (response) {
+            var result = "steam_qr_http=" + Number(response.statusCode) + "\r\n";
+            if (!response.isSuccessStatusCode) return result + "steam_qr_challenge=unavailable\r\n";
+            return bounded(response.content.readAsStringAsync()).then(function (body) {
+                var challenge = JSON.parse(body).response;
+                var valid = challenge && /^https:\/\/s\.team\/q\/[a-zA-Z0-9/_-]+$/.test(challenge.challenge_url) &&
+                    challenge.client_id && challenge.request_id;
+                // Discard the unapproved request. Challenge URLs and identifiers stay out of diagnostics.
+                return result + "steam_qr_challenge=" + (valid ? "issued" : "invalid") + "\r\n";
+            });
+        }).then(null, function () {
+            return "steam_qr_challenge=failed\r\n";
+        });
+    }
+
     function checkSteamNetwork() {
         var http = Windows.Web.Http;
         var filter = new http.Filters.HttpBaseProtocolFilter();
@@ -50,6 +78,10 @@
                 });
                 report += "steam_cm_candidates=" + endpoints.length + "\r\n";
                 return endpoints.length ? connectSteamSocket(endpoints[0].endpoint, report) : report;
+            });
+        }).then(function (report) {
+            return checkSteamApproval(client).then(function (approval) {
+                return report + approval;
             });
         }).then(function (report) {
             client.close();
