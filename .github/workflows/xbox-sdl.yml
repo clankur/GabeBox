@@ -12,6 +12,7 @@ on:
       - 'probe/sdl-host-protocol.h'
       - 'probe/sdl-host-runtime.h'
       - 'probe/sdl-surfaceless-framebuffer.h'
+      - 'probe/sdl-gl-trace.h'
   workflow_dispatch:
 
 permissions:

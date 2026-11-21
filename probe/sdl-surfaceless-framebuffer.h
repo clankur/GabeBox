@@ -2,6 +2,8 @@
 
 #include "SDL_opengl.h"
 #include "SDL_surface.h"
+#include "SDL_atomic.h"
+#include "sdl-gl-trace.h"
 
 /* This is a back buffer for one SDL window and its own GL context. */
 static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLContext context)
@@ -63,6 +65,10 @@ static void APIENTRY XboxSdlBindFramebuffer(GLenum target, GLuint framebuffer)
 static void *XboxSdlGetProcAddress(_THIS, const char *name)
 {
     void *function = SDL_EGL_GetProcAddress(_this, name);
+    if (function && SDL_GetHintBoolean("XBOX_SDL_TRACE_GL", SDL_FALSE)) {
+        void *traced = XboxSdlTracedGlFunction(name);
+        if (traced) return traced;
+    }
     if (_this->gl_allow_no_surface && SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE) && function &&
         (SDL_strcmp(name, "glBindFramebuffer") == 0 || SDL_strcmp(name, "glBindFramebufferEXT") == 0)) {
         return (void *)XboxSdlBindFramebuffer;

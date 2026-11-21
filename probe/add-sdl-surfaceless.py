@@ -15,6 +15,8 @@ def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
     framebuffer = Path(__file__).with_name('sdl-surfaceless-framebuffer.h')
     shutil.copyfile(framebuffer, offscreen / framebuffer.name)
+    trace = Path(__file__).with_name('sdl-gl-trace.h')
+    shutil.copyfile(trace, offscreen / trace.name)
 
     main = tree / 'src/SDL.c'
     source = main.read_text(encoding='utf-8')
