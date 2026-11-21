@@ -2,6 +2,16 @@
     "use strict";
     var session;
 
+    function switchView(to, from) {
+        var views = Windows.UI.ViewManagement.ApplicationViewSwitcher;
+        function replace() { return views.switchAsync(to, from); }
+        // The FHD presenter and Valve are two views of the same Xbox game.
+        // First request an in-place switch in the current foreground slot.
+        return Promise.resolve().then(replace).catch(function () {
+            return Promise.resolve(views.tryShowAsStandaloneAsync(to)).then(replace);
+        });
+    }
+
     function open(broker, onFailure) {
         if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure); });
         if (session) return session.ready;
@@ -42,8 +52,7 @@
         }
         var host, viewId, mainId, visible = false, activeSwitch, timer, playing = false;
         function show(to, from) {
-            function switchToView() { return views.ApplicationViewSwitcher.switchAsync(to, from); }
-            return Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(to)).then(switchToView, switchToView);
+            return switchView(to, from);
         }
         var playingApp = 0, presented = false, returnToGame, quitGame;
         function gameEvent(overlay) {
@@ -250,11 +259,15 @@
             });
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, showForGame: showForGame, ready: broker ? ready : startup};
+        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, ready: broker ? ready : startup};
         return session.ready;
     }
     window.steamBigPictureHost = {
         open: open,
+        switchView: switchView,
+        samplePresenter: function (stage) {
+            if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);
+        },
         resume: function (appId) { return session ? session.resume(appId) : Promise.resolve(); },
         showForGame: function (appId, viewId, restore, requestExit) {
             return session ? session.showForGame(appId, viewId, restore, requestExit) : Promise.resolve(false);

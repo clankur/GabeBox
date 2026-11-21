@@ -27,6 +27,8 @@
                 // that operation settles, unless a newer game has already taken over.
                 function restore() {
                     if (session !== activeSession) return;
+                    var steam = window.steamBigPictureHost;
+                    if (steam && steam.switchView) return steam.switchView(mainId, id).catch(function () {});
                     function switchToLibrary() {
                         if (session === activeSession) return switcher.switchAsync(mainId, id);
                     }
@@ -54,12 +56,17 @@
             function switchToGame() {
                 if (!closed) return switcher.switchAsync(id, fromView || mainId);
             }
-            pendingShow = Promise.resolve().then(function () {
+            var steam = window.steamBigPictureHost;
+            if (steam && steam.switchView) {
+                steam.samplePresenter("presenter_created");
+                pendingShow = steam.switchView(id, fromView || mainId);
+            } else pendingShow = Promise.resolve().then(function () {
                 if (!closed) return switcher.tryShowAsStandaloneAsync(id);
             }).then(switchToGame, switchToGame);
             pendingShow = pendingShow.then(function () {
                 switching = false;
                 shown = !closed;
+                if (shown && steam && steam.samplePresenter) steam.samplePresenter("presenter_foreground");
                 return shown;
             }, function () { failed(); return false; });
             return pendingShow;
