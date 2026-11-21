@@ -1,0 +1,36 @@
+# Windows game compatibility on retail Xbox Developer Mode
+
+A local compatibility layer is worth testing for a narrow class of Windows programs. Start with a small, unchanged 32-bit Windows executable in a packaged Boxedwine interpreter. A successful test would establish one reproducible Win32 guest path. Modern x64 games and accelerated Direct3D need their own evidence.
+
+## What the hardware already established
+
+The Series X can run the signed app and its fixed packaged x64 helper. The app can restore a Steam session, verify ownership, download a depot, and submit normal Steam Play. A package also ran a small WebAssembly function on the main thread and in a static worker. The packaged DOSBox runtime rendered the original X-COM intro from the Steam install. The launch contract records the boundaries of these tests. [Xbox probe](../probe/README.md) · [Steam launch contract](../probe/GAME-LAUNCH.md)
+
+The Windows games expose a wider gap. Factorio's installed executable imports `gdiplus.dll` and three unavailable Win32 functions. ULTRAKILL's installed Unity player imports desktop OpenGL and unavailable User32 functions. Hades's x64 DirectX engine also has ordinary OpenGL imports. A successful Steam submission can therefore precede a loader failure or an exit without a visible game window. [Factorio findings](https://github.com/clankur/steam-xbox-devmode/issues/43) · [ULTRAKILL findings](https://github.com/clankur/steam-xbox-devmode/issues/36) · [Hades findings](https://github.com/clankur/steam-xbox-devmode/issues/33)
+
+## Architecture choices
+
+| Path | Practical scope on this Xbox |
+| --- | --- |
+| **Boxedwine guest** | The browser build runs a Linux interface and 32-bit x86 Wine inside an emulator. It can be evaluated in the packaged web host with an independently built Win32 binary. Its browser graphics claims cover D3D9 and earlier. D3D10 and later are outside that implementation. [Boxedwine](https://www.boxedwine.org/) · [Browser renderer scope](https://github.com/danoon2/Boxedwine/blob/master/changeLog.txt) |
+| **Native Xbox engine port** | When source is available, build a packaged x64 UWP host and adapt rendering, input, audio, file paths, and suspend/resume to supported APIs. A port can reuse an owned game's data where the resulting software and data may be used together. Record this as an engine port with its own prerequisites. [Microsoft DirectX UWP porting](https://learn.microsoft.com/en-us/windows/uwp/gaming/directx-porting-faq) |
+| **Native Win32 compatibility runtime** | The matching x64 instruction set avoids CPU emulation. An unchanged desktop binary still expects a loader, Windows API behavior, process and thread semantics, exception handling, desktop windows, and graphics presentation. Validate those one at a time with independently compiled fixtures. [Wine architecture](https://github.com/wine-mirror/wine/blob/master/README.md) |
+| **Proton components on a new host** | Proton targets Linux and combines Wine with additional components. DXVK and vkd3d-proton target Vulkan. A retail Xbox port needs host services and a graphics and presentation backend supported by the public Xbox app environment. The existing project has no validated Vulkan backend. [Valve Proton](https://github.com/ValveSoftware/Proton) · [DXVK](https://github.com/doitsujin/dxvk) · [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) |
+| **OpenGL translation** | ANGLE supplies OpenGL ES/EGL over D3D11. Mesa's D3D12 driver covers desktop OpenGL. A game importing `opengl32.dll` can also need WGL context creation, pixel formats, extension lookup and presentation. Verify those requirements and the Xbox build before choosing a translator. [ANGLE](https://github.com/google/angle) · [Mesa D3D12](https://docs.mesa3d.org/drivers/d3d12.html) |
+
+Microsoft distinguishes retail UWP from partner Xbox Game OS builds that use console-specific tools and D3D12.X. A publisher-built Xbox title can use the corresponding partner path. Steam Remote Play is another way to play a title from the couch when a PC runs the game. It evaluates the receiver and network. [Microsoft Xbox targets](https://learn.microsoft.com/en-us/vcpkg/users/platforms/xbox) · [Steam Remote Play](https://store.steampowered.com/remoteplay/)
+
+## Smallest useful prototype
+
+1. Write an original Win32 x86 PE fixture. Open a normal GDI window, draw a square, move it on a keypress, and record a small save file. Record its SHA-256, expected frames and save bytes on a Windows PC. Reuse the same executable on Xbox.
+2. Pin a single-threaded Boxedwine interpreter build and its matching Wine filesystem. Test the exact WebAssembly artifact in the packaged Xbox web host. Report validation, instantiation, Wine boot, startup time and peak memory separately. Keep a desktop-browser control.
+3. Verify a recognizable guest frame, physical controller input, persistence after host restart, and return to the Steam library. An optional audio cue has its own check. Test repeat launch and measure frame timing over a fixed interval.
+4. If the GDI fixture works, try a second original 32-bit fixture using DirectDraw or D3D9. Test an independent redistributable title only after the display, input and save checks pass. Plan separate milestones for D3D11 and x64.
+
+The current Boxedwine browser makefile's single-threaded release avoids the explicit pthread and SIMD switches used by other targets. Its common settings request Wasm tail calls, Wasm exception handling and 512 MiB initial linear memory, with room to grow. The Xbox smoke test has verified basic Wasm and a static worker. Validate the exact runtime under the actual Xbox memory budget. If it fails to instantiate, test an older pinned interpreter or a compatible build configuration. The separate x64 browser work has additional requirements including Wasm memory64 and shared memory. [Boxedwine build](https://github.com/danoon2/Boxedwine/blob/master/project/emscripten/makefile) · [Emscripten pthreads](https://emscripten.org/docs/porting/pthreads.html) · [Xbox UWP resources](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation) · [Boxedwine64 experiments](https://github.com/andrewnakas/Boxedwine64)
+
+Keep the live Steam entitlement, completed manifest and exact app-local install checks for real titles. Mount the original content read-only and isolate writable data by account and AppID. Test genuine Steam and publisher middleware requirements per title. Keep the emulator and its source notices separate from proprietary game files. [Steam DRM documentation](https://partner.steamgames.com/doc/features/drm) · [Launch contract](../probe/GAME-LAUNCH.md)
+
+## Planning estimates
+
+Allow roughly 3–10 engineer-days to characterize the browser and attempt the first unchanged fixture. A repeatable legacy x86 path with input, saves and performance measurements could take another 2–6 engineer-weeks. A constrained native graphics backend or an engine-specific port can take several engineer-months. Broad modern x64 and Direct3D 11+ support remains a multi-year team effort with unresolved platform constraints. These are planning ranges under the current packaging pipeline and console access. Re-estimate after the first frame, input event and restored save from an unchanged fixture.

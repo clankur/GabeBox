@@ -31,6 +31,8 @@ The [workflow report](analysis/xbox-workflows.md) maps the observed desktop depe
 
 The [porting investigation](analysis/native-port-path.md) records which measured Steam imports link against Microsoft’s UWP SDK, what still needs an Xbox runtime test, and how to interpret a successful result. The [packaged process test](probe/README.md) runs a single controlled experiment on a Series X in Developer Mode.
 
+The [compatibility-layer study](analysis/xbox-win32-compatibility.md) compares the available host architectures and defines an unchanged Win32 fixture for the next Xbox experiment.
+
 ## Reproduce the audit
 
 With Python 3.11 or later and the REA 6.10.1 CLI installed, run the following from the repository root. The client script downloads about 71 MB from Valve’s CDN. It verifies the pinned archive hashes and inspects the selected files in a temporary directory. It never launches them. A matching result produces no output from `diff`.
