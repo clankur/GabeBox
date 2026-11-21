@@ -29,6 +29,9 @@ PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
 BIG_PICTURE_REPORT = 'big-picture-report.txt'
+WEBVIEW_REPORT = 'big-picture-webview-report.txt'
+ACTIVATION_REPORT = 'big-picture-activation.txt'
+BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
 PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_CONTROL_NAME: 'Packaged process startup control',
                 PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe',
@@ -850,6 +853,12 @@ def main():
     report_variant = report_command.add_mutually_exclusive_group()
     report_variant.add_argument('--big-picture', dest='report_file', action='store_const',
                                 const=BIG_PICTURE_REPORT, help='read the native Steam gamepad-mode launcher report')
+    report_variant.add_argument('--big-picture-webview', dest='report_file', action='store_const',
+                                const=WEBVIEW_REPORT, help='read the Xbox WebView2 device-test stages')
+    report_variant.add_argument('--steam-core-webview', dest='report_file', action='store_const',
+                                const='steam-core-webview', help='read WebView2 stages after Steam Core sign-in')
+    report_variant.add_argument('--big-picture-activation', dest='report_file', action='store_const',
+                                const=ACTIVATION_REPORT, help='read the WebView2 and renderer activation checks')
     report_variant.add_argument('--download', dest='report_file', action='store_const',
                                 const='steam-download-report.txt', help='read the Steam download checkpoint')
     report_variant.add_argument('--artwork', dest='report_file', action='store_const',
@@ -898,7 +907,7 @@ def main():
         probe.error('--require-ipc applies to the main probe')
     if args.command == 'probe' and args.restart and args.manual_launch:
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
-    if args.command == 'report' and args.report_file == BIG_PICTURE_REPORT and args.sdl_frame:
+    if args.command == 'report' and args.report_file in BIG_PICTURE_REPORTS and args.sdl_frame:
         report_command.error('--sdl-frame applies to a Steam Core game trial')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
@@ -956,7 +965,9 @@ def main():
                        args.require_ipc, restart=args.restart)
         return
     if args.command == 'report':
-        name = BIG_PICTURE_NAME if args.report_file == BIG_PICTURE_REPORT else PROBE_STEAM_CORE_NAME
+        name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
+        if args.report_file == 'steam-core-webview':
+            args.report_file = WEBVIEW_REPORT
         app = find_installed_probe(portal, name, args.version)
         if args.report_file == 'sdl-startup':
             _, raw = portal.request('GET', probe_report_path(app))

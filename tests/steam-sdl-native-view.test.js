@@ -64,10 +64,11 @@ test("closing during a pending switch restores the primary library after the lat
     const control = run.open("steam_sdl_mailbox=sdl-host-2-3.bin\n");
     run.poll();
     await new Promise(resolve => setImmediate(resolve));
-    control.close();
+    const restored = control.close();
     assert.equal(run.calls.at(-1), "close");
+    assert.equal(control.close(), restored);
     finish();
-    await new Promise(resolve => setImmediate(resolve));
+    await restored;
     assert.equal(run.calls.at(-1), "library");
 });
 

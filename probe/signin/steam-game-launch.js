@@ -24,7 +24,7 @@ var steamGameLaunch = (function () {
                     if (authorization.split(/\r?\n/).indexOf(hosted.authorizedLine) === -1) return authorization;
                     return Promise.resolve(hosted.start(function (phase) {
                         return attempt.checkpoint(authorization + hosted.phaseField + "=" + phase + "\r\n");
-                    }, attempt.automaticTrial)).then(function (result) { return authorization + result; });
+                    }, attempt.automaticTrial, attempt.onExit)).then(function (result) { return authorization + result; });
                 });
             }
         };

@@ -15,15 +15,18 @@ from zipfile import ZipFile
 
 RELEASE = Path(__file__).with_name("valve-release.json")
 MANIFEST = Path(__file__).with_name("steam_client_win64.manifest")
+UI_ARCHIVES = {b"steamui_websrc_all", b"steamui_websrc_sounds_all", b"steamui_websrc_movies_all"}
 
 
-def extract_archive(archive, destination):
+def extract_archive(archive, destination, ui_only=False):
     # Valve ZIPs can mix Windows separators in directory entries with POSIX file paths.
     with ZipFile(archive) as contents:
         for member in contents.infolist():
             path = PureWindowsPath(member.filename)
             if not path.parts or path.anchor or ".." in path.parts:
                 raise ValueError(f"Invalid Valve archive member: {member.filename!r}")
+            if ui_only and path.parts[0] != "steamui":
+                raise ValueError(f"Unexpected file outside steamui: {member.filename!r}")
             target = destination.joinpath(*path.parts)
             if member.filename.endswith(("/", "\\")):
                 target.mkdir(parents=True, exist_ok=True)
@@ -33,7 +36,7 @@ def extract_archive(archive, destination):
                     shutil.copyfileobj(source, output)
 
 
-def stage_client(destination, archive_cache=None):
+def stage_client(destination, archive_cache=None, ui_only=False):
     if destination.exists():
         raise FileExistsError(f"Use a new client directory: {destination}")
     pinned = json.loads(RELEASE.read_text())
@@ -48,9 +51,14 @@ def stage_client(destination, archive_cache=None):
     )
     if not archives or len(archives) != manifest.count(b'"file"'):
         raise ValueError("Incomplete archive list in the pinned manifest.")
-    # Use the explicit worldwide bootstrapper, once.
-    archives = [entry for entry in archives
-                if not entry[0].startswith((b"steam_win64_steamchina.", b"steam_win64.zip."))]
+    if ui_only:
+        archives = [entry for entry in archives if entry[0].split(b".", 1)[0] in UI_ARCHIVES]
+        if sorted(entry[0].split(b".", 1)[0] for entry in archives) != sorted(UI_ARCHIVES):
+            raise ValueError("Incomplete or duplicated steamui archive set in the pinned manifest.")
+    else:
+        # Use the explicit worldwide bootstrapper, once.
+        archives = [entry for entry in archives
+                    if not entry[0].startswith((b"steam_win64_steamchina.", b"steam_win64.zip."))]
     with TemporaryDirectory(dir=destination.parent) as temp:
         def fetch(entry):
             name, size, checksum = (field.decode("ascii") for field in entry)
@@ -73,18 +81,22 @@ def stage_client(destination, archive_cache=None):
         staged.mkdir()
         with ThreadPoolExecutor(max_workers=6) as executor:
             for archive in executor.map(fetch, archives):
-                extract_archive(archive, staged)
-        cache = staged / "package"
-        cache.mkdir(exist_ok=True)
-        (cache / MANIFEST.name).write_bytes(manifest)
+                extract_archive(archive, staged, ui_only)
+        if not ui_only:
+            cache = staged / "package"
+            cache.mkdir(exist_ok=True)
+            (cache / MANIFEST.name).write_bytes(manifest)
         staged.rename(destination)
-    print(f"Staged Valve Windows client manifest {pinned['version']}.")
+    payload = "UI" if ui_only else "Windows client"
+    print(f"Staged Valve {payload} from manifest {pinned['version']}.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--ui-only", action="store_true",
+                        help="stage the original steamui document root, sounds, and movies")
     parser.add_argument("--archive-cache", type=Path,
                         help="offline directory of the content-addressed Valve ZIPs")
     args = parser.parse_args()
-    stage_client(args.destination, args.archive_cache)
+    stage_client(args.destination, args.archive_cache, args.ui_only)

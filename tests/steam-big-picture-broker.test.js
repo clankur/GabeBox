@@ -1,0 +1,141 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const test = require("node:test");
+const vm = require("node:vm");
+
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-big-picture-broker.js"), "utf8"), context);
+
+function fixture() {
+    const calls = [];
+    const session = {
+        current: () => true,
+        busy: () => false,
+        games: [{ id: 12, name: "A", game: true, privateData: "internal" }, { id: 23, name: "B", game: true }],
+        installedGames: async () => new Set([12]),
+        isInstalled: async (game) => game.id === 12,
+        play: async (game) => { calls.push(["play", game]); return "presented"; },
+        install: async (game) => { calls.push(["install", game]); return "installed"; }
+    };
+    return { calls, session, broker: context.steamBigPictureBroker.create(session) };
+}
+
+test("lists every owned game, with only its public fields and observed install state", async () => {
+    const { session, broker } = fixture();
+    const games = await broker.library();
+    assert.deepEqual(JSON.parse(JSON.stringify(games)), [
+        { id: 12, name: "A", installed: true, canPlay: true },
+        { id: 23, name: "B", installed: false, canPlay: false }
+    ]);
+    games[0].id = 99;
+    assert.equal(session.games[0].id, 12);
+    assert.equal(await broker.play(99), "not-owned");
+});
+
+test("only numeric owned AppIDs can reach the real play or install action", async () => {
+    const { session, broker, calls } = fixture();
+    for (const invalid of [true, NaN, Infinity, 0, -12, 0x1000000, 12.5, "12", { id: 12 }]) {
+        assert.equal(await broker.play(invalid), "invalid-app");
+        assert.equal(await broker.install(invalid), "invalid-app");
+    }
+    assert.equal(await broker.play(5321), "not-owned");
+    assert.equal(await broker.install(5321), "not-owned");
+    assert.equal(await broker.play(23), "not-installed");
+    assert.equal(await broker.install(12), "already-installed");
+    assert.equal(await broker.play(12), "presented");
+    assert.equal(await broker.install(23), "installed");
+    assert.deepEqual(calls, [["play", session.games[0]], ["install", session.games[1]]]);
+});
+
+test("signing out while an install check or catalog request is pending revokes the broker", async () => {
+    const { session, broker, calls } = fixture();
+    let installed, catalog;
+    session.isInstalled = () => new Promise(resolve => { installed = resolve; });
+    session.installedGames = () => new Promise(resolve => { catalog = resolve; });
+    const action = broker.play(12);
+    const library = broker.library();
+    assert.equal(await broker.install(23), "busy");
+    session.current = () => false;
+    installed(true);
+    catalog(new Set([12]));
+    assert.equal(await action, "signed-out");
+    await assert.rejects(library, /signed-out/);
+    assert.equal(await broker.play(12), "signed-out");
+    assert.deepEqual(calls, []);
+});
+
+test("pending native actions cannot overlap and failures leave the broker usable", async () => {
+    const { session, broker } = fixture();
+    let reject;
+    session.play = () => new Promise((resolve, fail) => { reject = fail; });
+    const first = broker.play(12);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(await broker.play(12), "busy");
+    reject(new Error("private native detail"));
+    assert.equal(await first, "failed");
+    session.busy = () => true;
+    assert.equal(await broker.install(23), "busy");
+    session.busy = () => false;
+    assert.equal(await broker.install(23), "installed");
+});
+
+test("integrated sign-in goes directly to the Valve host, including when startup fails", async () => {
+    class Operation extends Promise {
+        done(resolve, reject) { this.then(resolve, reject); }
+    }
+    for (const outcome of ["ready", "missing", "failed", "lost"]) {
+        const elements = new Map();
+        const statuses = [];
+        const document = {
+            documentElement: { getAttribute: name => name === "data-steam-big-picture" ? "true" : null },
+            getElementById(id) {
+                if (!elements.has(id)) elements.set(id, { hidden: true, addEventListener() {} });
+                return elements.get(id);
+            },
+            createElement() { return { setAttribute() {} }; },
+            body: { appendChild: item => statuses.push(item) }
+        };
+        const window = { steamBigPictureBroker: context.steamBigPictureBroker };
+        const calls = [];
+        let loseRenderer;
+        if (outcome !== "missing") {
+            window.steamBigPictureHost = { async open(broker, onFailure) {
+                loseRenderer = onFailure;
+                calls.push(await broker.library());
+                if (outcome === "failed") throw Error("renderer startup");
+            } };
+        }
+        const localFolder = { createFileAsync: () => Operation.resolve({}), tryGetItemAsync: () => Operation.resolve(null) };
+        const globals = {
+            window, document, navigator: {}, Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker,
+            Windows: {
+                Storage: {
+                    ApplicationData: { current: { localFolder } },
+                    CreationCollisionOption: { replaceExisting: 1 },
+                    FileIO: { writeTextAsync: () => Operation.resolve(), readTextAsync: () => Operation.resolve("status=steam-library-rendering\r\n") }
+                },
+                Web: { Http: { Filters: { HttpBaseProtocolFilter: class {} }, HttpClient: class { close() {} } } }
+            },
+            XboxProbe: { Native: { ProbeRunner: { resumeSteamSignIn: () =>
+                Operation.resolve(JSON.stringify([{ id: 12, name: "A", game: true }])) } } }
+        };
+        vm.runInNewContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), globals);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(document.getElementById("signin").hidden, true);
+        assert.equal(document.getElementById("library").hidden, true);
+        assert.equal(statuses.length, 1);
+        if (outcome === "lost") {
+            assert.equal(statuses[0].hidden, true);
+            loseRenderer();
+            assert.match(statuses[0].textContent, /Reopen/);
+            assert.equal(statuses[0].hidden, false);
+            assert.equal(document.getElementById("library").hidden, true);
+        }
+        if (outcome === "missing") assert.match(statuses[0].textContent, /Reinstall/);
+        if (outcome === "failed") assert.match(statuses[0].textContent, /Reopen/);
+        if (outcome === "ready") {
+            assert.equal(statuses[0].hidden, true);
+            assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
+        }
+    }
+});

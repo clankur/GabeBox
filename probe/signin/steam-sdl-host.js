@@ -69,6 +69,7 @@
     }
 
     function start(runner, appId, attempt) {
+        var bigPictureMode = attempt.bigPicture === true;
         var previous = document.activeElement;
         var previousInputMode = navigator.gamepadInputEmulation;
         var nativePad = appId !== 975370;
@@ -94,7 +95,7 @@
         function stop(detail) {
             if (stopped) return;
             stopped = true;
-            if (nativeView) nativeView.close();
+            var restored = nativeView && nativeView.close();
             ready = false;
             cancelAnimationFrame(animation);
             exit.removeEventListener("click", quit);
@@ -116,7 +117,7 @@
             textForm.hidden = true;
             textValue.value = "";
             screen.hidden = true;
-            library.hidden = false;
+            library.hidden = bigPictureMode;
             if (previousInputMode !== undefined) navigator.gamepadInputEmulation = previousInputMode;
             if (view) {
                 if (savedBounds !== undefined) view.setDesiredBoundsMode(savedBounds);
@@ -124,6 +125,7 @@
             }
             if (previous && previous.focus) previous.focus();
             if (detail) complete(result + detail);
+            if (attempt.onExit) Promise.resolve(restored).then(attempt.onExit);
         }
 
         function quit() {
@@ -144,6 +146,11 @@
 
         function showMenu() {
             releaseKeys();
+            if (bigPictureMode) {
+                // Keep playing when the Steam overlay is unavailable on this host.
+                if (nativeView) nativeView.resume();
+                return;
+            }
             menu.hidden = false;
             resume.focus();
         }

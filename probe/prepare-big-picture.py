@@ -2,6 +2,7 @@
 """Prepare the native Big Picture APPX layout from the Windows SDK template."""
 import argparse
 from pathlib import Path
+import re
 import runpy
 import shutil
 from tempfile import TemporaryDirectory
@@ -16,7 +17,7 @@ HOST_FILES = {"AppxManifest.xml", "big-picture.html", "big-picture.js",
               "Assets/SmallLogo.png", "Assets/Splash.png", "Assets/StoreLogo.png"}
 
 
-def prepare_layout(template, layout, archive_cache=None):
+def prepare_layout(template, layout, archive_cache=None, webview_host=None, version=None):
     if layout.exists():
         raise FileExistsError(f"Use a new layout directory: {layout}")
     with TemporaryDirectory(dir=layout.parent) as temp:
@@ -58,7 +59,23 @@ def prepare_layout(template, layout, archive_cache=None):
                 with package.open(member) as source, output.open("xb") as target:
                     shutil.copyfileobj(source, target)
 
-        stage_client(staged / "ValveClient", archive_cache)
+        if webview_host is not None:
+            version = version or "1.0.0.1"
+            if not re.fullmatch(r"1\.0\.0\.[1-9][0-9]{0,4}", version) or int(version.split(".")[-1]) > 65535:
+                raise ValueError("Use a WebView test version between 1.0.0.1 and 1.0.0.65535.")
+            host = Path(__file__).with_name("big-picture-webview")
+            for name in ("smoke.html", "smoke.js"):
+                shutil.copyfile(host / name, staged / name)
+            manifest_path = staged / "AppxManifest.xml"
+            original = manifest_path.read_bytes()
+            if original.count(b' Version="1.0.0.0"') != 1:
+                raise ValueError("Expected the original 1.0.0.0 Big Picture SDK template.")
+            manifest_path.write_bytes(original.replace(b' Version="1.0.0.0"', f' Version="{version}"'.encode())
+                                      .replace(b'StartPage="big-picture.html"', b'StartPage="smoke.html"'))
+            runpy.run_path(str(host / "stage.py"))["add_webview_host"](staged, webview_host)
+        elif version is not None:
+            raise ValueError("--version applies to the WebView test package.")
+        stage_client(staged / "ValveClient", archive_cache, ui_only=webview_host is not None)
         staged.rename(layout)
 
 
@@ -68,5 +85,8 @@ if __name__ == "__main__":
     parser.add_argument("layout", type=Path, help="new local APPX layout directory")
     parser.add_argument("--archive-cache", type=Path,
                         help="read all pinned Valve ZIP filenames from this directory offline")
+    parser.add_argument("--webview-host", type=Path,
+                        help="build a separate device test of the original Valve document with this x64 host")
+    parser.add_argument("--version", help="four-part version for a WebView test package upgrade")
     args = parser.parse_args()
-    prepare_layout(args.template, args.layout, args.archive_cache)
+    prepare_layout(args.template, args.layout, args.archive_cache, args.webview_host, args.version)

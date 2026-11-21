@@ -1,6 +1,6 @@
 # Steam on Xbox Series X Developer Mode
 
-This branch targets Valve’s own Big Picture interface on Xbox Series X in Developer Mode. Its dedicated Xbox package launches the full pinned Windows Steam client with `-gamepadui`. The first console milestone is seeing Valve’s UI and navigating it with a controller. [Native Big Picture architecture, build and verification](analysis/big-picture.md)
+This branch targets Valve’s own Big Picture interface on Xbox Series X after the existing QR sign-in. An Xbox WebView2 host loads the original Steam UI entry. Its full gamepad window still requires Valve’s native client services. A separate package also tests the original Windows Steam client with `-gamepadui`. [Big Picture implementation and Series X results](analysis/big-picture.md)
 
 The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 

@@ -10,13 +10,13 @@
 
         var manager = Windows.UI.ViewManagement, switcher = manager.ApplicationViewSwitcher;
         var mainId = manager.ApplicationView.getForCurrentView().id;
-        var id = 0, timer, closed = false, switching = false, pendingShow;
+        var id = 0, timer, closed = false, switching = false, pendingShow, restored;
         var session = 0;
         var overlayOpen = false, opened = false, shown = false, ready = false;
         var measured = false;
         var started = Date.now();
         function close() {
-            if (closed) return;
+            if (closed) return restored;
             closed = true;
             clearInterval(timer);
             if (opened) {
@@ -34,8 +34,9 @@
                         return switcher.tryShowAsStandaloneAsync(mainId);
                     }).then(switchToLibrary, switchToLibrary).catch(function () {});
                 }
-                Promise.resolve(pendingShow).then(restore, restore);
+                restored = Promise.resolve(pendingShow).then(restore, restore);
             }
+            return restored;
         }
         function failed() {
             if (closed) return;

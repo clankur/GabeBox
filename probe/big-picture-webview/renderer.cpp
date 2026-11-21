@@ -101,6 +101,35 @@ struct View : implements<View, IFrameworkView> {
         popupSurface = nullptr;
     }
 
+    fire_and_forget observeGamepad(CoreWebView2CompositionController browser) {
+        // These selectors identify the shell layout, home carousel and library in
+        // Valve's pinned build 1794536281. Ignore blank windows and loading views.
+        constexpr wchar_t check[] = LR"JS((()=>{
+            const target = document.getElementById('popup_target');
+            const shell = document.getElementById('Header.Main.Footer');
+            if (!target || !shell || !target.contains(shell) || !shell.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq')) return false;
+            const content = shell.querySelector('.ZBBhezbBR4VJYysmVhF3_, ._2_cRkGdbegoIbiRsy_-I7');
+            if (!content) return false;
+            const bounds = content.getBoundingClientRect();
+            return bounds.width > 0 && bounds.height > 0 && getComputedStyle(content).visibility === 'visible';
+        })())JS";
+        auto lifetime = get_strong();
+        apartment_context ui;
+        try {
+            for (int sample = 0; sample < 80; ++sample) {
+                co_await resume_after(std::chrono::milliseconds(500));
+                co_await ui;
+                if (closed || popup != browser) co_return;
+                if ((co_await browser.CoreWebView2().ExecuteScriptAsync(check)) == L"true") {
+                    checkpoint(L"gamepad-ready");
+                    co_return;
+                }
+            }
+        } catch (...) {
+            if (!closed && popup == browser) checkpoint(L"gamepad-observation-error:" + std::to_wstring(to_hresult().value));
+        }
+    }
+
     fire_and_forget onPopup(CoreWebView2 const& sender, CoreWebView2NewWindowRequestedEventArgs args) {
         // Valve uses a same-origin blank child as the React portal for SP BPM.
         // Only its shared context can create that one surface. Grant no native
@@ -140,6 +169,7 @@ struct View : implements<View, IFrameworkView> {
                     popup.IsVisible(true);
                     popup.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
                     checkpoint(L"gamepad-window-created");
+                    observeGamepad(popup);
                 }
             }
         } catch (...) {

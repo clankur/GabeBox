@@ -23,6 +23,27 @@ On November 21, 2026, the x64 launcher cross-compiled and linked against Windows
 
 ## Check startup on Xbox
 
+### Test the original UI in Xbox WebView2
+
+Download `xbox-big-picture-webview-x64` and `xbox-big-picture-template` from this branch's Windows SDK builds. The standalone device test runs the pinned Valve document without an account. To build it, pass the extracted renderer artifact directory to the layout builder.
+
+```sh
+python3 probe/prepare-big-picture.py /path/to/BigPictureTemplate-x64.appx ./webview-layout --webview-host /path/to/xbox-big-picture-webview-x64 --version 1.0.0.3
+bash probe/package.sh --layout ./webview-layout ./webview-signed
+python3 xbox-deploy.py deploy ./webview-signed/SteamBigPicture-x64.appx --certificate ./webview-signed/SteamBigPicture.cer
+```
+
+Open **Steam Big Picture** in Dev Home, then read the two reports. The first checks WinRT activation. The second records navigation, script startup and display of the gamepad window.
+
+```sh
+python3 xbox-deploy.py report --big-picture-activation --version 1.0.0.3
+python3 xbox-deploy.py report --big-picture-webview --version 1.0.0.3
+```
+
+To test after QR sign-in or session restore on a development console, `probe/prepare-big-picture-library.py` takes the signed regular FHD 1.0.230.0 APPX, the Windows-built renderer directory and a new layout directory. Supply an upgrade `--version`. Both builders accept an offline `--archive-cache`. The integrated package preserves the Steam Core identity, installed games, game adapters and FHD presenter. It routes the authenticated library and Play requests to the existing Steam Core backend and records startup in `report --steam-core-webview --version VERSION`. The complete shell still depends on Valve's native services.
+
+### Test the Windows Steam bootstrap
+
 After configuring Device Portal, deploy and launch the signed package. [Device Portal setup](../README.md#setup)
 
 ```sh
@@ -43,6 +64,8 @@ The package opens a minimal packaged start page to activate the native launcher 
 
 On November 21, 2026, Device Portal installed Big Picture `1.0.0.0`. Both the initial launch and a cold restart created `ValveClient/steam.exe`, which exited with `0xffffff98` (−104). The pinned bootstrap executable associates that return value with failure to initialize the update UI or create its initial window. The console capture was blank, the subsequent process list showed the Xbox host with no surviving Steam client or web helper, and the app’s LocalState contained only the launcher report. The failure occurs before the library appears. Which Windows call failed is still unknown.
 
+The standalone WebView2 package `1.0.0.3` ran on the same Series X. The Microsoft-built renderer activated, created the composition controller and loaded Valve’s original `/index.html`. Device Portal reported live `msedgewebview2.exe` processes. Valve's first JavaScript exception in this account-free test was `SteamClient is not defined`. All 866 UI, sound and movie files matched Valve's pinned archives. [Windows renderer build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44943347786)
+
 In a separate check on the same console, Steam Core `1.0.230.0` restored the Steam session. All three games opened from their **Play** buttons in that library. A screen capture confirmed each title screen. Each test game process was closed through Device Portal at its title screen and the app returned to the library. The native presenter recorded a 1920×1080 source for all three. Its built-in 30-second sample begins five seconds after the first distinct frame, so it can include loading.
 
 | Game (Steam AppID) | Distinct frames | Sample seconds | Average FPS |
@@ -54,6 +77,10 @@ In a separate check on the same console, Steam Core `1.0.230.0` restored the Ste
 The native branch contained shared FHD revision `b79d1be`. The regular Steam Core release artifact matched the presenter, SDL and managed-adapter build inputs. Reanalyzing the earlier settled Slay title trace gave 1,798 distinct frames in 30 seconds (59.93 FPS). All 76 shared application payload files matched between that trial and the regular release by SHA-256. The trial added launch-selection and timing markers. Earlier scene-specific measurements also cover gameplay. [FHD performance results](../probe/GAME-LAUNCH.md#native-fullscreen-presentation)
 
 ## Steam Machine experience on Series X
+
+The existing Xbox QR screen handles sign-in and restores a remembered session. After authentication, the product entry point is Valve's full Big Picture shell. Valve owns home, library, search, game details, Play, downloads, controller settings, Steam menus, store, friends and the in-game overlay. Returning from a game must restore focus to Valve's interface. The Xbox backend can perform the existing entitlement checks, download, launch and fullscreen presentation underneath those controls.
+
+For each of Slay the Spire (646570), Dwarf Fortress (975370) and Stardew Valley (413150), open the title from Valve's library, press its Play button, verify its title screen and return to the same signed-in Big Picture session. Record the native presenter resolution and frame sample for each game. The separate Steam Core runs above establish a baseline for this check.
 
 Console acceptance starts with Valve’s interface appearing on the TV. From a cold launch, use a controller to navigate between two Big Picture screens, go back, open the Steam menu and enter Settings. The Windows reference can identify a Big Picture window on a desktop system. The Xbox trial must establish foreground presentation and input on the console. [Windows reference](windows-startup.md#native-big-picture-reference)
 
@@ -70,6 +97,8 @@ Microsoft supports embedding Chromium in an Xbox UWP app through the WinUI 2 Web
 Valve’s Windows x64 manifest `1794536281` pins the `steamui_websrc_all` archive at 35,981,544 bytes with SHA-256 `c4ef0ef15369de9076657e67af5b218d95d71402ed3f92a1b3d096fb06a7b69b`. A local test in Chromium 148.0.7778.97 served the original assets in a fresh offline profile. The `steamui/index.html` entry loaded the shared libraries and `library.js`. Its first exception was `ReferenceError: SteamClient is not defined` at `library.js:5:38536`, when the code tried to register for a login-state change. The root stayed empty. Loading `sp.js` alone registered a webpack chunk and also left the root empty. [Pinned archive manifest](steam_client_win64.manifest)
 
 The bundled source shows the next steps that require the bridge. Steam calls `SteamClient.UI.GetDesiredSteamUIWindows()` and subscribes to window changes. A `MainGamepadUI` request selects `CreateMainGamepadUIWindow`, and the gamepad component renders into the resulting popup. Those steps were identified in the source. The offline run stopped at the login-state call. A WebView2 implementation would need a genuine Steam-backed session and working window management to reach even that first Big Picture screen.
+
+A separate offline Chromium run of the original entry with the in-client configuration reached initialization of Valve's own services. The WebUI transport requested connection information for SteamUI and the client library. The shared-connection service requested a native connection handle to receive logon and message callbacks. Controller initialization requested a Steam Input service operation, and the UI store requested focus notifications. Several services catch initialization failures and allow the page to continue. A loaded document or a mounted library tile cannot establish that the full shell or its controls are working. Valve describes how the running Steam client serves its APIs over IPC in the [Steamworks architecture documentation](https://partner.steamgames.com/doc/sdk/api).
 
 The desktop boot path also uses `steam.exe`, `SteamUI.dll`, and `steamwebhelper.exe`. The checked client binaries import desktop window APIs and Chromium Embedded Framework entry points. The earlier Steam Core prototype stages a subset of the client DLLs. The Big Picture package includes the web helper, CEF, UI bundles and the runtime that supplies Valve’s native bridge. [Measured imports](client-imports.json) · [Client staging](stage-pinned-client.py)
 

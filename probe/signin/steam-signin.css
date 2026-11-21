@@ -74,3 +74,10 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
     transform: translate(-50%, -50%);
     pointer-events: none;
 }
+
+
+html[data-steam-big-picture="true"] #library,
+html[data-steam-big-picture="true"] #sdl-menu,
+html[data-steam-big-picture="true"] #sdl-text,
+html[data-steam-big-picture="true"] #xcom-game > button { display: none !important; }
+#big-picture-status { padding: 10vh 6vw; }
