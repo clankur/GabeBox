@@ -9,6 +9,8 @@
 #include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.System.Diagnostics.h>
+#include <winrt/Windows.System.h>
 #include <winrt/XboxProbe.Native.h>
 #include <algorithm>
 #include <array>
@@ -1052,6 +1054,7 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManife
 struct SteamGameProcess {
     winrt::handle handle;
     std::wstring_view checkpoint = L"not-reported";
+    std::wstring_view imageRole = L"unavailable";
     DWORD error = ERROR_SUCCESS;
 
     void Observe(void *clientUser, std::uintptr_t const *methods, std::uint64_t gameId,
@@ -1086,6 +1089,24 @@ struct SteamGameProcess {
             }
             handle = std::move(process);
             checkpoint = L"captured";
+            try {
+                using winrt::Windows::System::Diagnostics::ProcessDiagnosticInfo;
+                if (auto diagnostic = ProcessDiagnosticInfo::TryGetForProcessId(pid)) {
+                    auto image = diagnostic.ExecutableFileName();
+                    auto filename = std::wstring_view(image);
+                    if (auto separator = filename.find_last_of(L"\\/"); separator != std::wstring_view::npos) {
+                        filename.remove_prefix(separator + 1);
+                    }
+                    const auto size = static_cast<int>(filename.size());
+                    if (CompareStringOrdinal(filename.data(), size, L"javaw.exe", -1, TRUE) == CSTR_EQUAL) {
+                        imageRole = L"java-windowed";
+                    } else if (CompareStringOrdinal(filename.data(), size, L"java.exe", -1, TRUE) == CSTR_EQUAL) {
+                        imageRole = L"java-console";
+                    } else if (!filename.empty()) {
+                        imageRole = L"other";
+                    }
+                }
+            } catch (winrt::hresult_error const&) {}
             return;
         }
     }
@@ -1094,6 +1115,7 @@ struct SteamGameProcess {
         auto report = L"steam_launch_process=" + std::wstring(checkpoint) + L"\r\n";
         if (error) report += L"steam_launch_process_error=" + Hex(error) + L"\r\n";
         if (!handle) return report;
+        report += L"steam_launch_process_image=" + std::wstring(imageRole) + L"\r\n";
         DWORD exitCode = 0;
         if (WaitForSingleObject(handle.get(), 0) == WAIT_OBJECT_0 && GetExitCodeProcess(handle.get(), &exitCode)) {
             report += L"steam_launch_process_exit=" + Hex(exitCode) + L"\r\n";
@@ -1343,6 +1365,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     report += L"steam_launch_submitted=yes\r\n";
     const auto started = GetTickCount64();
     const auto deadline = started + 25000;
+    using winrt::Windows::System::MemoryManager;
+    std::uint64_t memoryLimit = 0, peakMemory = 0;
+    try {
+        memoryLimit = MemoryManager::AppMemoryUsageLimit();
+    } catch (winrt::hresult_error const&) {}
     SteamGameProcess process;
     bool accepted = false;
     bool observedRunning = false;
@@ -1385,6 +1412,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto running = reinterpret_cast<GameQuery>(session->userMethods[67])(user, &gameId);
             observedRunning = observedRunning || running;
             if (running) process.Observe(user, session->userMethods, gameId, launchTime);
+            if (memoryLimit) {
+                try {
+                    peakMemory = (std::max)(peakMemory, MemoryManager::AppMemoryUsage());
+                } catch (winrt::hresult_error const&) {
+                    memoryLimit = 0;
+                }
+            }
             auto windowReady = reinterpret_cast<GameQuery>(session->userMethods[68])(user, &gameId);
             if (accepted && windowReady && running) verdict = L"window-ready";
             if ((responded && !accepted) || (accepted && windowReady && running) || GetTickCount64() >= deadline) {
@@ -1393,6 +1427,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 report += std::wstring(L"steam_launch_running_seen=") + (observedRunning ? L"yes\r\n" : L"no\r\n");
                 report += process.Report();
+                if (memoryLimit) {
+                    report += L"steam_launch_app_memory_peak=" + std::to_wstring(peakMemory) + L"\r\n";
+                    report += L"steam_launch_app_memory_limit=" + std::to_wstring(memoryLimit) + L"\r\n";
+                }
                 session->launchCall = 0;
                 break;
             }
