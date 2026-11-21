@@ -4,6 +4,8 @@ This x64 UWP diagnostic calls `CreateProcessW` for one fixed executable bundled 
 
 Version `1.0.9.0` was installed and launched by CLI on a Series X in Developer Mode. The report recorded `create_process=success`, `child_exit_code=0x000051A7`, and `exit_code_matches=yes`. [Signed Windows SDK build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44857081600) · [Developer workflow and hardware observations](DEVELOPMENT.md)
 
+Version `1.0.10.0` also verifies a request and reply over one same-package named pipe. A successful report includes `ipc=success` and `ipc_child_exit=0x000051A8`. Add `--require-ipc` to make that result part of the CLI exit status. [Signed IPC build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44858026281)
+
 ## Test on a Series X in Developer Mode
 
 Copy `.env.example` to `.env` and set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username. Run `python3 xbox-deploy.py fingerprint`, compare it with the browser’s TLS certificate fingerprint for the portal, and set `XBOX_PORTAL_CERT_SHA256`. Python 3.9 or later prompts for the Device Portal password. For noninteractive use, set `XBOX_PORTAL_PASSWORD` in the Git-ignored `.env` and restrict it with `chmod 600 .env`.
@@ -12,7 +14,7 @@ Download the `xbox-probe-windows-sdk` artifact for the commit you want to test a
 
 ```sh
 python3 xbox-deploy.py deploy /path/to/PackagedProcessProbe-x64.appx --test-probe
-python3 xbox-deploy.py probe --version 1.0.9.0
+python3 xbox-deploy.py probe --version 1.0.10.0 --require-ipc
 ```
 
 Use `--certificate path/to/publisher.cer` if the portal requests the package-signing certificate. The CLI verifies the installed version, launches the app, and waits for a fresh report. If needed, read `probe-report.txt` manually in Device Portal under **File explorer → LocalAppData → Packaged process test → LocalState**. [Device Portal app deployment API](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#app-deployment)

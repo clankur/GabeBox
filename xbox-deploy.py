@@ -206,9 +206,10 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
                 if name == PROBE_CONTROL_NAME and re.search(r'^status=control-ready\s*$', report, re.MULTILINE):
                     return
                 if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
-                    if require_ipc and not re.search(r'^ipc=success\s*$', report, re.MULTILINE):
+                    if not require_ipc or re.search(r'^ipc=success\s*$', report, re.MULTILINE):
+                        return
+                    if re.search(r'^ipc=failed\s*$', report, re.MULTILINE):
                         raise ValueError('The signed helper ran, but the named-pipe exchange did not succeed.')
-                    return
                 if re.search(r'^exit_code_matches=no\s*$', report, re.MULTILINE):
                     raise ValueError('The probe ran, but the helper did not return its expected exit code.')
                 if re.search(r'^status=.*(?:error|failed)\s*$', report, re.MULTILINE):
@@ -216,6 +217,8 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
         time.sleep(0.5)
 
     if last_report:
+        if require_ipc and re.search(r'^exit_code_matches=yes\s*$', last_report, re.MULTILINE):
+            raise ValueError('The signed helper ran, but no terminal named-pipe result appeared.')
         raise ValueError('The probe wrote a startup checkpoint but did not finish the test.')
     raise ValueError('No fresh probe-report.txt appeared in LocalState.' +
                      (' The remote launch also failed.' if launch_error else ''))
