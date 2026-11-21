@@ -1,5 +1,5 @@
 // Scoped to the signed shared-context bridge by the packager. The native host
-// injects xboxNativeWindow before the Valve scripts and owns both WebViews.
+// injects xboxNativeWindow before the Valve scripts and owns the application view.
 let xboxGamepadPopup;
 let xboxGamepadVisible = false;
 function getXboxGamepadWindow() {
@@ -13,6 +13,7 @@ function installXboxWindow(client, send, lookupPopup) {
     const desired = new Set(), display = new Set();
     const focus = new Set(), overlayFocus = new Set(), mode = new Set();
     let state = xboxNativeWindow;
+    const surface = state.framedGamepad ? createXboxGamepadSurface(state, host) : undefined;
     let notifiedPopup;
 
     function subscribe(callbacks, fn, initial) {
@@ -39,7 +40,7 @@ function installXboxWindow(client, send, lookupPopup) {
             !popup.document.getElementById('popup_target')) return;
         // The pinned window manager defers its first React render until it
         // receives this CEF lifecycle message. WebView2 has now attached the
-        // approved composition controller and Valve has written its portal.
+        // approved popup surface and Valve has written its portal.
         const registered = lookupPopup?.(popup);
         if (lookupPopup && !registered) return;
         if (!registered?.m_bCreated) popup.postMessage('popup-created', location.origin);
@@ -50,6 +51,7 @@ function installXboxWindow(client, send, lookupPopup) {
         if (data?.event !== 'xbox-window' || data.state?.viewId !== state.viewId || data.state.pid !== state.pid) return;
         const previous = state;
         state = data.state;
+        surface?.update(state);
         xboxGamepadVisible = state.visible && state.popupVisible;
         if (previous.focused !== state.focused || previous.visible !== state.visible || previous.popupVisible !== state.popupVisible) {
             for (const fn of focus) fn();
@@ -168,7 +170,7 @@ function installXboxWindow(client, send, lookupPopup) {
     Object.assign(client.Window ||= {}, owner.Window);
     Object.assign(client.Browser ||= {}, owner.Browser);
 
-    const open = window.open.bind(window);
+    const open = surface ? surface.open : window.open.bind(window);
     window.open = function (url, name, ...rest) {
         const popup = open(url, name, ...rest);
         if (!popup || typeof url !== 'string' || !url.startsWith('about:blank?createflags=') || url.length > 2048 ||

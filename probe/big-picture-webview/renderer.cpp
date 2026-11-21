@@ -41,7 +41,6 @@ slim_mutex gate;
 weak_ref<IFrameworkView> active;
 CoreDispatcher dispatcher{nullptr};
 CoreApplicationView secondary{nullptr};
-IFrameworkView primaryHost{nullptr};
 int32_t viewId = 0;
 bool opening = false;
 bool closeRequested = false;
@@ -76,7 +75,8 @@ struct View : implements<View, IFrameworkView> {
     std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
-    bool usesPrimaryWindow = false;
+    bool frameOpen = false;
+    uint64_t frameGeneration = 0;
     bool capturePending = false;
     uint64_t popupVisibilityEpoch = 0;
     CoreWindow::PointerMoved_revoker moved;
@@ -188,8 +188,8 @@ struct View : implements<View, IFrameworkView> {
             L",\"pid\":" + std::to_wstring(web.BrowserProcessId()) +
             L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (!gameForeground && window.Visible() ? L"true" : L"false") +
             L",\"focused\":" + (window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground ? L"true" : L"false") +
-            L",\"popupOpen\":" + (popup ? L"true" : L"false") +
-            L",\"popupVisible\":" + (popup && popup.IsVisible() ? L"true" : L"false") +
+            L",\"popupOpen\":" + (gamepadSurface() ? L"true" : L"false") +
+            L",\"popupVisible\":" + (gamepadVisible() ? L"true" : L"false") +
             L",\"x\":" + std::to_wstring(bounds.X) + L",\"y\":" + std::to_wstring(bounds.Y) +
             L",\"width\":" + std::to_wstring(bounds.Width) + L",\"height\":" + std::to_wstring(bounds.Height) +
             L",\"usableX\":" + std::to_wstring(visible.X) + L",\"usableY\":" + std::to_wstring(visible.Y) +
@@ -223,6 +223,15 @@ struct View : implements<View, IFrameworkView> {
             web.PostWebMessageAsJson(hstring(L"{\"event\":\"xbox-window\",\"state\":" + windowState() + L"}"));
     }
 
+    CoreWebView2CompositionController gamepadSurface() const {
+        return frameOpen ? controller : popup;
+    }
+
+    bool gamepadVisible() const {
+        auto surface = gamepadSurface();
+        return surface && popupRequestedVisible && surface.IsVisible();
+    }
+
     void focusVisible() {
         if (!gameForeground && window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground)
             (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
@@ -231,7 +240,7 @@ struct View : implements<View, IFrameworkView> {
     // A composition controller has no child HWND. Forward CoreWindow pointer
     // input to the visible Valve surface in physical pixels, including underscan.
     void mouse(PointerEventArgs const& args, CoreWebView2MouseEventKind kind) {
-        if (closed || gameForeground || !popup || !popup.IsVisible() || !window.Visible()) return;
+        if (closed || gameForeground || !gamepadVisible() || !window.Visible()) return;
         auto point = args.CurrentPoint();
         if (point.PointerDevice().PointerDeviceType() != Windows::Devices::Input::PointerDeviceType::Mouse) return;
         auto props = point.Properties();
@@ -249,7 +258,7 @@ struct View : implements<View, IFrameworkView> {
             CoreWebView2MouseEventVirtualKeys::None;
         if (props.IsRightButtonPressed()) keys = keys | CoreWebView2MouseEventVirtualKeys::RightButton;
         if (kind == CoreWebView2MouseEventKind::LeftButtonDown) focusVisible();
-        popup.SendMouseInput(kind, keys, static_cast<uint32_t>(props.MouseWheelDelta()), pixels);
+        gamepadSurface().SendMouseInput(kind, keys, static_cast<uint32_t>(props.MouseWheelDelta()), pixels);
         args.Handled(true);
     }
 
@@ -315,10 +324,29 @@ struct View : implements<View, IFrameworkView> {
             // Steam signals post-login service setup separately from a visible screen.
             slim_lock_guard lock(gate);
             if (status == L"document-loaded" || status == L"gamepad-window-created") status = L"app-initialized";
+        } else if (message == L"\"xbox-window-frame-open\"" || message == L"\"xbox-window-frame-closed\"") {
+            if (!document->signedMode) return true;
+            const bool open = message == L"\"xbox-window-frame-open\"";
+            if (frameOpen != open) {
+                frameOpen = open;
+                popupRequestedVisible = open;
+                ++frameGeneration;
+                ++popupVisibilityEpoch;
+                publishWindow();
+                if (open) {
+                    focusVisible();
+                    checkpoint(L"gamepad-window-created");
+                    observeGamepad(controller);
+                } else {
+                    checkpoint(L"gamepad-window-error:closed");
+                }
+            }
         } else if (message == L"\"xbox-window-focus\"") focusVisible();
         else if (message == L"\"xbox-window-show\"" || message == L"\"xbox-window-hide\"") {
-            if (popup) {
-                popupRequestedVisible = message == L"\"xbox-window-show\"";
+            if (gamepadSurface()) {
+                const bool show = message == L"\"xbox-window-show\"";
+                if (frameOpen && popupRequestedVisible != show) ++popupVisibilityEpoch;
+                popupRequestedVisible = show;
                 applyVisibility();
                 focusVisible();
                 publishWindow();
@@ -358,8 +386,26 @@ struct View : implements<View, IFrameworkView> {
         browser.DownloadStarting([](auto const&, auto const& args) { args.Cancel(true); });
     }
 
+    // Signed production uses the owner's single WebView. Read the exact same
+    // Valve document inside its full-viewport frame. Unsigned smoke still uses
+    // the standalone popup controller.
+    hstring inGamepad(wchar_t const* script) const {
+        if (!frameOpen) return hstring(script);
+        return hstring(std::wstring(LR"JS((() => {
+            const element = document.getElementById('xbox-steam-gamepad-surface');
+            if (!element || element.parentElement !== document.documentElement || element.tagName !== 'IFRAME' ||
+                !element.checkVisibility({opacityProperty:true, visibilityProperty:true}) ||
+                document.elementFromPoint(innerWidth/2, innerHeight/2) !== element) return null;
+            const child = element.contentWindow;
+            if (child?.opener !== window || !(child.name === 'SP BPM' || /^SP BPM_uid[0-9]+$/.test(child.name))) return null;
+            return ((window) => {
+                const {document,innerWidth,innerHeight} = window;
+                const getComputedStyle = window.getComputedStyle.bind(window);
+                return )JS") + script + L"; })(child); })()");
+    }
+
     bool canCapture(CoreWebView2CompositionController const& surface, uint64_t visibilityEpoch) {
-        return visibilityEpoch == popupVisibilityEpoch && !closed && surface && surface == popup && popupAttached && !gameForeground && window.Visible() &&
+        return visibilityEpoch == popupVisibilityEpoch && !closed && surface && surface == gamepadSurface() && gamepadVisible() && (frameOpen ? ownerAttached : popupAttached) && !gameForeground && window.Visible() &&
             window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground && surface.IsVisible() &&
             web && document->signedMode && document->accepts(web.Source());
     }
@@ -370,7 +416,7 @@ struct View : implements<View, IFrameworkView> {
         if (capturePending) co_return;
         auto lifetime = get_strong();
         capturePending = true;
-        auto surface = popup;
+        auto surface = gamepadSurface();
         const auto visibilityEpoch = popupVisibilityEpoch;
         StorageFile temporary{nullptr};
         std::wstring state = L"not-visible";
@@ -379,7 +425,7 @@ struct View : implements<View, IFrameworkView> {
         try {
             sourceView = ApplicationView::GetForCurrentView().Id();
             if (web) browserPid = web.BrowserProcessId();
-            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(steam_capture::library) == L"true" &&
+            if (canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(steam_capture::library)) == L"true" &&
                 canCapture(surface, visibilityEpoch)) {
                 auto folder = ApplicationData::Current().LocalFolder();
                 temporary = co_await folder.CreateFileAsync(L"big-picture-library.capture.tmp", CreationCollisionOption::GenerateUniqueName);
@@ -399,7 +445,7 @@ struct View : implements<View, IFrameworkView> {
                     header.Close();
                 }
                 stream.Close();
-                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(steam_capture::library) == L"true" &&
+                if (width && canCapture(surface, visibilityEpoch) && co_await surface.CoreWebView2().ExecuteScriptAsync(inGamepad(steam_capture::library)) == L"true" &&
                     canCapture(surface, visibilityEpoch)) {
                     co_await temporary.RenameAsync(L"big-picture-library.png", NameCollisionOption::ReplaceExisting);
                     temporary = nullptr;
@@ -421,6 +467,9 @@ struct View : implements<View, IFrameworkView> {
     }
 
     void closePopup() {
+        frameOpen = false;
+        ++frameGeneration;
+        ++popupVisibilityEpoch;
         auto closing = std::exchange(popup, nullptr);
         if (closing) closing.Close();
         if (popupSurface) root.Children().Remove(popupSurface);
@@ -457,16 +506,18 @@ struct View : implements<View, IFrameworkView> {
         })())JS";
         auto lifetime = get_strong();
         apartment_context ui;
+        const auto generation = frameGeneration;
         try {
             bool setup = false;
             hstring previous;
             for (int sample = 0; sample < 240 || setup;) {
                 co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
                 co_await ui;
-                if (closed || popup != browser) co_return;
+                if (closed || gamepadSurface() != browser || generation != frameGeneration) co_return;
                 if (gameForeground || !window.Visible()) continue;
                 if (!setup) ++sample;
-                auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(check);
+                auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(inGamepad(check));
+                if (closed || gamepadSurface() != browser || generation != frameGeneration) co_return;
                 if (result != previous && result.size() == 1 && result[0] >= L'1' && result[0] <= L'8') {
                     previous = result;
                     slim_lock_guard lock(gate);
@@ -482,7 +533,7 @@ struct View : implements<View, IFrameworkView> {
                 }
             }
         } catch (...) {
-            if (!closed && popup == browser) checkpoint(L"gamepad-observation-error:" + std::to_wstring(to_hresult().value));
+            if (!closed && gamepadSurface() == browser && generation == frameGeneration) checkpoint(L"gamepad-observation-error:" + std::to_wstring(to_hresult().value));
         }
     }
 
@@ -499,7 +550,7 @@ struct View : implements<View, IFrameworkView> {
             auto source = args.OriginalSourceFrameInfo();
             auto name = args.Name();
             auto scopedName = L"SP BPM_uid" + std::to_wstring(sender.BrowserProcessId());
-            if (!popup && !openingPopup && document->accepts(sender.Source()) && source &&
+            if (!document->signedMode && !popup && !openingPopup && document->accepts(sender.Source()) && source &&
                 source.FrameKind() == CoreWebView2FrameKind::MainFrame && document->accepts(source.Source()) &&
                 (name == L"SP BPM" || name == scopedName) && url.size() <= 2048 && std::wstring_view(url).starts_with(L"about:blank?createflags=")) {
                 creating = openingPopup = true;
@@ -589,6 +640,18 @@ struct View : implements<View, IFrameworkView> {
             web.ContentLoading([this](auto const&, auto const& args) {
                 document->content(args.NavigationId(), args.IsErrorPage());
             });
+            web.FrameNavigationStarting([this](auto const&, auto const& args) {
+                // The signed gamepad and its nested menus need only their
+                // initial inherited blank DOM created by the pinned owner.
+                if (document->signedMode && args.Uri() != L"about:blank") args.Cancel(true);
+            });
+            web.AddWebResourceRequestedFilter(L"*", CoreWebView2WebResourceContext::Script);
+            web.WebResourceRequested([this](auto const&, CoreWebView2WebResourceRequestedEventArgs const& args) {
+                if (document->signedMode && args.ResourceContext() == CoreWebView2WebResourceContext::Script &&
+                    !std::wstring_view(args.Request().Uri()).starts_with(L"https://steamloopback.host/")) {
+                    args.Response(environment.CreateWebResourceResponse(nullptr, 403, L"Forbidden", L""));
+                }
+            });
             web.NewWindowRequested({this, &View::onPopup});
             web.WebMessageReceived([this](auto const& sender, auto const& args) {
                 // Frame messages have a separate WebView2Frame event. The bridge
@@ -635,10 +698,11 @@ struct View : implements<View, IFrameworkView> {
                     window.chrome.webview.postMessage({method:"renderer-error", message});
                 });
             )JS";
-            auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() + L"));\n";
+            document->signedMode = !adapter.empty();
+            auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() +
+                L",{framedGamepad:" + (document->signedMode ? L"true" : L"false") + L"}));\n";
             co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
             if (closed) co_return;
-            document->signedMode = !adapter.empty();
             web.Navigate(document->signedMode ? signedEntry : entry);
             controller.MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
         } catch (...) {
@@ -683,13 +747,7 @@ struct View : implements<View, IFrameworkView> {
         if (controller) controller.Close();
         web = nullptr;
         controller = nullptr;
-        if (usesPrimaryWindow) {
-            moved.revoke(); pressed.revoke(); released.revoke(); wheel.revoke();
-            sized.revoke(); visibility.revoke(); closing.revoke(); activated.revoke();
-            if (target) target.Root(nullptr);
-            target = nullptr;
-            Uninitialize();
-        } else window.Dispatcher().StopProcessEvents();
+        window.Dispatcher().StopProcessEvents();
     }
     void Uninitialize() {
         closed = true;
@@ -698,7 +756,6 @@ struct View : implements<View, IFrameworkView> {
         active = {};
         dispatcher = nullptr;
         secondary = nullptr;
-        primaryHost = nullptr;
         captureResult = hstring{};
         opening = false;
         closeRequested = false;
@@ -725,29 +782,6 @@ template <typename Callback> void onBrowserThread(Callback callback) {
 
 struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native::IRendererStatics> {
     IInspectable ActivateInstance() { throw hresult_not_implemented(); }
-    void OpenInCurrentView() {
-        auto primary = CoreApplication::MainView();
-        auto window = CoreWindow::GetForCurrentThread();
-        if (!window || window != primary.CoreWindow()) throw hresult_wrong_thread();
-        auto view = make_self<View>();
-        {
-            slim_lock_guard lock(gate);
-            if (opening && closeRequested) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
-            if (opening) return;
-            opening = true;
-            status = L"attaching-primary-view";
-            primaryHost = view.as<IFrameworkView>();
-        }
-        try {
-            view->usesPrimaryWindow = true;
-            view->SetWindow(window);
-            view->listen();
-            view->startBrowser();
-        } catch (...) {
-            view->close();
-            throw;
-        }
-    }
     void Open() {
         {
             slim_lock_guard lock(gate);

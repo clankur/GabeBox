@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,7 +8,8 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview'].includes(arg));
+const framedGamepad = process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -20,7 +21,8 @@ const fixtureAccount = '76561198000000000';
 
 // This fixture stands in for the outer, authenticated Xbox host. The production
 // bundle installs SteamClient inside Valve's unmodified document.
-function setupHost(steamId) {
+function setupHost(steamId, windowState) {
+    const state = {...windowState};
     const events = new EventTarget();
     const games = [{id: 42, name: 'Fixture A', installed: true, canPlay: true},
         {id: 73, name: 'Fixture B', installed: false, canPlay: false}];
@@ -32,6 +34,15 @@ function setupHost(steamId) {
     (window.chrome ||= {}).webview = {
         addEventListener: events.addEventListener.bind(events),
         postMessage(request) {
+            if (state.framedGamepad && typeof request === 'string' &&
+                ['xbox-window-frame-open', 'xbox-window-frame-closed', 'xbox-window-show', 'xbox-window-hide'].includes(request)) {
+                if (request === 'xbox-window-frame-open') state.popupOpen = true;
+                if (request === 'xbox-window-frame-closed') state.popupOpen = false;
+                state.popupVisible = state.popupOpen && request !== 'xbox-window-hide';
+                const snapshot = {...state};
+                queueMicrotask(() => hostEvent({event: 'xbox-window', state: snapshot}));
+                return;
+            }
             if (request === 'xbox-read-gamepads') {
                 queueMicrotask(() => window.hostEvent({event: 'xbox-gamepads', pads: [{...window.fixtureNativePad}]}));
                 return;
@@ -313,7 +324,12 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
         // directly on each DevTools session, including the initial owner target.
         async function serve(target) {
             const session = await context.newCDPSession(target);
-            session.on('Fetch.requestPaused', async ({requestId, request}) => {
+            const ownerId = (await session.send('Page.getFrameTree')).frameTree.frame.id;
+            session.on('Fetch.requestPaused', async ({requestId, request, resourceType, frameId}) => {
+                if (framedGamepad && resourceType === 'Document' && (request.url !== entry || frameId !== ownerId)) {
+                    await session.send('Fetch.failRequest', {requestId, errorReason: 'BlockedByClient'}).catch(() => {});
+                    return;
+                }
                 const url = new URL(request.url);
                 const file = path.resolve(assets, '.' + decodeURIComponent(url.pathname));
                 if (url.origin !== origin || !file.startsWith(assets + path.sep)) {
@@ -363,7 +379,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             });
             await session.send('Fetch.enable', {patterns: [{urlPattern: '*'}]});
         }
-        const state = {nativeGamepads, deviceFamily: 'Windows.Xbox', deviceFamilyVersion: String((10n << 48n) | (26100n << 16n) | 2n),
+        const state = {nativeGamepads, framedGamepad, deviceFamily: 'Windows.Xbox', deviceFamilyVersion: String((10n << 48n) | (26100n << 16n) | 2n),
             keyboardPresent: 0,
             devToolsEnabled: false, viewId: 1, pid: 100, ownerId: 1, popupId: 2, visible: true, popupOpen: false,
             popupVisible: false, x: 0, y: 0, width: 1280, height: 720, screenWidth: 1280, screenHeight: 720,
@@ -386,8 +402,8 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             await serve(page);
             observe(page);
             page.setDefaultTimeout(10000);
-            await page.addInitScript({content: 'const xboxNativeWindow=Object.freeze(' + JSON.stringify(state) + ');\n' +
-                '(' + setupHost.toString() + ')(' + JSON.stringify(steamId) + ');\n' + source});
+            await page.addInitScript({content: 'if(window===top){ const xboxNativeWindow=Object.freeze(' + JSON.stringify(state) + ');\n' +
+                '(' + setupHost.toString() + ')(' + JSON.stringify(steamId) + ', xboxNativeWindow);\n' + source + '\n}'});
             await page.goto(entry);
         }
         await openOwner();
@@ -412,7 +428,8 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 currentUser: App.BHasCurrentUser(), beganAfterLogin: App.m_bStartedInitAfterLogin,
                 servicesInitialized: App.GetServicesInitialized(), route: gamepad?.History?.location?.pathname, popups};
         });
-        const windows = await Promise.all(context.pages().map(async w => ({
+        const surfaces = framedGamepad ? page.frames().filter(frame => !frame.parentFrame() || frame.parentFrame() === page.mainFrame()) : context.pages();
+        const windows = await Promise.all(surfaces.map(async w => ({
             ...await w.evaluate(() => {
                 const target = document.getElementById('popup_target'), box = target?.getBoundingClientRect();
                 return {name: window.name, title: document.title, viewport: [innerWidth, innerHeight],
@@ -434,7 +451,11 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             assert.deepEqual(boot.ownedAppStore, [[42, 'Fixture A'], [73, 'Fixture B']]);
             await checkPlatform(page);
             const gamepad = windows.findIndex(win => /^(SP BPM)(?:$|_uid\d+$)/.test(win.name));
-            let popup = gamepad < 0 ? undefined : context.pages()[gamepad];
+            const popup = surfaces[gamepad];
+            if (framedGamepad) {
+                assert.equal(context.pages().length, 1);
+                assert(await popup.evaluate(() => opener === parent && parent.origin === origin && !window.chrome?.webview));
+            }
             assert(popup, 'Expected Valve to create its Big Picture window');
             await popup.getByText('Fixture A', {exact: true}).first().waitFor({state: 'visible', timeout: 15000}).catch(async error => {
                 const route = await page.evaluate(() => {
@@ -457,6 +478,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 const tour = ['Welcome to Big Picture', 'Steam Menu', 'Quick Access Menu', 'Set up Parental Controls', 'Have fun'];
                 const welcome = popup.getByText('Welcome to Big Picture', {exact: true}).first();
                 const hasTour = await welcome.isVisible();
+                if (framedGamepad) assert(hasTour, 'Fresh signed-in Steam tour missing');
                 for (const step of hasTour ? tour : []) {
                     const heading = popup.getByText(new RegExp('^' + step + '[!.]?$', 'i')).first();
                     await heading.waitFor({state: 'visible', timeout: 4000}).catch(async error => { throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700)); });
@@ -470,6 +492,13 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 });
                 await pressNative(8); // B closes the menu and returns to the library.
                 await menu.getByText('Library', {exact: true}).waitFor({state: 'hidden'});
+                if (framedGamepad) {
+                    await pressNative(3);
+                    await menu.getByText('Library', {exact: true}).click();
+                    await popup.getByText('All Games', {exact: true}).first().waitFor({state: 'visible'});
+                    await openStockLibrary(page, popup);
+                    await checkRunningControls(page, popup);
+                }
                 console.log('Native View + Menu opened Steam and B returned to the library. Tour shown:', hasTour);
                 return;
             }
@@ -489,7 +518,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
     const browser = await chromium.launch({headless: true, chromiumSandbox: true,
         executablePath: process.env.CHROMIUM_PATH, args: ['--host-resolver-rules=MAP * ~NOTFOUND', '--disable-background-networking']});
     try {
-        if (process.argv.includes('--native-startup')) await verifyStartup(browser, source, fixtureAccount, true);
+        if (framedGamepad || process.argv.includes('--native-startup')) await verifyStartup(browser, source, fixtureAccount, true);
         else {
             await verifyStartup(browser, source, null);
             await verifyStartup(browser, source, fixtureAccount);

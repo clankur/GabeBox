@@ -12,7 +12,6 @@ function fixture({activationError = false, primary = false, findRequest, openRep
     let opens = 0;
     const renderer = {
         open() { opens++; stage = "composition"; },
-        openInCurrentView() { opens++; stage = "composition"; },
         viewId() { return stage === "closed" ? 0 : (primary ? 3 : 10); },
         status() {
             if (activationError) throw {number: -2147024703};
@@ -49,7 +48,7 @@ function fixture({activationError = false, primary = false, findRequest, openRep
     };
 }
 
-test("Steam can use the QR host's primary game view without a foreground switch", async () => {
+test("an already-current Steam view does not request another foreground switch", async () => {
     const app = fixture({primary: true});
     const ready = app.start({});
     await drain();
