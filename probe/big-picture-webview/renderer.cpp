@@ -36,6 +36,7 @@ CoreDispatcher dispatcher{nullptr};
 CoreApplicationView secondary{nullptr};
 int32_t viewId = 0;
 bool opening = false;
+bool closeRequested = false;
 hstring status = L"closed";
 std::deque<hstring> requests;
 
@@ -270,6 +271,7 @@ struct View : implements<View, IFrameworkView> {
 
     void Run() {
         try {
+            { slim_lock_guard lock(gate); if (closeRequested) return; }
             window.SizeChanged({this, &View::onSize});
             window.Closed({this, &View::onClosed});
             window.Activated({this, &View::onActivated});
@@ -301,6 +303,7 @@ struct View : implements<View, IFrameworkView> {
         dispatcher = nullptr;
         secondary = nullptr;
         opening = false;
+        closeRequested = false;
         requests.clear();
     }
 };
@@ -327,6 +330,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     void Open() {
         {
             slim_lock_guard lock(gate);
+            if (opening && closeRequested) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
             if (opening) return;
             opening = true;
             status = L"creating-view";
@@ -353,7 +357,10 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             if (view.web && isEntry(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
-    void Close() { onBrowserThread([](View& view) { view.close(); }); }
+    void Close() {
+        { slim_lock_guard lock(gate); closeRequested = opening; }
+        onBrowserThread([](View& view) { view.close(); });
+    }
 };
 }
 

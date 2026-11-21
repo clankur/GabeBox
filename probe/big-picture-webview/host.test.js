@@ -11,7 +11,7 @@ function fixture({activationError = false} = {}) {
     const reports = [], replies = [], incoming = [];
     const renderer = {
         open() { stage = "composition"; },
-        viewId() { return 10; },
+        viewId() { return stage === "closed" ? 0 : 10; },
         status() {
             if (activationError) throw {number: -2147024703};
             return stage;
@@ -39,7 +39,7 @@ function fixture({activationError = false} = {}) {
         setTimeout(callback) { timeout = callback; return 2; }, clearTimeout() {}
     });
     return {
-        start: broker => window.steamBigPictureHost.open(broker),
+        start: (broker, failure) => window.steamBigPictureHost.open(broker, failure),
         async advance(nextStage) { stage = nextStage; poll(); await drain(); },
         expire() { timeout(); },
         incoming, reports, replies
@@ -89,4 +89,20 @@ test("the uncredentialed smoke host never dispatches a broker operation", async 
     testApp.incoming.push('{"id":1,"method":"play","appId":10}');
     await testApp.advance("document-loaded");
     assert.deepEqual(testApp.replies, [{id: 1, error: "signed-out"}]);
+});
+
+test("a failed startup can be retried and a later process failure reaches the trusted shell", async () => {
+    const app = fixture();
+    const rejected = assert.rejects(app.start({}), /environment-error/);
+    await drain();
+    await app.advance("environment-error:-1");
+    await rejected;
+    let failure;
+    const retried = app.start({}, error => { failure = error; });
+    await drain();
+    await app.advance("gamepad-ready");
+    await retried;
+    await app.advance("process-error:3");
+    await drain();
+    assert.match(failure.message, /process-error:3/);
 });

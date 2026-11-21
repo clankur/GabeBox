@@ -2,24 +2,27 @@
     "use strict";
     var session;
 
-    function open(broker) {
+    function open(broker, onFailure) {
+        if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure); });
         if (session) return session.ready;
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file = storage.ApplicationData.current.localFolder.createFileAsync("big-picture-webview-report.txt",
             storage.CreationCollisionOption.replaceExisting);
         var report = Promise.resolve(file);
-        var messages = [], last = "";
-        var resolveReady, rejectReady, readinessTimer, settled = false;
+        var messages = [], last = "", servedGames;
+        var resolveReady, rejectReady, readinessTimer, settled = false, failed = false;
         var ready = new Promise(function (resolve, reject) {
             resolveReady = resolve; rejectReady = reject;
         });
-        function record(stage) {
-            if (stage === last) return report;
-            last = stage;
-            messages.push(stage);
-            if (messages.length > 24) messages.shift();
-            var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" + messages.join("\r\n") + "\r\n";
+        function record(stage, refresh) {
+            if (stage !== last) {
+                last = stage;
+                messages.push(stage);
+                if (messages.length > 24) messages.shift();
+            } else if (!refresh) return report;
+            var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
+                (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") + messages.join("\r\n") + "\r\n";
             report = report.then(function (f) {
                 return storage.FileIO.writeTextAsync(f, text).then(function () { return f; });
             });
@@ -27,23 +30,24 @@
         }
         var host, viewId, mainId, visible = false, activeSwitch, timer, playing = false;
         function show(to, from) {
-            return Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(to)).then(function () {
-                return views.ApplicationViewSwitcher.switchAsync(to, from);
-            });
+            function switchToView() { return views.ApplicationViewSwitcher.switchAsync(to, from); }
+            return Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(to)).then(switchToView, switchToView);
         }
         function resume() {
             playing = false;
-            if (!viewId || visible) return Promise.resolve();
+            if (failed || !viewId || visible) return Promise.resolve();
             if (!activeSwitch) activeSwitch = show(viewId, mainId).then(function () {
                 visible = true; activeSwitch = null;
             }, function (err) { activeSwitch = null; throw err; });
             return activeSwitch;
         }
         function respond(id, ok, value) {
+            if (failed) return;
             if (ok) host.reply(JSON.stringify({id: id, result: value}));
             else host.reply(JSON.stringify({id: id, error: value}));
         }
         function handle(raw) {
+            if (failed) return;
             var request;
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
@@ -58,7 +62,7 @@
                 return;
             }
             var id = request.id, appId = request.appId;
-            if (typeof id !== "number" || id <= 0 || id > 0x7fffffff || id % 1) return;
+            if (typeof id !== "number" || !isFinite(id) || id <= 0 || id > 0x7fffffff || id % 1) return;
             if (!broker) return respond(id, false, "signed-out");
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
@@ -77,23 +81,42 @@
                     }, function (err) { return resume().then(function () { throw err; }); });
                 };
             } else return respond(id, false, "unavailable");
-            Promise.resolve().then(action).then(function (result) { respond(id, true, result); },
-                function () { respond(id, false, "failed"); });
+            Promise.resolve().then(function () { if (!failed) return action(); }).then(function (result) {
+                respond(id, true, result);
+                if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
+                    servedGames = result.length;
+                    record(last, true);
+                }
+            }, function () { respond(id, false, "failed"); });
         }
         function fail(error, stage) {
+            if (failed) return;
+            failed = true;
             clearInterval(timer);
             clearTimeout(readinessTimer);
             var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
             stage = stage || "host-error:" + code;
-            record(stage);
+            record(stage).catch(function () {});
+            var wasReady = settled;
             if (!settled) { settled = true; rejectReady(new Error(stage)); }
             if (broker) {
                 var restore = activeSwitch || Promise.resolve();
-                restore.catch(function () {}).then(function () {
+                var current = session;
+                current.cleanup = restore.catch(function () {}).then(function () {
                     if (visible && viewId) return show(mainId, viewId);
                 }).catch(function () {}).then(function () {
-                    if (host) { try { host.close(); } catch (_) {} }
-                    session = null;
+                    if (!host) return;
+                    try { host.close(); } catch (_) { return; }
+                    // Closing the CoreWindow is dispatched to its UI thread.
+                    var deadline = Date.now() + 2500;
+                    function check() {
+                        if (!host.viewId() || Date.now() >= deadline) return;
+                        return new Promise(function (resolve) { setTimeout(resolve, 50); }).then(check);
+                    }
+                    return check();
+                }).catch(function () {}).then(function () {
+                    if (session === current) session = null;
+                    if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
                 });
             }
         }
