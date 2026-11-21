@@ -8,9 +8,10 @@ summary = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.
 
 class SlayConsoleTests(unittest.TestCase):
     def test_prelogger_failure_reports_type_and_preserves_private_output(self):
-        raw = (b'slay_console=helper-started\nError: Unable to access jarfile /private/file.jar\n'
+        raw = (b'slay_console=helper-started\nslay_console_jar=readable\nError: Unable to access jarfile /private/file.jar\n'
                b'java.lang.UnsatisfiedLinkError: path to private files\nslay_console=exit-1\n')
         result = summary(raw)
+        self.assertIn('slay_console_jar=readable', result)
         self.assertIn('slay_console_observed=jar-unavailable', result)
         self.assertIn('slay_logged_exception=java.lang.UnsatisfiedLinkError', result)
         self.assertIn('slay_console=exit-1', result)

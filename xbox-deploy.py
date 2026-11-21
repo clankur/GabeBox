@@ -205,9 +205,12 @@ def slay_console_summary(raw):
     result = re.findall(r'^slay_console=(?:helper-started|create-error|running-at-timeout|exit--?\d+)\r?$', text, re.M)
     if not result or result[0] != 'slay_console=helper-started':
         return 'slay_console=unrecognized-output'
+    result.extend(re.findall(r'^slay_console_jar=(?:readable|unavailable)\r?$', text, re.M))
+    result.extend(re.findall(r'^slay_console_capture=(?:truncated|read-error|incomplete)\r?$', text, re.M))
     stages = [('Unable to access jarfile', 'jar-unavailable'), ('Could not find or load main class', 'main-class'),
               ('Could not create the Java Virtual Machine', 'vm-creation'),
               ('Could not reserve enough space', 'vm-reservation'), ('DesktopLauncher', 'desktop-launcher'),
+              ('Access is denied', 'file-access-denied'), ('DisplayConfig.writeDisplayConfigFile', 'display-config-write'),
               ('Pixel format not accelerated', 'pixel-format'), ('Failed to create display', 'display-creation')]
     for marker, stage in stages:
         if marker in text:
