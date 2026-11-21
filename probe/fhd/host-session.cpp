@@ -26,7 +26,7 @@ SdlHostMailbox *box;
 HANDLE baseFile=INVALID_HANDLE_VALUE, child;
 alignas(HostedGpuReceiver) BYTE receiverStorage[sizeof(HostedGpuReceiver)];
 HostedGpuReceiver *receiver;
-volatile LONG stop, running, overlay, submitted, sharedCount, cpuCount, width, height, visible, activation, gpuError, hardError;
+volatile LONG generation, starting, stop, running, overlay, submitted, sharedCount, cpuCount, width, height, visible, activation, gpuError, hardError;
 const char * volatile gpuStage="idle";
 volatile LONG64 sampleUs, sampleFrames;
 UINT beginCount;
@@ -58,6 +58,8 @@ void releaseBase() {
 }
 HRESULT attach(const WCHAR *path,bool create) {
     if (running) return E_PENDING;
+    InterlockedIncrement(&generation);
+    starting=0;
     releaseBase();
     CREATEFILE2_EXTENDED_PARAMETERS flags{};flags.dwSize=sizeof(flags);
     if(create) {flags.dwFileFlags=FILE_FLAG_DELETE_ON_CLOSE;flags.dwFileAttributes=FILE_ATTRIBUTE_TEMPORARY;}
@@ -93,17 +95,36 @@ extern "C" HRESULT FhdAttach(HSTRING h) {
     const WCHAR *path=nullptr;HRESULT hr=validate(h,&path);if(FAILED(hr))return hr;
     AcquireSRWLockExclusive(&stateLock);hr=attach(path,false);ReleaseSRWLockExclusive(&stateLock);return hr;
 }
-extern "C" HRESULT FhdPrepareStart() {
+extern "C" HRESULT FhdPrepareStart(LONG *token) {
     AcquireSRWLockExclusive(&stateLock);
-    HRESULT hr=receiver?S_OK:E_UNEXPECTED;
-    if (SUCCEEDED(hr)) {InterlockedExchange(&overlay,0);InterlockedExchange(&stop,0);}
-    ReleaseSRWLockExclusive(&stateLock);return hr;
+    HRESULT hr = E_UNEXPECTED;
+    if (receiver && !stop) {
+        InterlockedExchange(&overlay,0);
+        hr = running || starting ? S_FALSE : S_OK;
+        starting = 1;
+        *token = generation;
+    }
+    ReleaseSRWLockExclusive(&stateLock);
+    return hr;
+}
+extern "C" bool FhdCurrentSession(LONG token) {
+    return token==InterlockedCompareExchange(&generation,0,0) && !InterlockedCompareExchange(&stop,0,0);
+}
+extern "C" void FhdViewFailed(LONG token,HRESULT hr) {
+    bool current=false;
+    AcquireSRWLockExclusive(&stateLock);
+    if (token==generation && !stop) {
+        hardError=hr;
+        current=true;
+    }
+    ReleaseSRWLockExclusive(&stateLock);
+    if (current) FhdRequestReturn();
 }
 extern "C" void FhdNativePad(BYTE v) {InterlockedExchange(&nativePad,v?1:0);}
-extern "C" bool FhdIsRunning() {return InterlockedCompareExchange(&running,0,0)!=0;}
 extern "C" void FhdCloseSession() {
     AcquireSRWLockExclusive(&stateLock);
     InterlockedExchange(&stop,1);
+    starting=0;
     if (!running) releaseBase();
     ReleaseSRWLockExclusive(&stateLock);
 }
@@ -137,9 +158,9 @@ extern "C" HRESULT FhdLaunchTest() {
 #endif
 }
 
-extern "C" HRESULT FhdHostedLoop(void *window,void *dispatcher,HRESULT (*pump)(void*),HRESULT (*save)(const WCHAR*)) {
+extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESULT (*pump)(void*),HRESULT (*save)(const WCHAR*)) {
     AcquireSRWLockExclusive(&stateLock);
-    if (!receiver || stop || running) {ReleaseSRWLockExclusive(&stateLock);return E_UNEXPECTED;}
+    if (token!=generation || !receiver || stop || running) {ReleaseSRWLockExclusive(&stateLock);return E_UNEXPECTED;}
     InterlockedExchange(&running,1);ReleaseSRWLockExclusive(&stateLock);
     ID3D11Device *device=nullptr; ID3D11DeviceContext *ctx=nullptr;ID3D11RenderTargetView *target=nullptr;IDXGISwapChain1 *chain=nullptr;
     HRESULT hr=FhdOpenTargets(window,save,&device,&ctx,&target,&chain);
@@ -203,7 +224,7 @@ extern "C" HRESULT FhdHostedLoop(void *window,void *dispatcher,HRESULT (*pump)(v
 #endif
     trace.close();
     if(wait)CloseHandle(wait);
-    if(FAILED(hr)){hardError=hr;FhdRequestReturn();}
-    AcquireSRWLockExclusive(&stateLock);releaseBase();FhdCloseTargets();running=0;ReleaseSRWLockExclusive(&stateLock);
+    if(FAILED(hr))hardError=hr;
+    AcquireSRWLockExclusive(&stateLock);releaseBase();FhdCloseTargets();starting=0;running=0;ReleaseSRWLockExclusive(&stateLock);
     Text t;report(t);save(t.bytes);return hr;
 }

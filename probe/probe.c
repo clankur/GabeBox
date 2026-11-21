@@ -51,7 +51,14 @@ typedef void *HSTRING;
 #define INVALID_HANDLE_VALUE ((HANDLE)(LONG_PTR)-1)
 #ifdef FHD_SECONDARY_VIEW
 #define REPORT_NAME L"native-report.txt"
+#ifdef FHD_HOSTED_VIEW
+extern HRESULT FhdSecondaryWindowReady(void *, LONG);
+extern void FhdViewFailed(LONG,HRESULT);
+__declspec(dllimport) void *WINAPI CoTaskMemAlloc(__SIZE_TYPE__);
+__declspec(dllimport) void WINAPI CoTaskMemFree(void *);
+#else
 extern HRESULT FhdSecondaryWindowReady(void *);
+#endif
 #else
 #define REPORT_NAME L"probe-report.txt"
 #endif
@@ -248,8 +255,17 @@ typedef struct ViewObject {
     IFrameworkView iface;
     volatile LONG refs;
     ICoreWindow *window;
+#ifdef FHD_HOSTED_VIEW
+    LONG token;
+#endif
 } ViewObject;
-typedef struct ViewSourceObject { IFrameworkViewSource iface; volatile LONG refs; } ViewSourceObject;
+typedef struct ViewSourceObject {
+    IFrameworkViewSource iface;
+    volatile LONG refs;
+#ifdef FHD_HOSTED_VIEW
+    LONG token;
+#endif
+} ViewSourceObject;
 static ViewObject g_view;
 static ViewSourceObject g_source;
 
@@ -303,6 +319,13 @@ static ULONG STDMETHODCALLTYPE ViewAddRef(void *self) {
 
 static ULONG STDMETHODCALLTYPE ViewRelease(void *self) {
     LONG remaining = InterlockedDecrement(&((ViewObject *)self)->refs);
+#ifdef FHD_HOSTED_VIEW
+    if (remaining == 0) {
+        ViewObject *view = (ViewObject *)self;
+        if (view->window) view->window->lpVtbl->Release(view->window);
+        CoTaskMemFree(view);
+    }
+#endif
     if (remaining < 0) {
         InterlockedIncrement(&((ViewObject *)self)->refs);
         return 0;
@@ -328,7 +351,9 @@ static HRESULT STDMETHODCALLTYPE ViewSetWindow(IFrameworkView *self, IInspectabl
     if (FAILED(hr)) return ReportStartupError(L"window-query-error", hr);
     if (view->window) view->window->lpVtbl->Release(view->window);
     view->window = coreWindow;
-#ifdef FHD_SECONDARY_VIEW
+#ifdef FHD_HOSTED_VIEW
+    return FhdSecondaryWindowReady(coreWindow,view->token);
+#elif defined(FHD_SECONDARY_VIEW)
     return FhdSecondaryWindowReady(coreWindow);
 #else
     return S_OK;
@@ -370,7 +395,7 @@ static HRESULT ProcessPendingFhd(void *object) {
 }
 #endif
 
-static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
+static HRESULT RunFrameworkView(IFrameworkView *self) {
     ViewObject *view = (ViewObject *)self;
     static const WCHAR className[] = L"Windows.ApplicationModel.Core.CoreApplication";
     HSTRING hClass = (HSTRING)0;
@@ -386,8 +411,8 @@ static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
     if (SUCCEEDED(hr)) {
 #ifdef FHD_GRAPHICS_CONTROL
 #ifdef FHD_HOSTED_VIEW
-        extern HRESULT FhdHostedLoop(void *, void *, HRESULT (*)(void *), HRESULT (*)(PCWSTR));
-        hr = FhdHostedLoop(view->window, dispatcher, ProcessPendingFhd, WriteReport);
+        extern HRESULT FhdHostedLoop(LONG,void *, void *, HRESULT (*)(void *), HRESULT (*)(PCWSTR));
+        hr = FhdHostedLoop(view->token, view->window, dispatcher, ProcessPendingFhd, WriteReport);
 #else
         hr = FhdPresent(view->window, dispatcher, ProcessPendingFhd, WriteReport);
 #endif
@@ -408,6 +433,14 @@ static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
         }
         WindowsDeleteString(hClass);
     }
+#endif
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
+    HRESULT hr = RunFrameworkView(self);
+#ifdef FHD_HOSTED_VIEW
+    if (FAILED(hr)) FhdViewFailed(((ViewObject *)self)->token,hr);
 #endif
     return hr;
 }
@@ -445,6 +478,9 @@ static ULONG STDMETHODCALLTYPE SourceAddRef(void *self) {
 
 static ULONG STDMETHODCALLTYPE SourceRelease(void *self) {
     LONG remaining = InterlockedDecrement(&((ViewSourceObject *)self)->refs);
+#ifdef FHD_HOSTED_VIEW
+    if (remaining == 0) CoTaskMemFree(self);
+#endif
     if (remaining < 0) {
         InterlockedIncrement(&((ViewSourceObject *)self)->refs);
         return 0;
@@ -455,9 +491,20 @@ static ULONG STDMETHODCALLTYPE SourceRelease(void *self) {
 static HRESULT STDMETHODCALLTYPE SourceCreateView(IFrameworkViewSource *self, IFrameworkView **view) {
     (void)self;
     if (!view) return E_POINTER;
+#ifdef FHD_HOSTED_VIEW
+    *view = (IFrameworkView*)0;
+    ViewObject *object = (ViewObject*)CoTaskMemAlloc(sizeof(ViewObject));
+    if (!object) return (HRESULT)0x8007000EL;
+    object->iface.lpVtbl = &g_view_vtbl;
+    object->refs = 1;
+    object->window = (ICoreWindow*)0;
+    object->token = ((ViewSourceObject*)self)->token;
+    *view = &object->iface;
+#else
     g_view.iface.lpVtbl = &g_view_vtbl;
     InterlockedIncrement(&g_view.refs);
     *view = &g_view.iface;
+#endif
     return S_OK;
 }
 
@@ -466,7 +513,18 @@ static const IFrameworkViewSourceVtbl g_source_vtbl = {
     SourceCreateView
 };
 
-#ifdef FHD_SECONDARY_VIEW
+#ifdef FHD_HOSTED_VIEW
+void *FhdNativeViewSource(LONG token) {
+    ViewSourceObject *source = (ViewSourceObject *)CoTaskMemAlloc(sizeof(ViewSourceObject));
+    if (!source) return (void*)0;
+    source->iface.lpVtbl = &g_source_vtbl;
+    source->refs = 1;
+    source->token = token;
+    GetSystemTimeAsFileTime(&g_runTime);
+    g_processId = GetCurrentProcessId();
+    return &source->iface;
+}
+#elif defined(FHD_SECONDARY_VIEW)
 void *FhdNativeViewSource(void) {
     g_view.iface.lpVtbl = &g_view_vtbl;
     g_view.refs = 1;

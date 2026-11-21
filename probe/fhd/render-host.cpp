@@ -6,13 +6,14 @@
 #include <winrt/Fhd.Native.h>
 #endif
 extern "C" HRESULT FhdAttach(HSTRING);
-extern "C" HRESULT FhdPrepareStart();
-extern "C" bool FhdIsRunning();
+extern "C" HRESULT FhdPrepareStart(LONG*);
+extern "C" bool FhdCurrentSession(LONG);
+extern "C" HRESULT FhdRequestReturn();
 extern "C" HRESULT FhdSessionStatus(HSTRING *);
 extern "C" void FhdCloseSession();
 extern "C" HRESULT FhdLaunchTest();
 extern "C" void FhdNativePad(BYTE);
-extern "C" void *FhdNativeViewSource();
+extern "C" void *FhdNativeViewSource(LONG);
 namespace {
 const WCHAR klass[]=L"Fhd.Native.RenderHost";
 #ifdef FHD_SDK_METADATA
@@ -37,6 +38,7 @@ struct Switcher : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE Standalone2(LONG,int,IInspectable**)=0;
     virtual HRESULT STDMETHODCALLTYPE Standalone3(LONG,int,LONG,int,IInspectable**)=0;
     virtual HRESULT STDMETHODCALLTYPE Switch(LONG,IInspectable**)=0;
+    virtual HRESULT STDMETHODCALLTYPE SwitchFrom(LONG,LONG,IInspectable**)=0;
 };
 struct Statics : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE Open(HSTRING)=0;
@@ -77,16 +79,21 @@ public:
     HRESULT STDMETHODCALLTYPE ActivateInstance(IInspectable **out) override {*out=nullptr;return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE Open(HSTRING p) override {return FhdAttach(p);}
     HRESULT STDMETHODCALLTYPE Start() override {
-        HRESULT hr=FhdPrepareStart();if (FAILED(hr)||FhdIsRunning())return hr;
+        LONG token=0;HRESULT hr=FhdPrepareStart(&token);if (hr!=S_OK)return hr;
         CoreStatics *core=nullptr;IInspectable *window=nullptr;LONG main=0;
         hr=get(L"Windows.UI.Core.CoreWindow",iidCoreStatic,&core);
         if(SUCCEEDED(hr)){hr=core->Current(&window);core->Release();}
         if(SUCCEEDED(hr)&&window){hr=identify(window,main);window->Release();}
-        if(FAILED(hr)||!main)return FAILED(hr)?hr:E_POINTER;
+        if(FAILED(hr)||!main){FhdCloseSession();return FAILED(hr)?hr:E_POINTER;}
         InterlockedExchange(&primaryId,main);InterlockedExchange(&secondaryId,0);InterlockedExchange(&windowError,0);
         if(secondaryView){secondaryView->Release();secondaryView=nullptr;}
         Immersive *app=nullptr;hr=get(L"Windows.ApplicationModel.Core.CoreApplication",iidImmersive,&app);
-        if(SUCCEEDED(hr)){hr=app->CreateNewView((IInspectable*)FhdNativeViewSource(),&secondaryView);app->Release();}
+        if(SUCCEEDED(hr)){
+            IInspectable *source=static_cast<IInspectable*>(FhdNativeViewSource(token));
+            hr=source ? app->CreateNewView(source,&secondaryView) : E_OUTOFMEMORY;
+            if(source)source->Release();
+            app->Release();
+        }
         if(FAILED(hr))FhdCloseSession();
         return hr;
     }
@@ -94,12 +101,13 @@ public:
         if(!v)return E_POINTER;*v=InterlockedCompareExchange(&secondaryId,0,0);return InterlockedCompareExchange(&windowError,0,0);
     }
     HRESULT STDMETHODCALLTYPE Status(HSTRING *s) override {return FhdSessionStatus(s);}
-    HRESULT STDMETHODCALLTYPE Close() override {FhdCloseSession();return S_OK;}
+    HRESULT STDMETHODCALLTYPE Close() override {FhdCloseSession();FhdRequestReturn();return S_OK;}
     HRESULT STDMETHODCALLTYPE LaunchControl() override {return FhdLaunchTest();}
     HRESULT STDMETHODCALLTYPE SetNativeGamepad(BYTE b) override {FhdNativePad(b);return S_OK;}
 };
 }
-extern "C" HRESULT FhdSecondaryWindowReady(void *window) {
+extern "C" HRESULT FhdSecondaryWindowReady(void *window,LONG token) {
+    if(!FhdCurrentSession(token))return E_ABORT;
     LONG id=0;HRESULT hr=identify((IInspectable*)window,id);
     if(FAILED(hr))InterlockedExchange(&windowError,hr);else InterlockedExchange(&secondaryId,id);
     return hr;
@@ -109,7 +117,18 @@ extern "C" LONG FhdReadActivation(void *window) {
 }
 extern "C" HRESULT FhdRequestReturn() {
     Switcher *s=nullptr;HRESULT hr=get(L"Windows.UI.ViewManagement.ApplicationViewSwitcher",iidSwitch,&s);
-    if(SUCCEEDED(hr)){IInspectable *action=nullptr;hr=s->Switch(primaryId,&action);s->Release();if(action)action->Release();}return hr;
+    if(SUCCEEDED(hr)){
+        IInspectable *action=nullptr;
+        LONG main=InterlockedCompareExchange(&primaryId,0,0), secondary=InterlockedCompareExchange(&secondaryId,0,0);
+        hr=main && secondary ? s->SwitchFrom(main,secondary,&action) : S_FALSE;
+        if(FAILED(hr)){
+            if(action){action->Release();action=nullptr;}
+            hr=s->Switch(main,&action);
+        }
+        s->Release();
+        if(action)action->Release();
+    }
+    return hr;
 }
 extern "C" HRESULT WINAPI DllGetActivationFactory(HSTRING h,IActivationFactory **out) {
     if(!out)return E_POINTER;*out=nullptr;UINT len=0;const WCHAR *s=WindowsGetStringRawBuffer(h,&len);
