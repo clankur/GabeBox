@@ -69,24 +69,34 @@ bool fail(Producer *p, const char *stage, HRESULT code) {
     }
     return false;
 }
-SdlGpuMailbox *open_mailbox() {
+SdlGpuMailbox *open_mailbox(int *retry) {
     WCHAR path[1024];
     DWORD n = GetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", path, ARRAYSIZE(path));
     if (!n || n + 5 > ARRAYSIZE(path)) return nullptr;
     SDL_memcpy(path + n, L".gpu", 5 * sizeof(WCHAR));
     HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return nullptr;
+    if (file == INVALID_HANDLE_VALUE) {
+        DWORD reason = GetLastError();
+        *retry = reason == ERROR_FILE_NOT_FOUND || reason == ERROR_PATH_NOT_FOUND || reason == ERROR_SHARING_VIOLATION;
+        return nullptr;
+    }
     LARGE_INTEGER size = {};
-    HANDLE mapping = GetFileSizeEx(file, &size) && size.QuadPart == sizeof(SdlGpuMailbox)
+    bool sized = GetFileSizeEx(file, &size) != 0;
+    *retry = sized && !size.QuadPart; // presenter has just created the file
+    HANDLE mapping = sized && size.QuadPart == sizeof(SdlGpuMailbox)
         ? CreateFileMappingFromApp(file, nullptr, PAGE_READWRITE, 0, nullptr) : nullptr;
     CloseHandle(file);
     if (!mapping) return nullptr;
     auto *box = static_cast<SdlGpuMailbox *>(MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, sizeof(SdlGpuMailbox)));
     CloseHandle(mapping);
-    if (box && InterlockedCompareExchange(&box->magic, 0, 0) != SDL_GPU_MAGIC) {
-        UnmapViewOfFile(box);
-        return nullptr;
+    if (box) {
+        LONG magic = InterlockedCompareExchange(&box->magic, 0, 0);
+        if (magic != SDL_GPU_MAGIC) {
+            *retry = magic == 0;
+            UnmapViewOfFile(box);
+            return nullptr;
+        }
     }
     return box;
 }
@@ -209,8 +219,9 @@ extern "C" void XboxSdlDestroyGpu(void *state) {
     if (state) { static_cast<Producer *>(state)->~Producer(); SDL_free(state); }
 }
 
-extern "C" void *XboxSdlCreateGpu(void *egl, void *display, void *context, void *flush, unsigned color, int width, int height) {
-    auto *box = open_mailbox();
+extern "C" void *XboxSdlCreateGpu(void *egl, void *display, void *context, void *flush, unsigned color, int width, int height, int *retry) {
+    *retry = 0;
+    auto *box = open_mailbox(retry);
     if (!box) return nullptr;
     void *storage = SDL_malloc(sizeof(Producer));
     if (!storage) { UnmapViewOfFile(box); return nullptr; }

@@ -17,6 +17,7 @@ static Clear clear;
 static Scissor scissor;
 static HANDLE log_file = INVALID_HANDLE_VALUE;
 static SdlGpuMailbox *exchange;
+static WCHAR exchange_path[2048];
 
 static void record(const char *line)
 {
@@ -32,16 +33,7 @@ static int configure(void)
     log_file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     SDL_wcslcpy(path + n, L".gpu", ARRAYSIZE(path) - n);
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file != INVALID_HANDLE_VALUE) {
-        HANDLE mapping = CreateFileMappingFromApp(file, NULL, PAGE_READONLY, 0, NULL);
-        if (mapping) {
-            exchange = (SdlGpuMailbox *)MapViewOfFileFromApp(mapping, FILE_MAP_READ, 0, sizeof(SdlGpuMailbox));
-            CloseHandle(mapping);
-        }
-        CloseHandle(file);
-    }
+    SDL_wcslcpy(exchange_path, path, ARRAYSIZE(exchange_path));
     n = GetModuleFileNameW(NULL, path, ARRAYSIZE(path));
     if (!n || n >= ARRAYSIZE(path)) return 0;
     filename = path + n;
@@ -56,6 +48,19 @@ static int configure(void)
            SetEnvironmentVariableW(L"SDL_VIDEODRIVER", L"offscreen") &&
            SetEnvironmentVariableW(L"SDL_VIDEO_WIN_D3DCOMPILER", L"none") &&
            SetEnvironmentVariableW(L"XBOX_SDL_SURFACELESS", L"1");
+}
+static void open_samples(void)
+{
+    HANDLE file = CreateFileW(exchange_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE) {
+        HANDLE mapping = CreateFileMappingFromApp(file, NULL, PAGE_READONLY, 0, NULL);
+        if (mapping) {
+            exchange = (SdlGpuMailbox *)MapViewOfFileFromApp(mapping, FILE_MAP_READ, 0, sizeof(SdlGpuMailbox));
+            CloseHandle(mapping);
+        }
+        CloseHandle(file);
+    }
 }
 static void fill(int x, int y, int w, int h, float r, float g, float b)
 {
@@ -83,6 +88,7 @@ static void sample(const char *phase, Uint64 elapsed, Uint64 freq, unsigned rend
     char line[240];
     LONG generation = 0, accepted = 0, active = 0;
     LONG64 sequence = 0;
+    if (!exchange) open_samples();
     if (exchange && exchange->magic == SDL_GPU_MAGIC) {
         generation = exchange->generation;
         accepted = exchange->accepted_generation;

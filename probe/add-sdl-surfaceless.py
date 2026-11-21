@@ -92,6 +92,8 @@ def add_surfaceless(tree):
     void *xbox_get_integer, *xbox_pixel_store, *xbox_read_pixels;
     void *xbox_bind_framebuffer, *xbox_bind_buffer;
     void *xbox_gpu;
+    int xbox_gpu_retry;
+    Uint64 xbox_gpu_retry_after;
     SDL_bool xbox_pack_invert;
     unsigned xbox_readback_samples;
     Uint64 xbox_readback_ticks;
