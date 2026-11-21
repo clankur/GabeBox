@@ -10,6 +10,7 @@ function fixture() {
     const calls = [];
     const session = {
         current: () => true,
+        steamId: () => "76561197960268001",
         busy: () => false,
         games: [{ id: 12, name: "A", game: true, privateData: "internal" }, { id: 23, name: "B", game: true }],
         installedGames: async () => new Set([12]),
@@ -116,7 +117,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 },
                 Web: { Http: { Filters: { HttpBaseProtocolFilter: class {} }, HttpClient: class { close() {} } } }
             },
-            XboxProbe: { Native: { ProbeRunner: { resumeSteamSignIn: () =>
+            XboxProbe: { Native: { ProbeRunner: { steamSessionSteamId: () => "76561197960268001", resumeSteamSignIn: () =>
                 Operation.resolve(JSON.stringify([{ id: 12, name: "A", game: true }])) } } }
         };
         vm.runInNewContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), globals);
@@ -137,5 +138,32 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             assert.equal(statuses[0].hidden, true);
             assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
         }
+    }
+});
+
+test("session only exposes a validated public SteamID from current native handles", async () => {
+    const { session, broker } = fixture();
+    session.steamId = () => "76561197960268001";
+    assert.deepEqual(JSON.parse(JSON.stringify(await broker.session())), {steamId: "76561197960268001"});
+    for (const value of [undefined, null, {steamId: "76561197960268001", secret: "private"}, "private", "18446744073709551616"]) {
+        session.steamId = () => value;
+        await assert.rejects(broker.session(), /session-unavailable/);
+    }
+    session.steamId = () => "";
+    assert.equal((await broker.session()).steamId, null);
+    session.steamId = () => assert.fail("revoked native query");
+    session.current = () => false;
+    assert.equal((await broker.session()).steamId, null);
+});
+
+test("a changed native account or dropped connection revokes the prior library and its actions", async () => {
+    const { session, broker, calls } = fixture();
+    for (const id of ["", "76561197960268999"]) {
+        session.steamId = () => id;
+        assert.equal((await broker.session()).steamId, null);
+        await assert.rejects(broker.library(), /signed-out/);
+        assert.equal(await broker.play(12), "signed-out");
+        assert.equal(await broker.install(23), "signed-out");
+        assert.deepEqual(calls, []);
     }
 });

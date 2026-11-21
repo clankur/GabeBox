@@ -28,9 +28,9 @@
         if (pending.size >= 16) return Promise.reject(new Error('Steam broker is busy'));
         const id = requestId = requestId % 0x7fffffff + 1;
         return new Promise((resolve, reject) => {
-            const timeout = method === 'library' ? setTimeout(() => {
+            const timeout = method !== 'play' && method !== 'install' ? setTimeout(() => {
                 pending.delete(id);
-                reject(new Error('Steam library broker timed out'));
+                reject(new Error('Steam broker timed out'));
             }, 60000) : undefined;
             pending.set(id, {resolve, reject, timeout});
             try {
@@ -79,6 +79,10 @@
     }
 
     window.SteamClient = {Apps: {
+        // This package has no Workshop event source. The pinned WorkshopStore
+        // accepts an absent subscription handle and does not consume it further.
+        RegisterForWorkshopChanges() { return undefined; },
+        RegisterForWorkshopItemInstalled() { return undefined; },
         RegisterForAppOverviewChanges(callback) {
             if (typeof callback !== 'function') throw new TypeError('Expected an overview listener');
             const subscription = {callback, ids: new Set()};
@@ -86,15 +90,30 @@
             refresh().catch(error => console.error('Steam library unavailable', error.message));
             return {unregister() { listeners.delete(subscription); }};
         },
-        async RunGame(gameId, launchOptions, launchOptionIndex) {
+        async RunGame(gameId, launchOptions, launchOptionIndex, source) {
             const appId = Number(gameId);
             if (!validId(appId) || String(appId) !== String(gameId) || launchOptions !== '' || launchOptionIndex !== -1) {
                 throw new Error('Unsupported Steam launch request');
             }
-            const result = await send('play', appId);
+            const result = await runAction(appId, source, () => send('play', appId));
             if (result !== 'presented' && result !== 'window-ready') throw new Error(String(result || 'Launch unconfirmed'));
         }
     }};
+    const client = window.SteamClient;
+    const runAction = installXboxGameActions(client);
+    client.System = {async IsSteamInTournamentMode() {
+        const mode = await send('system-mode');
+        if (typeof mode !== 'boolean') throw new Error('Xbox presentation mode unavailable');
+        return mode;
+    }};
+    installXboxWindow(client, send);
+    installXboxUser(client, send);
+    installXboxInput(client, send);
+    installXboxLifecycle(client);
+    installXboxMessaging(client);
+    installXboxCoreStartup(client, send);
+    installXboxServices(client, send);
+    installXboxUrls(client);
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden && listeners.size) refresh().catch(error => console.error('Steam library unavailable', error.message));
     });

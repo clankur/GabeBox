@@ -51,14 +51,16 @@ def release_layout(base, destination, version):
     manifest.write_bytes(original.replace(b'Version="1.0.230.0"', f'Version="{version}"'.encode(), 1))
 
 
-def prepare_layout(base, host_artifact, layout, version, archive_cache=None):
+def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum):
     if layout.exists():
         raise FileExistsError(f"Use a new layout directory: {layout}")
     with TemporaryDirectory(dir=layout.parent) as temp:
         staged = Path(temp) / "layout"
         staged.mkdir()
         release_layout(base, staged, version)
-        for name in ("steam-signin.js", "steam-signin.css", "steam-game-launch.js", "steam-sdl-host.js",
+        stage_session = runpy.run_path(str(PROBE / "big-picture-bridge/stage-session.py"))["stage_session_component"]
+        stage_session(staged, session_artifact, session_checksum)
+        for name in ("xbox-system-mode.js", "steam-signin.js", "steam-signin.css", "steam-game-launch.js", "steam-sdl-host.js",
                      "steam-sdl-native-view.js", "steam-big-picture-broker.js", "xcom-dos.js"):
             shutil.copyfile(PROBE / "signin" / name, staged / name)
         shutil.copyfile(staged / "xcom-dos.js", staged / "xcom-runtime/xcom-dos.js")
@@ -72,13 +74,15 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache=None):
         if original.count(marker) != 1 or original.count(html) != 1:
             raise ValueError("Unexpected Steam sign-in entry page in the release.")
         original = original.replace(html, b'<html lang="en" data-steam-big-picture="true">')
-        page.write_bytes(original.replace(marker, b'<script src="steam-big-picture-broker.js"></script>\n'
+        page.write_bytes(original.replace(marker, b'<script src="xbox-system-mode.js"></script>\n'
+                                          b'    <script src="steam-big-picture-broker.js"></script>\n'
                                           b'    <script src="big-picture-webview.js"></script>\n    ' + marker))
 
-        stage_client(staged / "ValveClient", archive_cache, ui_only=True)
+        stage_client(staged / "ValveClient", archive_cache, ui_only=True, include_url_catalog=True)
         shell = staged / "ValveClient/steamui/xbox"
         shell.mkdir()
-        shutil.copyfile(PROBE / "big-picture-bridge/bridge.js", shell / "bridge.js")
+        bundle = runpy.run_path(str(PROBE / "big-picture-bridge/bundle.py"))["bundle"]
+        (shell / "bridge.js").write_text(bundle(staged / "ValveClient/public/url_list.txt"), encoding="utf-8")
         staged.rename(layout)
 
 
@@ -89,5 +93,8 @@ if __name__ == "__main__":
     parser.add_argument("layout", type=Path, help="new output directory")
     parser.add_argument("--version", required=True)
     parser.add_argument("--archive-cache", type=Path)
+    parser.add_argument("--session-artifact", type=Path, required=True)
+    parser.add_argument("--session-checksum", required=True, help="SHA256 of the Windows build SHA256SUMS file")
     args = parser.parse_args()
-    prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache)
+    prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
+                   args.session_artifact, args.session_checksum)

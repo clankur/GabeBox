@@ -4,10 +4,29 @@ var steamBigPictureBroker = (function () {
 
     function create(session) {
         var acting = false;
+        function nativeId() {
+            if (!session.current()) return null;
+            var id = session.steamId();
+            if (id === "") return null;
+            if (typeof id !== "string" || !/^[1-9][0-9]{16,19}$/.test(id) ||
+                (id.length === 20 && id > "18446744073709551615")) throw new Error("session-unavailable");
+            return id;
+        }
+        // The owned games belong to the account active when this page acquired
+        // its catalog. A later account must acquire its own catalog and broker.
+        var owner;
+        try { owner = nativeId(); } catch (_) { owner = null; }
+        function identity() {
+            var id = nativeId();
+            return { steamId: owner && owner === id ? id : null };
+        }
+        function active() {
+            try { return !!identity().steamId; } catch (_) { return false; }
+        }
         function library() {
-            if (!session.current()) return Promise.reject(new Error("signed-out"));
+            if (!active()) return Promise.reject(new Error("signed-out"));
             return Promise.resolve(session.installedGames()).then(function (installed) {
-                if (!session.current()) throw new Error("signed-out");
+                if (!active()) throw new Error("signed-out");
                 return session.games.map(function (game) {
                     var local = installed.has(game.id);
                     return { id: game.id, name: game.name, installed: local, canPlay: local };
@@ -15,7 +34,7 @@ var steamBigPictureBroker = (function () {
             });
         }
         function action(appId, install) {
-            if (!session.current()) return Promise.resolve("signed-out");
+            if (!active()) return Promise.resolve("signed-out");
             if (typeof appId !== "number" || appId !== Math.floor(appId) || appId < 1 || appId > 0xffffff) {
                 return Promise.resolve("invalid-app");
             }
@@ -26,7 +45,7 @@ var steamBigPictureBroker = (function () {
             return Promise.resolve().then(function () {
                 return session.isInstalled(game);
             }).then(function (installed) {
-                if (!session.current()) return "signed-out";
+                if (!active()) return "signed-out";
                 if (session.busy()) return "busy";
                 if (install) return installed ? "already-installed" : session.install(game);
                 return installed ? session.play(game) : "not-installed";
@@ -39,6 +58,7 @@ var steamBigPictureBroker = (function () {
             });
         }
         return {
+            session: function () { return Promise.resolve().then(identity); },
             library: library,
             play: function (appId) { return action(appId, false); },
             install: function (appId) { return action(appId, true); }

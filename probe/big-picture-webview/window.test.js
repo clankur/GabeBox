@@ -99,3 +99,14 @@ test('focus observers report the foreground application view and clear it when t
     assert.deepEqual(modes, [4]);
     assert.deepEqual(overlays, [[0,0],[0,0]]);
 });
+
+test('opaque and hidden composition affect only the actual gamepad controller', () => {
+    const f = fixture();
+    f.window.open('about:blank?createflags=2', 'SP BPM_uid3804');
+    const child = f.popup.SteamClient.Window;
+    child.SetComposition(3, [769], 0);
+    child.SetComposition(0, [769], 0);
+    assert.throws(() => child.SetComposition(2, [769, 646570], 0), /cannot composite/);
+    assert.throws(() => child.SetComposition(3, [769], 9999), /cannot composite/);
+    assert.deepEqual(f.messages, ['xbox-window-show', 'xbox-window-hide']);
+});

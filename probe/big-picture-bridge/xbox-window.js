@@ -115,6 +115,13 @@ function installXboxWindow(client, send) {
             IsWindowMinimized: async () => !state.visible || (popup && !state.popupVisible)
         };
         if (popup) Object.assign(Window, {
+            SetComposition(mode, appQueue, targetWindow) {
+                // Valve's opaque and hidden modes map to the actual Xbox child
+                // controller. Other modes require blending with a game window.
+                if (!Array.isArray(appQueue) || !Number.isSafeInteger(targetWindow) || targetWindow !== 0 ||
+                    (mode !== 0 && mode !== 3)) throw new Error('Xbox cannot composite another game window');
+                command(mode === 3 ? 'xbox-window-show' : 'xbox-window-hide');
+            },
             ShowWindow() { command('xbox-window-show'); },
             HideWindow() { command('xbox-window-hide'); },
             Close() { target.close(); },

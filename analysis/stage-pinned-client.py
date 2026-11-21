@@ -36,7 +36,7 @@ def extract_archive(archive, destination, ui_only=False):
                     shutil.copyfileobj(source, output)
 
 
-def stage_client(destination, archive_cache=None, ui_only=False):
+def stage_client(destination, archive_cache=None, ui_only=False, include_url_catalog=False):
     if destination.exists():
         raise FileExistsError(f"Use a new client directory: {destination}")
     pinned = json.loads(RELEASE.read_text())
@@ -52,8 +52,9 @@ def stage_client(destination, archive_cache=None, ui_only=False):
     if not archives or len(archives) != manifest.count(b'"file"'):
         raise ValueError("Incomplete archive list in the pinned manifest.")
     if ui_only:
-        archives = [entry for entry in archives if entry[0].split(b".", 1)[0] in UI_ARCHIVES]
-        if sorted(entry[0].split(b".", 1)[0] for entry in archives) != sorted(UI_ARCHIVES):
+        selected = UI_ARCHIVES | ({b"public_all"} if include_url_catalog else set())
+        archives = [entry for entry in archives if entry[0].split(b".", 1)[0] in selected]
+        if sorted(entry[0].split(b".", 1)[0] for entry in archives) != sorted(selected):
             raise ValueError("Incomplete or duplicated steamui archive set in the pinned manifest.")
     else:
         # Use the explicit worldwide bootstrapper, once.
@@ -81,7 +82,13 @@ def stage_client(destination, archive_cache=None, ui_only=False):
         staged.mkdir()
         with ThreadPoolExecutor(max_workers=6) as executor:
             for archive in executor.map(fetch, archives):
-                extract_archive(archive, staged, ui_only)
+                if ui_only and archive.name.startswith("public_all.zip."):
+                    catalog = staged / "public/url_list.txt"
+                    catalog.parent.mkdir()
+                    with ZipFile(archive) as package:
+                        catalog.write_bytes(package.read("public/url_list.txt"))
+                else:
+                    extract_archive(archive, staged, ui_only)
         if not ui_only:
             cache = staged / "package"
             cache.mkdir(exist_ok=True)

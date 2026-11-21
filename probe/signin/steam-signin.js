@@ -383,6 +383,7 @@
         }
         var broker = steamBigPictureBroker.create({
             current: currentSession, games: games, installedGames: installedGames,
+            steamId: function () { return XboxProbe.Native.ProbeRunner.steamSessionSteamId(); },
             isInstalled: function (game) {
                 return readLocalInstall(game).then(function (local) {
                     if (currentSession()) game.installed = local;
