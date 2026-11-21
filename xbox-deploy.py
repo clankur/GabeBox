@@ -20,7 +20,8 @@ from uuid import uuid4
 
 
 PACKAGE_API = '/api/app/packagemanager'
-SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256')
+SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
+                 'XBOX_PORTAL_PASSWORD')
 
 
 def load_settings():
@@ -80,7 +81,8 @@ class DevicePortal:
             data = response.read()
             if response.status == 401:
                 raise ValueError('Xbox Device Portal rejected the username or password.')
-            if response.status not in (200, 204):
+            accepted_statuses = (200, 202, 204) if method == 'POST' else (200, 204)
+            if response.status not in accepted_statuses:
                 details = data.decode('utf-8', errors='replace')[:1000].strip()
                 raise ValueError(f'{method} {path} returned HTTP {response.status}. {details}'.strip())
             return response.status, data
@@ -163,9 +165,11 @@ def main():
 
     if not hmac.compare_digest(portal.request(), fingerprint):
         raise ValueError('Xbox portal certificate does not match XBOX_PORTAL_CERT_SHA256.')
-    if not sys.stdin.isatty():
-        raise ValueError('Run this command in a terminal to enter your Device Portal password.')
-    password = getpass.getpass('Xbox Device Portal password: ')
+    password = settings.get('XBOX_PORTAL_PASSWORD')
+    if not password:
+        if not sys.stdin.isatty():
+            raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
+        password = getpass.getpass('Xbox Device Portal password: ')
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'deploy':
         portal.upload(files)
