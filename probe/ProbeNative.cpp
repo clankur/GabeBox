@@ -748,19 +748,25 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     JsonArray library;
     auto appType = reinterpret_cast<SteamAppValue>(appsMethods[10]);
     constexpr std::uint32_t gameType = 1;
+    constexpr std::uint32_t dlcType = 32;
+    size_t namedCount = 0;
     for (size_t i = 0; i < apps.size(); ++i) {
         if (names[i].empty()) continue;
+        ++namedCount;
+        const auto type = appType(clientApps, apps[i]);
+        if (type & dlcType) continue;
         JsonObject entry;
         entry.SetNamedValue(L"id", JsonValue::CreateNumberValue(apps[i]));
         entry.SetNamedValue(L"name", JsonValue::CreateStringValue(names[i]));
         entry.SetNamedValue(L"type", JsonValue::CreateStringValue(ReadSteamAppField(read, clientApps, apps[i], "type")));
-        const bool game = appType(clientApps, apps[i]) == gameType;
+        const bool game = type == gameType;
         entry.SetNamedValue(L"game", JsonValue::CreateBooleanValue(game));
         if (game) handles.games.push_back(apps[i]);
         library.Append(entry);
     }
-    report += L"steam_library_named=" + std::to_wstring(library.Size()) + L"\r\n";
-    if (!library.Size()) {
+    report += L"steam_library_named=" + std::to_wstring(namedCount) + L"\r\n";
+    report += L"steam_library_visible=" + std::to_wstring(library.Size()) + L"\r\n";
+    if (!namedCount) {
         report += L"steam_library_metadata=missing\r\n";
         co_await save(complete);
         co_return winrt::hstring{};
