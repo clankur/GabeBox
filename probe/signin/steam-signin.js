@@ -211,8 +211,11 @@
         entries.forEach(function (entry) {
             if (filter && entry.name.toLowerCase().indexOf(filter) < 0) return;
             var button = document.createElement("button");
+            var name = document.createElement("span");
             button.type = "button";
-            button.textContent = entry.name;
+            name.className = "tile-name";
+            name.textContent = entry.name;
+            button.appendChild(name);
             button.entry = entry;
             libraryArt.decorate(button, entry);
             button.setAttribute("aria-pressed", "false");
@@ -616,7 +619,11 @@
         if (event.target.entry) select(event.target);
     });
     list.addEventListener("click", function (event) {
-        if (event.target.entry) select(event.target);
+        var button = event.target.entry ? event.target : event.target.parentElement;
+        if (!button || !button.entry) return;
+        select(button);
+        var action = play.hidden ? download : play;
+        if (!action.hidden && !action.disabled) action.focus();
     });
     var originalInputMode = navigator.gamepadInputEmulation;
     // EdgeHTML can emit arrow keys, Navigation keys, or gamepad virtual keys.
@@ -649,9 +656,9 @@
         } else if (target === signOut) {
             if (direction === "down" || direction === "left") next = search;
         } else if (target.entry) {
-            if (direction === "up") next = target.previousElementSibling || search;
-            if (direction === "down") next = target.nextElementSibling;
-            if (direction === "right") next = play.hidden ? download : play;
+            next = libraryNavigation.adjacent(list.children, target, direction);
+            if (!next && direction === "up") next = search;
+            if (!next && direction === "right") next = play.hidden ? download : play;
         } else if (target === play || target === download) {
             if (direction === "left") next = selected;
             if (direction === "up") next = signOut;
