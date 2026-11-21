@@ -63,7 +63,7 @@ def adapt_pinned_keyboard(binary, objdump):
 
 
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
-                   launch_app_id=None, probe_java_runtime=False, repeat_launch=False):
+                   launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -101,8 +101,12 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             updated = updated.replace(b'StartPage="index.html"', b'StartPage="steam-signin.html"')
         (layout / 'AppxManifest.xml').write_bytes(updated)
         if launch_app_id is not None:
-            config = f'{launch_app_id}\nrepeat\n' if repeat_launch else str(launch_app_id)
-            (layout / 'steam-launch-app.txt').write_text(config, encoding='ascii')
+            config = [str(launch_app_id)]
+            if repeat_launch:
+                config.append('repeat')
+            if install_before_launch:
+                config.append('install')
+            (layout / 'steam-launch-app.txt').write_text('\n'.join(config), encoding='ascii')
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
 
@@ -138,6 +142,8 @@ def main():
     parser.add_argument('--launch-app-id', type=int, help='test one installed Steam game after sign-in')
     parser.add_argument('--repeat-launch', action='store_true',
                         help='run the launch test again each time the probe starts from a fresh process')
+    parser.add_argument('--install-before-launch', action='store_true',
+                        help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
     args = parser.parse_args()
@@ -151,12 +157,15 @@ def main():
         parser.error('--probe-java-runtime requires --launch-app-id 646570')
     if args.repeat_launch and args.launch_app_id is None:
         parser.error('--repeat-launch requires --launch-app-id')
+    if args.install_before_launch and args.launch_app_id is None:
+        parser.error('--install-before-launch requires --launch-app-id')
     if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', args.version):
         parser.error('--version must have four integer components')
     if any(int(part) > 65535 for part in args.version.split('.')):
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
-                   args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch)
+                   args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
+                   args.install_before_launch)
 
 
 if __name__ == '__main__':

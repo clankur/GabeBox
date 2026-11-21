@@ -171,21 +171,26 @@
     }
 
     function checkLocalInstall(entry) {
-        if (entry.installed || entry.checked || !manifestFolder) return;
-        entry.checked = true;
+        if (entry.installed || !manifestFolder) return Promise.resolve(!!entry.installed);
+        if (entry.installCheck) return entry.installCheck;
         var storage = Windows.Storage;
-        manifestFolder.then(function (folder) {
+        entry.installCheck = Promise.resolve(manifestFolder).then(function (folder) {
             if (!folder) return null;
             return folder.tryGetItemAsync("appmanifest_" + entry.id + ".acf");
         }).then(function (file) {
             return file ? storage.FileIO.readTextAsync(file) : "";
-        }).done(function (text) {
+        }).then(function (text) {
             var match = /^\s*"StateFlags"\s*"([0-9]+)"\s*$/mi.exec(text);
             if (match && (+match[1] & 0x7000a6) === 4) {
                 entry.installed = true;
                 if (selected && selected.entry === entry) updateActions();
             }
-        }, function () { entry.checked = false; });
+            return !!entry.installed;
+        }, function () {
+            entry.installCheck = null;
+            return !!entry.installed;
+        });
+        return entry.installCheck;
     }
 
     function renderList() {
@@ -258,7 +263,7 @@
         return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
             if (!file) return save(complete);
             return storage.FileIO.readTextAsync(file).then(function (text) {
-                var config = /^(\d{1,8})(?:\r?\n(repeat))?$/.exec(text.trim());
+                var config = /^(\d{1,8})(?:\r?\n(repeat))?(?:\r?\n(install))?$/.exec(text.trim());
                 if (!config || +config[1] < 1 || +config[1] > 16777215) {
                     return save("steam_launch=invalid-game\r\n" + complete);
                 }
@@ -268,7 +273,19 @@
                 }
                 var game = entries.filter(function (entry) { return entry.id === +config[1]; })[0];
                 if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
-                return runGameLaunch(attempt, game);
+                if (!config[3]) return runGameLaunch(attempt, game);
+                return save("status=steam-game-install-checking\r\n").then(function () {
+                    return checkLocalInstall(game);
+                }).then(function (installed) {
+                    if (installed) return "already-installed";
+                    return save("status=steam-game-installing\r\n").then(function () {
+                        return startDownload(game);
+                    });
+                }).then(function (stage) {
+                    attempt.libraryReport += "steam_launch_install=" + stage + "\r\n";
+                    if (stage !== "installed" && stage !== "already-installed") return save(complete);
+                    return runGameLaunch(attempt, game);
+                });
             });
         }, function () { return save("steam_launch_config=unavailable\r\n" + complete); });
     }
@@ -372,6 +389,11 @@
         if (stage === "installed") job.entry.installed = true;
         transfer = null;
         select(selected);
+        if (job.write) {
+            job.write.then(function () { job.complete(stage); }, function () { job.complete(stage); });
+        } else {
+            job.complete(stage);
+        }
     }
 
     function pollDownload(job) {
@@ -384,9 +406,12 @@
         if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 2000);
     }
 
-    function startDownload() {
-        if (transfer || launching || !selected || !selected.entry.game || selected.entry.installed) return;
-        var job = { entry: selected.entry, id: Date.now() };
+    function startDownload(entry) {
+        if (transfer || launching) return Promise.resolve("busy");
+        if (!entry || !entry.game) return Promise.resolve("game-unavailable");
+        if (entry.installed) return Promise.resolve("already-installed");
+        var job = { entry: entry, id: Date.now() };
+        var completion = new Promise(function (resolve) { job.complete = resolve; });
         transfer = job;
         updateActions();
         signOut.disabled = true;
@@ -408,6 +433,7 @@
             signOut.disabled = false;
             updateDownload(job, "failed");
         });
+        return completion;
     }
 
     function schedulePoll(attempt, challenge) {
@@ -539,7 +565,9 @@
         event.preventDefault();
         if (next && !next.hidden && !next.disabled) next.focus();
     });
-    download.addEventListener("click", startDownload);
+    download.addEventListener("click", function () {
+        if (selected) startDownload(selected.entry);
+    });
     play.addEventListener("click", function () {
         if (selected && selected.entry.installed) runGameLaunch(current, selected.entry);
     });
