@@ -91,6 +91,8 @@ In the library, use the controller D-pad to move between games. Right focuses th
 
 From **Play** or **Download**, press Down to reach **Cloud saves**. Open the selected title’s Steam Cloud page in the console browser or use the QR code to open it on a phone. Sign in to Steam in that browser if prompted, then use Valve’s **Download** links. The app’s QR contains only the fixed Steam Store origin and the title’s AppID. Browser downloads go to that device’s downloads. [Valve Remote Storage](https://store.steampowered.com/account/remotestorage) · [UWP browser launch](https://learn.microsoft.com/en-us/windows/uwp/launch-resume/launch-default-app)
 
+Series X build `1.0.222.0` restored the Steam client session and displayed Cloud saves on the game detail panel. Controller navigation, QR rendering and the external browser request passed in a local simulation. The console browser handoff still needs a console check. [Direct download issue](https://github.com/clankur/steam-xbox-devmode/issues/56)
+
 Game rows load Steam's public small capsule artwork as they approach the viewport. The client schedules up to three image loads at once and releases decoded artwork more than a viewport away. It caches up to 256 entries in IndexedDB, with an 8 MiB cap on JPEG payloads and a 30-day freshness window. Missing art shows the game’s initial. [Steam graphical assets](https://partner.steamgames.com/doc/store/assets)
 
 Read the library's aggregate artwork counters after the visible rows have loaded. `art_run_id` identifies the app process, and `art_active=0` marks a settled batch. A fresh app restart lets you compare `art_network_requests` with `art_disk_hits` on the same library viewport.
