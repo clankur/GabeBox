@@ -892,6 +892,35 @@ static bool IsLocalSteamInstall(std::wstring const& directory, std::wstring cons
         directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
 }
 
+static const wchar_t *SteamPathScope(std::wstring const& directory, std::wstring const& library,
+        std::wstring const& data, std::wstring const& package) {
+    if (directory.empty()) return L"unresolved";
+    auto within = [&](std::wstring const& root) {
+        return CompareStringOrdinal(directory.c_str(), -1, root.c_str(), -1, TRUE) == CSTR_EQUAL ||
+            IsLocalSteamInstall(directory, root);
+    };
+    if (within(library)) return L"app-library";
+    if (within(data)) return L"app-data";
+    if (within(package)) return L"read-only-package";
+    return L"outside-app";
+}
+
+static std::wstring DescribeSteamDestination(void *manager, std::uintptr_t const *methods,
+        std::uint32_t app, std::wstring_view checkpoint, std::wstring const& library,
+        std::wstring const& data, std::wstring const& package) {
+    using AppLibraryFolder = std::int32_t (__cdecl *)(void *, std::uint32_t);
+    auto index = reinterpret_cast<AppLibraryFolder>(methods[82])(manager, app);
+    auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+    std::wstring prefix = L"steam_launch_redistributables_" + std::wstring(checkpoint) + L"_";
+    auto report = prefix + L"install_scope=" + SteamPathScope(directory, library, data, package) + L"\r\n";
+    report += prefix + L"library_index=" + std::to_wstring(index) + L"\r\n";
+    if (index >= 0) {
+        auto folder = SteamPath(reinterpret_cast<SteamAppPath>(methods[76]), manager, index);
+        report += prefix + L"library_scope=" + SteamPathScope(folder, library, data, package) + L"\r\n";
+    }
+    return report;
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDownload(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
     auto root = ApplicationData::Current().LocalFolder();
@@ -1087,6 +1116,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     } while (true);
 
     constexpr std::uint32_t commonRedistributables = 228980;
+    constexpr std::uint32_t updatePaused = 0x200;
+    const std::wstring libraryRoot(path);
+    const std::wstring dataRoot(root.Path());
+    const std::wstring packageRoot(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
     bool waitForSharedInstall = false;
     {
         std::lock_guard lock(steamSessionMutex);
@@ -1095,7 +1128,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto manager = session->appManager;
         auto methods = SteamMethods(manager);
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
-        if (methods[18] != base + 0x77fe20) {
+        if (methods[18] != base + 0x77fe20 || methods[56] != base + 0x766730 ||
+                methods[82] != base + 0x781040) {
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
@@ -1112,13 +1146,18 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto end = dependencies.begin() + count;
         if (std::find(dependencies.begin(), end, commonRedistributables) != end) {
             report += L"steam_launch_common_redistributables=required\r\n";
+            report += L"steam_launch_redistributables_requested_index=" + std::to_wstring(libraryIndex) + L"\r\n";
             auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
             report += L"steam_launch_redistributables_initial_state=" + std::to_wstring(state) + L"\r\n";
+            report += DescribeSteamDestination(
+                manager, methods, commonRedistributables, L"initial", libraryRoot, dataRoot, packageRoot);
             if ((state & installMask) != fullyInstalled) {
                 // Let Steam obtain the shared dependency of the game it just verified the account owns.
                 auto install = reinterpret_cast<SteamInstall>(methods[0]);
                 auto code = install(manager, commonRedistributables, libraryIndex, false);
                 report += L"steam_launch_redistributables_install_result=" + std::to_wstring(code) + L"\r\n";
+                report += DescribeSteamDestination(
+                    manager, methods, commonRedistributables, L"queued", libraryRoot, dataRoot, packageRoot);
                 if (code != 0) co_return winrt::hstring(report + L"steam_launch=dependency-install-rejected\r\n");
                 waitForSharedInstall = true;
             }
@@ -1126,7 +1165,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     }
 
     if (waitForSharedInstall) {
-        auto deadline = GetTickCount64() + 90000;
+        const auto started = GetTickCount64();
+        auto deadline = started + 90000;
+        bool retriedPaused = false;
         for (;;) {
             {
                 std::lock_guard lock(steamSessionMutex);
@@ -1138,12 +1179,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 auto manager = session->appManager;
                 auto methods = SteamMethods(manager);
                 auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
+                const auto now = GetTickCount64();
+                if (!retriedPaused && now - started >= 3000 && (state & updatePaused)) {
+                    using SetQueuePlacement = bool (__cdecl *)(void *, std::uint32_t, std::int32_t);
+                    constexpr std::int32_t firstInQueue = 1;
+                    auto accepted = reinterpret_cast<SetQueuePlacement>(methods[56])(
+                        manager, commonRedistributables, firstInQueue);
+                    retriedPaused = true;
+                    report += std::wstring(L"steam_launch_redistributables_retry=") +
+                        (accepted ? L"accepted\r\n" : L"declined\r\n");
+                }
                 if ((state & installMask) == fullyInstalled) {
                     report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    report += DescribeSteamDestination(
+                        manager, methods, commonRedistributables, L"final", libraryRoot, dataRoot, packageRoot);
                     break;
                 }
-                if (GetTickCount64() >= deadline) {
+                if (now >= deadline) {
                     report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    report += DescribeSteamDestination(
+                        manager, methods, commonRedistributables, L"final", libraryRoot, dataRoot, packageRoot);
                     co_return winrt::hstring(report + L"steam_launch=dependency-install-incomplete\r\n");
                 }
             }
