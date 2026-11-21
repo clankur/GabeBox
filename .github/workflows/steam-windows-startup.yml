@@ -6,8 +6,14 @@ on:
       - analysis/trace-steam-startup.ps1
       - analysis/stage-pinned-client.py
       - analysis/valve-release.json
+      - analysis/steam_client_win64.manifest
       - .github/workflows/steam-windows-startup.yml
   workflow_dispatch:
+    inputs:
+      big_picture:
+        type: boolean
+        description: Verify the native Big Picture window on cold start
+        default: false
 
 permissions:
   contents: read
@@ -22,8 +28,11 @@ jobs:
           persist-credentials: false
       - name: Install signed Steam and trace startup on a clean host
         shell: pwsh
+        env:
+          BIG_PICTURE: ${{ inputs.big_picture }}
         run: |
-          ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-startup" -PinnedClient
+          $bigPicture = $env:BIG_PICTURE -eq 'true'
+          ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:RUNNER_TEMP/steam-startup" -PinnedClient -BigPicture:$bigPicture
       - name: Upload Steam-only findings
         if: always()
         uses: actions/upload-artifact@v4

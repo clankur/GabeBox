@@ -27,9 +27,12 @@ PROBE_NAME = 'XboxPortabilityProbe.ChildProcess'
 PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
 PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
+BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
+BIG_PICTURE_REPORT = 'big-picture-report.txt'
 PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_CONTROL_NAME: 'Packaged process startup control',
-                PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe'}
+                PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe',
+                BIG_PICTURE_NAME: 'Steam Big Picture'}
 PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 SDL_TRIALS = {
@@ -597,7 +600,7 @@ def activate_probe(portal, app):
     portal.request('POST', '/api/taskmanager/app?' + urlencode(launch))
 
 
-def stop_lifetime_probe(portal, app, allow_inactive=False):
+def stop_probe(portal, app, allow_inactive=False):
     package = base64.b64encode(app['PackageFullName'].encode()).decode('ascii')
     try:
         portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': package}))
@@ -617,7 +620,8 @@ def stop_lifetime_probe(portal, app, allow_inactive=False):
 def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
     app = find_installed_probe(portal, name, version)
     print(f'Installed package: {app["PackageFullName"]}', flush=True)
-    report_url = probe_report_path(app)
+    filename = BIG_PICTURE_REPORT if name == BIG_PICTURE_NAME else PROBE_REPORT
+    report_url = probe_report_path(app, filename)
 
     def read_report():
         try:
@@ -629,21 +633,15 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
         return raw
 
     baseline = read_report()
+    baseline_run = report_fields(decode_report(baseline)).get('run_id')
     launch_error = ''
     if manual:
         print(f'Launch {PROBE_LABELS[name]} once from Xbox Dev Home.', flush=True)
     else:
         if restart:
-            package = base64.b64encode(app['PackageFullName'].encode()).decode('ascii')
-            try:
-                portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': package}))
-            except PortalError as error:
-                if error.status != 404:
-                    raise
-        # Match Xbox Device Portal's App Launcher, which sends the AUMID only.
-        launch = {'appid': base64.b64encode(app['PackageRelativeId'].encode()).decode('ascii')}
+            stop_probe(portal, app, allow_inactive=True)
         try:
-            portal.request('POST', '/api/taskmanager/app?' + urlencode(launch))
+            activate_probe(portal, app)
         except PortalError as error:
             launch_error = str(error)
             print(f'Remote launch returned an error. You can launch from Dev Home while the CLI waits.\n{error}',
@@ -660,9 +658,22 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
             raw = b''
         if raw and raw != baseline:
             report = decode_report(raw)
+            if name == BIG_PICTURE_NAME:
+                fields = report_fields(report)
+                if (fields.get('probe') != 'native-steam-big-picture' or not fields.get('run_id')
+                        or fields['run_id'] == baseline_run):
+                    report = ''
             if report.endswith('\n') and report != last_report:
                 last_report = report
                 print(report, end='', flush=True)
+                if name == BIG_PICTURE_NAME:
+                    status = fields.get('status', '')
+                    if status == 'client-running':
+                        print('Steam was running at the observation deadline. Check the Xbox display for Big Picture.')
+                        return report
+                    if status == 'client-exited':
+                        raise ValueError(f"The Steam launcher exited ({fields.get('exit_code', 'unknown')}). "
+                                         'Check the Xbox display for a possible handoff.')
                 if name == PROBE_CONTROL_NAME and re.search(r'^status=control-ready\s*$', report, re.MULTILINE):
                     return
                 if name == PROBE_STEAM_CORE_NAME and re.search(
@@ -683,7 +694,7 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, re
         if require_ipc and re.search(r'^exit_code_matches=yes\s*$', last_report, re.MULTILINE):
             raise ValueError('The signed helper ran, but no terminal named-pipe result appeared.')
         raise ValueError('The probe wrote a startup checkpoint but did not finish the test.')
-    raise ValueError('No fresh probe-report.txt appeared in LocalState.' +
+    raise ValueError(f'No fresh {filename} appeared in LocalState.' +
                      (' The remote launch also failed.' if launch_error else ''))
 
 
@@ -746,7 +757,7 @@ def request_protocol_return(portal, control, run):
 def run_lifetime(portal, version, dwell, timeout, portal_return):
     app = find_installed_probe(portal, PROBE_LIFETIME_NAME, version)
     control = find_installed_probe(portal, PROBE_CONTROL_NAME, version)
-    stop_lifetime_probe(portal, app, allow_inactive=True)
+    stop_probe(portal, app, allow_inactive=True)
     baseline = read_probe_report(portal, app, LIFETIME_REPORT)
     try:
         print('Starting the lifetime probe.', flush=True)
@@ -790,7 +801,7 @@ def run_lifetime(portal, version, dwell, timeout, portal_return):
         print('Verified the original helper transaction across the foreground switch.', flush=True)
     finally:
         try:
-            stop_lifetime_probe(portal, app)
+            stop_probe(portal, app)
         except (ValueError, OSError, http.client.HTTPException) as error:
             print(f'Could not stop the dedicated lifetime probe: {error}', file=sys.stderr)
 
@@ -831,10 +842,14 @@ def main():
                          help='watch the clean-registration control')
     variant.add_argument('--steam-core', dest='probe_name', action='store_const', const=PROBE_STEAM_CORE_NAME,
                          help='watch the Steam Core Loader Probe')
+    variant.add_argument('--big-picture', dest='probe_name', action='store_const', const=BIG_PICTURE_NAME,
+                         help='watch the native Steam gamepad-mode launcher')
     probe.set_defaults(probe_name=PROBE_NAME)
     report_command = commands.add_parser('report', help='read the current Steam probe report without launching it')
     report_command.add_argument('--version', required=True, help='installed Steam package version')
     report_variant = report_command.add_mutually_exclusive_group()
+    report_variant.add_argument('--big-picture', dest='report_file', action='store_const',
+                                const=BIG_PICTURE_REPORT, help='read the native Steam gamepad-mode launcher report')
     report_variant.add_argument('--download', dest='report_file', action='store_const',
                                 const='steam-download-report.txt', help='read the Steam download checkpoint')
     report_variant.add_argument('--artwork', dest='report_file', action='store_const',
@@ -883,6 +898,8 @@ def main():
         probe.error('--require-ipc applies to the main probe')
     if args.command == 'probe' and args.restart and args.manual_launch:
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
+    if args.command == 'report' and args.report_file == BIG_PICTURE_REPORT and args.sdl_frame:
+        report_command.error('--sdl-frame applies to a Steam Core game trial')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
 
@@ -939,7 +956,8 @@ def main():
                        args.require_ipc, restart=args.restart)
         return
     if args.command == 'report':
-        app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        name = BIG_PICTURE_NAME if args.report_file == BIG_PICTURE_REPORT else PROBE_STEAM_CORE_NAME
+        app = find_installed_probe(portal, name, args.version)
         if args.report_file == 'sdl-startup':
             _, raw = portal.request('GET', probe_report_path(app))
             run = re.search(r'^steam_launch_sdl_run=([0-9]{1,20})\r?$', decode_report(raw), re.MULTILINE)

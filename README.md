@@ -1,6 +1,8 @@
 # Steam on Xbox Series X Developer Mode
 
-This project tests Steam sign-in, owned-game downloads, and local game launches on an Xbox Series X in Developer Mode. The source includes the Xbox diagnostic, Steam core loader, interactive Steam library, the fullscreen SDL player, Slay the Spire cloud-save restore, and the X-COM DOS runtime. The linked Series X results come from the original feature builds. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
+This branch targets Valve’s own Big Picture interface on Xbox Series X in Developer Mode. Its dedicated Xbox package launches the full pinned Windows Steam client with `-gamepadui`. The first console milestone is seeing Valve’s UI and navigating it with a controller. [Native Big Picture architecture, build and verification](analysis/big-picture.md)
+
+The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 
 ## Setup
 
@@ -8,16 +10,11 @@ You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on t
 
 1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username.
 2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate presented by Device Portal in your browser, then set `XBOX_PORTAL_CERT_SHA256` in `.env`. The CLI prompts for your Device Portal password.
-3. Download the `xbox-probe-windows-sdk` artifact from a successful **Build Xbox probe** run for the revision you want to test. Verify its checksums and deploy the signed APPX. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml)
+3. Build the `xbox-big-picture-template` from this branch, then prepare a signed local package with Valve’s client archives. The Big Picture guide includes the build commands, Device Portal launch command and expected startup reports. [Build and verify the Big Picture package](analysis/big-picture.md#build-the-native-big-picture-package)
 
-   ```sh
-   (cd /path/to/artifact && shasum -a 256 -c SHA256SUMS)
-   python3 xbox-deploy.py deploy /path/to/artifact/PackagedProcessProbe-x64.appx --test-probe
-   ```
+To run the original packaged-process diagnostic, follow its separate deployment instructions. [Probe setup and report fields](probe/README.md)
 
-   `exit_code_matches=yes` confirms the bundled helper ran. If Device Portal requests a signing certificate, rerun deployment with `--certificate` pointing to the artifact’s `PackagedProcessProbe.cer`. [Probe setup and report fields](probe/README.md)
-
-### Try the Steam prototype
+### Try the earlier Steam Core prototype
 
 Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml) · [Steam setup guide](probe/STEAM-CORE.md)
 

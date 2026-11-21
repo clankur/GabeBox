@@ -2,13 +2,17 @@
 param(
     [Parameter(Mandatory)]
     [string]$WorkDirectory,
-    [switch]$PinnedClient
+    [switch]$PinnedClient,
+    [switch]$BigPicture
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ((Test-Path $WorkDirectory) -or (Get-Process -Name steam, steamwebhelper, steamservice -ErrorAction SilentlyContinue)) {
     throw 'Use a clean Windows VM and a new work directory.'
+}
+if ($BigPicture -and (!$PinnedClient -or (Test-Path 'HKCU:\Software\Valve\Steam'))) {
+    throw 'Use -PinnedClient and a fresh Windows user profile for the Big Picture reference.'
 }
 
 $work = New-Item -ItemType Directory -Path $WorkDirectory
@@ -54,6 +58,51 @@ function Wait-ForSteamUI {
         Start-Sleep -Seconds 2
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'Steam did not reach a client and webhelper pair before the startup deadline.'
+}
+
+function Trace-BigPictureWindow {
+    $result = [ordered]@{
+        argument = '-gamepadui'
+        launchPid = $null
+        steamWindowSeen = $false
+        webhelperSeen = $false
+        bigPictureWindowPid = $null
+        bigPictureWindowOwner = $null
+        pinnedManifestAtEnd = $false
+    }
+    $release = Get-Content -Raw (Join-Path $PSScriptRoot 'valve-release.json') | ConvertFrom-Json
+    $helper = Join-Path $installation 'bin\cef\cef.win64\steamwebhelper.exe'
+    try {
+        if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $release.manifest_sha256) {
+            throw 'The Steam update changed the pinned manifest before the Big Picture cold start.'
+        }
+        $launched = Start-Process -FilePath $steam -ArgumentList $result.argument -WorkingDirectory $installation -PassThru
+        $result.launchPid = $launched.Id
+        $deadline = [DateTime]::UtcNow.AddSeconds(115)
+        do {
+            foreach ($process in (Get-Process -Name steam, steamwebhelper -ErrorAction SilentlyContinue)) {
+                if ($process.Path -notin @($steam, $helper)) { continue }
+                if ($process.Path -eq $helper) { $result.webhelperSeen = $true }
+                if ($process.MainWindowHandle -eq 0) { continue }
+                $result.steamWindowSeen = $true
+                if ($process.MainWindowTitle -eq 'Steam Big Picture Mode') {
+                    $result.bigPictureWindowPid = $process.Id
+                    $result.bigPictureWindowOwner = $process.ProcessName
+                }
+            }
+            if ($result.webhelperSeen -and $result.bigPictureWindowPid) { break }
+            Start-Sleep -Seconds 1
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (!$result.webhelperSeen -or !$result.bigPictureWindowPid) {
+            throw 'The pinned Steam client did not expose a Big Picture main window before the deadline.'
+        }
+    } finally {
+        if (Test-Path -LiteralPath $manifest) {
+            $result.pinnedManifestAtEnd = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -eq $release.manifest_sha256
+        }
+        Save-Json 'big-picture-window.json' $result
+    }
+    if (!$result.pinnedManifestAtEnd) { throw 'The Steam update changed the pinned manifest during the Big Picture cold start.' }
 }
 
 function Save-StartupStatus($Stage) {
@@ -199,6 +248,10 @@ while (Get-Process -Name steam, steamwebhelper -ErrorAction SilentlyContinue) {
 }
 
 Trace-Stage 'cold-start' {
-    Start-Process -FilePath $steam -WorkingDirectory $installation
-    Wait-ForSteamUI
+    if ($BigPicture) {
+        Trace-BigPictureWindow
+    } else {
+        Start-Process -FilePath $steam -WorkingDirectory $installation
+        Wait-ForSteamUI
+    }
 }

@@ -1,0 +1,99 @@
+name: Build Xbox Big Picture template
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/xbox-big-picture.yml'
+      - 'probe/big-picture/**'
+      - 'probe/Assets/**'
+      - 'probe/prepare-big-picture.py'
+      - 'analysis/stage-pinned-client.py'
+      - 'analysis/steam_client_win64.manifest'
+      - 'analysis/valve-release.json'
+      - 'xbox-deploy.py'
+      - 'tests/big-picture-launch.test.js'
+      - 'tests/test_big_picture_*.py'
+  pull_request:
+    paths:
+      - '.github/workflows/xbox-big-picture.yml'
+      - 'probe/big-picture/**'
+      - 'probe/Assets/**'
+      - 'probe/prepare-big-picture.py'
+      - 'analysis/stage-pinned-client.py'
+      - 'analysis/steam_client_win64.manifest'
+      - 'analysis/valve-release.json'
+      - 'xbox-deploy.py'
+      - 'tests/big-picture-launch.test.js'
+      - 'tests/test_big_picture_*.py'
+
+permissions:
+  contents: read
+
+jobs:
+  template:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Big Picture startup and packaging
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          node --test tests/big-picture-launch.test.js
+          python -m unittest discover -s tests -p 'test_big_picture_*.py'
+      - name: Build and sign the launcher with the Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $version = (Get-ChildItem "$sdk\bin" -Directory | Where-Object {
+            $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)\x64\midl.exe") -and
+              (Test-Path "$sdk\UnionMetadata\$($_.Name)\Windows.winmd")
+          } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$version) { throw 'Windows SDK with MIDL and Windows Runtime metadata is required.' }
+          $tool = "$sdk\bin\$version\x64"
+          $metadata = "$sdk\UnionMetadata\$version\Windows.winmd"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          $work = Join-Path $env:RUNNER_TEMP 'big-picture'
+          $layout = Join-Path $work 'layout'
+          $out = Join-Path $work 'artifact'
+          New-Item -ItemType Directory -Path $layout,$out | Out-Null
+          Copy-Item -Recurse probe/Assets $layout
+          Copy-Item probe/big-picture/AppxManifest.xml,probe/big-picture/big-picture.html,probe/big-picture/big-picture.js $layout
+          & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
+            /out $work /winmd "$layout\BigPicture.Native.winmd" probe/big-picture/BigPicture.Native.idl
+          & cl.exe /nologo /LD /O2 /MT /std:c++20 /DUNICODE /D_UNICODE /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+            "/Fo$work\launcher.obj" "/Fe$layout\BigPicture.Native.dll" probe/big-picture/launcher.cpp WindowsApp.lib uuid.lib `
+            /link /APPCONTAINER "/IMPLIB:$work\launcher.lib" /EXPORT:DllGetActivationFactory /EXPORT:DllCanUnloadNow
+          & "$tool\makepri.exe" createconfig /cf "$work\priconfig.xml" /dq lang-en-US /pv 10.0.0
+          & "$tool\makepri.exe" new /cf "$work\priconfig.xml" /pr $layout /of "$layout\resources.pri"
+
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout\BigPicture.Native.dll"
+            & "$tool\makeappx.exe" pack /d $layout /p "$out\BigPictureTemplate-x64.appx"
+            & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out\BigPictureTemplate-x64.appx"
+            Export-Certificate -Cert $cert -FilePath "$out\BigPictureTemplate.cer" | Out-Null
+            Get-FileHash "$out\BigPictureTemplate-x64.appx","$out\BigPictureTemplate.cer" | ForEach-Object {
+              "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
+            } | Set-Content -Encoding ascii "$out\SHA256SUMS"
+          } finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-big-picture-template
+          path: ${{ runner.temp }}/big-picture/artifact/
+          if-no-files-found: error
