@@ -28,6 +28,8 @@ The workflow uses Windows Event Tracing to collect process starts, exits and ima
 
 ## Observations
 
+The account-free Big Picture cold start on November 21, 2026 passed on Windows Server 2025 build 26100. Release `1794536281` started with `-gamepadui`, and `steamwebhelper.exe` owned a window titled `Steam Big Picture Mode`. All 6,630 staged payload files matched their pre-launch hashes before and after the window appeared. Steam had rewritten its installed manifest while retaining the same release number. On Series X the same desktop release exited before the web helper started. The Windows run establishes a reference for window creation. Account navigation and game launch require separate evidence. [Windows reference run](https://github.com/clankur/steam-xbox-devmode/actions/runs/44945189559) · [Series X comparison](big-picture.md#series-x-deployment-and-game-checks)
+
 - Valve’s ordinary installer passed Authenticode validation on the first runner. The test reached its startup deadline. The ETL event-log query returned no usable records, so this trial provides no evidence about the client’s runtime dependencies. [Initial workflow run](https://github.com/clankur/steam-xbox-devmode/actions/runs/44859772265)
 
 The pinned client ran on Windows Server 2025 Datacenter build `26100`. All five executable and library hashes in the runtime inventory matched [the import audit](client-imports.json). The process trace showed a window owned by `steamwebhelper.exe` at the end of both startup stages. The launcher initially updated and relaunched itself. The second run started a fresh `steam.exe` after both the prior main process and its web helpers exited. [Successful workflow and artifacts](https://github.com/clankur/steam-xbox-devmode/actions/runs/44860130408)
