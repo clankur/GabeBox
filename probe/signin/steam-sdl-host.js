@@ -14,12 +14,14 @@
         39: [1, 0], 141: [1, 0], 206: [1, 0], 213: [1, 0],
         40: [0, 1], 139: [0, 1], 204: [0, 1], 212: [0, 1]
     };
-    var keys = { 13: 16, 27: 32, 32: 64, 143: 32, 196: 32 };
-    var clickCodes = { 142: true, 195: true };
+    var keys = { 27: 32, 32: 64, 143: 32, 196: 32 };
+    var clickCodes = { 13: true, 142: true, 195: true };
 
     function start(runner, appId, attempt) {
         var previous = document.activeElement;
+        var previousInputMode = navigator.gamepadInputEmulation;
         var held = {};
+        var pointerHeld = false;
         var pointerX = 0.5, pointerY = 0.5;
         var lastPointer = -1, lastKeys = -1;
         var animation, image, firstFrame, trialSerial = 0, trialEvents = 0;
@@ -37,10 +39,15 @@
             exit.removeEventListener("click", quit);
             canvas.removeEventListener("keydown", setKey);
             canvas.removeEventListener("keyup", setKey);
+            canvas.removeEventListener("pointermove", setPointer);
+            canvas.removeEventListener("pointerdown", setPointer);
+            canvas.removeEventListener("pointerup", setPointer);
+            canvas.removeEventListener("pointercancel", setPointer);
             window.removeEventListener("blur", releaseKeys);
             document.removeEventListener("visibilitychange", releaseKeys);
             screen.hidden = true;
             library.hidden = false;
+            if (previousInputMode !== undefined) navigator.gamepadInputEmulation = previousInputMode;
             if (previous && previous.focus) previous.focus();
             if (detail) complete(result + detail);
         }
@@ -61,8 +68,22 @@
 
         function releaseKeys() {
             held = {};
+            pointerHeld = false;
             if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
             lastPointer = -1;
+        }
+
+        function setPointer(event) {
+            if (!ready || !firstFrame) return;
+            var bounds = canvas.getBoundingClientRect();
+            if (!bounds.width || !bounds.height) return;
+            pointerX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+            pointerY = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
+            pointerHeld = !!(event.buttons & 1);
+            if (event.type === "pointerdown") {
+                canvas.focus();
+                if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+            }
         }
 
         function encodePointer(click) {
@@ -70,7 +91,7 @@
         }
 
         function movePointer(elapsed) {
-            var dx = 0, dy = 0, keyMask = 0, click = false;
+            var dx = 0, dy = 0, keyMask = 0, click = pointerHeld;
             Object.keys(held).forEach(function (code) {
                 if (!held[code]) return;
                 if (directions[code]) {
@@ -173,8 +194,13 @@
         exit.addEventListener("click", quit);
         canvas.addEventListener("keydown", setKey);
         canvas.addEventListener("keyup", setKey);
+        canvas.addEventListener("pointermove", setPointer);
+        canvas.addEventListener("pointerdown", setPointer);
+        canvas.addEventListener("pointerup", setPointer);
+        canvas.addEventListener("pointercancel", setPointer);
         window.addEventListener("blur", releaseKeys);
         document.addEventListener("visibilitychange", releaseKeys);
+        if (previousInputMode !== undefined) navigator.gamepadInputEmulation = "mouse";
         canvas.focus();
         Promise.resolve(runner.launchSteamSdlGame(appId, attempt.file, attempt.report)).then(function (report) {
             result = report;
