@@ -19,6 +19,8 @@ Check a failed launch against the installed executable's architecture, supported
 
 Register an adapter only when a bundled runtime can execute the verified installed format. An adapter declares its AppID, backend, native authorization method, success marker, and start function. The dispatcher opens a hosted runtime only after that method verifies the selected install. A refused or failed authorization returns to the library with its diagnostic.
 
+The SDL player fills the Xbox viewport and fits the game's complete image at its original aspect ratio. Hold Menu and View together to open the player menu. Use the D-pad and A to choose Resume or Quit to library. The game keeps its regular Menu and View actions when each button is pressed individually.
+
 For DOS, the native component allowlists the exact supported AppID and directory. The fixed profile in `signin/xcom-dos.js` records the publisher's DOS mount, startup command, supported configuration and file exclusions. The host handles file copying, process lifetime, return to the library, and optional local trial snapshots. When adding a DOS title, verify its owned depot, define a separate fixed profile, and extend the native allowlist to that exact title and install path. Keep publication of the runtime separate from the user's game files. Input and save persistence also need their own validation for each supported backend.
 
 ## Verification
@@ -56,7 +58,7 @@ Build `1.0.189.0` reached SDL video, window creation and the software renderer a
 
 Prepare the regular sign-in package with `--startup-sdl-host` and the official desktop VC++ framework. Deploy it and install the checksum-verified shared SDL 2.26.2 artifact with `sdl-trial --install-only --app-id 975370`. The CLI confirms Steam's local manifest and the publisher DLL before replacement, verifies the installed replacement, and stores the original in the specified backup directory. Use the same artifact and backup directory with `sdl-trial --restore-only` to restore it.
 
-The library's Play action uses Steam to check the license and launch the installed executable. The SDL player receives software frames and sends pointer input using a bounded, same-package mailbox. Press A to click and use the player's Quit to library control to request a normal SDL quit. The Series X trial `1.0.193.0` showed the full game menu in a Device Portal screen image and recorded `steam_sdl_host_frame=presented` and `steam_sdl_host_input=delivered` for test input. [Live SDL workflow](https://github.com/clankur/steam-xbox-devmode/actions/runs/44910058092) · [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44910421309)
+The library's Play action uses Steam to check the license and launch the installed executable. The SDL player receives software frames and uses controller-driven pointer input for Dwarf Fortress. Move with the left stick or D-pad and press A to click. The Series X trial `1.0.218.0` confirmed fullscreen presentation and pointer event delivery with the existing version-matched SDL adapter. [Live SDL workflow](https://github.com/clankur/steam-xbox-devmode/actions/runs/44910058092) · [Fullscreen Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44920639328)
 
 ### Play Stardew Valley in the Steam library
 
@@ -64,8 +66,12 @@ Build the Stardew startup hook from the managed diagnostic and supply its DLL to
 
 For a console trial, add `--launch-app-id 413150 --repeat-launch` to the hosted Stardew layout and run `probe --steam-core` through the Xbox CLI. `1.0.211.0` presented the full title menu, acknowledged the host's test pointer event and remained on the title menu at the 40-second screenshot. The trial verifies startup, display and pointer delivery. Gameplay, audio and saves still need console validation. [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047) · [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965212)
 
+For controller play, use the shared SDL2 build with the virtual gamepad transport. The player forwards Xbox buttons, both sticks and both triggers as SDL game controller state. `steam_sdl_host_gamepad=delivered` verifies test input was readable through that SDL device on the console. [Controller SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44921504825)
+
 ### Play Slay the Spire in the Steam library
 
 Supply `--slay-sdl-host "$runtime_dir"` with the built `SlayConsoleDiagnostic` classes, signed-template Java bridge DLLs, adapted LWJGL JAR, verified shared SDL 2.30.9 DLL and license, and `slay-font-atlas-limit.txt` containing `512`. Stage the same Mesa and DXIL release files alongside the Java and SDL adapters. The current library launch authorizes the installed Steam AppID `646570` before starting the original launcher in its packaged Java runtime. The Xbox SDL player owns the frame and pointer mailbox throughout the session. [Slay Java and LWJGL adapter](https://github.com/clankur/steam-xbox-devmode/pull/52) · [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047)
 
 With `--launch-app-id 646570 --repeat-launch`, `1.0.213.0` reached Slay the Spire's save-slot selection in the live Xbox player and was still animating at the 40-second capture. `1.0.214.0` confirmed pointer delivery using a repeated test motion after input initialization. Keep the automated trial at the menu and validate save creation during a separate gameplay session. [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918568603) · [Slay bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44918265865)
+
+Build the LWJGL adapter with the pinned libGDX 1.9.5 API inputs using `--gdx-api` and `--gdx-controllers-api` to supply its desktop gamepad provider. In `1.0.217.0`, the game recognized the bridged controller through libGDX and displayed its own Xbox button prompt in fullscreen. [Controller bridge SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44920534966)
