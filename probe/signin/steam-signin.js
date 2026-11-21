@@ -197,6 +197,7 @@
             button.type = "button";
             button.textContent = entry.name;
             button.entry = entry;
+            libraryArt.decorate(button, entry);
             button.setAttribute("aria-pressed", "false");
             fragment.appendChild(button);
         });
@@ -205,6 +206,7 @@
         empty.hidden = !!list.firstElementChild;
         empty.textContent = entries.length ? "No matching games." : "No games in this library.";
         select(list.firstElementChild);
+        libraryArt.schedule();
     }
 
     function runGameLaunch(attempt, entry) {

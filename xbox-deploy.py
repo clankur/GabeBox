@@ -363,7 +363,12 @@ def main():
     probe.set_defaults(probe_name=PROBE_NAME)
     report_command = commands.add_parser('report', help='read the current Steam probe report without launching it')
     report_command.add_argument('--version', required=True, help='installed Steam package version')
-    report_command.add_argument('--download', action='store_true', help='read the Steam download checkpoint')
+    report_variant = report_command.add_mutually_exclusive_group()
+    report_variant.add_argument('--download', dest='report_file', action='store_const',
+                                const='steam-download-report.txt', help='read the Steam download checkpoint')
+    report_variant.add_argument('--artwork', dest='report_file', action='store_const',
+                                const='steam-library-art.txt', help='read the Steam library artwork counters')
+    report_command.set_defaults(report_file=PROBE_REPORT)
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
@@ -424,8 +429,7 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        filename = 'steam-download-report.txt' if args.download else PROBE_REPORT
-        _, raw = portal.request('GET', probe_report_path(app, filename))
+        _, raw = portal.request('GET', probe_report_path(app, args.report_file))
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
