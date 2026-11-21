@@ -7,6 +7,7 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import org.lwjgl.LWJGLException;
 import org.lwjgl.input.Cursor;
+import org.lwjgl.input.Mouse;
 
 /** SDL-backed display for the opt-in Xbox launch profile. */
 final class XboxSdlDisplay implements DisplayImplementation {
@@ -31,6 +32,7 @@ final class XboxSdlDisplay implements DisplayImplementation {
     private static native void destroy();
     private static native boolean pollClose();
     private static native int mouse(ByteBuffer coordinates);
+    private static native int readMouseEvents(IntBuffer events, int count);
     private static native ByteBuffer makeCursor(int width, int height, int hotX, int hotY, IntBuffer pixels);
     private static native void selectCursor(ByteBuffer handle);
     private static native void releaseCursor(ByteBuffer handle);
@@ -122,6 +124,8 @@ final class XboxSdlDisplay implements DisplayImplementation {
     }
 
     private final ByteBuffer mouseState = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.nativeOrder());
+    private final IntBuffer mouseEvents = ByteBuffer.allocateDirect(32 * 5 * Integer.BYTES)
+            .order(java.nio.ByteOrder.nativeOrder()).asIntBuffer();
 
     public boolean hasWheel() { return false; }
     public int getButtonCount() { return 3; }
@@ -136,7 +140,19 @@ final class XboxSdlDisplay implements DisplayImplementation {
         buttons.put(1, (byte)((mask & 4) != 0 ? 1 : 0));
         buttons.put(2, (byte)((mask & 2) != 0 ? 1 : 0));
     }
-    public void readMouse(ByteBuffer buffer) {}
+    public void readMouse(ByteBuffer buffer) {
+        int capacity = Math.min(buffer.remaining() / Mouse.EVENT_SIZE, mouseEvents.capacity() / 5);
+        int count = readMouseEvents(mouseEvents, capacity);
+        for (int event = 0; event < count; ++event) {
+            int offset = event * 5;
+            buffer.put((byte)mouseEvents.get(offset));
+            buffer.put((byte)mouseEvents.get(offset + 1));
+            buffer.putInt(mouseEvents.get(offset + 2));
+            buffer.putInt(height - 1 - mouseEvents.get(offset + 3));
+            buffer.putInt(0);
+            buffer.putLong(Integer.toUnsignedLong(mouseEvents.get(offset + 4)) * 1_000_000L);
+        }
+    }
     public void grabMouse(boolean grab) {}
     public int getNativeCursorCapabilities() { return Cursor.CURSOR_ONE_BIT_TRANSPARENCY; }
     public void setCursorPosition(int x, int y) { warpCursor(x, height - 1 - y); }

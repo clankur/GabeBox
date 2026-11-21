@@ -1,10 +1,26 @@
 #include <windows.h>
 #include <jni.h>
+#include <array>
 #include <string>
 
 namespace {
 HMODULE sdl;
 void *window;
+
+struct MouseEvent {
+    jint button, pressed, x, y, timestamp;
+};
+std::array<MouseEvent, 64> mouseEvents{};
+size_t mouseEventHead, mouseEventCount;
+
+void queueMouseEvent(MouseEvent event) {
+    if (mouseEventCount == mouseEvents.size()) {
+        mouseEventHead = (mouseEventHead + 1) % mouseEvents.size();
+        --mouseEventCount;
+    }
+    mouseEvents[(mouseEventHead + mouseEventCount) % mouseEvents.size()] = event;
+    ++mouseEventCount;
+}
 
 template<class Function>
 Function resolve(const char *name) {
@@ -93,6 +109,7 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_create(JNIEnv *,
 JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_destroy(JNIEnv *, jclass) {
     if (window) destroyWindow(window);
     window = nullptr;
+    mouseEventHead = mouseEventCount = 0;
 }
 
 JNIEXPORT jobject JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_openContext(JNIEnv *env, jclass) {
@@ -136,11 +153,44 @@ JNIEXPORT jlong JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_lookupGl(JNIEnv *en
 }
 
 JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_pollClose(JNIEnv *, jclass) {
-    union alignas(void*) { unsigned type; unsigned char event[56]; } input{};  // SDL2_Event, x64
+    struct Motion { unsigned type, timestamp, windowId, which, state; int x, y; };
+    struct Button { unsigned type, timestamp, windowId, which; unsigned char button, state, clicks, padding; int x, y; };
+    union alignas(void*) { unsigned type; Motion motion; Button button; unsigned char event[56]; } input{};
     while (pollEvent(&input) > 0) {
         if (input.type == 0x100) return JNI_TRUE;  // SDL_QUIT
+        if (input.type == 0x400) {  // SDL_MOUSEMOTION
+            const auto &motion = input.motion;
+            queueMouseEvent({-1, 0, motion.x, motion.y, static_cast<jint>(motion.timestamp)});
+        }
+        if (input.type == 0x401 || input.type == 0x402) {  // SDL_MOUSEBUTTONDOWN or SDL_MOUSEBUTTONUP
+            const auto &button = input.button;
+            constexpr jint lwjglButtons[] = {0, 2, 1};  // SDL left, middle, right.
+            if (button.button >= 1 && button.button <= 3) {
+                queueMouseEvent({lwjglButtons[button.button - 1], button.state, button.x, button.y,
+                                 static_cast<jint>(button.timestamp)});
+            }
+        }
     }
     return JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_readMouseEvents(
+    JNIEnv *env, jclass, jobject events, jint requested) {
+    auto output = static_cast<jint*>(env->GetDirectBufferAddress(events));
+    if (!output || requested <= 0 || env->GetDirectBufferCapacity(events) / 5 < requested) return 0;
+    jint count = 0;
+    while (count < requested && mouseEventCount) {
+        const auto &event = mouseEvents[mouseEventHead];
+        *output++ = event.button;
+        *output++ = event.pressed;
+        *output++ = event.x;
+        *output++ = event.y;
+        *output++ = event.timestamp;
+        mouseEventHead = (mouseEventHead + 1) % mouseEvents.size();
+        --mouseEventCount;
+        ++count;
+    }
+    return count;
 }
 
 JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_mouse(JNIEnv *env, jclass, jobject coordinates) {
