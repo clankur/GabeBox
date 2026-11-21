@@ -228,6 +228,8 @@ def stardew_host_summary(raw):
 def stardew_managed_summary(raw):
     allowed = (r'stardew_managed=(?:entered|unhandled-exception|process-exit)|'
                r'stardew_managed_exception=(?:dll-not-found|entry-point-not-found|bad-image-format|platform-not-supported)|'
+               r'stardew_managed_fault=[a-zA-Z0-9_.+]{1,128}|'
+               r'stardew_managed_detail=(?:opengl|sdl|access-denied)|'
                r'stardew_managed_library=(?:opengl32|sdl2)')
     lines = (raw or b'').decode('ascii', errors='replace').splitlines()
     return '\n'.join(dict.fromkeys(line for line in lines if re.fullmatch(allowed, line))) or 'stardew_managed=no-output'

@@ -40,7 +40,22 @@ internal static class StartupHook
             if (exception.Message.IndexOf("SDL2", StringComparison.OrdinalIgnoreCase) >= 0)
                 Record("stardew_managed_library=sdl2");
         };
-        AppDomain.CurrentDomain.UnhandledException += (_, args) => Record("stardew_managed=unhandled-exception");
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            Record("stardew_managed=unhandled-exception");
+            var fault = args.ExceptionObject as Exception;
+            for (int depth = 0; fault != null && depth < 5; depth++, fault = fault.InnerException)
+            {
+                Record("stardew_managed_fault=" + fault.GetType().FullName);
+                if (fault.Message.IndexOf("opengl", StringComparison.OrdinalIgnoreCase) >= 0)
+                    Record("stardew_managed_detail=opengl");
+                if (fault.Message.IndexOf("SDL", StringComparison.OrdinalIgnoreCase) >= 0)
+                    Record("stardew_managed_detail=sdl");
+                if (fault.Message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    fault.Message.IndexOf("denied", StringComparison.OrdinalIgnoreCase) >= 0)
+                    Record("stardew_managed_detail=access-denied");
+            }
+        };
         AppDomain.CurrentDomain.ProcessExit += (_, args) => Record("stardew_managed=process-exit");
     }
 }

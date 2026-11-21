@@ -33,5 +33,8 @@ class StardewTraceTests(unittest.TestCase):
         managed_summary = cli['stardew_managed_summary']
         self.assertEqual(managed_summary(None), 'stardew_managed=no-output')
         log = b'stardew_managed=entered\nstardew_managed_library=opengl32\n' \
-              b'stardew_managed_library=/private/user/opengl32\nstardew_managed=entered\n'
-        self.assertEqual(managed_summary(log), 'stardew_managed=entered\nstardew_managed_library=opengl32')
+              b'stardew_managed_library=/private/user/opengl32\nstardew_managed=entered\n' \
+              b'stardew_managed_fault=System.TypeInitializationException\n' \
+              b'stardew_managed_fault=/private/user/error\n'
+        self.assertEqual(managed_summary(log), 'stardew_managed=entered\nstardew_managed_library=opengl32\n'
+                         'stardew_managed_fault=System.TypeInitializationException')
