@@ -6,7 +6,7 @@
 #include "SDL_opengl.h"
 #include "../probe/sdl-gpu-protocol.h"
 
-enum { width = 1920, height = 1080, fps = 60, duration = 30 };
+enum { width = 1920, height = 1080, fps = 60, duration = 70 };
 typedef void (APIENTRY *Color)(GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void (APIENTRY *Clear)(GLbitfield);
 typedef void (APIENTRY *Scissor)(GLint, GLint, GLsizei, GLsizei);
