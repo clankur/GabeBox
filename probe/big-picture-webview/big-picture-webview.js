@@ -3,6 +3,7 @@
     var session;
 
     function switchView(to, from) {
+        if (to === from) return Promise.resolve();
         var views = Windows.UI.ViewManagement.ApplicationViewSwitcher;
         function replace() { return views.switchAsync(to, from); }
         // The FHD presenter and Valve are two views of the same Xbox game.
@@ -79,7 +80,7 @@
             setGameForeground(false);
             // The initial Steam window needs its own Xbox foreground allocation.
             // Replacing the QR view directly can retire the primary WWA host.
-            if (!activeSwitch) activeSwitch = (firstActivation ?
+            if (!activeSwitch) activeSwitch = (firstActivation && viewId !== mainId ?
                 Promise.resolve(views.ApplicationViewSwitcher.tryShowAsStandaloneAsync(viewId)).then(function (shown) {
                     if (!shown) throw new Error("Xbox could not show the Steam window");
                     return views.ApplicationViewSwitcher.switchAsync(viewId, mainId);
@@ -302,7 +303,8 @@
             host = BigPictureView.Native.Renderer;
             record("winrt-projected");
             record("status-before-open:" + host.status());
-            host.open();
+            if (broker) host.openInCurrentView();
+            else host.open();
             record("open-returned");
             timer = setInterval(poll, 80);
             poll();

@@ -6,13 +6,14 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, openReport = async () => ({})} = {}) {
+function fixture({activationError = false, primary = false, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0;
     const renderer = {
         open() { opens++; stage = "composition"; },
-        viewId() { return stage === "closed" ? 0 : 10; },
+        openInCurrentView() { opens++; stage = "composition"; },
+        viewId() { return stage === "closed" ? 0 : (primary ? 3 : 10); },
         status() {
             if (activationError) throw {number: -2147024703};
             return stage;
@@ -47,6 +48,16 @@ function fixture({activationError = false, openReport = async () => ({})} = {}) 
         shell: window.steamBigPictureHost, opens: () => opens, switches, incoming, reports, replies
     };
 }
+
+test("Steam can use the QR host's primary game view without a foreground switch", async () => {
+    const app = fixture({primary: true});
+    const ready = app.start({});
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.equal(app.opens(), 1);
+    assert.deepEqual(app.switches, []);
+});
 
 test("opening Valve's window never waits on a locked startup report", async () => {
     let release;

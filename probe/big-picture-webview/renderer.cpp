@@ -40,6 +40,7 @@ slim_mutex gate;
 weak_ref<IFrameworkView> active;
 CoreDispatcher dispatcher{nullptr};
 CoreApplicationView secondary{nullptr};
+IFrameworkView primaryHost{nullptr};
 int32_t viewId = 0;
 bool opening = false;
 bool closeRequested = false;
@@ -73,6 +74,15 @@ struct View : implements<View, IFrameworkView> {
     std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
+    bool usesPrimaryWindow = false;
+    CoreWindow::PointerMoved_revoker moved;
+    CoreWindow::PointerPressed_revoker pressed;
+    CoreWindow::PointerReleased_revoker released;
+    CoreWindow::PointerWheelChanged_revoker wheel;
+    CoreWindow::SizeChanged_revoker sized;
+    CoreWindow::VisibilityChanged_revoker visibility;
+    CoreWindow::Closed_revoker closing;
+    CoreWindow::Activated_revoker activated;
     steam_display::Placement placement{{}, 1.f};
 
     void Initialize(CoreApplicationView const&) {}
@@ -565,18 +575,21 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    void listen() {
+        auto pointer = [this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Move); };
+        moved = window.PointerMoved(auto_revoke, pointer);
+        pressed = window.PointerPressed(auto_revoke, pointer);
+        released = window.PointerReleased(auto_revoke, pointer);
+        wheel = window.PointerWheelChanged(auto_revoke, [this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Wheel); });
+        sized = window.SizeChanged(auto_revoke, {this, &View::onSize});
+        visibility = window.VisibilityChanged(auto_revoke, [this](auto const&, auto const&) { applyVisibility(); publishWindow(); });
+        closing = window.Closed(auto_revoke, {this, &View::onClosed});
+        activated = window.Activated(auto_revoke, {this, &View::onActivated});
+    }
     void Run() {
         try {
             { slim_lock_guard lock(gate); if (closeRequested) return; }
-            auto pointer = [this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Move); };
-            window.PointerMoved(pointer);
-            window.PointerPressed(pointer);
-            window.PointerReleased(pointer);
-            window.PointerWheelChanged([this](auto const&, PointerEventArgs const& args) { mouse(args, CoreWebView2MouseEventKind::Wheel); });
-            window.SizeChanged({this, &View::onSize});
-            window.VisibilityChanged([this](auto const&, auto const&) { applyVisibility(); publishWindow(); });
-            window.Closed({this, &View::onClosed});
-            window.Activated({this, &View::onActivated});
+            listen();
             window.Activate();
             startBrowser();
             window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessUntilQuit);
@@ -591,13 +604,20 @@ struct View : implements<View, IFrameworkView> {
     }
     void close() {
         if (closed) return;
+        auto lifetime = get_strong();
         closed = true;
         if (cloudCache) cloudCache->cancel();
         closePopup();
         if (controller) controller.Close();
         web = nullptr;
         controller = nullptr;
-        window.Dispatcher().StopProcessEvents();
+        if (usesPrimaryWindow) {
+            moved.revoke(); pressed.revoke(); released.revoke(); wheel.revoke();
+            sized.revoke(); visibility.revoke(); closing.revoke(); activated.revoke();
+            if (target) target.Root(nullptr);
+            target = nullptr;
+            Uninitialize();
+        } else window.Dispatcher().StopProcessEvents();
     }
     void Uninitialize() {
         closed = true;
@@ -606,6 +626,7 @@ struct View : implements<View, IFrameworkView> {
         active = {};
         dispatcher = nullptr;
         secondary = nullptr;
+        primaryHost = nullptr;
         opening = false;
         closeRequested = false;
         requests.clear();
@@ -631,6 +652,29 @@ template <typename Callback> void onBrowserThread(Callback callback) {
 
 struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native::IRendererStatics> {
     IInspectable ActivateInstance() { throw hresult_not_implemented(); }
+    void OpenInCurrentView() {
+        auto primary = CoreApplication::MainView();
+        auto window = CoreWindow::GetForCurrentThread();
+        if (!window || window != primary.CoreWindow()) throw hresult_wrong_thread();
+        auto view = make_self<View>();
+        {
+            slim_lock_guard lock(gate);
+            if (opening && closeRequested) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
+            if (opening) return;
+            opening = true;
+            status = L"attaching-primary-view";
+            primaryHost = view.as<IFrameworkView>();
+        }
+        try {
+            view->usesPrimaryWindow = true;
+            view->SetWindow(window);
+            view->listen();
+            view->startBrowser();
+        } catch (...) {
+            view->close();
+            throw;
+        }
+    }
     void Open() {
         {
             slim_lock_guard lock(gate);
