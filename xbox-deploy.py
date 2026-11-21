@@ -260,7 +260,7 @@ def inspect_game(portal, package, app_id, executable):
     print('executable_source=missing')
 
 
-def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
+def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
     app = find_installed_probe(portal, name, version)
     print(f'Installed package: {app["PackageFullName"]}', flush=True)
     report_url = probe_report_path(app)
@@ -279,6 +279,9 @@ def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False):
     if manual:
         print(f'Launch {PROBE_LABELS[name]} once from Xbox Dev Home.', flush=True)
     else:
+        if restart:
+            package = base64.b64encode(app['PackageFullName'].encode()).decode('ascii')
+            portal.request('DELETE', '/api/taskmanager/app?' + urlencode({'package': package}))
         # Match Xbox Device Portal's App Launcher, which sends the AUMID only.
         launch = {'appid': base64.b64encode(app['PackageRelativeId'].encode()).decode('ascii')}
         try:
@@ -347,6 +350,7 @@ def main():
     deploy.add_argument('--test-probe', action='store_true', help='launch this probe and wait for its report')
     probe = commands.add_parser('probe', help='launch the installed probe and wait for a fresh report')
     probe.add_argument('--version', help='require a specific installed package version')
+    probe.add_argument('--restart', action='store_true', help='stop the selected probe before launching it')
     variant = probe.add_mutually_exclusive_group()
     variant.add_argument('--control', dest='probe_name', action='store_const', const=PROBE_CONTROL_NAME,
                          help='watch the clean-registration control')
@@ -369,6 +373,8 @@ def main():
         deploy.error('--require-ipc requires --test-probe')
     if args.command == 'probe' and args.require_ipc and args.probe_name != PROBE_NAME:
         probe.error('--require-ipc applies to the main probe')
+    if args.command == 'probe' and args.restart and args.manual_launch:
+        probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
 
@@ -409,7 +415,8 @@ def main():
         password = getpass.getpass('Xbox Device Portal password: ')
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'probe':
-        wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout, args.require_ipc)
+        wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout,
+                       args.require_ipc, restart=args.restart)
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)

@@ -254,16 +254,18 @@
             return storage.FileIO.writeTextAsync(attempt.file, attempt.libraryReport + checkpoint);
         }
 
-        if (values.hasKey(versionKey) && values.lookup(versionKey) === packageInfo.id.fullName) return save(complete);
         return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
             if (!file) return save(complete);
             return storage.FileIO.readTextAsync(file).then(function (text) {
-                var requested = text.trim();
-                if (!/^\d{1,8}$/.test(requested) || +requested < 1 || +requested > 16777215) {
+                var config = /^(\d{1,8})(?:\r?\n(repeat))?$/.exec(text.trim());
+                if (!config || +config[1] < 1 || +config[1] > 16777215) {
                     return save("steam_launch=invalid-game\r\n" + complete);
                 }
-                values.insert(versionKey, packageInfo.id.fullName);
-                var game = entries.filter(function (entry) { return entry.id === +requested; })[0];
+                if (!config[2]) {
+                    if (values.hasKey(versionKey) && values.lookup(versionKey) === packageInfo.id.fullName) return save(complete);
+                    values.insert(versionKey, packageInfo.id.fullName);
+                }
+                var game = entries.filter(function (entry) { return entry.id === +config[1]; })[0];
                 if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
                 return runGameLaunch(attempt, game);
             });
