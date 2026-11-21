@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
@@ -83,9 +84,40 @@ def vclibs_dependency(appx):
             f'MinVersion="{version}" />').encode('ascii')
 
 
+def add_xcom_runtime(layout, archive):
+    # Pinned npm distribution; only the two static browser scripts and their license are packaged.
+    expected = "d4485f31fb4e841677e06bf3fd108bb00a0472059c675a66ba6a46dbc67ef6843da1054ff748dc910a6f4bd356eefbdfc182569828fe3d7fa3dd43b8e223ba2c"
+    if hashlib.sha512(archive.read_bytes()).hexdigest() != expected:
+        raise ValueError("Provide the original js-dos 6.22.60 npm archive.")
+    if b'AuthorizeXcomDos' not in (layout / 'XboxProbe.Native.winmd').read_bytes():
+        raise ValueError("This option needs a template with the native X-COM entitlement check.")
+    destination = layout / 'xcom-runtime'
+    destination.mkdir()
+    with tarfile.open(archive, mode='r:gz') as bundle:
+        for member, name in (('dist/js-dos.js', 'js-dos.js'), ('dist/dosbox-emterp.js', 'dosbox-emterp.js'),
+                             ('LICENSE', 'LICENSE.js-dos')):
+            with bundle.extractfile('package/' + member) as source, (destination / name).open('xb') as output:
+                shutil.copyfileobj(source, output)
+    assets = Path(__file__).resolve().parent / 'signin'
+    for name in ('xcom-dos.js', 'xcom-dos.css', 'xcom-notices.txt'):
+        shutil.copyfile(assets / name, destination / name)
+    if 'window.xcomDosRuntime' not in (layout / 'steam-signin.js').read_text(encoding='utf-8'):
+        raise ValueError("Use a template containing the X-COM library Play handler.")
+    page = layout / 'steam-signin.html'
+    html = page.read_text(encoding='utf-8')
+    marker = '<script src="steam-signin.js"></script>'
+    scripts = ('js-dos.js', 'dosbox-emterp.js', 'xcom-dos.js')
+    if html.count(marker) != 1 or html.count('</head>') != 1:
+        raise ValueError("Unexpected Steam sign-in template markup.")
+    html = html.replace('</head>', '<link rel="stylesheet" href="xcom-runtime/xcom-dos.css">\n</head>')
+    page.write_text(html.replace(marker, '\n    '.join(
+        '<script src="xcom-runtime/' + script + '"></script>' for script in scripts) + '\n    ' + marker),
+        encoding='utf-8')
+
+
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
-                   library_inventory=False, vclibs_framework=None):
+                   library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None):
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -139,6 +171,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
 
+    if xcom_runtime_archive:
+        add_xcom_runtime(layout, xcom_runtime_archive)
+
     if valve_archive:
         with ZipFile(valve_archive) as archive:
             for filename in VALVE_FILES:
@@ -179,7 +214,13 @@ def main():
                         help='add a dependency on a signed Microsoft.VCLibs.140.00.UWPDesktop x64 framework APPX')
     parser.add_argument('--probe-java-runtime', action='store_true',
                         help='run the installed Slay the Spire Java version check after a startup exit')
+    parser.add_argument('--xcom-dos-runtime', type=Path, metavar='JS_DOS_TGZ',
+                        help='use pinned js-dos 6.22.60 for the licensed X-COM DOS install')
     args = parser.parse_args()
+    if args.xcom_dos_runtime and not args.steam_sign_in:
+        parser.error('--xcom-dos-runtime requires --steam-sign-in')
+    if args.xcom_dos_runtime and args.launch_app_id not in (None, 7760):
+        parser.error('--xcom-dos-runtime supports only X-COM AppID 7760 for an automatic trial')
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
     if args.unicode_keyboard and not args.valve_archive:
@@ -200,7 +241,7 @@ def main():
         parser.error('--version components may not exceed 65535')
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
-                   args.install_before_launch, args.library_inventory, args.vclibs_framework)
+                   args.install_before_launch, args.library_inventory, args.vclibs_framework, args.xcom_dos_runtime)
 
 
 if __name__ == '__main__':
