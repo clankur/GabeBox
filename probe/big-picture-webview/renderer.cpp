@@ -58,6 +58,7 @@ struct View : implements<View, IFrameworkView> {
     CoreWebView2CompositionController popup{nullptr};
     bool openingPopup = false;
     CoreWebView2 web{nullptr};
+    hstring assets;
     bool closed = false;
 
     void Initialize(CoreApplicationView const&) {}
@@ -151,7 +152,10 @@ struct View : implements<View, IFrameworkView> {
         return true;
     }
 
-    static void configure(CoreWebView2 const& browser, bool allowMessages) {
+    void configure(CoreWebView2 const& browser, bool allowMessages) {
+        // WebView2 virtual hosts are scoped to one CoreWebView2. Valve's
+        // independently composed SP BPM child loads its own CSS and fonts.
+        browser.SetVirtualHostNameToFolderMapping(L"steamloopback.host", assets, CoreWebView2HostResourceAccessKind::Deny);
         auto settings = browser.Settings();
         settings.IsWebMessageEnabled(allowMessages);
         settings.AreHostObjectsAllowed(false);
@@ -286,8 +290,7 @@ struct View : implements<View, IFrameworkView> {
             web = controller.CoreWebView2();
 
             step = L"mapping";
-            auto assets = Package::Current().InstalledLocation().Path() + L"\\ValveClient\\steamui";
-            web.SetVirtualHostNameToFolderMapping(L"steamloopback.host", assets, CoreWebView2HostResourceAccessKind::Deny);
+            assets = Package::Current().InstalledLocation().Path() + L"\\ValveClient\\steamui";
             configure(web, true);
             web.NavigationStarting([](auto const&, auto const& args) {
                 if (!isEntry(args.Uri())) args.Cancel(true);
