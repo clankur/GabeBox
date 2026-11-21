@@ -394,7 +394,7 @@
                 return !!transfer || launching || restoring || !document.getElementById("sdl-game").hidden ||
                     !!document.getElementById("xcom-game");
             },
-            install: startDownload, play: playGame
+            install: startDownload, play: playGame, signOut: signOutCurrent
         });
         function failed() {
             if (currentSession()) showBigPictureStatus("Steam Big Picture could not open. Reopen the app to retry.");
@@ -833,8 +833,8 @@
         }
         runCloudRestore(entry.id, false).then(done, function () { done("failed"); });
     });
-    signOut.addEventListener("click", function () {
-        if (restoring) return;
+    function signOutCurrent() {
+        if (signingOut || restoring) return Promise.resolve("busy");
         signingOut = true;
         if (transfer) updateDownload(transfer, "interrupted");
         launching = true;
@@ -851,12 +851,16 @@
             if ("gamepadInputEmulation" in navigator) navigator.gamepadInputEmulation = originalInputMode;
             library.hidden = true;
             signin.hidden = false;
+            if (bigPictureMode) showBigPictureStatus("");
             downloadStatus.textContent = "";
             status.textContent = cleared ? "Signed out of Steam." : "Could not confirm removal of the saved Steam session.";
             retry.hidden = false;
             retry.focus();
+            return "signed-out";
         }
-        XboxProbe.Native.ProbeRunner.signOutSteam().done(endSignOut, function () { endSignOut(false); });
-    });
+        return Promise.resolve().then(function () { return XboxProbe.Native.ProbeRunner.signOutSteam(); })
+            .then(endSignOut, function () { return endSignOut(false); });
+    }
+    signOut.addEventListener("click", signOutCurrent);
     start();
 })();

@@ -10,5 +10,6 @@ namespace BigPictureView.Native
         static void Reply(String message);
         static void Close();
         static void OpenForWarmup();
+        static void OpenForAccount(String steamId);
     };
 }

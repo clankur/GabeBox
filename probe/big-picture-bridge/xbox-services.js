@@ -1,7 +1,7 @@
 // Steam's per-user UI preferences persist in the WebView's package-local data folder.
 // Authenticate each operation with the account that owns this renderer session.
 function installXboxServices(client, send) {
-    const keys = new Set(['CurrentKeyboardTheme', 'GetKeyboardSkins', 'GetStartupMovies', 'seen_clip_saved_hint']);
+    const keys = new Set(['CurrentKeyboardTheme', 'Deck_GuidedTourVersionSeen', 'GetKeyboardSkins', 'GetStartupMovies', 'seen_clip_saved_hint']);
     const profileKey = /^GetEquippedProfileItemsForUser([1-9][0-9]{16,19})$/;
     const maxValue = 64 * 1024;
     let queue = Promise.resolve(), pending = 0, owner;

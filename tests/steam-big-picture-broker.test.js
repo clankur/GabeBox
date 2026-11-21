@@ -48,6 +48,23 @@ test("only numeric owned AppIDs can reach the real play or install action", asyn
     assert.deepEqual(calls, [["play", session.games[0]], ["install", session.games[1]]]);
 });
 
+test("only the current idle owner can sign out using the stock menu", async () => {
+    const {session, broker} = fixture();
+    let calls = 0;
+    session.signOut = async () => { calls++; return "signed-out"; };
+    session.busy = () => true;
+    assert.equal(await broker.signOut(), "busy");
+    session.busy = () => false;
+    const switched = broker.signOut();
+    session.steamId = () => "76561197960268002";
+    assert.equal(await switched, "session-changed");
+    assert.equal(calls, 0);
+    assert.equal(await broker.signOut(), "session-changed");
+    session.steamId = () => "76561197960268001";
+    assert.equal(await broker.signOut(), "signed-out");
+    assert.equal(calls, 1);
+});
+
 test("signing out while an install check or catalog request is pending revokes the broker", async () => {
     const { session, broker, calls } = fixture();
     let installed, catalog;

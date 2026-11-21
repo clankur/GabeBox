@@ -29,6 +29,15 @@ test('signed Steam preference writes and deletes are ordered with subsequent rea
     assert.throws(() => prefs.SetString('GetStartupMovies', 'a'.repeat(65537)), /Invalid/);
 });
 
+test('the Valve tour completion survives reopening the same account and is private to it', async () => {
+    const data = new Map(), key = 'Deck_GuidedTourVersionSeen';
+    const fresh = fixture(data, {id: first});
+    assert.equal(await fresh.GetString(key), null);
+    await fresh.SetString(key, '1');
+    assert.equal(await fixture(data, {id: first}).GetString(key), '1');
+    assert.equal(await fixture(data, {id: second}).GetString(key), null);
+});
+
 test('an account change or sign-out cannot read a previous user cache', async () => {
     const data = new Map(), owner = {id: first}, firstPrefs = fixture(data, owner);
     await firstPrefs.SetString('seen_clip_saved_hint', '1');

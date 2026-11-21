@@ -65,6 +65,16 @@ var steamBigPictureBroker = (function () {
         return {
             session: function () { return Promise.resolve().then(identity); },
             library: library,
+            signOut: function () {
+                if (!active()) return Promise.resolve("session-changed");
+                if (acting || session.busy()) return Promise.resolve("busy");
+                acting = true;
+                return Promise.resolve().then(function () {
+                    if (!active()) return "session-changed";
+                    return session.signOut();
+                }).then(function (result) { acting = false; return result; },
+                    function () { acting = false; return "failed"; });
+            },
             play: function (appId, handoff) { return action(appId, false, handoff); },
             install: function (appId) { return action(appId, true); }
         };

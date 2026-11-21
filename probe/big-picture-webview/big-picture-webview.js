@@ -15,7 +15,11 @@
 
     function open(broker, onFailure) {
         if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure); });
-        if (session) return session.ready;
+        if (session) {
+            if (session.broker === broker) return session.ready;
+            if (!session.replaceable()) return Promise.reject(new Error("steam-view-busy"));
+            return session.finish("account-changed", true).then(function () { return open(broker, onFailure); });
+        }
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file, report = Promise.resolve();
@@ -240,6 +244,10 @@
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
             else if (request.method === "session") action = function () { return broker.session(); };
+            else if (request.method === "sign-out") action = function () {
+                if (!settled || !visible || playing || failed) return "busy";
+                return broker.signOut();
+            };
             else if (request.method === "restart-client") action = function () {
                 return broker.session().then(function (user) {
                     if (!user || !user.steamId) return "signed-out";
@@ -290,6 +298,10 @@
             } else return respond(id, false, "unavailable");
             Promise.resolve().then(function () { if (!failed) return action(); }).then(function (result) {
                 respond(id, true, result);
+                if (request.method === "sign-out" && result === "signed-out" && !failed) {
+                    finish("signed-out", true);
+                    return;
+                }
                 if (request.method === "restart-client" && result === "restart" && !playing && !failed) {
                     record("client-restart");
                     host.reply(JSON.stringify({nativeRestartClient: true}));
@@ -306,8 +318,8 @@
             var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
             finish(stage || "host-error:" + code);
         }
-        function finish(stage) {
-            if (failed) return;
+        function finish(stage, intentional) {
+            if (failed) return session && session.cleanup || Promise.resolve();
             failed = true;
             clearInterval(timer);
             clearTimeout(readinessTimer);
@@ -331,9 +343,11 @@
                     return check();
                 }).catch(function () {}).then(function () {
                     if (session === current) session = null;
-                    if (wasReady && typeof onFailure === "function") onFailure(new Error(stage));
+                    if (wasReady && !intentional && typeof onFailure === "function") onFailure(new Error(stage));
                 });
+                return current.cleanup;
             }
+            return Promise.resolve();
         }
         var lastNative, nextCaptureCheck = 0, lookingForCapture = false;
         function checkCaptureRequest() {
@@ -412,15 +426,24 @@
             host = BigPictureView.Native.Renderer;
             record("winrt-projected");
             record("status-before-open:" + host.status());
-            warming = !!broker && typeof host.openForWarmup === "function";
-            if (warming) host.openForWarmup();
-            else host.open();
+            if (!broker) { host.open(); return; }
+            return broker.session().then(function (identity) {
+                if (failed) return;
+                var owner = identity && identity.steamId;
+                if (typeof owner !== "string" || !/^[1-9][0-9]{16,19}$/.test(owner) ||
+                    (owner.length === 20 && owner > "18446744073709551615")) throw new Error("signed-out");
+                warming = true;
+                host.openForAccount(owner);
+            });
+        }).then(function () {
+            if (failed) return;
             record("open-returned");
             timer = setInterval(poll, 80);
             poll();
         }).catch(fail);
         if (!broker) ready.catch(function () {});
-        session = {resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
+        session = {broker: broker, replaceable: function () { return !!broker && !playing; }, finish: finish,
+            resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
             ready: broker ? ready : startup};
         return session.ready;
     }

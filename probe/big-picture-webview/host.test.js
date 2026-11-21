@@ -10,7 +10,7 @@ function fixture({activationError = false, primary = false, warm = false, expect
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
-    const memoryRequests = [];
+    const memoryRequests = [], owners = [];
     const renderer = {
         open() { opens++; stage = "composition"; },
         viewId() { return stage === "closed" ? 0 : (primary ? 3 : 10); },
@@ -22,7 +22,7 @@ function fixture({activationError = false, primary = false, warm = false, expect
         reply(reply) { replies.push(JSON.parse(reply)); },
         close() { stage = "closed"; }
     };
-    if (warm) renderer.openForWarmup = () => { warmOpens++; stage = "composition"; };
+    renderer.openForAccount = id => { owners.push(id); if (warm) warmOpens++; else opens++; stage = "composition"; };
     const window = {};
     vm.runInNewContext(source, {
         Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
@@ -44,11 +44,20 @@ function fixture({activationError = false, primary = false, warm = false, expect
         setTimeout(callback) { timeout = callback; return 2; }, clearTimeout() {}
     });
     return {
-        start: (broker, failure) => window.steamBigPictureHost.open(broker, failure),
-        async advance(nextStage) { stage = nextStage; poll(); await drain(); },
+        start(broker, failure) {
+            if (broker && !broker.session) broker.session = async () => ({steamId: "76561198000000001"});
+            return window.steamBigPictureHost.open(broker, failure);
+        },
+        async advance(nextStage) {
+            if (!warm && owners.length && (nextStage === "gamepad-ready" || nextStage === "setup-ready")) {
+                stage = nextStage === "setup-ready" ? "warmup-setup-layout" : "warmup-gamepad-layout";
+                poll(); await drain();
+            }
+            stage = nextStage; poll(); await drain();
+        },
         expire() { timeout(); },
         elapse(ms) { now += ms; }, warmOpens: () => warmOpens, memoryRequests,
-        shell: window.steamBigPictureHost, opens: () => opens, switches, incoming, reports, replies
+        shell: window.steamBigPictureHost, opens: () => opens, owners, switches, incoming, reports, replies
     };
 }
 
@@ -152,7 +161,7 @@ test("a local operator request captures the active console renderer only after s
     await ready;
     assert.deepEqual(files, ["big-picture-capture-library.request"]);
     assert.deepEqual(removed, files);
-    assert.deepEqual(app.replies, [{nativeCaptureLibrary: true}]);
+    assert.deepEqual(app.replies, [{nativeWarmupComplete: true}, {nativeCaptureLibrary: true}]);
     app.incoming.push(JSON.stringify({method: "capture-library-result", state: "saved", viewId: 3,
         browserPid: 99, width: 1920, height: 1080}));
     await app.advance("gamepad-ready");
@@ -287,7 +296,7 @@ test("session and system policy requests require a signed-in broker and keep acc
     app.incoming.push('{"id":11,"method":"session"}');
     await app.advance("gamepad-ready");
     await startup;
-    assert.deepEqual(app.replies, [{id: 11, result: {steamId: identity}}]);
+    assert.deepEqual(app.replies.filter(reply => reply.id), [{id: 11, result: {steamId: identity}}]);
     assert.ok(app.reports.every(report => !report.includes(identity)));
 
     const smoke = fixture();
@@ -295,6 +304,37 @@ test("session and system policy requests require a signed-in broker and keep acc
     smoke.incoming.push('{"id":12,"method":"session"}', '{"id":13,"method":"system-mode"}');
     await smoke.advance("document-loaded");
     assert.deepEqual(smoke.replies, [{id: 12, error: "signed-out"}, {id: 13, error: "signed-out"}]);
+});
+
+test("an account change closes the previous view and late library results never reach the new owner", async () => {
+    const app = fixture();
+    let replyLate, failures = 0;
+    const first = {session: async () => ({steamId: "76561198000000010"}),
+        library: () => new Promise(resolve => { replyLate = resolve; })};
+    const opened = app.start(first, () => failures++);
+    await drain(); await app.advance("gamepad-ready"); await opened;
+    app.incoming.push(JSON.stringify({id: 8, method: "library"}));
+    await app.advance("gamepad-ready");
+    const second = {session: async () => ({steamId: "76561198000000011"}), signOut: async () => "signed-out"};
+    const switched = app.start(second, () => failures++);
+    await drain(); await app.advance("gamepad-ready"); await switched;
+    assert.deepEqual(app.owners, ["76561198000000010", "76561198000000011"]);
+    replyLate([{id: 101, name: "Private old account game"}]);
+    app.incoming.push(JSON.stringify({id: 9, method: "sign-out"}));
+    await app.advance("gamepad-ready");
+    assert(!app.replies.some(reply => reply.id === 8));
+    assert(app.replies.some(reply => reply.id === 9 && reply.result === "signed-out"));
+    assert.deepEqual(app.switches.at(-1), [3, 10]);
+    assert.equal(failures, 0);
+});
+
+test("a missing or invalid owner never opens a signed renderer profile", async () => {
+    for (const steamId of [null, "../shared", "18446744073709551616"]) {
+        const app = fixture();
+        await assert.rejects(app.start({session: async () => ({steamId})}));
+        assert.deepEqual(app.owners, []);
+        assert.equal(app.opens(), 0);
+    }
 });
 
 test("a visible Valve first-run screen keeps the session open during setup", async () => {

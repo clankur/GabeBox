@@ -44,6 +44,7 @@ CoreApplicationView secondary{nullptr};
 int32_t viewId = 0;
 bool opening = false;
 bool closeRequested = false;
+hstring openingAccount;
 hstring status = L"closed";
 std::deque<hstring> requests;
 hstring captureResult;
@@ -75,7 +76,8 @@ struct View : implements<View, IFrameworkView> {
     std::shared_ptr<SteamUiCloudCache> cloudCache;
     hstring assets;
     bool closed = false;
-    explicit View(bool warm = false) : warming(warm) {}
+    explicit View(bool warm, hstring const& owner) : account(owner), warming(warm) {}
+    hstring const account;
     bool warming;
     bool frameOpen = false;
     bool xboxDisplay = false;
@@ -708,8 +710,13 @@ struct View : implements<View, IFrameworkView> {
 
             step = L"environment";
             checkpoint(step);
-            auto cache = Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path();
-            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", cache + L"\\WebView2", nullptr);
+            auto cache = Windows::Storage::ApplicationData::Current().LocalCacheFolder();
+            auto profile = cache.Path() + L"\\WebView2";
+            if (!account.empty()) {
+                auto profiles = co_await cache.CreateFolderAsync(L"SteamWebProfiles", Windows::Storage::CreationCollisionOption::OpenIfExists);
+                profile = profiles.Path() + L"\\" + account;
+            }
+            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", profile, nullptr);
             if (closed) co_return;
 
             step = L"controller";
@@ -799,6 +806,7 @@ struct View : implements<View, IFrameworkView> {
                 });
             )JS";
             document->signedMode = !adapter.empty();
+            if (document->signedMode && account.empty()) throw hresult_access_denied();
             auto seed = L"const xboxNativeWindow = Object.freeze(Object.assign(" + windowState() + L"," + platformState() +
                 L",{framedGamepad:" + (document->signedMode ? L"true" : L"false") + L"}));\n";
             co_await web.AddScriptToExecuteOnDocumentCreatedAsync(script + hstring(seed) + adapter + L"\n}");
@@ -858,15 +866,17 @@ struct View : implements<View, IFrameworkView> {
         secondary = nullptr;
         captureResult = hstring{};
         opening = false;
+        openingAccount = hstring{};
         closeRequested = false;
         requests.clear();
     }
 };
 
 struct Source : implements<Source, IFrameworkViewSource> {
-    explicit Source(bool warm) : warming(warm) {}
+    explicit Source(bool warm, hstring const& owner) : warming(warm), account(owner) {}
     bool warming;
-    IFrameworkView CreateView() { return make<View>(warming); }
+    hstring const account;
+    IFrameworkView CreateView() { return make<View>(warming, account); }
 };
 
 template <typename Callback> void onBrowserThread(Callback callback) {
@@ -886,16 +896,24 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     IInspectable ActivateInstance() { throw hresult_not_implemented(); }
     void Open() { openView(false); }
     void OpenForWarmup() { openView(true); }
-    void openView(bool warm) {
+    void OpenForAccount(hstring const& owner) {
+        std::wstring_view id(owner);
+        if (id.size() < 17 || id.size() > 20 || id.front() == L'0' ||
+            id.find_first_not_of(L"0123456789") != id.npos ||
+            (id.size() == 20 && id > L"18446744073709551615")) throw hresult_invalid_argument();
+        openView(true, owner);
+    }
+    void openView(bool warm, hstring const& owner = {}) {
         {
             slim_lock_guard lock(gate);
-            if (opening && closeRequested) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
+            if (opening && (closeRequested || openingAccount != owner)) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
             if (opening) return;
             opening = true;
+            openingAccount = owner;
             status = L"creating-view";
         }
         try {
-            auto newView = CoreApplication::CreateNewView(make<Source>(warm));
+            auto newView = CoreApplication::CreateNewView(make<Source>(warm, owner));
             slim_lock_guard lock(gate);
             if (opening) secondary = newView;
         }
