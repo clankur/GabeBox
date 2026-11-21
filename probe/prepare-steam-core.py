@@ -86,11 +86,13 @@ def vclibs_dependency(appx):
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, slay_startup_log=False, slay_console=False,
-                   slay_native_cwd=False, slay_lwjgl_display=None, slay_sdl=None):
+                   slay_native_cwd=False, slay_lwjgl_display=None, slay_sdl=None, slay_font_atlas_limit=None):
     if slay_lwjgl_display and not slay_native_cwd:
         raise ValueError('The LWJGL display fallback needs the Slay native working-directory diagnostic.')
     if slay_sdl and not slay_lwjgl_display:
         raise ValueError('The SDL trial requires the LWJGL SDL display and context JAR.')
+    if slay_font_atlas_limit is not None and (not slay_sdl or slay_font_atlas_limit not in (512, 1024)):
+        raise ValueError('The font atlas limit requires the Slay SDL profile and a supported page size.')
     version_parts = tuple(int(part) for part in version.split('.'))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
@@ -170,6 +172,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 raise ValueError('Use the checked shared SDL2 workflow artifact.')
             (layout / 'SDL2.dll').write_bytes(library)
             shutil.copyfile(slay_sdl / 'LICENSE.txt', layout / 'LICENSE.SDL2')
+            if slay_font_atlas_limit is not None:
+                (layout / 'slay-font-atlas-limit.txt').write_text(f'{slay_font_atlas_limit}\n', encoding='ascii')
         if library_inventory:
             (layout / 'steam-library-inventory.txt').touch()
 
@@ -222,6 +226,8 @@ def main():
     parser.add_argument('--slay-lwjgl-display', type=Path, metavar='FALLBACK_JAR',
                         help='use the pinned LWJGL windowed display fallback in the Slay diagnostic')
     parser.add_argument('--slay-sdl', type=Path, metavar='ARTIFACT', help='use the checked SDL2 artifact for the Slay SDL profile')
+    parser.add_argument('--slay-font-atlas-limit', type=int, choices=(512, 1024),
+                        help='cap the default libGDX font atlas page size in the Slay SDL trial')
     args = parser.parse_args()
     if args.steam_sign_in and not args.unicode_keyboard:
         parser.error('--steam-sign-in requires --unicode-keyboard')
@@ -250,7 +256,8 @@ def main():
     prepare_layout(args.template, args.layout, args.version, args.valve_archive, args.objdump, args.unicode_keyboard,
                    args.steam_sign_in, args.launch_app_id, args.probe_java_runtime, args.repeat_launch,
                    args.install_before_launch, args.library_inventory, args.vclibs_framework, args.slay_startup_log,
-                   args.slay_console, args.slay_native_cwd, args.slay_lwjgl_display, args.slay_sdl)
+                   args.slay_console, args.slay_native_cwd, args.slay_lwjgl_display, args.slay_sdl,
+                   args.slay_font_atlas_limit)
 
 
 if __name__ == '__main__':

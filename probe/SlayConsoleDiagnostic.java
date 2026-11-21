@@ -40,6 +40,27 @@ public final class SlayConsoleDiagnostic {
     private static native int setGameDirectory(String path);
     private static native int[] runMesaControl();
 
+    private static void configureFontAtlas(File packageRoot) throws IOException {
+        Path settings = packageRoot.toPath().resolve("slay-font-atlas-limit.txt");
+        if (!Files.isRegularFile(settings)) return;
+        String setting = new String(Files.readAllBytes(settings), StandardCharsets.US_ASCII).trim();
+        if (!setting.equals("512") && !setting.equals("1024")) {
+            throw new IOException("Unexpected font atlas limit");
+        }
+        try {
+            Class<?> generator = Class.forName("com.badlogic.gdx.graphics.g2d.freetype.FreeTypeFontGenerator");
+            Method getLimit = generator.getMethod("getMaxTextureSize");
+            Method setLimit = generator.getMethod("setMaxTextureSize", int.class);
+            int requested = Integer.parseInt(setting);
+            int initial = (Integer)getLimit.invoke(null);
+            if (initial == -1 || requested < initial) setLimit.invoke(null, requested);
+            System.out.println("slay_font_atlas_initial=" + initial);
+            System.out.println("slay_font_atlas_limit=" + getLimit.invoke(null));
+        } catch (ReflectiveOperationException e) {
+            System.out.println("slay_font_atlas_limit=unavailable");
+        }
+    }
+
     private static void checkLwjglBinding() {
         System.out.println("slay_lwjgl_egl_binding=begin");
         Method useContext = null;
@@ -134,6 +155,7 @@ public final class SlayConsoleDiagnostic {
         File packageRoot = new File(library).getParentFile();
         if (new File(packageRoot, "slay-sdl-display.dll").isFile()) {
             System.setProperty("xbox.lwjgl.sdl.package", packageRoot.getAbsolutePath());
+            configureFontAtlas(packageRoot);
         } else {
             checkMesaInGameJvm(packageRoot);
         }
