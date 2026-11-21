@@ -5,6 +5,8 @@
     var canvas = document.getElementById("code");
     var retry = document.getElementById("retry");
     var cancel = document.getElementById("cancel");
+    var rememberRow = document.getElementById("remember-session");
+    var remember = document.getElementById("remember");
     var signin = document.getElementById("signin");
     var library = document.getElementById("library");
     var libraryCount = document.getElementById("library-count");
@@ -117,14 +119,19 @@
         canvas.width = canvas.height = 0;
     }
 
-    function accountId(refresh) {
+    function steamTokenClaims(refresh) {
         var part = refresh.split(".")[1];
         if (!part) throw new Error("Valve did not return an account identity");
         part = part.replace(/-/g, "+").replace(/_/g, "/");
         while (part.length % 4) part += "=";
-        var id = JSON.parse(atob(part)).sub;
+        var claims = JSON.parse(atob(part));
+        var id = claims.sub;
         if (typeof id !== "string" || !/^[0-9]{17,20}$/.test(id)) throw new Error("Invalid Valve account identity");
-        return id;
+        var expiry = claims.exp;
+        if (typeof expiry !== "number" || Math.floor(expiry) !== expiry || expiry <= 0 || expiry > 4294967295) {
+            expiry = 0;
+        }
+        return { id: id, expiry: expiry };
     }
 
     function finish(attempt, display, marker) {
@@ -134,6 +141,7 @@
         attempt.client.close();
         clearCode();
         cancel.hidden = true;
+        rememberRow.hidden = true;
         retry.hidden = false;
         retry.focus();
         status.textContent = display;
@@ -216,6 +224,13 @@
                 message = " is on disk, but Steam could not reopen its install.";
             }
             if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            if (/steam_launch=(?:dependency-install-rejected|dependency-install-incomplete)\r\n/.test(result) ||
+                    result.indexOf("steam_launch_client_reason=dependency-not-ready\r\n") >= 0) {
+                message = " is waiting for a required Steam component.";
+            }
+            if (result.indexOf("steam_launch_client_reason=invalid-platform\r\n") >= 0) {
+                message = " has a Windows build that Steam refused on this Xbox.";
+            }
             downloadStatus.textContent = entry.name + message;
             return fileIO.writeTextAsync(attempt.file, report + result + complete);
         }
@@ -268,6 +283,9 @@
                 list.firstElementChild.focus();
                 attempt.done = true;
                 attempt.client.close();
+                if (report.indexOf("steam_session_cache=unavailable\r\n") >= 0) {
+                    downloadStatus.textContent = "This Xbox could not save the Steam sign-in.";
+                }
                 attempt.libraryReport = report.replace("status=steam-library-rendering\r\n", "steam_library_rendered=yes\r\n");
                 return completeLibrary(attempt);
             } else if (report.indexOf("steam_signin=authenticated\r\n") >= 0) {
@@ -279,13 +297,15 @@
     }
 
     function submitApproval(attempt, reply) {
-        var id = accountId(reply.refresh_token);
+        var claims = steamTokenClaims(reply.refresh_token);
+        var optedIn = remember.checked;
         clearCode();
         cancel.hidden = true;
+        rememberRow.hidden = true;
         status.textContent = "Connecting to Steam and reading your library…";
         var approved = attempt.prefix + "steam_approval=received\r\n";
         var operation = XboxProbe.Native.ProbeRunner.runSteamSignIn(
-            attempt.file, approved, reply.account_name, reply.refresh_token, id
+            attempt.file, approved, reply.account_name, reply.refresh_token, claims.id, optedIn, claims.expiry
         );
         return operation.then(function (payload) { return finishNative(attempt, payload); });
     }
@@ -405,22 +425,11 @@
         }, interval);
     }
 
-    function start() {
-        if (current && !current.done) return;
-        retry.hidden = true;
+    function prepareQr(attempt) {
+        attempt.deadline = Date.now() + 150000;
         status.textContent = "Preparing Steam Guard sign-in…";
-        var attempt = {
-            client: httpClient(),
-            deadline: Date.now() + 150000,
-            prefix: "probe=steam-signin\r\nrun_id=" + Date.now() + "\r\n"
-        };
-        current = attempt;
-        Windows.Storage.ApplicationData.current.localFolder.createFileAsync(
-            "probe-report.txt", Windows.Storage.CreationCollisionOption.replaceExisting
-        ).then(function (file) {
-            attempt.file = file;
-            return Windows.Storage.FileIO.writeTextAsync(file, attempt.prefix + "status=steam-approval-starting\r\n");
-        }).then(function () {
+        return Windows.Storage.FileIO.writeTextAsync(attempt.file,
+            attempt.prefix + "status=steam-approval-starting\r\n").then(function () {
             var name = "Xbox Dev Mode Steam client";
             var device = byteString(10, name) + String.fromCharCode(16, 1);
             return steamRequest(attempt.client, "BeginAuthSessionViaQR", byteString(26, device));
@@ -431,10 +440,38 @@
             showCode(challenge.challenge_url);
             status.textContent = "Scan this code with Steam Guard in the Steam Mobile app, then approve this Xbox.";
             cancel.hidden = false;
+            rememberRow.hidden = false;
+            remember.focus();
             return Windows.Storage.FileIO.writeTextAsync(attempt.file, attempt.prefix +
                 "steam_qr_challenge=displayed\r\nstatus=steam-approval-ready\r\n").then(function () {
                 schedulePoll(attempt, challenge);
             });
+        });
+    }
+
+    function start() {
+        if (current && !current.done) return;
+        retry.hidden = true;
+        remember.checked = false;
+        status.textContent = "Checking for a saved Steam session…";
+        var attempt = {
+            client: httpClient(),
+            prefix: "probe=steam-signin\r\nrun_id=" + Date.now() + "\r\n"
+        };
+        current = attempt;
+        Windows.Storage.ApplicationData.current.localFolder.createFileAsync(
+            "probe-report.txt", Windows.Storage.CreationCollisionOption.replaceExisting
+        ).then(function (file) {
+            attempt.file = file;
+            return Windows.Storage.FileIO.writeTextAsync(file, attempt.prefix + "status=steam-session-checking\r\n");
+        }).then(function () {
+            return XboxProbe.Native.ProbeRunner.resumeSteamSignIn(attempt.file, attempt.prefix).then(null, function () {
+                return "fallback";
+            });
+        }).then(function (payload) {
+            if (payload && payload !== "fallback") return finishNative(attempt, payload);
+            if (payload === "fallback") attempt.prefix += "steam_session_restore=fallback\r\n";
+            return prepareQr(attempt);
         }).done(null, function () {
             finish(attempt, "Steam could not prepare an approval code. Try again.", "steam_qr_challenge=failed");
         });
@@ -498,16 +535,24 @@
     play.addEventListener("keydown", backToLibrary);
     signOut.addEventListener("click", function () {
         if (transfer) updateDownload(transfer, "interrupted");
-        XboxProbe.Native.ProbeRunner.signOutSteam();
-        entries = [];
-        manifestFolder = null;
-        renderList();
-        library.hidden = true;
-        signin.hidden = false;
-        downloadStatus.textContent = "";
-        status.textContent = "Signed out of Steam.";
-        retry.hidden = false;
-        retry.focus();
+        launching = true;
+        signOut.disabled = true;
+        downloadStatus.textContent = "Signing out of Steam…";
+        updateActions();
+        function endSignOut(cleared) {
+            launching = false;
+            signOut.disabled = false;
+            entries = [];
+            manifestFolder = null;
+            renderList();
+            library.hidden = true;
+            signin.hidden = false;
+            downloadStatus.textContent = "";
+            status.textContent = cleared ? "Signed out of Steam." : "Could not confirm removal of the saved Steam session.";
+            retry.hidden = false;
+            retry.focus();
+        }
+        XboxProbe.Native.ProbeRunner.signOutSteam().done(endSignOut, function () { endSignOut(false); });
     });
     start();
 })();

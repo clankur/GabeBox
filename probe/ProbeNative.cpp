@@ -5,8 +5,10 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Security.Cryptography.Core.h>
+#include <winrt/Windows.Security.Cryptography.DataProtection.h>
 #include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/XboxProbe.Native.h>
 #include <algorithm>
 #include <array>
@@ -472,6 +474,92 @@ static void SteamSignOut() {
     --winrt::get_module_lock();
 }
 
+static constexpr auto SteamCacheFile = L"steam-session.dpapi";
+static constexpr auto SteamCacheOptIn = L"steamSessionRemembered";
+static constexpr std::wstring_view SteamCacheSchema = L"steam-session-v1\n";
+static constexpr std::uint32_t SteamCacheMaximum = 65536;
+
+static bool SteamSessionIsCurrent(std::uint32_t expiry) {
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return expiry != 0 && static_cast<std::int64_t>(expiry) > now;
+}
+
+struct WipeSteamBuffer {
+    std::uint8_t *data;
+    std::uint32_t length;
+    ~WipeSteamBuffer() { SecureZeroMemory(data, length); }
+};
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::Storage::Streams::IBuffer>
+ProtectSteamSession(winrt::hstring account, winrt::hstring approval, winrt::hstring accountId,
+                    std::uint32_t expiry) {
+    using winrt::Windows::Security::Cryptography::DataProtection::DataProtectionProvider;
+    using winrt::Windows::Storage::Streams::Buffer;
+    using winrt::Windows::Storage::Streams::IBuffer;
+    if (!SteamSessionIsCurrent(expiry) ||
+            std::wstring_view(account).find(L'\n') != std::wstring_view::npos ||
+            std::wstring_view(approval).find(L'\n') != std::wstring_view::npos) {
+        co_return IBuffer{nullptr};
+    }
+    try {
+        std::wstring metadata(SteamCacheSchema);
+        metadata += std::to_wstring(expiry) + L"\n" + std::wstring(accountId) + L"\n" +
+            std::wstring(account) + L"\n";
+        const auto metadataBytes = metadata.size() * sizeof(wchar_t);
+        const auto approvalBytes = approval.size() * sizeof(wchar_t);
+        const auto length = static_cast<std::uint32_t>(metadataBytes + approvalBytes);
+        Buffer clear(length);
+        clear.Length(length);
+        const WipeSteamBuffer wipe{clear.data(), length};
+        std::memcpy(wipe.data, metadata.data(), metadataBytes);
+        std::memcpy(wipe.data + metadataBytes, approval.data(), approvalBytes);
+        approval.clear();
+        co_return co_await DataProtectionProvider(L"LOCAL=user").ProtectAsync(clear);
+    } catch (winrt::hresult_error const&) {
+        co_return IBuffer{nullptr};
+    }
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<bool> ForgetSteamSession() {
+    using namespace winrt::Windows::Storage;
+    try {
+        auto values = ApplicationData::Current().LocalSettings().Values();
+        if (values.HasKey(SteamCacheOptIn)) values.Remove(SteamCacheOptIn);
+    } catch (winrt::hresult_error const&) {}
+    try {
+        auto cached = co_await ApplicationData::Current().LocalCacheFolder().TryGetItemAsync(SteamCacheFile);
+        if (cached) co_await cached.DeleteAsync(StorageDeleteOption::PermanentDelete);
+        co_return true;
+    } catch (winrt::hresult_error const&) {
+        co_return false;
+    }
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<bool>
+SaveSteamSession(winrt::Windows::Storage::Streams::IBuffer sealed) {
+    using namespace winrt::Windows::Storage;
+    if (!sealed || !sealed.Length() || sealed.Length() > SteamCacheMaximum) co_return false;
+    try {
+        auto data = ApplicationData::Current();
+        auto values = data.LocalSettings().Values();
+        if (values.HasKey(SteamCacheOptIn)) values.Remove(SteamCacheOptIn);
+        auto cache = co_await data.LocalCacheFolder().CreateFileAsync(
+            SteamCacheFile, CreationCollisionOption::ReplaceExisting);
+        co_await FileIO::WriteBufferAsync(cache, sealed);
+        values.Insert(SteamCacheOptIn, winrt::box_value(true));
+        co_return true;
+    } catch (winrt::hresult_error const&) {}
+    co_await ForgetSteamSession();
+    co_return false;
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<bool> SteamSignOutAndForget() {
+    const bool cleared = co_await ForgetSteamSession();
+    SteamSignOut();
+    co_return cleared;
+}
+
 static winrt::hstring ReadSteamAppField(SteamReadAppData read, void *apps, std::uint32_t id, const char *key) {
     std::array<char, 2048> buffer{};
     auto size = read(apps, id, key, buffer.data(), static_cast<std::int32_t>(buffer.size()));
@@ -486,12 +574,13 @@ static winrt::hstring ReadSteamAppField(SteamReadAppData read, void *apps, std::
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         winrt::Windows::Storage::StorageFile file, winrt::hstring prefix, winrt::hstring account,
-        winrt::hstring approval, winrt::hstring accountId) {
+        winrt::hstring approval, winrt::hstring accountId, bool remember, std::uint32_t expiry,
+        bool restoring = false) {
     using winrt::Windows::Storage::FileIO;
     using CreateUser = std::int32_t (__cdecl *)(std::int32_t *);
     using SetToken = void (__cdecl *)(void *, const char *, const char *);
     using LogOn = std::int32_t (__cdecl *)(void *, std::uint64_t);
-    constexpr auto complete = L"status=steam-core-complete\r\n";
+    const auto complete = restoring ? L"status=steam-session-fallback\r\n" : L"status=steam-core-complete\r\n";
     std::wstring report(prefix);
     auto save = [&](const wchar_t *suffix) {
         return FileIO::WriteTextAsync(file, winrt::hstring(report + suffix));
@@ -561,6 +650,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         co_return winrt::hstring{};
     }
 
+    winrt::Windows::Storage::Streams::IBuffer sealed{nullptr};
+    if (remember) sealed = co_await ProtectSteamSession(account, approval, accountId, expiry);
     auto token = winrt::to_string(approval);
     approval.clear();
     auto name = winrt::to_string(account);
@@ -581,7 +672,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
 
     winrt::apartment_context caller;
     std::vector<std::uint32_t> apps(65536);
-    ULONGLONG deadline = GetTickCount64() + 60000;
+    ULONGLONG deadline = GetTickCount64() + (restoring ? 20000 : 60000);
     bool identityMatches = false;
     bool wrongAccount = false;
     std::int32_t count = 0;
@@ -676,11 +767,70 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     }
 
     auto payload = library.Stringify();
+    if (remember) {
+        const bool saved = co_await SaveSteamSession(sealed);
+        report += saved ? L"steam_session_cache=saved\r\n" : L"steam_session_cache=unavailable\r\n";
+    }
+    if (restoring) report += L"steam_session_cache=restored\r\n";
     co_await save(L"status=steam-library-rendering\r\n");
     std::lock_guard lock(steamSessionMutex);
     ++winrt::get_module_lock();
     liveSteamSession = session.release();
     co_return payload;
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSignIn(
+        winrt::Windows::Storage::StorageFile reportFile, winrt::hstring prefix) {
+    using winrt::Windows::Security::Cryptography::DataProtection::DataProtectionProvider;
+    using namespace winrt::Windows::Storage;
+    using namespace winrt::Windows::Storage::Streams;
+    bool optedIn = false;
+    try {
+        auto data = ApplicationData::Current();
+        auto values = data.LocalSettings().Values();
+        optedIn = values.HasKey(SteamCacheOptIn) &&
+            winrt::unbox_value_or<bool>(values.Lookup(SteamCacheOptIn), false);
+        if (!optedIn) co_return winrt::hstring{};
+        auto file = co_await data.LocalCacheFolder().GetFileAsync(SteamCacheFile);
+        auto stream = co_await file.OpenReadAsync();
+        const auto size = stream.Size();
+        if (size == 0 || size > SteamCacheMaximum) throw winrt::hresult_invalid_argument();
+        const auto length = static_cast<std::uint32_t>(size);
+        auto encrypted = co_await stream.ReadAsync(Buffer(length), length, InputStreamOptions::None);
+        stream.Close();
+        if (encrypted.Length() != length) throw winrt::hresult_invalid_argument();
+        winrt::hstring accountId, account, approval;
+        {
+            auto clear = co_await DataProtectionProvider().UnprotectAsync(encrypted);
+            const WipeSteamBuffer wipe{clear.data(), clear.Length()};
+            if (wipe.length % sizeof(wchar_t) != 0) throw winrt::hresult_invalid_argument();
+            std::wstring_view fields(reinterpret_cast<const wchar_t *>(wipe.data), wipe.length / sizeof(wchar_t));
+            if (!fields.starts_with(SteamCacheSchema)) throw winrt::hresult_invalid_argument();
+            fields.remove_prefix(SteamCacheSchema.size());
+            auto nextField = [&]() {
+                const auto newline = fields.find(L'\n');
+                if (newline == fields.npos) throw winrt::hresult_invalid_argument();
+                const auto field = fields.substr(0, newline);
+                fields.remove_prefix(newline + 1);
+                return field;
+            };
+            const auto expiryText = winrt::to_string(nextField());
+            std::uint32_t expiry = 0;
+            const auto parsed = std::from_chars(expiryText.data(), expiryText.data() + expiryText.size(), expiry);
+            if (parsed.ec != std::errc{} || parsed.ptr != expiryText.data() + expiryText.size() ||
+                    !SteamSessionIsCurrent(expiry)) {
+                throw winrt::hresult_invalid_argument();
+            }
+            accountId = winrt::hstring(nextField());
+            account = winrt::hstring(nextField());
+            approval = winrt::hstring(fields);
+        }
+        auto payload = co_await SteamSignIn(reportFile, prefix, std::move(account), std::move(approval),
+            std::move(accountId), false, 0, true);
+        if (!payload.empty()) co_return payload;
+    } catch (winrt::hresult_error const&) {}
+    if (optedIn) co_await ForgetSteamSession();
+    co_return winrt::hstring(L"fallback");
 }
 
 static std::wstring SteamPath(SteamAppPath readPath, void *manager, std::uint32_t id) {
@@ -936,6 +1086,72 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     } while (true);
 
+    constexpr std::uint32_t commonRedistributables = 228980;
+    bool waitForSharedInstall = false;
+    {
+        std::lock_guard lock(steamSessionMutex);
+        auto session = liveSteamSession;
+        if (!session || !session->OwnsSession()) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+        auto manager = session->appManager;
+        auto methods = SteamMethods(manager);
+        const auto base = reinterpret_cast<std::uintptr_t>(session->module);
+        if (methods[18] != base + 0x77fe20) {
+            co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
+        }
+        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
+            co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
+        }
+
+        using GetDependencies = std::uint32_t (__cdecl *)(void *, std::uint32_t, std::uint32_t *, std::uint32_t);
+        std::array<std::uint32_t, 128> dependencies{};
+        auto count = reinterpret_cast<GetDependencies>(methods[18])(
+            manager, app, dependencies.data(), static_cast<std::uint32_t>(dependencies.size()));
+        report += L"steam_launch_dependency_count=" + std::to_wstring(count) + L"\r\n";
+        if (count > dependencies.size()) co_return winrt::hstring(report + L"steam_launch=dependency-list-truncated\r\n");
+        auto end = dependencies.begin() + count;
+        if (std::find(dependencies.begin(), end, commonRedistributables) != end) {
+            report += L"steam_launch_common_redistributables=required\r\n";
+            auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
+            report += L"steam_launch_redistributables_initial_state=" + std::to_wstring(state) + L"\r\n";
+            if ((state & installMask) != fullyInstalled) {
+                // Let Steam obtain the shared dependency of the game it just verified the account owns.
+                auto install = reinterpret_cast<SteamInstall>(methods[0]);
+                auto code = install(manager, commonRedistributables, libraryIndex, false);
+                report += L"steam_launch_redistributables_install_result=" + std::to_wstring(code) + L"\r\n";
+                if (code != 0) co_return winrt::hstring(report + L"steam_launch=dependency-install-rejected\r\n");
+                waitForSharedInstall = true;
+            }
+        }
+    }
+
+    if (waitForSharedInstall) {
+        auto deadline = GetTickCount64() + 90000;
+        for (;;) {
+            {
+                std::lock_guard lock(steamSessionMutex);
+                auto session = liveSteamSession;
+                if (!session || !session->OwnsSession()) {
+                    co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+                }
+                session->PumpCallbacks();
+                auto manager = session->appManager;
+                auto methods = SteamMethods(manager);
+                auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
+                if ((state & installMask) == fullyInstalled) {
+                    report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    break;
+                }
+                if (GetTickCount64() >= deadline) {
+                    report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
+                    co_return winrt::hstring(report + L"steam_launch=dependency-install-incomplete\r\n");
+                }
+            }
+            co_await winrt::resume_after(std::chrono::milliseconds(500));
+            co_await caller;
+        }
+    }
+
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1009,6 +1225,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             std::memcpy(&code, payload.data() + sizeof(reportedGame), sizeof(code));
                             if (reportedGame == gameId) {
                                 report += L"steam_launch_client_result=" + std::to_wstring(code) + L"\r\n";
+                                if (code == 17) report += L"steam_launch_client_reason=dependency-not-ready\r\n";
+                                if (code == 29) report += L"steam_launch_client_reason=invalid-platform\r\n";
                                 accepted = code == 0;
                                 verdict = accepted ? L"start-unconfirmed" : L"client-rejected";
                             }
@@ -1062,12 +1280,18 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
 
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RunSteamSignIn(
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix,
-            winrt::hstring const& account, winrt::hstring const& approval, winrt::hstring const& accountId) {
-        return SteamSignIn(file, prefix, account, approval, accountId);
+            winrt::hstring const& account, winrt::hstring const& approval, winrt::hstring const& accountId,
+            bool remember, std::uint32_t expiresAt) {
+        return SteamSignIn(file, prefix, account, approval, accountId, remember, expiresAt);
     }
 
-    void SignOutSteam() {
-        SteamSignOut();
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSignIn(
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return ::ResumeSteamSignIn(file, prefix);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<bool> SignOutSteam() {
+        return SteamSignOutAndForget();
     }
 
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> QueueSteamDownload(std::uint32_t app) {
