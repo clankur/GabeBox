@@ -1,5 +1,7 @@
 # Xbox packaged process test
 
+For the build, CLI deployment, and console diagnosis loop, see [Developer workflow](DEVELOPMENT.md).
+
 This x64 UWP diagnostic answers one question: can this console start a second executable bundled with the same signed package using the documented `CreateProcessW` API and obtain the exit code the helper is programmed to return? It uses two small, original executables and requires no Steam account, Valve files, or network access. Its result applies to this package on the tested console OS.
 
 ## Test on a Series X in Developer Mode

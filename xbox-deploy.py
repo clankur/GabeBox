@@ -17,16 +17,23 @@ import sys
 import time
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 
 PACKAGE_API = '/api/app/packagemanager'
+PROBE_NAME = 'XboxPortabilityProbe.ChildProcess'
+PROBE_REPORT = 'probe-report.txt'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
 
 
-def load_settings():
+def load_settings(config_path=None):
     settings = {}
-    config_path = Path(__file__).with_name('.env')
+    if config_path is None:
+        config_path = Path(__file__).with_name('.env')
+    elif not config_path.is_file():
+        raise ValueError(f'Environment file not found: {config_path}')
     if config_path.is_file():
         for line in config_path.read_text().splitlines():
             key, _, value = line.strip().partition('=')
@@ -34,6 +41,12 @@ def load_settings():
                 settings[key.strip()] = value.strip()
     settings.update({key: os.environ[key] for key in SETTING_NAMES if key in os.environ})
     return settings
+
+
+class PortalError(ValueError):
+    def __init__(self, status, details):
+        self.status = status
+        super().__init__(details)
 
 
 class DevicePortal:
@@ -84,7 +97,8 @@ class DevicePortal:
             accepted_statuses = (200, 202, 204) if method == 'POST' else (200, 204)
             if response.status not in accepted_statuses:
                 details = data.decode('utf-8', errors='replace')[:1000].strip()
-                raise ValueError(f'{method} {path} returned HTTP {response.status}. {details}'.strip())
+                raise PortalError(response.status,
+                                  f'{method} {path} returned HTTP {response.status}. {details}'.strip())
             return response.status, data
         finally:
             connection.close()
@@ -122,6 +136,82 @@ class DevicePortal:
         self.request('POST', f'{PACKAGE_API}/package?{query}', body(), headers)
 
 
+def probe_version(file):
+    with ZipFile(file) as archive:
+        manifest = ElementTree.fromstring(archive.read('AppxManifest.xml'))
+    identity = manifest.find('{*}Identity')
+    if identity is None or identity.get('Name') != PROBE_NAME or identity.get('ProcessorArchitecture') != 'x64':
+        raise ValueError('--test-probe requires the x64 packaged process probe APPX.')
+    return identity.attrib['Version']
+
+
+def wait_for_probe(portal, version, manual, timeout):
+    _, data = portal.request('GET', f'{PACKAGE_API}/packages')
+    prefix = f'{PROBE_NAME}_{version}_x64__' if version else f'{PROBE_NAME}_'
+    candidates = [package for package in json.loads(data)['InstalledPackages']
+                  if package['PackageFullName'].startswith(prefix)]
+    if len(candidates) != 1:
+        raise ValueError(f'Expected exactly one installed probe matching {prefix}. Found {len(candidates)}.')
+    app = candidates[0]
+    package_name = app['PackageFullName']
+    print(f'Installed package: {package_name}', flush=True)
+    query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package_name,
+                       'path': r'\LocalState', 'filename': PROBE_REPORT})
+    report_url = f'/api/filesystem/apps/file?{query}'
+
+    def read_report():
+        try:
+            _, raw = portal.request('GET', report_url)
+        except PortalError as error:
+            if error.status != 404:
+                raise
+            return b''
+        return raw
+
+    baseline = read_report()
+    launch_error = ''
+    if manual:
+        print('Launch Packaged process test once from Xbox Dev Home.', flush=True)
+    else:
+        # Match Xbox Device Portal's App Launcher, which sends the AUMID only.
+        launch = {'appid': base64.b64encode(app['PackageRelativeId'].encode()).decode('ascii')}
+        try:
+            portal.request('POST', '/api/taskmanager/app?' + urlencode(launch))
+        except PortalError as error:
+            launch_error = str(error)
+            print(f'Remote launch returned an error. You can launch from Dev Home while the CLI waits.\n{error}',
+                  flush=True)
+
+    deadline = time.monotonic() + timeout
+    last_report = ''
+    while time.monotonic() < deadline:
+        try:
+            raw = read_report()
+        except PortalError as error:
+            if error.status != 409:
+                raise
+            raw = b''
+        if raw and raw != baseline:
+            encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8'
+            try:
+                report = raw.decode(encoding)
+            except UnicodeDecodeError:
+                report = ''  # The report can be read while the app is replacing it.
+            if report.endswith('\n') and report != last_report:
+                last_report = report
+                print(report, end='', flush=True)
+                if 'exit_code_matches=' in report or 'status=complete' in report:
+                    return
+                if re.search(r'^status=.*(?:error|failed)\s*$', report, re.MULTILINE):
+                    raise ValueError('The probe reported a startup or test error above.')
+        time.sleep(0.5)
+
+    if last_report:
+        raise ValueError('The probe wrote a startup checkpoint but did not finish the test.')
+    raise ValueError('No fresh probe-report.txt appeared in LocalState.' +
+                     (' The remote launch also failed.' if launch_error else ''))
+
+
 def print_install_result(data):
     result = json.loads(data) if data.strip() else {}
     if isinstance(result, dict) and result.get('Success') is True:
@@ -132,6 +222,7 @@ def print_install_result(data):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--env-file', type=Path, help='use a local .env from another workspace')
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('fingerprint', help='show the certificate fingerprint without signing in')
     commands.add_parser('status', help='check the latest installation status')
@@ -139,9 +230,15 @@ def main():
     deploy.add_argument('package', type=Path)
     deploy.add_argument('--dependency', action='append', type=Path, default=[])
     deploy.add_argument('--certificate', type=Path, help='optional package-signing .cer')
+    deploy.add_argument('--test-probe', action='store_true', help='launch this probe and wait for its report')
+    probe = commands.add_parser('probe', help='launch the installed probe and wait for a fresh report')
+    probe.add_argument('--version', help='require a specific installed package version')
+    for command in (deploy, probe):
+        command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
+        command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
     args = parser.parse_args()
 
-    settings = load_settings()
+    settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
     portal = DevicePortal(settings.get('XBOX_PORTAL_URL', ''), fingerprint)
     if args.command == 'fingerprint':
@@ -162,6 +259,9 @@ def main():
         for file in files:
             if not file.is_file():
                 raise ValueError(f'File not found: {file}')
+        version = probe_version(args.package) if args.test_probe else None
+    if args.command in ('deploy', 'probe') and args.timeout <= 0:
+        raise ValueError('--timeout must be a positive number of seconds.')
 
     if not hmac.compare_digest(portal.request(), fingerprint):
         raise ValueError('Xbox portal certificate does not match XBOX_PORTAL_CERT_SHA256.')
@@ -171,6 +271,9 @@ def main():
             raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
         password = getpass.getpass('Xbox Device Portal password: ')
     portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
+    if args.command == 'probe':
+        wait_for_probe(portal, args.version, args.manual_launch, args.timeout)
+        return
     if args.command == 'deploy':
         portal.upload(files)
         print(f'Uploaded {args.package.name}. Waiting for Xbox Device Portal...', flush=True)
@@ -181,6 +284,8 @@ def main():
         status, data = portal.request('GET', f'{PACKAGE_API}/state')
         if status == 200:
             print_install_result(data)
+            if args.command == 'deploy' and args.test_probe:
+                wait_for_probe(portal, version, args.manual_launch, args.timeout)
             return
         if args.command == 'status':
             print('Xbox Device Portal reports an install in progress.')
@@ -193,5 +298,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, OSError, http.client.HTTPException) as error:
+    except (ValueError, KeyError, BadZipFile, ElementTree.ParseError, OSError, http.client.HTTPException) as error:
         sys.exit(f'Error: {error}')

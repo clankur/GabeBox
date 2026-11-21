@@ -1,0 +1,76 @@
+name: Build Xbox probe
+
+on:
+  push:
+    paths:
+      - 'probe/**'
+      - '.github/workflows/xbox-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-sdk-package:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and sign with the Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $sdkVersion = (Get-ChildItem "$sdk\bin" -Directory |
+            Where-Object { $_.Name -match '^10\.' -and
+              (Test-Path "$($_.FullName)\x64\MakeAppx.exe") -and
+              (Test-Path "$($_.FullName)\x64\MakePri.exe") -and
+              (Test-Path "$sdk\Lib\$($_.Name)\um\x64\WindowsApp.lib") } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$sdkVersion) { throw 'No Windows SDK with MakeAppx, MakePri, and WindowsApp.lib was found.' }
+          $bin = "$sdk\bin\$sdkVersion\x64"
+          $lib = "$sdk\Lib\$sdkVersion\um\x64\WindowsApp.lib"
+          $llvm = "$env:ProgramFiles\LLVM\bin"
+          $work = Join-Path $env:RUNNER_TEMP 'xbox-probe'
+          $layout = Join-Path $work 'layout'
+          $artifacts = Join-Path $work 'artifacts'
+          New-Item -ItemType Directory -Path $layout, $artifacts | Out-Null
+          Copy-Item -Recurse probe/Assets $layout
+          Copy-Item probe/Package.appxmanifest "$layout/AppxManifest.xml"
+
+          $targets = @(
+            @{ Source = 'probe'; Extension = 'exe'; Flags = @('/entry:wWinMain') },
+            @{ Source = 'child'; Extension = 'exe'; Flags = @('/entry:ChildEntry') },
+            @{ Source = 'child-process'; Extension = 'dll'; Flags = @('/dll', '/noentry') }
+          )
+          foreach ($target in $targets) {
+            $source = $target.Source
+            $options = $target.Flags
+            & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
+              -c "probe/$source.c" -o "$work/$source.obj"
+            & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+              /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro @options `
+              "/out:$layout/$source.$($target.Extension)" "$work/$source.obj" $lib
+          }
+
+          & "$bin\MakePri.exe" createconfig /cf "$work/priconfig.xml" /dq lang-en-US /pv 10.0.0
+          & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $layout /of "$layout/resources.pri"
+          $appx = "$artifacts/PackagedProcessProbe-x64.appx"
+          & "$bin\MakeAppx.exe" pack /d $layout /p $appx
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            Export-Certificate -Cert $cert -FilePath "$artifacts/PackagedProcessProbe.cer" | Out-Null
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 $appx
+          } finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
+          }
+          Get-ChildItem $artifacts -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content "$artifacts/SHA256SUMS" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-probe-windows-sdk
+          path: ${{ runner.temp }}/xbox-probe/artifacts/
+          if-no-files-found: error

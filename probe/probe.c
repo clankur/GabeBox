@@ -7,6 +7,8 @@
  * method ordering are taken from Windows SDK 10.0.26100.0 headers.
  */
 
+#include "child-process.h"
+
 typedef unsigned char BYTE;
 typedef unsigned short WORD;
 typedef unsigned short WCHAR;
@@ -38,39 +40,19 @@ typedef void *HSTRING;
 #define GENERIC_WRITE 0x40000000u
 #define FILE_SHARE_READ 0x00000001u
 #define CREATE_ALWAYS 2u
-#define FILE_ATTRIBUTE_NORMAL 0x00000080u
 #define WAIT_OBJECT_0 0x00000000u
-#define WAIT_FAILED 0xFFFFFFFFu
 #define ERROR_SUCCESS 0u
 #define ERROR_INSUFFICIENT_BUFFER 122u
 #define ERROR_WRITE_FAULT 29u
 #define INVALID_HANDLE_VALUE ((HANDLE)(LONG_PTR)-1)
-#define EXPECTED_CHILD_EXIT 0x51A7u
 #define REPORT_NAME L"probe-report.txt"
 #define CHILD_NAME L"child.exe"
 
 typedef __INTPTR_TYPE__ LONG_PTR;
 
-typedef struct STARTUPINFOW {
-    DWORD cb;
-    PWSTR lpReserved;
-    PWSTR lpDesktop;
-    PWSTR lpTitle;
-    DWORD dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars;
-    DWORD dwFillAttribute;
-    DWORD dwFlags;
-    WORD wShowWindow;
-    WORD cbReserved2;
-    BYTE *lpReserved2;
-    HANDLE hStdInput, hStdOutput, hStdError;
-} STARTUPINFOW;
-
-typedef struct PROCESS_INFORMATION {
-    HANDLE hProcess;
-    HANDLE hThread;
-    DWORD dwProcessId;
-    DWORD dwThreadId;
-} PROCESS_INFORMATION;
+typedef struct { DWORD low, high; } FILETIME;
+static FILETIME g_runTime;
+static DWORD g_processId;
 
 __declspec(dllimport) HRESULT WINAPI RoInitialize(DWORD initType);
 __declspec(dllimport) void WINAPI RoUninitialize(void);
@@ -86,15 +68,14 @@ static LONG InterlockedDecrement(volatile LONG *value) {
 }
 __declspec(dllimport) DWORD WINAPI GetModuleFileNameW(HINSTANCE module, PWSTR fileName, DWORD size);
 __declspec(dllimport) DWORD WINAPI GetLastError(void);
-__declspec(dllimport) void WINAPI SetLastError(DWORD error);
-__declspec(dllimport) BOOL WINAPI CreateProcessW(PCWSTR applicationName, PWSTR commandLine,
-    void *processAttributes, void *threadAttributes, BOOL inheritHandles, DWORD creationFlags,
-    void *environment, PCWSTR currentDirectory, STARTUPINFOW *startup, PROCESS_INFORMATION *processInfo);
-__declspec(dllimport) DWORD WINAPI WaitForSingleObject(HANDLE handle, DWORD milliseconds);
-__declspec(dllimport) BOOL WINAPI GetExitCodeProcess(HANDLE process, DWORD *exitCode);
+__declspec(dllimport) HINSTANCE WINAPI LoadPackagedLibrary(PCWSTR name, DWORD reserved);
+__declspec(dllimport) RunPackagedChildFn WINAPI GetProcAddress(HINSTANCE module, const char *name);
+__declspec(dllimport) BOOL WINAPI FreeLibrary(HINSTANCE module);
+__declspec(dllimport) DWORD WINAPI GetCurrentProcessId(void);
+__declspec(dllimport) void WINAPI GetSystemTimeAsFileTime(FILETIME *time);
 __declspec(dllimport) BOOL WINAPI CloseHandle(HANDLE handle);
-__declspec(dllimport) HANDLE WINAPI CreateFileW(PCWSTR fileName, DWORD access, DWORD shareMode,
-    void *securityAttributes, DWORD creationDisposition, DWORD flags, HANDLE templateFile);
+__declspec(dllimport) HANDLE WINAPI CreateFile2(PCWSTR fileName, DWORD access, DWORD shareMode,
+    DWORD creationDisposition, const void *parameters);
 __declspec(dllimport) BOOL WINAPI WriteFile(HANDLE file, const void *buffer, DWORD bytesToWrite,
     DWORD *bytesWritten, void *overlapped);
 __declspec(dllimport) BOOL WINAPI FlushFileBuffers(HANDLE file);
@@ -214,7 +195,6 @@ struct IStorageFolder { const void *lpVtbl; };
 struct IStorageItem { const void *lpVtbl; };
 
 /* Slot numbers in the x64 WinRT ABI, independently checked against SDK 26100. */
-_Static_assert(sizeof(STARTUPINFOW) == 104 && sizeof(PROCESS_INFORMATION) == 24, "x64 process ABI");
 _Static_assert(__builtin_offsetof(ICoreApplicationVtbl, Run) == 13 * sizeof(void *), "ICoreApplication.Run");
 _Static_assert(__builtin_offsetof(ICoreWindowVtbl, Activate) == 18 * sizeof(void *), "ICoreWindow.Activate");
 _Static_assert(__builtin_offsetof(IApplicationDataVtbl, get_LocalFolder) == 12 * sizeof(void *), "IApplicationData.LocalFolder");
@@ -461,10 +441,10 @@ done:
 }
 
 static HRESULT WriteReport(PCWSTR content) {
-    static const BYTE bom[2] = {0xFF, 0xFE};
+    WCHAR document[1152];
     WCHAR path[MAX_PATH];
     DWORD pathChars = 0;
-    DWORD contentChars = 0;
+    DWORD contentChars = 1;
     DWORD bytesWritten = 0;
     HANDLE file;
     HRESULT hr = GetLocalStatePath(path, MAX_PATH);
@@ -473,17 +453,19 @@ static HRESULT WriteReport(PCWSTR content) {
     if (pathChars + 1 + (DWORD)(sizeof(REPORT_NAME) / sizeof(REPORT_NAME[0])) >= MAX_PATH) return (HRESULT)0x8007007AL;
     path[pathChars++] = L'\\';
     AppendText(path, MAX_PATH, &pathChars, REPORT_NAME);
-    file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, (void *)0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, (HANDLE)0);
+    file = CreateFile2(path, GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, (void *)0);
     if (file == INVALID_HANDLE_VALUE) return (HRESULT)(0x80070000L | (GetLastError() & 0xFFFF));
-    if (!WriteFile(file, bom, 2, &bytesWritten, (void *)0) || bytesWritten != 2) {
+    document[0] = 0xfeff;
+    AppendText(document, 1152, &contentChars, L"run_id=");
+    AppendHex(document, 1152, &contentChars, g_runTime.high);
+    AppendHex(document, 1152, &contentChars, g_runTime.low);
+    AppendHex(document, 1152, &contentChars, g_processId);
+    AppendText(document, 1152, &contentChars, L"\r\n");
+    AppendText(document, 1152, &contentChars, content);
+    if (!WriteFile(file, document, contentChars * sizeof(WCHAR), &bytesWritten, (void *)0)) {
         hr = (HRESULT)(0x80070000L | (GetLastError() & 0xFFFF));
-        CloseHandle(file);
-        return hr;
-    }
-    while (content[contentChars]) ++contentChars;
-    if (!WriteFile(file, content, contentChars * sizeof(WCHAR), &bytesWritten, (void *)0) ||
-        bytesWritten != contentChars * sizeof(WCHAR)) {
-        hr = (HRESULT)(0x80070000L | (GetLastError() & 0xFFFF));
+    } else if (bytesWritten != contentChars * sizeof(WCHAR)) {
+        hr = (HRESULT)(0x80070000L | ERROR_WRITE_FAULT);
     } else if (!FlushFileBuffers(file)) {
         hr = (HRESULT)(0x80070000L | (GetLastError() & 0xFFFF));
     } else {
@@ -491,6 +473,10 @@ static HRESULT WriteReport(PCWSTR content) {
     }
     CloseHandle(file);
     return hr;
+}
+
+static HRESULT ReportWin32Error(PCWSTR status, DWORD error) {
+    return ReportStartupError(status, (HRESULT)(0x80070000L | (error & 0xffff)));
 }
 
 static HRESULT ReportStartupError(PCWSTR status, HRESULT error) {
@@ -512,12 +498,9 @@ static HRESULT RunProbe(void) {
     DWORD used = 0;
     DWORD moduleChars;
     DWORD childChars;
-    DWORD win32Error = ERROR_SUCCESS;
-    DWORD waitResult = WAIT_FAILED;
-    DWORD exitCode = 0;
-    BOOL created;
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION process;
+    HINSTANCE library;
+    RunPackagedChildFn runChild;
+    ChildProcessResult result;
     HRESULT hr;
 
     report[0] = 0;
@@ -527,7 +510,7 @@ static HRESULT RunProbe(void) {
 
     moduleChars = GetModuleFileNameW((HINSTANCE)0, modulePath, MAX_PATH);
     if (moduleChars == 0 || moduleChars >= MAX_PATH) {
-        win32Error = GetLastError();
+        DWORD win32Error = GetLastError();
         if (win32Error == ERROR_SUCCESS) win32Error = ERROR_INSUFFICIENT_BUFFER;
         used = 0; report[0] = 0;
         AppendText(report, 1024, &used, L"probe=packaged-child-process\r\nstatus=path-error\r\nerror=");
@@ -549,49 +532,30 @@ static HRESULT RunProbe(void) {
     }
     AppendText(childPath, MAX_PATH, &childChars, CHILD_NAME);
 
-    startup.cb = sizeof(startup);
-    startup.lpReserved = (PWSTR)0;
-    startup.lpDesktop = (PWSTR)0;
-    startup.lpTitle = (PWSTR)0;
-    startup.dwX = startup.dwY = startup.dwXSize = startup.dwYSize = 0;
-    startup.dwXCountChars = startup.dwYCountChars = 0;
-    startup.dwFillAttribute = 0;
-    startup.dwFlags = 0;
-    startup.wShowWindow = 0;
-    startup.cbReserved2 = 0;
-    startup.lpReserved2 = (BYTE *)0;
-    startup.hStdInput = startup.hStdOutput = startup.hStdError = (HANDLE)0;
-    process.hProcess = process.hThread = (HANDLE)0;
-    process.dwProcessId = process.dwThreadId = 0;
-
-    SetLastError(ERROR_SUCCESS);
-    created = CreateProcessW(childPath, (PWSTR)0, (void *)0, (void *)0, FALSE,
-        0, (void *)0, (PCWSTR)0, &startup, &process);
-    if (!created) {
-        win32Error = GetLastError();
-    } else {
-        waitResult = WaitForSingleObject(process.hProcess, 3000);
-        if (waitResult == WAIT_OBJECT_0) {
-            if (!GetExitCodeProcess(process.hProcess, &exitCode)) win32Error = GetLastError();
-        } else if (waitResult == WAIT_FAILED) {
-            win32Error = GetLastError();
-        }
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
+    library = LoadPackagedLibrary(PROBE_CHILD_MODULE, 0);
+    if (!library) return ReportWin32Error(L"child-module-load-error", GetLastError());
+    runChild = GetProcAddress(library, PROBE_CHILD_EXPORT);
+    if (!runChild) {
+        DWORD error = GetLastError();
+        FreeLibrary(library);
+        return ReportWin32Error(L"child-module-export-error", error);
     }
+    runChild(childPath, &result);
+    FreeLibrary(library);
 
     used = 0; report[0] = 0;
     AppendText(report, 1024, &used, L"probe=packaged-child-process\r\nchild_path=");
     AppendText(report, 1024, &used, childPath);
     AppendText(report, 1024, &used, L"\r\ncreate_process=");
-    AppendText(report, 1024, &used, created ? L"success\r\n" : L"failure\r\n");
-    AppendText(report, 1024, &used, L"win32_error="); AppendHex(report, 1024, &used, win32Error);
-    AppendText(report, 1024, &used, L"\r\nwait_result="); AppendHex(report, 1024, &used, waitResult);
-    AppendText(report, 1024, &used, L"\r\nexpected_exit_code="); AppendHex(report, 1024, &used, EXPECTED_CHILD_EXIT);
-    AppendText(report, 1024, &used, L"\r\nchild_exit_code="); AppendHex(report, 1024, &used, exitCode);
+    AppendText(report, 1024, &used, result.created ? L"success\r\n" : L"failure\r\n");
+    AppendText(report, 1024, &used, L"win32_error="); AppendHex(report, 1024, &used, result.error);
+    AppendText(report, 1024, &used, L"\r\nwait_result="); AppendHex(report, 1024, &used, result.waitResult);
+    AppendText(report, 1024, &used, L"\r\nexpected_exit_code="); AppendHex(report, 1024, &used, PROBE_EXPECTED_CHILD_EXIT);
+    AppendText(report, 1024, &used, L"\r\nchild_exit_code="); AppendHex(report, 1024, &used, result.exitCode);
     AppendText(report, 1024, &used, L"\r\nexit_code_matches=");
     AppendText(report, 1024, &used,
-        (created && waitResult == WAIT_OBJECT_0 && exitCode == EXPECTED_CHILD_EXIT) ? L"yes\r\n" : L"no\r\n");
+        (result.created && result.waitResult == WAIT_OBJECT_0 && result.exitCode == PROBE_EXPECTED_CHILD_EXIT)
+            ? L"yes\r\n" : L"no\r\n");
     hr = WriteReport(report);
     return hr;
 }
@@ -608,6 +572,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
     g_source.iface.lpVtbl = &g_source_vtbl;
     g_source.refs = 1;
 
+    GetSystemTimeAsFileTime(&g_runTime);
+    g_processId = GetCurrentProcessId();
     hr = RoInitialize(RO_INIT_MULTITHREADED);
     if (FAILED(hr)) return (int)hr;
     (void)WriteReport(L"probe=packaged-child-process\r\nstatus=core-application-starting\r\n");
