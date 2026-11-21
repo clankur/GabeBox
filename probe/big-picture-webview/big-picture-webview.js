@@ -55,6 +55,12 @@
             return switchView(to, from);
         }
         var playingApp = 0, presented = false, returnToGame, quitGame;
+        var gameForeground = false;
+        function setGameForeground(value) {
+            if (!host || failed || value === gameForeground) return;
+            gameForeground = value;
+            host.reply(JSON.stringify({nativeGameForeground: value}));
+        }
         function gameEvent(overlay) {
             if (!host || failed) return;
             var hosted = playingApp === 646570 || playingApp === 975370 || playingApp === 413150;
@@ -62,9 +68,11 @@
         }
         function showValve(from) {
             if (failed || !viewId || visible) return Promise.resolve();
+            var wasGame = gameForeground;
+            setGameForeground(false);
             if (!activeSwitch) activeSwitch = show(viewId, from || mainId).then(function () {
                 visible = true; activeSwitch = null;
-            }, function (error) { activeSwitch = null; throw error; });
+            }, function (error) { activeSwitch = null; if (wasGame) setGameForeground(true); throw error; });
             return activeSwitch;
         }
         function showForGame(appId, from, restore, requestExit) {
@@ -84,6 +92,7 @@
             return Promise.resolve().then(function () { return restore(viewId); }).then(function (shown) {
                 if (!shown || !played(appId)) return "unavailable";
                 visible = false;
+                setGameForeground(true);
                 sampleMemory("resume_game"); gameEvent(false); record("game-switch-to-game");
                 return "presented";
             }, function () {
@@ -160,6 +169,7 @@
                     return broker.play(appId, function () {
                         return show(mainId, viewId).then(function () {
                             visible = false;
+                            setGameForeground(true);
                             sampleMemory("handoff");
                             return record("game-window-backgrounded");
                         });

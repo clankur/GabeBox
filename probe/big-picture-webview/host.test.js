@@ -210,6 +210,8 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     await app.shell.resume(975370);
     await drain();
     const events = app.replies.filter(e => e.event === "xbox-game").map(e => [e.appId,e.overlay]);
+    const foreground = app.replies.filter(e => 'nativeGameForeground' in e).map(e => e.nativeGameForeground);
+    assert.deepEqual(foreground, [true, false, true, false]);
     assert.deepEqual(events, [[975370,false],[975370,true],[975370,false],[975370,true],[0,false]]);
     assert.ok(app.reports.at(-1).includes("memory_first_frame_limit_bytes=1073741824"));
     assert.equal(app.opens(), 1);

@@ -64,6 +64,10 @@ function installXboxWindow(client, send) {
 
     const system = (client.System ||= {});
     const systemUI = (system.UI ||= {});
+    (system.Display ||= {}).EnableUnderscan = enabled => {
+        if (typeof enabled !== 'boolean') throw new TypeError('Expected a display mode');
+        host.postMessage(enabled ? 'xbox-display-safe-bounds' : 'xbox-display-full-bounds');
+    };
     function subscribeValue(callbacks, callback, deliver, initial) {
         if (typeof callback !== 'function') throw new TypeError('Expected a window callback');
         return subscribe(callbacks, () => deliver(callback), initial);

@@ -1,8 +1,16 @@
 #include "../probe/big-picture-webview/document-address.h"
+#include "../probe/big-picture-webview/display-layout.h"
 #include <cassert>
 
 int main() {
     using namespace steam_document;
+    const steam_display::Bounds screen{10, 5, 1920, 1080}, safe{40, 15, 1800, 1020};
+    const auto inset = steam_display::viewport(screen, safe, 1.5f, true, false);
+    assert(inset.x == 45 && inset.y == 15 && inset.width == 2700 && inset.height == 1530);
+    const auto full = steam_display::viewport(screen, safe, 1.5f, false, false);
+    assert(full.x == 0 && full.y == 0 && full.width == 2880 && full.height == 1620);
+    const auto hidden = steam_display::viewport(screen, safe, 1.5f, true, true);
+    assert(hidden.width == 1 && hidden.height == 1);
     constexpr auto route = L"https://steamloopback.host/routes/oobe/1";
     Owner doc;
     assert(!doc.start(route, 1));

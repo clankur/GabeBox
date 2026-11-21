@@ -18,6 +18,7 @@
 #include <deque>
 #include <string>
 #include "cloud-cache.h"
+#include "display-layout.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -59,6 +60,8 @@ struct View : implements<View, IFrameworkView> {
     CoreWebView2CompositionController controller{nullptr};
     CoreWebView2CompositionController popup{nullptr};
     std::array<Windows::Gaming::Input::Gamepad, 8> gamepadSlots{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    bool safeBounds = false;
+    bool gameForeground = false;
     bool openingPopup = false;
     bool popupRequestedVisible = false;
     CoreWebView2 web{nullptr};
@@ -83,13 +86,18 @@ struct View : implements<View, IFrameworkView> {
         if (!controller) return;
         float scale = static_cast<float>(Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
         auto bounds = window.Bounds();
-        Rect pixels{0.f, 0.f, bounds.Width * scale, bounds.Height * scale};
+        auto visible = ApplicationView::GetForCurrentView().VisibleBounds();
+        const auto layout = steam_display::viewport({bounds.X, bounds.Y, bounds.Width, bounds.Height},
+            {visible.X, visible.Y, visible.Width, visible.Height}, scale, safeBounds, gameForeground);
+        Rect pixels{0.f, 0.f, layout.width, layout.height};
         controller.Bounds(pixels);
-        root.Size({pixels.Width, pixels.Height});
-        mainSurface.Size(root.Size());
+        root.Size({bounds.Width * scale, bounds.Height * scale});
+        mainSurface.Offset({layout.x, layout.y, 0});
+        mainSurface.Size({layout.width, layout.height});
         if (popup) {
             popup.Bounds(pixels);
-            popupSurface.Size(root.Size());
+            popupSurface.Offset(mainSurface.Offset());
+            popupSurface.Size(mainSurface.Size());
         }
     }
 
@@ -97,7 +105,7 @@ struct View : implements<View, IFrameworkView> {
         auto lifetime = get_strong();
         try {
             // A view may be shown again before Chromium completes suspension.
-            if (co_await browser.TrySuspendAsync(); !closed && window.Visible()) browser.Resume();
+            if (co_await browser.TrySuspendAsync(); !closed && !gameForeground && window.Visible()) browser.Resume();
         } catch (hresult_error const&) {
             // Chromium can decline suspension for an active browser operation.
         }
@@ -105,7 +113,7 @@ struct View : implements<View, IFrameworkView> {
 
     void applyVisibility() {
         if (closed || !controller) return;
-        const bool visible = window.Visible();
+        const bool visible = !gameForeground && window.Visible();
         controller.IsVisible(visible);
         if (popup) popup.IsVisible(visible && popupRequestedVisible);
         // A foreground game owns the GPU presenter. Keep the IPC renderer
@@ -125,6 +133,23 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    void setGameForeground(bool value) {
+        if (closed || !controller || gameForeground == value) return;
+        gameForeground = value;
+        if (value) {
+            applyVisibility();
+            controller.RootVisualTarget(nullptr);
+            if (popup) popup.RootVisualTarget(nullptr);
+            resize();
+        } else {
+            resize();
+            controller.RootVisualTarget(mainSurface);
+            if (popup) popup.RootVisualTarget(popupSurface);
+            applyVisibility();
+        }
+        publishWindow();
+    }
+
     // IDs 1 and 2 are local to this pair of WebViews. The PID is the
     // environment's actual Edge browser process, not a desktop Steam process.
     std::wstring windowState() {
@@ -138,7 +163,7 @@ struct View : implements<View, IFrameworkView> {
         } catch (hresult_error const&) {}
         return L"{\"viewId\":" + std::to_wstring(ApplicationView::GetForCurrentView().Id()) +
             L",\"pid\":" + std::to_wstring(web.BrowserProcessId()) +
-            L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (window.Visible() ? L"true" : L"false") +
+            L",\"ownerId\":1,\"popupId\":2,\"visible\":" + (!gameForeground && window.Visible() ? L"true" : L"false") +
             L",\"focused\":" + (window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground ? L"true" : L"false") +
             L",\"popupOpen\":" + (popup ? L"true" : L"false") +
             L",\"popupVisible\":" + (popup && popup.IsVisible() ? L"true" : L"false") +
@@ -176,14 +201,14 @@ struct View : implements<View, IFrameworkView> {
     }
 
     void focusVisible() {
-        if (window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground)
+        if (!gameForeground && window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground)
             (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
     }
 
     void publishGamepads() {
         std::wstring result = L"{\"event\":\"xbox-gamepads\",\"pads\":[";
         bool first = true;
-        if (window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) {
+        if (!gameForeground && window.Visible() && window.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) {
             try {
                 auto pads = Windows::Gaming::Input::Gamepad::Gamepads();
                 uint32_t index;
@@ -218,7 +243,17 @@ struct View : implements<View, IFrameworkView> {
 
     bool handleWindowCommand(hstring const& message) {
         if (message == L"\"xbox-read-gamepads\"") publishGamepads();
-        else if (message == L"\"xbox-app-initialized\"") {
+        else if (message == L"\"xbox-display-safe-bounds\"" || message == L"\"xbox-display-full-bounds\"") {
+            safeBounds = message == L"\"xbox-display-safe-bounds\"";
+            // The compositor also uses VisibleBounds directly when the platform
+            // does not honor a desired-bounds-mode change for this view.
+            try {
+                ApplicationView::GetForCurrentView().SetDesiredBoundsMode(safeBounds ?
+                    ApplicationViewBoundsMode::UseVisible : ApplicationViewBoundsMode::UseCoreWindow);
+            } catch (hresult_error const&) {}
+            resize();
+            publishWindow();
+        } else if (message == L"\"xbox-app-initialized\"") {
             // Steam signals post-login service setup separately from a visible screen.
             slim_lock_guard lock(gate);
             if (status == L"document-loaded" || status == L"gamepad-window-created") status = L"app-initialized";
@@ -271,6 +306,8 @@ struct View : implements<View, IFrameworkView> {
             const shell = document.getElementById('Header.Main.Footer');
             if (target?.contains(shell) && shell?.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq') &&
                 visible(shell.querySelector('.ZBBhezbBR4VJYysmVhF3_, ._2_cRkGdbegoIbiRsy_-I7'))) return 2;
+            const library = target?.querySelector('#GamepadUI_Full_Root._3LYP1SIxyoky-yW9Ug_1fq #Main [role=tabpanel][id$="AllGames_Content"] [role=grid]');
+            if (visible(library) && visible(library.querySelector('[role=gridcell] [role=link]'))) return 2;
             const connect = target?.querySelector('._1wlvJjVURYzQHWJlITdVCA button[role=menuitem]._21kxLhOa-E8amdNn4Q_zBY');
             if (visible(connect) && !connect.disabled && connect.querySelector('svg')) return 1;
             const choices = target?.querySelectorAll('._2RjHR32VwDeGwslJx6LcCN[role=listbox] .zzXtdadESGEkT4IFqLvjm[role=option][lang]');
@@ -285,7 +322,7 @@ struct View : implements<View, IFrameworkView> {
                 co_await resume_after(std::chrono::milliseconds(setup ? 1500 : 500));
                 co_await ui;
                 if (closed || popup != browser) co_return;
-                if (!window.Visible()) continue;
+                if (gameForeground || !window.Visible()) continue;
                 if (!setup) ++sample;
                 auto result = co_await browser.CoreWebView2().ExecuteScriptAsync(check);
                 if (result == L"1" && !setup) {
@@ -327,7 +364,7 @@ struct View : implements<View, IFrameworkView> {
                     popup = browser;
                     popupSurface = compositor.CreateContainerVisual();
                     root.Children().InsertAtTop(popupSurface);
-                    popup.RootVisualTarget(popupSurface);
+                    if (!gameForeground) popup.RootVisualTarget(popupSurface);
                     resize();
                     auto child = popup.CoreWebView2();
                     configure(child, false);
@@ -554,7 +591,11 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     void Reply(hstring const& message) {
         if (message.size() > 4 * 1024 * 1024) throw hresult_invalid_argument();
         onBrowserThread([message](View& view) {
-            if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
+            // This direction is the trusted WWA-to-native channel. Renderer
+            // WebMessageReceived never accepts a presenter-visibility command.
+            if (message == L"{\"nativeGameForeground\":true}") view.setGameForeground(true);
+            else if (message == L"{\"nativeGameForeground\":false}") view.setGameForeground(false);
+            else if (view.web && view.document->accepts(view.web.Source())) view.web.PostWebMessageAsJson(message);
         });
     }
     void Close() {
