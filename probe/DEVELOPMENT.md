@@ -8,7 +8,7 @@ Run these commands from the repository root with the Xbox in Developer Mode, sig
 
 Use the Git-ignored `.env` documented in [the probe README](README.md). `--env-file` lets a checkout use the setup workspace’s existing file without copying it into the repository. Keep saved credentials in the local file and share only the CLI’s diagnostic output.
 
-For an updated build, increment `Identity Version` in [`Package.appxmanifest`](Package.appxmanifest) so the install can be identified on the console. Keep the package name and publisher consistent during an in-place upgrade. Use the workflow run whose commit matches the change being tested. Download the signed packages to separate directories because both artifacts use the same filenames.
+For an updated build, increment `Identity Version` in [`Package.appxmanifest`](Package.appxmanifest) so the install can be identified on the console. Keep the package name and publisher consistent during an in-place upgrade. Use the workflow run whose commit matches the change being tested. Download the signed packages to separate directories because the artifacts use the same filenames.
 
 ```sh
 trial_dir=$(mktemp -d)
@@ -36,6 +36,22 @@ python3 xbox-deploy.py --env-file "$xbox_env" probe --version 1.0.9.0 --timeout 
 ```
 
 Substitute the installed version in those commands. `--manual-launch` also works with `deploy --test-probe`. The HTML report includes a timestamp as `run_id` so two runs with the same result still produce distinct reports.
+
+### Test a foreground switch
+
+Use the signed `xbox-probe-lifetime` and `xbox-probe-fresh-identity` artifacts from the same workflow run. The lifetime package has its own identity and runs beside the regular process test. The control shows when its document becomes visible.
+
+```sh
+gh run download "$run_id" --name xbox-probe-lifetime --dir "$trial_dir/lifetime"
+(cd "$trial_dir/lifetime" && shasum -a 256 -c SHA256SUMS)
+python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+  "$trial_dir/lifetime/PackagedProcessProbe-x64.appx"
+python3 xbox-deploy.py --env-file "$xbox_env" lifetime --version 1.0.12.0 --dwell 15 --timeout 25
+```
+
+Install the matching control using the earlier command. The CLI starts the lifetime app, waits for a pending helper request in `lifetime-report.txt`, then switches to the control and requires its fresh visibility report. After the dwell, it checks that the transaction is still pending and requests a return to the lifetime app. The CLI uploads the control’s current run ID to its LocalState. That app requests the lifetime package’s registered URI and records a diagnostic in `protocol-return.txt` if the return fails. Use `--portal-return` to reproduce Device Portal’s app launcher path. The finish path writes a new challenge to the original pipe handle. The signed helper encodes the challenge and its startup token in its exit code, which the parent verifies on the original process handle. The CLI also compares the two reports’ run, parent, helper, and channel identifiers. Its process inventory checks show whether the original PIDs were listed before switching, at the control’s first visible report, and before returning. Capture the complete CLI output with the build run and dwell duration.
+
+A reload, changed identifier, early reply, or incomplete result fails the check. Inspect the final available checkpoint to distinguish a cold start from a blocked return or a lost pipe. The report includes visibility, background, suspension, and resumption callbacks separately. A completed transaction establishes continuity across the observed app switch. Execution while the app was away from the foreground and communication across packages need their own tests. The CLI stops the dedicated lifetime app during cleanup. [Named-pipe transactions](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-callnamedpipew) · [UWP app lifecycle](https://learn.microsoft.com/en-us/windows/uwp/launch-resume/app-lifecycle)
 
 ### Rebuild the original native executable host
 
@@ -74,6 +90,9 @@ The last available checkpoint shows how far execution got. The HTML also display
 - `1.0.9.0` built `child.exe` with Microsoft’s compiler and linker, embedded a Windows manifest, and signed the executable individually before signing the APPX. The console reported `create_process=success`, `child_exit_code=0x000051A7`, and `exit_code_matches=yes`. A second CLI launch without reinstalling produced a fresh report with the same result. These helper-image changes were tested together. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44857081600)
 - `1.0.10.0` retained the first helper check and added a second signed helper that exchanges two four-byte messages over `\\.\pipe\LOCAL\`. The app correlates the request with the PID returned by `CreateProcessW`, and confirms reply validation through the exit code on that process handle. Windows’ pipe client PID query is absent from the UWP umbrella library. Two CLI launches produced fresh reports with `exit_code_matches=yes`, `ipc=success`, and `ipc_child_exit=0x000051A8`. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44858026281) · [Microsoft named-pipe scope](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew)
 
-Run `python3 xbox-deploy.py probe --version 1.0.10.0 --require-ipc` to repeat the hardware check. Requiring IPC makes the CLI wait for a terminal pipe result even if a partial read contains the process-only result. The exchange covers two processes in one package while the app is foreground. Foreground transitions require a second owned app, a fresh activation marker from that app, and a reply over the original connection after returning, with stable process and connection IDs.
+- `1.0.11.0` opened a pending pipe transaction, and the control reported foreground visibility. The Xbox process inventory still listed both original PIDs after 15 seconds away. The Portal’s app launcher returned with new parent, helper, and channel IDs on both trials. Its Resume action returned HTTP 500 with `Element not found` in a separate trial. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44858820731)
+- `1.0.12.0` used the control’s registered-protocol return to complete the same pipe transaction after 15 and 25 seconds away. Runs `1795230363213` and `1795230419817` preserved the run, parent, helper, and channel IDs and reported both `observed_suspending=yes` and `observed_resuming=yes`. The challenge-derived helper exit codes were `0x5100C1E8` and `0x5100EEEF`. The main package from the same build also returned `0x000051A7` and `ipc=success`. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44859225111)
+
+Run `python3 xbox-deploy.py probe --version 1.0.10.0 --require-ipc` to repeat the hardware check. Requiring IPC makes the CLI wait for a terminal pipe result even if a partial read contains the process-only result. That command checks the immediate exchange in one package. Use the lifetime command above to test what happens across a foreground switch.
 
 If the exact failure in the old executable host needs to be identified, debug the archived `1.0.5.0` package from Visual Studio on the Series X. Break first at `wWinMain`, then at the activation callback and `RunDiagnostic`. Record the first HRESULT from the runtime or storage call and preserve the exact tested APPX. [Debug an installed UWP package](https://learn.microsoft.com/en-us/visualstudio/debugger/debug-installed-app-package?view=visualstudio)

@@ -3,5 +3,7 @@ namespace XboxProbe.Native
     runtimeclass ProbeRunner
     {
         static String Run();
+        static String StartLifetime();
+        static String FinishLifetime();
     };
 }
