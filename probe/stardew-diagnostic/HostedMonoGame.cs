@@ -28,10 +28,10 @@ internal static class HostedMonoGame
             {
                 var type = framework.GetType("Microsoft.Xna.Framework.Game", true)!;
                 bool finished = false;
-                for (int i = 0; i < 120 && !finished; ++i)
+                void ResizeOnGameThread()
                 {
-                    Thread.Sleep(500);
-                    dispatch.Invoke(null, new object[] { (Action)(() => {
+                    try
+                    {
                         var game = type.GetProperty("Instance", Members)!.GetValue(null);
                         if (game == null || !(bool)type.GetProperty("Initialized", Members)!.GetValue(game)!) return;
                         var window = type.GetProperty("Window", Members)!.GetValue(game)!;
@@ -43,7 +43,19 @@ internal static class HostedMonoGame
                         settings.GetProperty("PreferredBackBufferHeight")!.SetValue(manager, height);
                         settings.GetMethod("ApplyChanges", Type.EmptyTypes)!.Invoke(manager, null);
                         record("stardew_shared_render_size=" + width + "x" + height);
-                    })});
+                    }
+                    catch (Exception error)
+                    {
+                        // A changed game assembly can throw on the dispatcher thread.
+                        finished = true;
+                        record("stardew_shared_resize=" + error.GetBaseException().GetType().Name);
+                    }
+                }
+                Action resize = ResizeOnGameThread;
+                for (int i = 0; i < 120 && !finished; ++i)
+                {
+                    Thread.Sleep(500);
+                    dispatch.Invoke(null, new object[] { resize });
                 }
             }
             catch (Exception error) { record("stardew_shared_resize=" + error.GetBaseException().GetType().Name); }
