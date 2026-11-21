@@ -14,9 +14,9 @@ public:
     HRESULT Open(const wchar_t *mailboxPath);
     // S_OK drew a unique sequence. S_FALSE has no new frame. A failure leaves CPU delivery enabled.
     HRESULT Draw(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11RenderTargetView *target,
-                 UINT width, UINT height, UINT64 &sequence);
+                 UINT width, UINT height, UINT64 &sequence, LONG hostPointer = -1);
     HRESULT DrawCpu(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11RenderTargetView *target,
-                    UINT width, UINT height, const BYTE *pixels, UINT sourceWidth, UINT sourceHeight);
+                    UINT width, UINT height, const BYTE *pixels, UINT sourceWidth, UINT sourceHeight, LONG hostPointer = -1);
     UINT SourceWidth() const { return lastWidth_; }
     UINT SourceHeight() const { return lastHeight_; }
     const char *Stage() const { return stage_; }

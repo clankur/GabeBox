@@ -16,6 +16,7 @@ extern "C" HRESULT FhdRequestReturn();
 #ifdef FHD_NATIVE_INPUT
 extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *,void *);
 extern "C" void FhdSetHostedInputProfile(BOOL,UINT,UINT);
+extern "C" BOOL FhdHostedInputForeground();
 extern "C" int FhdPollHostedInput(SdlHostMailbox *,void *);
 extern "C" void FhdResumeHostedInput();
 extern "C" void FhdEndHostedInput();
@@ -39,6 +40,18 @@ struct Text {
     void field(const WCHAR *key, UINT64 n) {add(key);num(n);add(L"\r\n");}
 };
 volatile LONG sharedMode=0, nativePad=1;
+volatile LONG pointerSample=-1, pointerSerial, pointerAck, pointerEvents, pointerForeground;
+void samplePointer() {
+#ifdef FHD_NATIVE_INPUT
+    pointerSample=nativePad || !box ? -1 : SdlHostLoad(&box->input_pointer);
+    if (pointerSample >= 0) {
+        pointerSerial=SdlHostLoad(&box->input_serial);
+        pointerAck=SdlHostLoad(&box->input_ack);
+        pointerEvents=SdlHostLoad(&box->input_events);
+        pointerForeground=FhdHostedInputForeground();
+    }
+#endif
+}
 void report(Text &t) {
     t.add(L"mode=");t.add(sharedMode?L"shared-texture":L"cpu-upload");t.add(L"\r\n");
     t.field(L"presented=",submitted);t.field(L"gpu_presented=",sharedCount);t.field(L"cpu_presented=",cpuCount);
@@ -48,6 +61,12 @@ void report(Text &t) {
     t.field(L"sample_frames=",InterlockedCompareExchange64(&sampleFrames,0,0));
     t.add(L"gpu_stage=");t.ascii(gpuStage);t.add(L"\r\n");
     t.field(L"gpu_hresult=",static_cast<UINT>(gpuError));
+    const LONG point=pointerSample;
+    if (point >= 0) {
+        t.field(L"pointer_x_4095=",point & 4095);t.field(L"pointer_y_4095=",(point >> 12) & 4095);
+        t.field(L"pointer_down=",(point >> 24) & 1);t.field(L"pointer_foreground=",pointerForeground);
+        t.field(L"pointer_serial=",pointerSerial);t.field(L"pointer_ack=",pointerAck);t.field(L"pointer_events=",pointerEvents);
+    }
     if (hardError) t.field(L"error=",static_cast<UINT>(hardError));
 }
 void releaseBase() {
@@ -77,6 +96,7 @@ HRESULT attach(const WCHAR *path,bool create) {
     HRESULT hr=receiver->Open(path);
     if (FAILED(hr)) {releaseBase();return hr;}
     stop=overlay=submitted=sharedCount=cpuCount=width=height=visible=activation=gpuError=hardError=sharedMode=0;
+    pointerSample=-1;
     gpuStage="waiting-for-producer";sampleUs=sampleFrames=0;
     return S_OK;
 }
@@ -184,14 +204,15 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
         }
 #endif
         if (overlay) {if (wait) WaitForSingleObjectEx(wait,15,FALSE);continue;}
-        UINT64 seq=0;hr=receiver->Draw(device,ctx,target,1920,1080,seq);
+        const LONG hostPointer = nativePad ? -1 : SdlHostLoad(&box->input_pointer);
+        UINT64 seq=0;hr=receiver->Draw(device,ctx,target,1920,1080,seq,hostPointer);
         gpuStage=receiver->Stage();
         if (FAILED(hr)){gpuError=hr;hr=S_FALSE;}
         bool gpu=hr==S_OK;
         if(!gpu && !receiver->Active() &&
                 InterlockedCompareExchange(&box->frame_state,SDL_HOST_READING,SDL_HOST_READY)==SDL_HOST_READY) {
             const auto header=box->frame;
-            hr=receiver->DrawCpu(device,ctx,target,1920,1080,box->pixels,header.width,header.height);
+            hr=receiver->DrawCpu(device,ctx,target,1920,1080,box->pixels,header.width,header.height,hostPointer);
             InterlockedExchange(&box->frame_state,SDL_HOST_EMPTY);
             if(FAILED(hr))break;
             seq=header.sequence;
@@ -213,6 +234,7 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
         } else if(wait) WaitForSingleObjectEx(wait,1,FALSE);
         auto ms=GetTickCount64();
         if(ms-lastReport>3000) {
+            samplePointer();
             visible=FhdWindowVisible(window);activation=FhdReadActivation(window);
             if (trace.file!=INVALID_HANDLE_VALUE) {trace.flush();Text t;report(t);save(t.bytes);}
             lastReport=ms;
@@ -220,6 +242,7 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
         if (child && WaitForSingleObjectEx(child,0,FALSE)==WAIT_OBJECT_0)break;
     }
 #ifdef FHD_NATIVE_INPUT
+    samplePointer();
     FhdEndHostedInput();
 #endif
     trace.close();

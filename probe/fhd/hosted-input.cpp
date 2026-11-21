@@ -68,7 +68,7 @@ bool chordTiming;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
 double cursorX, cursorY;
-bool physicalClick, padClick;
+bool physicalClick, padClick, freshPointer;
 LONG heldVirtual[256];
 struct Pad {
     LONG bits;
@@ -452,6 +452,7 @@ bool readPad(Reading *out) {
     return SUCCEEDED(hr);
 }
 } // namespace
+extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
     if (!!nativePad != !!gamepad) {
         if (alive()) {
@@ -462,6 +463,15 @@ extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) 
         }
         nativePad = gamepad;
         sentPad = false;
+    }
+    // A new mailbox starts at zero. WWA resumes and existing input (even a
+    // deliberate top-left position) must keep their original coordinates.
+    if (!nativePad && freshPointer && alive()) {
+        freshPointer = false;
+        if (!SdlHostLoad(&mail->input_serial) && !SdlHostLoad(&mail->input_pointer)) {
+            cursorX = cursorY = .5;
+            sendPointer();
+        }
     }
     if (width && height) {
         gameW = width;
@@ -516,6 +526,7 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     inputEnabled = enabled;
     mouse = SdlHostLoad(&box->input_pointer);
     legacyKeys = SdlHostLoad(&box->input_keys);
+    freshPointer = !mouse && !SdlHostLoad(&box->input_serial);
     cursorX = (mouse & 4095) / 4095.;
     cursorY = ((mouse >> 12) & 4095) / 4095.;
     neutral();
