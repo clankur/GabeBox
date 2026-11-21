@@ -75,6 +75,11 @@ def add_surfaceless(tree):
     SDL_GLContext xbox_context;
     unsigned xbox_framebuffer;
     unsigned xbox_color, xbox_depth_stencil;
+    void *xbox_get_integer, *xbox_pixel_store, *xbox_read_pixels;
+    void *xbox_bind_framebuffer, *xbox_bind_buffer;
+    SDL_bool xbox_pack_invert;
+    unsigned xbox_readback_samples;
+    Uint64 xbox_readback_ticks;
     int xbox_width, xbox_height;
     Uint64 xbox_last_swap;
     Uint64 xbox_first_swap;
@@ -171,8 +176,8 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
         }
         offscreen_wind->xbox_last_swap = SDL_GetTicks64();
         XboxSdlResizeFramebuffer(_this, offscreen_wind);
-        XboxSdlPresentHostFrame(_this, offscreen_wind);
-        XboxSdlCaptureFrame(_this, offscreen_wind);
+        XboxSdlPresentHostFrame(offscreen_wind);
+        XboxSdlCaptureFrame(offscreen_wind);
         return 0;
     }
 ''' + old)

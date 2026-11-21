@@ -7,6 +7,7 @@ on:
       - 'probe/prepare-steam-core.py'
       - 'probe/ProbeNative.cpp'
       - 'probe/SteamCloud*.h'
+      - 'probe/sdl-frame-copy.h'
       - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
       - '.github/workflows/steam-launch-tests.yml'
@@ -16,6 +17,7 @@ on:
       - 'probe/prepare-steam-core.py'
       - 'probe/ProbeNative.cpp'
       - 'probe/SteamCloud*.h'
+      - 'probe/sdl-frame-copy.h'
       - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
       - '.github/workflows/steam-launch-tests.yml'
@@ -37,3 +39,4 @@ jobs:
       - run: node --test tests/*.test.js
       - run: python -m unittest discover -s tests
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-cloud-manifest.test.cpp -o /tmp/steam-cloud-manifest-test && /tmp/steam-cloud-manifest-test
+      - run: g++ -std=c++20 -O2 -Wall -Wextra -Werror tests/steam-sdl-frame.test.cpp -o /tmp/steam-sdl-frame-test && /tmp/steam-sdl-frame-test

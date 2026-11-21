@@ -44,7 +44,7 @@ static inline void XboxSdlInitOffscreenCursor(void)
     mouse->FreeCursor = XboxSdlFreeOffscreenCursor;
 }
 
-static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, SDL_Surface *target)
+static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, Uint8 *pixels, int width, int height)
 {
     SDL_Mouse *mouse = SDL_GetMouse();
     if (!mouse->cursor_shown || mouse->focus != window || !mouse->CreateCursor ||
@@ -54,10 +54,14 @@ static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, SDL_Surface *t
     SDL_Cursor *active = SDL_GetCursor();
     if (active && active->driverdata) {
         XboxSdlCursor *cursor = active->driverdata;
+        SDL_Surface *target = SDL_CreateRGBSurfaceWithFormatFrom(pixels, width, height,
+                                                                 32, width * 4, SDL_PIXELFORMAT_RGBA32);
+        if (!target) return;
         SDL_Rect position = { 0, 0, cursor->image->w, cursor->image->h };
         SDL_GetMouseState(&position.x, &position.y);
         position.x -= cursor->hot_x;
         position.y -= cursor->hot_y;
         SDL_BlitSurface(cursor->image, NULL, target, &position);
+        SDL_FreeSurface(target);
     }
 }

@@ -2193,6 +2193,27 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return steamSdlSurface ? steamSdlSurface->Frame() : nullptr;
     }
 
+    winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::Storage::Streams::IRandomAccessStream> SteamSdlFrameStreamAsync() {
+        using namespace winrt::Windows::Storage::Streams;
+        std::shared_ptr<SteamSdlSurface> surface;
+        Buffer pixels{nullptr};
+        {
+            std::lock_guard lock(steamSdlMutex);
+            surface = steamSdlSurface;
+            if (surface) pixels = surface->TakeFrame();
+        }
+        if (!pixels) co_return nullptr;
+        InMemoryRandomAccessStream stream;
+        const auto length = pixels.Length();
+        if ((co_await stream.WriteAsync(pixels)) != length) throw winrt::hresult_error(E_FAIL);
+        {
+            std::lock_guard lock(steamSdlMutex);
+            surface->ReuseFrame(std::move(pixels));
+        }
+        stream.Seek(0);
+        co_return stream;
+    }
+
     std::uint32_t SendSteamSdlInput(std::uint32_t pointer, std::uint32_t keys) {
         std::lock_guard lock(steamSdlMutex);
         return steamSdlSurface ? steamSdlSurface->Input(pointer, keys) : 0;

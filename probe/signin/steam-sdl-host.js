@@ -86,6 +86,8 @@
         var lastTime = 0;
         var ready = false, closing = false, stopped = false;
         var result = "";
+        var timing = attempt.automaticTrial && window.steamSdlTiming && window.steamSdlTiming.create();
+        var trialReport, timingReport;
         var complete;
         var finished = new Promise(function (resolve) { complete = resolve; });
 
@@ -222,7 +224,11 @@
             lastPointer = -1;
         }
 
-        function onBlur() { foreground = false; releaseKeys(); }
+        function onBlur() {
+            foreground = false;
+            if (timing) timing.reset();
+            releaseKeys();
+        }
         function onFocus() { foreground = true; }
         function onVisibility() { if (document.hidden) onBlur(); else onFocus(); }
 
@@ -288,8 +294,10 @@
         }
 
         function draw() {
+            var began = timing && performance.now();
             var buffer = runner.steamSdlFrame();
             if (!buffer) return null;
+            var acquired = timing && performance.now();
             var reader = Windows.Storage.Streams.DataReader.fromBuffer(buffer);
             try {
                 reader.byteOrder = Windows.Storage.Streams.ByteOrder.littleEndian;
@@ -306,11 +314,23 @@
                     fitFrame();
                 }
                 reader.readBytes(imageBytes);
+                var copied = timing && performance.now();
                 context.putImageData(image, 0, 0);
-                return { sequence: sequence, ack: ack, events: events };
+                var frame = { sequence: sequence, ack: ack, events: events };
+                if (timing) {
+                    frame.nativeMs = acquired - began;
+                    frame.readMs = copied - acquired;
+                    frame.uploadMs = performance.now() - copied;
+                }
+                return frame;
             } finally {
                 reader.close();
             }
+        }
+
+        function finishTrial(report) {
+            trialReport = report;
+            if (!timing || timingReport) complete(report + (timingReport || ""));
         }
 
         function tick(now) {
@@ -321,6 +341,15 @@
                     return;
                 }
                 var frame = draw();
+                if (timing && foreground && firstFrame !== undefined && now - firstFrame >= 8000) {
+                    timingReport = timing.observe(performance.now(), frame);
+                    if (timingReport) {
+                        timingReport += "steam_sdl_canvas=" + canvas.width + "x" + canvas.height + "\r\n" +
+                            "steam_sdl_viewport=" + screen.clientWidth + "x" + screen.clientHeight + "\r\n";
+                        timing = null;
+                        if (trialReport) complete(trialReport + timingReport);
+                    }
+                }
                 if (frame) {
                     if (!firstFrame) {
                         firstFrame = now;
@@ -338,11 +367,11 @@
                             frame.ack >= trialSerial && frame.events > trialEvents;
                         if (trialSerial && delivered) {
                             trialComplete = true;
-                            complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=delivered\r\n" +
+                            finishTrial(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=delivered\r\n" +
                                 (nativePad ? "steam_sdl_host_gamepad=delivered\r\n" : ""));
                         } else if (now - firstFrame > 24000) {
                             trialComplete = true;
-                            complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=unconfirmed\r\n");
+                            finishTrial(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_host_input=unconfirmed\r\n");
                         } else if (now >= trialRetry) {
                             // Some titles finish initializing their input devices after their first swap.
                             if (nativePad) {

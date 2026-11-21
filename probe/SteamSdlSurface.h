@@ -1,6 +1,8 @@
 #pragma once
 
 #include "sdl-host-protocol.h"
+#include "sdl-frame-copy.h"
+#include <utility>
 
 class SteamSdlSurface {
     winrt::handle file_;
@@ -133,11 +135,19 @@ public:
         transfer_.Length(length);
         auto bytes = transfer_.data();
         std::memcpy(bytes, &header, sizeof(header));
-        std::memcpy(bytes + sizeof(header), view_->pixels, count);
-        for (std::uint32_t offset = sizeof(header) + 3; offset < length; offset += 4) {
-            bytes[offset] = 255;
-        }
+        CopyOpaqueSdlFrame(bytes + sizeof(header), view_->pixels, count / 4);
         return transfer_;
+    }
+
+    // Async writers retain their pixels until WriteAsync completes. A second
+    // reader can claim a new frame while the first writer owns its buffer.
+    winrt::Windows::Storage::Streams::Buffer TakeFrame() {
+        if (!Frame()) return nullptr;
+        return std::exchange(transfer_, nullptr);
+    }
+
+    void ReuseFrame(winrt::Windows::Storage::Streams::Buffer buffer) {
+        if (!transfer_) transfer_ = std::move(buffer);
     }
 };
 

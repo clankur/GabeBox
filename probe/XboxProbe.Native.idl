@@ -34,5 +34,6 @@ namespace XboxProbe.Native
         static void ResetSteamSdlKeyboard();
         static Boolean SteamSdlRunning();
         static void QuitSteamSdl();
+        static Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IRandomAccessStream> SteamSdlFrameStreamAsync();
     };
 }

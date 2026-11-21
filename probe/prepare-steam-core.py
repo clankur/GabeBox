@@ -130,13 +130,16 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    stardew_host_trace=False, stardew_startup_diagnostic=None, startup_snapshot=False,
                    startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
-                   startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None):
+                   startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
+                   measure_sdl_frames=False):
     imports = {}
     for binary in inspect_binaries:
         for module, symbols in system_imports(objdump, binary).items():
             imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
     startup_app_id = launch_app_id
+    if measure_sdl_frames and not (launch_app_id == 646570 and slay_sdl_host and repeat_launch):
+        raise ValueError('Frame measurement requires the hosted Slay repeat launch trial.')
     if startup_sdl_host and launch_app_id is None:
         startup_app_id = 975370
         startup_snapshot = True
@@ -252,6 +255,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 profiles.append('646570')
             script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
             helper = '<script src="steam-sdl-gamepad.js"></script>'
+            if measure_sdl_frames:
+                if not (layout / 'steam-sdl-timing.js').is_file():
+                    raise ValueError('Use the SDK template containing the SDL frame timing script.')
+                helper += '\n    <script src="steam-sdl-timing.js"></script>'
             html_path.write_text(html.replace(original, helper + '\n    ' + script + '\n    ' + original), encoding='utf-8')
         if startup_sdl_host:
             (layout / 'steam-sdl-host-975370.txt').touch()
@@ -338,6 +345,8 @@ def main():
     parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
     parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
                         help='enable the hosted Stardew Valley SDL profile with its built startup hook')
+    parser.add_argument('--measure-sdl-frames', action='store_true',
+                        help='measure 30 seconds of presentation after an eight-second hosted Slay warmup')
     parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
                         help='enable the hosted Slay the Spire profile with its built Java and SDL adapters')
     parser.add_argument('--install-before-launch', action='store_true',
@@ -424,7 +433,8 @@ def main():
                    startup_sdl_working_directory=args.startup_sdl_working_directory,
                    startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
-                   stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host)
+                   stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
+                   measure_sdl_frames=args.measure_sdl_frames)
 
 
 if __name__ == '__main__':
