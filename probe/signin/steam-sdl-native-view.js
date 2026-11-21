@@ -12,7 +12,7 @@
         var mainId = manager.ApplicationView.getForCurrentView().id;
         var id = 0, timer, closed = false, switching = false, pendingShow, restored;
         var session = 0;
-        var overlayOpen = false, opened = false, shown = false, ready = false;
+        var overlayOpen = false, opened = false, shown = false, ready = false, activated = false;
         var measured = false;
         var started = Date.now();
         function close() {
@@ -57,15 +57,18 @@
                 if (!closed) return switcher.switchAsync(id, fromView || mainId);
             }
             var steam = window.steamBigPictureHost;
-            if (steam && steam.switchView) {
-                steam.samplePresenter("presenter_created");
+            if (steam && steam.samplePresenter) steam.samplePresenter("presenter_created");
+            if (activated && steam && steam.switchView) {
                 pendingShow = steam.switchView(id, fromView || mainId);
             } else pendingShow = Promise.resolve().then(function () {
+                // Register a newly created game view with the Xbox shell before
+                // switching to it, as in the verified fullscreen FHD presenter.
                 if (!closed) return switcher.tryShowAsStandaloneAsync(id);
             }).then(switchToGame, switchToGame);
             pendingShow = pendingShow.then(function () {
                 switching = false;
                 shown = !closed;
+                activated = activated || shown;
                 if (shown && steam && steam.samplePresenter) steam.samplePresenter("presenter_foreground");
                 return shown;
             }, function () { failed(); return false; });

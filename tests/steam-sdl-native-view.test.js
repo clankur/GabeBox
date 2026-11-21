@@ -4,16 +4,20 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
-function fixture(accept = true, gate = null) {
+function fixture(accept = true, gate = null, withSteam = false) {
     const calls = [];
     let tick, stats = "presented=0\n";
     const host = { open: path => calls.push(path), start: () => calls.push("start"),
         setNativeGamepad: enabled => calls.push(enabled), close: () => calls.push("close"),
         viewId: () => -31, status: () => stats };
     const window = { Fhd: { Native: { RenderHost: host } } };
+    if (withSteam) window.steamBigPictureHost = {
+        samplePresenter: () => {},
+        switchView: async () => { calls.push("steam-switch"); }
+    };
     const Windows = {
         UI: { ViewManagement: { ApplicationView: { getForCurrentView: () => ({ id: -73 }) }, ApplicationViewSwitcher: {
-            tryShowAsStandaloneAsync: () => Promise.resolve(true),
+            tryShowAsStandaloneAsync: async () => { if (withSteam) calls.push("standalone"); return true; },
             switchAsync: (id, from) => {
                 if (id === -73) { assert.equal(from, -31); calls.push("library"); return Promise.resolve(); }
                 assert.equal(from, -73); calls.push(id);
@@ -30,6 +34,15 @@ function fixture(accept = true, gate = null) {
     }
     return { open, calls, poll(value) { if (value) stats = value; tick(); } };
 }
+
+test("a fresh game launched from Steam gets a standalone Xbox view before the switch", async () => {
+    const run = fixture(true, null, true);
+    const control = run.open("steam_sdl_mailbox=sdl-host-12-99.bin\r\n");
+    run.poll();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(run.calls.slice(-2), ["standalone", -31]);
+    await control.close();
+});
 
 test("native presentation uses the package-local frame mailbox and returns to the player overlay", async () => {
     const run = fixture();

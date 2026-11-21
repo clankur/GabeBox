@@ -224,8 +224,7 @@
                     // Make the expensive view handoff only after the broker has
                     // verified this account, the title and its local installation.
                     return broker.play(appId, function () {
-                        // Slay exceeded the foreground budget on the separate FHD view.
-                        // Keep its game's swapchain in the existing Valve CoreWindow.
+                        // The QR host creates the game's fullscreen presenter.
                         return show(mainId, viewId).then(function () {
                             visible = false;
                             setGameForeground(true);
