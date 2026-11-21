@@ -1,6 +1,7 @@
 """Enable Mesa surfaceless EGL in SDL's offscreen driver for opted-in launches."""
 
 from pathlib import Path
+import shutil
 import sys
 
 
@@ -12,10 +13,37 @@ def replace_once(source, old, new):
 
 def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
+    framebuffer = Path(__file__).with_name('sdl-surfaceless-framebuffer.h')
+    shutil.copyfile(framebuffer, offscreen / framebuffer.name)
+
+    window_header = offscreen / 'SDL_offscreenwindow.h'
+    source = window_header.read_text(encoding='utf-8')
+    old = '    EGLSurface egl_surface;'
+    source = replace_once(source, old, old + '''
+    SDL_GLContext xbox_context;
+    unsigned xbox_framebuffer;
+    int xbox_width, xbox_height;
+    SDL_bool xbox_capture_attempted;''')
+    window_header.write_text(source, encoding='utf-8')
+
+    context_header = offscreen / 'SDL_offscreenopengles.h'
+    source = context_header.read_text(encoding='utf-8')
+    source = replace_once(source, '#define OFFSCREEN_GLES_GetProcAddress  SDL_EGL_GetProcAddress',
+                          'extern void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name);')
+    context_header.write_text(source, encoding='utf-8')
+
     context = offscreen / 'SDL_offscreenopengles.c'
     source = context.read_text(encoding='utf-8')
     old = '#include "SDL_offscreenwindow.h"'
-    source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "SDL_opengl.h"\n#include "../../sdl-startup-trace.h"')
+    source = replace_once(source, old, old + '\n#include "SDL_hints.h"\n#include "../../sdl-startup-trace.h"'
+                          '\n#include "sdl-surfaceless-framebuffer.h"')
+    old = '/* EGL implementation of SDL OpenGL support */'
+    source = replace_once(source, old, old + '''
+
+void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name)
+{
+    return XboxSdlGetProcAddress(_this, name);
+}''')
     old = '    int ret = SDL_EGL_LoadLibraryOnly(_this, path);'
     source = replace_once(source, old, '''    int ret;
     if (SDL_GetHintBoolean("XBOX_SDL_SURFACELESS", SDL_FALSE)) {
@@ -48,10 +76,17 @@ def add_surfaceless(tree):
             return NULL;
         }
         XboxSdlTrace("sdl_surfaceless_context=ready\\n");
+        if (XboxSdlCreateFramebuffer(_this, offscreen_window, context) < 0) {
+            XboxSdlTrace("sdl_surfaceless_framebuffer=error\\n");
+            SDL_EGL_DeleteContext(_this, context);
+            return NULL;
+        }
+        XboxSdlTrace("sdl_surfaceless_framebuffer=ready\\n");
     }''')
     old = '    return SDL_EGL_SwapBuffers(_this, offscreen_wind->egl_surface);'
     source = replace_once(source, old, '''    if (offscreen_wind->egl_surface == EGL_NO_SURFACE) {
-        return SDL_SetError("Surfaceless OpenGL has no presentation surface");
+        XboxSdlCaptureFrame(_this, offscreen_wind);
+        return 0;
     }
 ''' + old)
     context.write_text(source, encoding='utf-8')
