@@ -4,6 +4,7 @@
 #include "../events/SDL_mouse_c.h"
 #include "../events/SDL_events_c.h"
 #include "SDL_timer.h"
+#include "SDL.h"
 #include "SDL_gamecontroller.h"
 #include <stddef.h>
 
