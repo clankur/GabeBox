@@ -150,6 +150,14 @@ extern "C" void FhdReleaseMedia(LONG token) {
     }
     ReleaseSRWLockExclusive(&stateLock);
 }
+extern "C" void FhdMediaSequences(LONG token, UINT64& cpu, UINT64& gpu) {
+    AcquireSRWLockShared(&stateLock);
+    if (token && mediaToken == token && box && receiver) {
+        cpu = static_cast<UINT32>(SdlHostLoad(&box->frame_sequence));
+        gpu = receiver->ProducerSequence();
+    }
+    ReleaseSRWLockShared(&stateLock);
+}
 extern "C" HRESULT FhdDrawMedia(LONG token, ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
                                 bool nativePad, UINT64 &sequence, bool &gpu) {
     AcquireSRWLockShared(&stateLock);

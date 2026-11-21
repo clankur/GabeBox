@@ -184,6 +184,12 @@ struct HostedGpuReceiver::Resources {
 };
 
 HostedGpuReceiver::~HostedGpuReceiver() { Close(); }
+UINT64 HostedGpuReceiver::ProducerSequence() const {
+    if (!mailbox_) return 0;
+    const auto first = load64(&mailbox_->sequence[0]);
+    const auto second = load64(&mailbox_->sequence[1]);
+    return first > second ? first : second;
+}
 HRESULT HostedGpuReceiver::Open(const wchar_t *mailboxPath) {
     if (mailbox_ || !mailboxPath) return E_INVALIDARG;
     WCHAR path[1024]; UINT length=0;

@@ -21,6 +21,7 @@ public:
     UINT SourceHeight() const { return lastHeight_; }
     const char *Stage() const { return stage_; }
     bool Active() const;
+    UINT64 ProducerSequence() const;
     void Close();
 private:
     struct Resources;

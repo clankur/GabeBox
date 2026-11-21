@@ -7,7 +7,9 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Media.MediaProperties.h>
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -15,6 +17,7 @@
 
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" void FhdReleaseMedia(LONG);
+extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
 
 namespace {
@@ -26,6 +29,29 @@ using namespace winrt::Windows::Media::MediaProperties;
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 constexpr unsigned width = 1920, height = 1080;
+
+// The media sink may retain more surfaces than the reusable pool contains.
+// D3D private data lives exactly as long as its texture (including sink-owned
+// references). This bounds extra allocations even if Processed is delayed.
+constexpr GUID textureLeaseId{0x66993deb,0xd087,0x44a9,{0xb5,0x5d,0x1d,0xe4,0x9f,0x36,0x34,0x16}};
+class TextureLease final : public ::IUnknown {
+    std::atomic<ULONG> refs{1};
+    std::shared_ptr<std::atomic<unsigned>> count;
+public:
+    explicit TextureLease(std::shared_ptr<std::atomic<unsigned>> value) : count(std::move(value)) { ++*count; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (iid != IID_IUnknown) return E_NOINTERFACE;
+        *out = static_cast<::IUnknown*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        auto left = --refs;
+        if (!left) { --*count; delete this; }
+        return left;
+    }
+};
 
 struct Slot {
     com_ptr<ID3D11RenderTargetView> target;
@@ -42,6 +68,10 @@ struct Stream : std::enable_shared_from_this<Stream> {
     com_ptr<ID3D11Device> device;
     com_ptr<ID3D11DeviceContext> context;
     std::array<Slot, 3> slots;
+    Slot spare;
+    std::shared_ptr<std::atomic<unsigned>> outstanding = std::make_shared<std::atomic<unsigned>>(0);
+    uint64_t requests = 0, pending = 0, processed = 0, poolWaits = 0, sourceWaits = 0;
+    uint64_t extraAllocations = 0, peak = 0, lastSequence = 0;
     MediaStreamSource source{nullptr};
     MediaFrameCount frames;
     Clock::time_point firstSample{};
@@ -55,20 +85,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
             nullptr, 0, D3D11_SDK_VERSION, device.put(), nullptr, context.put()));
         auto multithread = context.try_as<ID3D11Multithread>();
         if (multithread) multithread->SetMultithreadProtected(TRUE);
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        for (auto& slot : slots) {
-            com_ptr<ID3D11Texture2D> texture;
-            check_hresult(device->CreateTexture2D(&desc, nullptr, texture.put()));
-            check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, slot.target.put()));
-            com_ptr<::IInspectable> wrapped;
-            check_hresult(CreateDirect3D11SurfaceFromDXGISurface(texture.as<IDXGISurface>().get(), wrapped.put()));
-            slot.surface = wrapped.as<IDirect3DSurface>();
-        }
+        for (auto& slot : slots) allocate(slot, false);
         auto props = VideoEncodingProperties::CreateUncompressed(MediaEncodingSubtypes::Bgra8(), width, height);
         props.FrameRate().Numerator(60); props.FrameRate().Denominator(1);
         props.PixelAspectRatio().Numerator(1); props.PixelAspectRatio().Denominator(1);
@@ -88,6 +105,28 @@ struct Stream : std::enable_shared_from_this<Stream> {
         source.Closed([weak](auto const&, auto const&) {
             if (auto self = weak.lock()) self->close();
         });
+    }
+
+    void allocate(Slot& slot, bool ownedBySample) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        com_ptr<ID3D11Texture2D> texture;
+        check_hresult(device->CreateTexture2D(&desc, nullptr, texture.put()));
+        if (ownedBySample) {
+            com_ptr<::IUnknown> lease;
+            lease.attach(new TextureLease(outstanding));
+            check_hresult(texture->SetPrivateDataInterface(textureLeaseId, lease.get()));
+            ++extraAllocations;
+            peak = (std::max)(peak, static_cast<uint64_t>(outstanding->load()));
+        }
+        check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, slot.target.put()));
+        com_ptr<::IInspectable> wrapped;
+        check_hresult(CreateDirect3D11SurfaceFromDXGISurface(texture.as<IDXGISurface>().get(), wrapped.put()));
+        slot.surface = wrapped.as<IDirect3DSurface>();
     }
 
     void onRendered() {
@@ -110,37 +149,47 @@ struct Stream : std::enable_shared_from_this<Stream> {
     MediaStreamSample next() {
         std::lock_guard guard(lock);
         if (closed) throw hresult_error(RO_E_CLOSED);
-        for (size_t index = 0; index < slots.size(); ++index) {
-            auto& slot = slots[index];
-            if (slot.busy) continue;
-            bool gpu = false;
-            UINT64 sequence = 0;
-            auto hr = FhdDrawMedia(token, device.get(), context.get(), slot.target.get(), nativePad, sequence, gpu);
-            if (hr == S_FALSE) return nullptr;
-            check_hresult(hr);
-            context->Flush();
-            auto now = Clock::now();
-            if (!frames.cpu && !frames.gpu) firstSample = now;
-            auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface,
-                std::chrono::duration_cast<TimeSpan>(now - firstSample));
-            sample.Duration(TimeSpan{10000000 / 60});
-            sample.KeyFrame(true);
-            sample.Processed([weak = weak_from_this(),index](auto const&, auto const&) {
-                if (auto self = weak.lock()) {
-                    std::lock_guard guard(self->lock);
-                    self->slots[index].busy = false;
-                }
-            });
-            slot.busy = true;
-            frames.submit(gpu);
-            return sample;
+        size_t index = 0;
+        while (index < slots.size() && slots[index].busy) ++index;
+        const bool extra = index == slots.size();
+        auto& slot = extra ? spare : slots[index];
+        if (extra && !spare.target) {
+            if (outstanding->load() >= 12) { ++poolWaits; return nullptr; }
+            allocate(spare, true);
         }
-        return nullptr;
+        bool gpu = false;
+        UINT64 sequence = 0;
+        auto hr = FhdDrawMedia(token, device.get(), context.get(), slot.target.get(), nativePad, sequence, gpu);
+        if (hr == S_FALSE) { ++sourceWaits; return nullptr; }
+        lastSequence = sequence;
+        check_hresult(hr);
+        context->Flush();
+        auto now = Clock::now();
+        if (!frames.cpu && !frames.gpu) firstSample = now;
+        auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface,
+            std::chrono::duration_cast<TimeSpan>(now - firstSample));
+        sample.Duration(TimeSpan{10000000 / 60});
+        sample.KeyFrame(true);
+        sample.Processed([weak = weak_from_this(),index](auto const&, auto const&) {
+            if (auto self = weak.lock()) {
+                std::lock_guard guard(self->lock);
+                ++self->processed;
+                if (index < self->slots.size()) self->slots[index].busy = false;
+            }
+        });
+        if (extra) spare = {}; // The sample now owns its entire texture lifetime.
+        else slot.busy = true;
+        frames.submit(gpu);
+        return sample;
     }
 
     static fire_and_forget provide(std::shared_ptr<Stream> self, MediaStreamSourceSampleRequest request,
                                    MediaStreamSourceSampleRequestDeferral deferral) {
         try {
+            {
+                std::lock_guard guard(self->lock);
+                ++self->requests; ++self->pending;
+            }
             co_await resume_background();
             for (;;) {
                 if (auto frame = self->next()) { request.Sample(frame); break; }
@@ -153,6 +202,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
                 if (!self->closed) self->error = hr;
             }
         }
+        { std::lock_guard guard(self->lock); --self->pending; }
         try { deferral.Complete(); } catch (...) {}
     }
 
@@ -163,6 +213,15 @@ struct Stream : std::enable_shared_from_this<Stream> {
             text += key; text += L"="; text += std::to_wstring(value); text += L"\r\n";
         };
         field(L"running", !closed); field(L"width", width); field(L"height", height);
+        UINT64 cpu = 0, gpu = 0;
+        FhdMediaSequences(token, cpu, gpu);
+        size_t busy = 0;
+        for (auto const& slot : slots) if (slot.busy) ++busy;
+        field(L"requests", requests); field(L"pending", pending); field(L"processed", processed);
+        field(L"slots_busy", busy); field(L"outstanding", outstanding->load());
+        field(L"pool_waits", poolWaits); field(L"source_waits", sourceWaits);
+        field(L"spill_allocations", extraAllocations); field(L"texture_peak", peak);
+        field(L"source_sequence", lastSequence); field(L"cpu_sequence", cpu); field(L"gpu_sequence", gpu);
         field(L"submitted", frames.gpu + frames.cpu); field(L"presented", frames.rendered);
         field(L"gpu_submitted", frames.gpu); field(L"cpu_submitted", frames.cpu);
         if (frames.singleMode()) {
