@@ -2,6 +2,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +39,38 @@ public final class SlayConsoleDiagnostic {
 
     private static native int setGameDirectory(String path);
     private static native int[] runMesaControl();
+
+    private static void checkLwjglBinding() {
+        System.out.println("slay_lwjgl_egl_binding=begin");
+        Method useContext = null;
+        boolean bound = false;
+        try {
+            useContext = Class.forName("org.lwjgl.opengl.GLContext").getMethod("useContext", Object.class);
+            useContext.invoke(null, new Object());
+            bound = true;
+            String version = (String) Class.forName("org.lwjgl.opengl.GL11").getMethod("glGetString", int.class)
+                .invoke(null, 0x1F02); // GL_VERSION
+            System.out.println("slay_lwjgl_egl_binding=" + (version == null ? "no-version" : "gl-version"));
+            Class<?> shaderApi = Class.forName("org.lwjgl.opengl.GL20");
+            int shader = (Integer) shaderApi.getMethod("glCreateShader", int.class).invoke(null, 0x8B31); // GL_VERTEX_SHADER
+            if (shader != 0) {
+                shaderApi.getMethod("glDeleteShader", int.class).invoke(null, shader);
+                System.out.println("slay_lwjgl_egl_binding=shader-created");
+            } else {
+                System.out.println("slay_lwjgl_egl_binding=no-shader");
+            }
+        } catch (ReflectiveOperationException | LinkageError e) {
+            Throwable cause = e.getCause();
+            System.out.println("slay_lwjgl_egl_binding_fault=" + (cause == null ? e : cause).getClass().getName());
+        } finally {
+            if (bound) {
+                try { useContext.invoke(null, (Object) null); }
+                catch (ReflectiveOperationException | LinkageError e) {
+                    System.out.println("slay_lwjgl_egl_binding=release-error");
+                }
+            }
+        }
+    }
 
     private static void checkMesaInGameJvm(File packageRoot) {
         File mesaLibrary = new File(packageRoot, "mesa-jni-control.dll");
