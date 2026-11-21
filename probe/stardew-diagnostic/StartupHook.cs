@@ -11,6 +11,9 @@ internal static class StartupHook
         if (target != "Stardew Valley" || string.IsNullOrEmpty(log))
             return;
 
+        if (Environment.GetEnvironmentVariable("XBOX_SDL_TRACE_FILE") == null)
+            Environment.SetEnvironmentVariable("XBOX_SDL_TRACE_FILE", Path.ChangeExtension(log, ".sdl.txt"));
+
         void Record(string entry)
         {
             try { File.AppendAllText(log, entry + "\n"); }
