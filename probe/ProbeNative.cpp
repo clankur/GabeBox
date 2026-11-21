@@ -1210,7 +1210,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
     co_return winrt::hstring(L"steam_java_probe=exited\r\nsteam_java_probe_exit=" + Hex(exitCode) + L"\r\n");
 }
 
-static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(std::uint32_t app) {
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
+        std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix) {
     using namespace winrt::Windows::Storage;
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
     using GameQuery = bool (__cdecl *)(void *, const std::uint64_t *);
@@ -1221,6 +1222,17 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     struct ResetLaunch {
         ~ResetLaunch() { steamLaunchActive.clear(); }
     } resetLaunch;
+    std::wstring report;
+    auto checkpoint = [&](std::wstring_view phase) -> winrt::Windows::Foundation::IAsyncAction {
+        auto text = std::wstring(prefix) + report + L"steam_launch_phase=" + std::wstring(phase) +
+            L"\r\nstatus=steam-game-launch-starting\r\n";
+        try {
+            co_await FileIO::WriteTextAsync(file, winrt::hstring(text));
+        } catch (winrt::hresult_error const&) {
+            // A diagnostic write must not interrupt Steam's launch or callback processing.
+        }
+    };
+    co_await checkpoint(L"checking-library");
     auto root = ApplicationData::Current().LocalFolder();
     auto item = co_await root.TryGetItemAsync(L"SteamLibrary");
     auto folder = item.try_as<StorageFolder>();
@@ -1254,7 +1266,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         reinterpret_cast<RefreshLibrary>(managerMethods[83])(session->appManager);
     }
 
-    std::wstring report = L"steam_launch_library_refreshed=yes\r\n";
+    report = L"steam_launch_library_refreshed=yes\r\n";
+    co_await checkpoint(L"checking-installed-state");
     winrt::apartment_context caller;
     auto installDeadline = GetTickCount64() + 6000;
     bool attemptedRegistration = false;
@@ -1295,6 +1308,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const std::wstring dataRoot(root.Path());
     const std::wstring packageRoot(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
     bool waitForSharedInstall = false;
+    co_await checkpoint(L"checking-prerequisites");
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1356,6 +1370,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     }
 
     if (waitForSharedInstall) {
+        co_await checkpoint(L"waiting-for-prerequisites");
         const auto started = GetTickCount64();
         auto deadline = started + 90000;
         bool retriedPaused = false;
@@ -1397,6 +1412,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
 
     FILETIME launchTime{};
     std::wstring gameDirectory;
+    co_await checkpoint(L"submitting-play");
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1447,6 +1463,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::array<std::uint8_t, 524> payload{};
     auto verdict = L"timeout";
     report += L"steam_launch_submitted=yes\r\n";
+    co_await checkpoint(L"waiting-for-steam");
     const auto started = GetTickCount64();
     const auto deadline = started + 25000;
     using winrt::Windows::System::MemoryManager;
@@ -1457,6 +1474,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     SteamGameProcess process;
     bool accepted = false;
     bool observedRunning = false;
+    bool recordedRunning = false;
     for (;;) {
         {
             std::lock_guard lock(steamSessionMutex);
@@ -1518,6 +1536,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 session->launchCall = 0;
                 break;
             }
+        }
+        if (observedRunning && !recordedRunning) {
+            recordedRunning = true;
+            co_await checkpoint(L"game-running");
         }
         co_await winrt::resume_after(std::chrono::milliseconds(GetTickCount64() - started < 3000 ? 50 : 250));
         co_await caller;
@@ -1594,8 +1616,9 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
             L"\r\nvolume_available=" + std::to_wstring(volumeAvailable.QuadPart) + L"\r\n");
     }
 
-    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app) {
-        return LaunchLocalSteamGame(app);
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app,
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return LaunchLocalSteamGame(app, file, prefix);
     }
 };
 

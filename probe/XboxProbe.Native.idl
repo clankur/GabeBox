@@ -13,6 +13,7 @@ namespace XboxProbe.Native
         static Windows.Foundation.IAsyncOperation<String> QueueSteamDownload(UInt32 app);
         static String SteamDownloadStatus();
         static String SteamStorageInfo();
-        static Windows.Foundation.IAsyncOperation<String> LaunchSteamGame(UInt32 app);
+        static Windows.Foundation.IAsyncOperation<String> LaunchSteamGame(UInt32 app,
+            Windows.Storage.StorageFile file, String prefix);
     };
 }

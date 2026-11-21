@@ -246,7 +246,7 @@
         }
 
         return fileIO.writeTextAsync(attempt.file, report + "status=steam-game-launch-starting\r\n").then(function () {
-            return XboxProbe.Native.ProbeRunner.launchSteamGame(entry.id);
+            return XboxProbe.Native.ProbeRunner.launchSteamGame(entry.id, attempt.file, report);
         }).then(finish, function () { return finish("steam_launch=failed\r\n"); });
     }
 
