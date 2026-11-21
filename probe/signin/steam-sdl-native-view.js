@@ -10,6 +10,7 @@
         var mainId = manager.ApplicationView.getForCurrentView().id;
         var id = 0, timer, closed = false, switching = false;
         var overlayOpen = false, opened = false, shown = false, ready = false;
+        var measured = false;
         var started = Date.now();
         function close() {
             if (closed) return;
@@ -57,6 +58,14 @@
                     events.presented();
                 }
                 if (!ready && Date.now() - started > 12000) return failed();
+                if (ready && !measured && events.measured) {
+                    var duration = /^sample_us=([0-9]+)\r?$/m.exec(stats);
+                    var frames = /^sample_frames=([0-9]+)\r?$/m.exec(stats);
+                    if (duration && +duration[1] > 0 && frames) {
+                        measured = true;
+                        events.measured(+frames[1], +duration[1]);
+                    }
+                }
                 var overlay = /^overlay_requested=([0-9]+)\r?$/m.exec(stats);
                 if (overlay && +overlay[1] && !overlayOpen) {
                     overlayOpen = true;

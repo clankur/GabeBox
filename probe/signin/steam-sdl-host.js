@@ -583,6 +583,13 @@
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
                     fallback: function () { nativeView = null; },
+                    measured: attempt.automaticTrial && function (frames, microseconds) {
+                        var padAcknowledged = nativePad && runner.steamSdlGamepadAck() > 0;
+                        complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_presentation=native\r\n" +
+                            "steam_sdl_sample_frames=" + frames + "\r\nsteam_sdl_sample_us=" + microseconds + "\r\n" +
+                            "steam_sdl_host_input=" + (padAcknowledged ? "delivered" : "unconfirmed") + "\r\n" +
+                            (padAcknowledged ? "steam_sdl_host_gamepad=delivered\r\n" : ""));
+                    },
                     presented: function () {
                         firstFrame = performance.now();
                         status.textContent = "";

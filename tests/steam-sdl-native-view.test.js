@@ -21,7 +21,8 @@ function fixture(accept = true) {
     vm.runInNewContext(source, { window, Windows, Date, setInterval(f) { tick = f; return 1; }, clearInterval() {} });
     function open(value, nativePad) {
         return window.steamSdlNativeView.open(value, { running: () => true, fallback: () => calls.push("fallback"),
-            presented: () => calls.push("presented"), menu: () => calls.push("menu") }, nativePad);
+            presented: () => calls.push("presented"), menu: () => calls.push("menu"),
+            measured: (n, us) => calls.push([n, us]) }, nativePad);
     }
     return { open, calls, poll(value) { if (value) stats = value; tick(); } };
 }
@@ -37,10 +38,11 @@ test("native presentation uses the package-local frame mailbox and returns to th
     run.poll();
     control.resume();
     await new Promise(resolve => setImmediate(resolve));
-    run.poll("presented=5\r\noverlay_requested=1\r\n");
+    run.poll("presented=1800\r\nsample_frames=1799\r\nsample_us=30001000\r\noverlay_requested=1\r\n");
+    run.poll();
     control.close();
     assert.deepEqual(run.calls, ["C:\\LocalState\\sdl-host-12-99.bin", false, "start", -31, "presented",
-        "menu", "start", -31, "menu", "close"]);
+        "menu", "start", -31, [1799, 30001000], "menu", "close"]);
 });
 
 test("a failed view switch releases the native resources and lets the existing player resume", async () => {
