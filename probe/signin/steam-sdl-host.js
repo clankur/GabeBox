@@ -17,7 +17,7 @@
     };
     var keys = { 27: 32, 32: 64, 143: 32, 196: 32 };
     var clickCodes = { 13: true, 142: true, 195: true };
-    var titles = { 975370: "Dwarf Fortress", 413150: "Stardew Valley" };
+    var titles = { 975370: "Dwarf Fortress", 413150: "Stardew Valley", 646570: "Slay the Spire" };
 
     function start(runner, appId, attempt) {
         var previous = document.activeElement;

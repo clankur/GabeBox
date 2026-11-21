@@ -1239,6 +1239,7 @@ enum class GameBackend { SteamPlay, DosBox, SdlHost };
 static constexpr std::uint32_t xcomDosAppId = 7760;
 static constexpr std::uint32_t dwarfFortressAppId = 975370;
 static constexpr std::uint32_t stardewValleyAppId = 413150;
+static constexpr std::uint32_t slayTheSpireAppId = 646570;
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSteamGame(
         std::uint32_t app, winrt::Windows::Storage::StorageFile file, winrt::hstring prefix,
@@ -1254,7 +1255,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     }
     const bool hostedSdl = backend == GameBackend::SdlHost;
     const bool hostedStardew = hostedSdl && app == stardewValleyAppId;
-    if (hostedSdl && app != dwarfFortressAppId && !hostedStardew) {
+    const bool hostedSlay = hostedSdl && app == slayTheSpireAppId;
+    if (hostedSdl && app != dwarfFortressAppId && !hostedStardew && !hostedSlay) {
         co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
     }
     if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"steam_launch=busy\r\n");
@@ -1326,13 +1328,18 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 diagnosticRenderer = choice.c_str();
             }
         }
-        if (hostedSdl && !hostedStardew && (!snapshotRequested || !dummyVideo || diagnosticRenderer != L"software" ||
+        if (hostedSdl && app == dwarfFortressAppId && (!snapshotRequested || !dummyVideo || diagnosticRenderer != L"software" ||
                           !sdlWorkingDirectory || sdlPreferencesPath.empty())) {
             co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
         }
         if (hostedStardew && (!co_await packageFolder.TryGetItemAsync(L"StardewStartupDiagnostic.dll") ||
                               !co_await packageFolder.TryGetItemAsync(L"stardew-sdl-surfaceless.txt") ||
                               !co_await packageFolder.TryGetItemAsync(L"dxil.dll"))) {
+            co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
+        }
+        if (hostedSlay && (!co_await packageFolder.TryGetItemAsync(L"SlayConsoleDiagnostic.class") ||
+                           !co_await packageFolder.TryGetItemAsync(L"slay-live-host.txt") ||
+                           !co_await packageFolder.TryGetItemAsync(L"dxil.dll"))) {
             co_return winrt::hstring(report + L"steam_sdl_host=profile-error\r\n");
         }
         auto optionItem = co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -1539,6 +1546,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
       frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"},
       managedHook{L"DOTNET_STARTUP_HOOKS"}, managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHeap{L"DOTNET_GCHeapHardLimit"};
     std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
+    winrt::handle slayProcess;
+    std::wstring slayTempDirectory;
+    if (hostedSlay) {
+        auto temp = co_await root.CreateFolderAsync(L"slay-native-temp", CreationCollisionOption::OpenIfExists);
+        slayTempDirectory = temp.Path().c_str();
+    }
     if (snapshotRequested) {
         co_await winrt::resume_background();
         report += L"steam_launch_probe_pid=" + std::to_wstring(GetCurrentProcessId()) + L"\r\n";
@@ -1547,7 +1560,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     }
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
-    if ((backend == GameBackend::DosBox || hostedStardew) && !co_await HasCompletedSteamManifest(folder, app)) {
+    if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay) && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
     {
@@ -1578,6 +1591,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
         if (hostedStardew && CompareStringOrdinal(gameDirectory.c_str(), -1,
                 (libraryRoot + L"\\steamapps\\common\\Stardew Valley").c_str(), -1, TRUE) != CSTR_EQUAL) {
+            co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
+        }
+        if (hostedSlay && CompareStringOrdinal(gameDirectory.c_str(), -1,
+                (libraryRoot + L"\\steamapps\\common\\SlayTheSpire").c_str(), -1, TRUE) != CSTR_EQUAL) {
             co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
         }
         if (reinterpret_cast<GameQuery>(session->userMethods[67])(session->clientUser, &gameId)) {
@@ -1647,9 +1664,57 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
             }
         }
-        call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
-        if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
-        session->launchCall = call;
+        if (hostedSlay) {
+            const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                launchTime.dwLowDateTime);
+            const auto java = gameDirectory + L"\\jre\\bin\\java.exe";
+            const auto jar = gameDirectory + L"\\desktop-1.0.jar";
+            const auto cwd = packageRoot + L"\\slay-working-directory.dll";
+            const auto log = dataRoot + L"\\slay-console-" + id + L".log";
+            auto command = L"\"" + java + L"\" -Xms32m -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1 "
+                L"-XX:ReservedCodeCacheSize=48m -Duser.dir=\"" + gameDirectory + L"\" -Djava.io.tmpdir=\"" +
+                slayTempDirectory + L"\" -cp \"" + packageRoot + L";" + packageRoot + L"\\slay-lwjgl-display.jar;" +
+                jar + L"\" SlayConsoleDiagnostic --launch-hosted \"" + gameDirectory + L"\" \"" + cwd + L"\" \"" +
+                jar + L"\" \"" + log + L"\"";
+            STARTUPINFOW startup{};
+            startup.cb = sizeof(startup);
+            PROCESS_INFORMATION child{};
+            if (!CreateProcessW(java.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                nullptr, gameDirectory.c_str(), &startup, &child)) {
+                co_return winrt::hstring(report + L"steam_slay_console=create-error\r\nsteam_slay_console_error=" +
+                    Hex(GetLastError()) + L"\r\n");
+            }
+            slayProcess.attach(child.hProcess);
+            CloseHandle(child.hThread);
+            report += L"steam_slay_console_run=" + id + L"\r\n";
+        } else {
+            call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
+            if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
+            session->launchCall = call;
+        }
+    }
+
+    if (hostedSlay) {
+        co_await checkpoint(L"waiting-for-sdl-host");
+        const auto deadline = GetTickCount64() + 35000;
+        while (WaitForSingleObject(slayProcess.get(), 0) == WAIT_TIMEOUT && GetTickCount64() < deadline) {
+            if (pendingSdlSurface->HasFrame()) {
+                pendingSdlSurface->Attach(std::move(slayProcess));
+                std::lock_guard lock(steamSdlMutex);
+                steamSdlSurface = std::move(pendingSdlSurface);
+                co_return winrt::hstring(report + L"steam_sdl_host=ready\r\n");
+            }
+            co_await winrt::resume_after(std::chrono::milliseconds(100));
+            co_await caller;
+        }
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(slayProcess.get(), &exitCode) && exitCode != STILL_ACTIVE) {
+            co_return winrt::hstring(report + L"steam_sdl_host=exited\r\nsteam_launch_process_exit=" + Hex(exitCode) + L"\r\n");
+        }
+        pendingSdlSurface->Quit();
+        co_await winrt::resume_background();
+        if (WaitForSingleObject(slayProcess.get(), 2000) == WAIT_TIMEOUT) TerminateProcess(slayProcess.get(), ERROR_TIMEOUT);
+        co_return winrt::hstring(report + L"steam_sdl_host=timeout\r\n");
     }
 
     struct CompletionEvent {

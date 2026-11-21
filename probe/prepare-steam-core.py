@@ -128,7 +128,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
                    launch_options=(), startup_snapshot=False, startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
-                   startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None):
+                   startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None):
     version_parts = tuple(int(part) for part in version.split('.'))
     startup_app_id = launch_app_id
     if startup_sdl_host and launch_app_id is None:
@@ -155,6 +155,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The SDL host requires the licensed Dwarf Fortress software-rendering profile.')
     if stardew_sdl_host is not None and (not steam_sign_in or not stardew_sdl_host.is_file()):
         raise ValueError('The hosted Stardew profile requires sign-in and the built Stardew startup hook.')
+    slay_files = ('SlayConsoleDiagnostic.class', 'slay-working-directory.dll', 'slay-sdl-display.dll',
+                  'slay-lwjgl-display.jar', 'slay-font-atlas-limit.txt', 'SDL2.dll', 'LICENSE.SDL2')
+    if slay_sdl_host is not None and (not steam_sign_in or not all((slay_sdl_host / name).is_file() for name in slay_files)):
+        raise ValueError('The hosted Slay profile requires sign-in and the built Java and SDL adapters.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
@@ -218,7 +222,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / f'steam-startup-sdl-local-preferences-{startup_app_id}.txt').touch()
         if startup_sdl_late_frame:
             (layout / f'steam-startup-sdl-late-frame-{startup_app_id}.txt').touch()
-        if startup_sdl_host or stardew_sdl_host:
+        if startup_sdl_host or stardew_sdl_host or slay_sdl_host:
             html_path = layout / 'steam-signin.html'
             html = html_path.read_text(encoding='utf-8')
             original = '<script src="steam-signin.js"></script>'
@@ -229,6 +233,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 profiles.append('975370')
             if stardew_sdl_host:
                 profiles.append('413150')
+            if slay_sdl_host:
+                profiles.append('646570')
             script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
             html_path.write_text(html.replace(original, script + '\n    ' + original), encoding='utf-8')
         if startup_sdl_host:
@@ -237,6 +243,13 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             shutil.copyfile(stardew_sdl_host, layout / 'StardewStartupDiagnostic.dll')
             for name in ('steam-sdl-host-413150.txt', 'stardew-game-directory.txt', 'stardew-low-memory.txt'):
                 (layout / name).touch()
+        if slay_sdl_host:
+            for name in slay_files:
+                shutil.copyfile(slay_sdl_host / name, layout / name)
+            for java_class in slay_sdl_host.glob('SlayConsoleDiagnostic$*.class'):
+                shutil.copyfile(java_class, layout / java_class.name)
+            (layout / 'steam-sdl-host-646570.txt').touch()
+            (layout / 'slay-live-host.txt').touch()
         if probe_java_runtime:
             (layout / 'steam-java-probe.txt').touch()
         if library_inventory:
@@ -298,6 +311,8 @@ def main():
     parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
     parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
                         help='enable the hosted Stardew Valley SDL profile with its built startup hook')
+    parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
+                        help='enable the hosted Slay the Spire profile with its built Java and SDL adapters')
     parser.add_argument('--install-before-launch', action='store_true',
                         help='ask Steam to install the selected test game before Play if needed')
     parser.add_argument('--library-inventory', action='store_true',
@@ -361,7 +376,7 @@ def main():
                    startup_sdl_working_directory=args.startup_sdl_working_directory,
                    startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
-                   stardew_sdl_host=args.stardew_sdl_host)
+                   stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host)
 
 
 if __name__ == '__main__':
