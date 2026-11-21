@@ -43,8 +43,9 @@ function createXboxGamepadSurface(seed, host) {
         update(state) {
             if (!frame) return;
             const shown = state.visible && state.popupVisible;
-            frame.style.display = shown ? 'block' : 'none';
-            if (shown && !frame.contentDocument.hasFocus()) frame.contentWindow.focus();
+            const layout = state.warming && state.popupOpen && state.layoutPopup;
+            frame.style.display = shown || layout ? 'block' : 'none';
+            if (shown && !state.warming && state.focused !== false && !frame.contentDocument.hasFocus()) frame.contentWindow.focus();
         }
     };
 }

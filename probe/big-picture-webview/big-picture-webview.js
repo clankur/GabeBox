@@ -20,7 +20,8 @@
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
-        var surfaceSizing = "";
+        var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
+        var warming = false, warmStarted = 0, warmProgress = 0, warmSwitch = false;
         function sampleMemory(stage) {
             try {
                 var manager = Windows.System.MemoryManager;
@@ -29,6 +30,21 @@
                     typeof limit === "number" && isFinite(limit) && limit > 0)
                     memory[stage] = "memory_" + stage + "_usage_bytes=" + usage + "\r\n" +
                         "memory_" + stage + "_limit_bytes=" + limit + "\r\n";
+                var expected = manager.expectedAppMemoryUsageLimit;
+                if (memory[stage] && Number.isSafeInteger(expected) && expected > 0)
+                    memory[stage] += "memory_" + stage + "_expected_limit_bytes=" + expected + "\r\n";
+                // Only a cold signed shell can make this one bounded request.
+                // The platform has to advertise more headroom than the observed 1-GiB floor.
+                var target = 1610612736;
+                if (warming && !settled && !playing && !triedMemory && limit > 0 && limit < 1207959552 &&
+                    Number.isSafeInteger(expected) && expected >= target && typeof manager.trySetAppMemoryUsageLimit === "function") {
+                    triedMemory = true;
+                    memoryRequest = "unavailable";
+                    var granted = manager.trySetAppMemoryUsageLimit(target);
+                    var currentLimit = manager.appMemoryUsageLimit;
+                    memoryRequest = (granted ? "granted" : "declined") + " requested_bytes=" + target +
+                        (Number.isSafeInteger(currentLimit) && currentLimit > 0 ? " current_bytes=" + currentLimit : "");
+                }
             } catch (_) {}
         }
         var resolveReady, rejectReady, readinessTimer, settled = false, failed = false;
@@ -43,6 +59,8 @@
             } else if (!refresh) return;
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
+                (warmReport ? "warmup=" + warmReport + "\r\n" : "") +
+                (memoryRequest ? "shell_memory_request=" + memoryRequest + "\r\n" : "") +
                 (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
@@ -106,6 +124,17 @@
             }, function (error) { activeSwitch = null; if (wasGame) setGameForeground(true); throw error; });
             return activeSwitch;
         }
+        function handoffWarmup(reason) {
+            if (warmSwitch || failed || !viewId) return;
+            warmSwitch = true;
+            warmReport = reason + " elapsed_ms=" + Math.max(0, Date.now() - warmStarted);
+            sampleMemory("warm_handoff");
+            record(last, true);
+            showValve(mainId).then(function () {
+                if (failed) return;
+                host.reply(JSON.stringify({nativeWarmupComplete: true}));
+            }).catch(fail);
+        }
         function showForGame(appId, from, restore, requestExit) {
             if (!played(appId) || !from || typeof restore !== "function")
                 return Promise.resolve(false);
@@ -133,6 +162,7 @@
         }
         function played(appId) { return !failed && playing && presented && appId === playingApp; }
         function resume(exitedApp) {
+            if (warming && !settled) return Promise.resolve();
             if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
             var returning = playing;
             playing = presented = false;
@@ -217,6 +247,7 @@
             else if (request.method === "system-mode") action = function () { return window.steamXboxSystemMode(Windows); };
             else if ((request.method === "play" || request.method === "install" || request.method === "resume-game" || request.method === "quit-game") &&
                      typeof appId === "number" && appId > 0 && appId <= 0xffffffff && appId % 1 === 0) {
+                if (!settled) return respond(id, false, "unavailable");
                 if (request.method === "resume-game" || request.method === "quit-game") action = function () {
                     return broker.session().then(function (user) {
                         if (!user || !user.steamId) return "signed-out";
@@ -330,6 +361,7 @@
             try {
                 var stage = host.status();
                 if (stage !== lastNative) {
+                    if (warming) warmProgress = Date.now();
                     if (stage === "gamepad-window-created") sampleMemory("steam_popup");
                     if (stage === "gamepad-ready") sampleMemory("steam_ready");
                     record(stage);
@@ -338,11 +370,24 @@
                 if (broker && /-error(?:$|:)/.test(stage)) return fail(new Error(stage), stage);
                 if (!viewId) {
                     viewId = host.viewId();
-                    if (viewId) resume().catch(fail);
+                    if (viewId) {
+                        if (warming) {
+                            warmStarted = warmProgress = Date.now();
+                            sampleMemory("warm_view");
+                            warmReport = "preparing";
+                            record(last, true);
+                        } else resume().catch(fail);
+                    }
+                }
+                if (warming && viewId && !warmSwitch) {
+                    if (stage === "warmup-gamepad-layout" || stage === "warmup-setup-layout") handoffWarmup(stage);
+                    else if (Date.now() - warmStarted >= 32000) handoffWarmup("time-limit");
+                    else if (Date.now() - warmProgress >= 14000) handoffWarmup("no-layout-progress");
                 }
                 if (!settled && visible && (stage === "gamepad-ready" || stage === "setup-ready")) {
-                    settled = true; clearTimeout(readinessTimer);
                     sampleMemory("steam_foreground");
+                    settled = true; clearTimeout(readinessTimer);
+                    warming = false;
                     record(last, true);
                     resolveReady();
                 }
@@ -364,7 +409,9 @@
             host = BigPictureView.Native.Renderer;
             record("winrt-projected");
             record("status-before-open:" + host.status());
-            host.open();
+            warming = !!broker && typeof host.openForWarmup === "function";
+            if (warming) host.openForWarmup();
+            else host.open();
             record("open-returned");
             timer = setInterval(poll, 80);
             poll();

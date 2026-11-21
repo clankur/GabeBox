@@ -9,5 +9,6 @@ namespace BigPictureView.Native
         static String Read();
         static void Reply(String message);
         static void Close();
+        static void OpenForWarmup();
     };
 }

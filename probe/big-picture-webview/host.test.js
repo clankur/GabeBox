@@ -6,10 +6,11 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, primary = false, findRequest, openReport = async () => ({})} = {}) {
+function fixture({activationError = false, primary = false, warm = false, expected = 0, findRequest, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
-    let opens = 0;
+    let opens = 0, warmOpens = 0, now = 100000;
+    const memoryRequests = [];
     const renderer = {
         open() { opens++; stage = "composition"; },
         viewId() { return stage === "closed" ? 0 : (primary ? 3 : 10); },
@@ -21,11 +22,13 @@ function fixture({activationError = false, primary = false, findRequest, openRep
         reply(reply) { replies.push(JSON.parse(reply)); },
         close() { stage = "closed"; }
     };
+    if (warm) renderer.openForWarmup = () => { warmOpens++; stage = "composition"; };
     const window = {};
     vm.runInNewContext(source, {
-        window, BigPictureView: {Native: {Renderer: renderer}},
+        Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
         Windows: {
-            System: {MemoryManager: {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824}},
+            System: {MemoryManager: {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
+                expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }}},
             Foundation: {GuidHelper: {createNewGuid: () => "test"}},
             Storage: {
                 ApplicationData: {current: {localFolder: {createFileAsync: openReport, tryGetItemAsync: findRequest}}},
@@ -44,9 +47,68 @@ function fixture({activationError = false, primary = false, findRequest, openRep
         start: (broker, failure) => window.steamBigPictureHost.open(broker, failure),
         async advance(nextStage) { stage = nextStage; poll(); await drain(); },
         expire() { timeout(); },
+        elapse(ms) { now += ms; }, warmOpens: () => warmOpens, memoryRequests,
         shell: window.steamBigPictureHost, opens: () => opens, switches, incoming, reports, replies
     };
 }
+
+test("a signed warmup keeps QR foreground until a real layout and a fresh physical foreground check", async () => {
+    const app = fixture({warm: true, expected: 5368709120});
+    let ready = false, plays = 0;
+    const start = app.start({play() { ++plays; }}).then(() => { ready = true; });
+    await drain();
+    assert.equal(app.warmOpens(), 1);
+    app.incoming.push(JSON.stringify({id: 5, method: "play", appId: 42}));
+    await app.advance("gamepad-window-created");
+    await app.shell.resume();
+    assert.equal(plays, 0);
+    assert.deepEqual(app.switches, []);
+    app.elapse(2200);
+    await app.advance("warmup-gamepad-layout");
+    assert.deepEqual(app.switches, [[10,3]]);
+    assert(!ready);
+    assert(app.replies.some(r => r.nativeWarmupComplete));
+    assert.match(app.reports.at(-1), /warmup=warmup-gamepad-layout elapsed_ms=2200/);
+    assert.deepEqual(app.memoryRequests, [1610612736]);
+    assert.match(app.reports.at(-1), /expected_limit_bytes=5368709120/);
+    await app.advance("warmup-gamepad-layout");
+    assert(!ready);
+    await app.advance("gamepad-ready");
+    await start;
+    assert(ready);
+});
+
+test("when hidden Steam stops making progress switch once and wait for visible setup", async () => {
+    const app = fixture({warm: true});
+    let ready = false;
+    const start = app.start({}).then(() => { ready = true; });
+    await drain();
+    app.elapse(14001);
+    await app.advance("composition");
+    assert.deepEqual(app.switches, [[10,3]]);
+    assert(!ready);
+    assert.match(app.reports.at(-1), /warmup=no-layout-progress elapsed_ms=14001/);
+    app.elapse(25000);
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(app.switches, [[10,3]]);
+    assert(!ready);
+    await app.advance("setup-ready");
+    await start;
+    assert.deepEqual(app.memoryRequests, []);
+});
+
+test("warmup errors leave QR in foreground and unsigned smoke uses ordinary activation", async () => {
+    const app = fixture({warm: true});
+    const rejected = assert.rejects(app.start({}), /process-error/);
+    await drain();
+    await app.advance("process-error:owner:1:out-of-memory");
+    await rejected;
+    assert.deepEqual(app.switches, []);
+    const smoke = fixture({warm: true});
+    await smoke.start(null);
+    assert.equal(smoke.warmOpens(), 0);
+    assert.equal(smoke.opens(), 1);
+});
 
 test("an already-current Steam view does not request another foreground switch", async () => {
     const app = fixture({primary: true});
