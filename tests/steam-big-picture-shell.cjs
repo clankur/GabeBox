@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,8 +8,10 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview'].includes(arg));
-const framedGamepad = process.argv.includes('--single-webview');
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour'].includes(arg));
+const accounts = process.argv.includes('--accounts');
+const emptyOnly = process.argv.includes('--empty-account');
+const framedGamepad = accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -18,14 +20,21 @@ const contentTypes = {'.css': 'text/css', '.js': 'application/javascript', '.htm
     '.json': 'application/json', '.webm': 'video/webm', '.svg': 'image/svg+xml', '.png': 'image/png',
     '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf'};
 const fixtureAccount = '76561198000000000';
+const secondAccount = '76561198000000001';
+const emptyAccount = '76561198000000002';
+const catalogs = {
+    [emptyAccount]: [],
+    [fixtureAccount]: [{id: 42, name: 'Fixture A', installed: true, canPlay: true},
+        {id: 73, name: 'Fixture B', installed: false, canPlay: false}],
+    [secondAccount]: [{id: 81, name: 'Second Atlas', installed: false, canPlay: false},
+        {id: 93, name: 'Second Lantern', installed: true, canPlay: true}]
+};
 
 // This fixture stands in for the outer, authenticated Xbox host. The production
 // bundle installs SteamClient inside Valve's unmodified document.
-function setupHost(steamId, windowState) {
+function setupHost(steamId, windowState, catalogs) {
     const state = {...windowState};
     const events = new EventTarget();
-    const games = [{id: 42, name: 'Fixture A', installed: true, canPlay: true},
-        {id: 73, name: 'Fixture B', installed: false, canPlay: false}];
     window.fixtureCalls = [];
     window.fixtureNativePad = {slot: 0, bits: 0, lt: 0, rt: 0, lx: 0, ly: 0, rx: 0, ry: 0};
     window.fixtureSteamId = sessionStorage.getItem('fixture-next-account') || steamId;
@@ -55,13 +64,18 @@ function setupHost(steamId, windowState) {
             window.fixtureCalls.push(request);
             if (typeof request === 'string') return;
             let reply;
+            const games = catalogs[window.fixtureSteamId];
             switch (request.method) {
-                case 'library': reply = {result: games}; break;
+                case 'library': reply = games ? {result: games} : {error: 'signed-out'}; break;
                 case 'session': reply = {result: {steamId: window.fixtureSteamId}}; break;
+                case 'sign-out':
+                    window.fixtureSteamId = null;
+                    reply = {result: 'signed-out'};
+                    break;
                 case 'restart-client': reply = {result: window.fixtureSteamId ? 'restart' : 'signed-out'}; break;
                 case 'system-mode': reply = {result: false}; break;
-                case 'play': reply = request.appId === 42 ? {result: 'presented'} : {error: 'not-installed'}; break;
-                case 'resume-game': reply = request.appId === 42 ? {result: 'presented'} : {error: 'unavailable'}; break;
+                case 'play': reply = games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: games ? 'not-installed' : 'signed-out'}; break;
+                case 'resume-game': reply = window.fixtureSteamId === steamId && games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: 'unavailable'}; break;
                 default: reply = {error: 'unavailable'};
             }
             queueMicrotask(() => window.hostEvent({id: request.id, ...reply}));
@@ -121,6 +135,27 @@ async function checkRunningControls(page, popup) {
     await resume.evaluate(button => button.click());
     await page.waitForFunction(count => fixtureCalls.filter(c => c.method === 'resume-game' && c.appId === 42).length > count, before);
     await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 0, overlay: false}));
+    if (accounts) {
+        const predicates = await nativeLibraryPredicates();
+        await popup.waitForFunction(predicates.library, undefined, {timeout: 12000}).catch(async error => {
+            const route = await page.evaluate(() => {
+                let r; webpackChunksteamui.push([['fixture-exit-route'], {}, value => { r = value; }]);
+                return r(5757).oy.WindowStore.GamepadUIMainWindowInstance?.History.location.pathname;
+            });
+            const ui = await popup.evaluate(() => {
+                const visible = el => el.checkVisibility({visibilityProperty:true}) && el.getBoundingClientRect().width > 0;
+                const grid = document.querySelector('[role=tabpanel][id$="AllGames_Content"] [role=grid]');
+                const tile = grid?.querySelector('[role=link]');
+                const rect = tile?.getBoundingClientRect();
+                const blockers = [...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open],._1yLBJnGBard9ajB79vr-6_,._16IUnAiPD_1s1KQ0g8vJpq,iframe')]
+                    .filter(visible).map(el=>[el.tagName,el.name,el.className]);
+                return {text:document.getElementById('popup_target')?.innerText.slice(0,500), blockers, tile:tile?.innerText,
+                    hit:rect && document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)?.className};
+            });
+            throw new Error(error.message + '\nExit route ' + route + ' ' + JSON.stringify(ui));
+        });
+        await stockTile(popup, 'Fixture A').waitFor({state: 'visible'});
+    }
 }
 
 async function checkSettingsAdapter(page) {
@@ -220,9 +255,9 @@ async function pressPad(page, popup, button) {
     await popup.waitForTimeout(500);
 }
 async function openStockLibrary(page, popup) {
-    const title = popup.getByText('Fixture A', {exact: true}).first();
+    const title = stockTile(popup, 'Fixture A');
     await title.waitFor({state: 'visible'});
-    assert(await popup.getByText('Fixture B', {exact: true}).first().isVisible());
+    await stockTile(popup, 'Fixture B').waitFor({state: 'visible'});
     if (requireGamepad) {
         assert(await popup.evaluate(visibleShell), 'Original Steam library layout is missing or offscreen.');
         assert(!(await popup.locator('#popup_target').innerText()).includes('Error Reference:'),
@@ -304,6 +339,149 @@ function visibleShell() {
     return !!(target?.contains(shell) && shell.classList.contains('_3LYP1SIxyoky-yW9Ug_1fq') && content &&
         content.getBoundingClientRect().width && content.getBoundingClientRect().height &&
         getComputedStyle(content).visibility === 'visible');
+}
+
+const tourPrompts = ['Welcome to Big Picture', 'Steam Menu', 'Quick Access Menu', 'Set up Parental Controls', 'Have fun'];
+async function pressNative(page, bits) {
+    await page.evaluate(value => { fixtureNativePad.bits = value; }, bits);
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { fixtureNativePad.bits = 0; });
+    await page.waitForTimeout(350);
+}
+
+async function completeTour(page, popup, advance = () => pressNative(page, 4)) {
+    for (const step of tourPrompts) {
+        const heading = popup.getByText(new RegExp('^' + step + '[!.]?$', 'i')).first();
+        await heading.waitFor({state: 'visible', timeout: 6000}).catch(async error => {
+            throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700));
+        });
+        await advance();
+        await heading.waitFor({state: 'hidden', timeout: 6000});
+    }
+}
+
+function stockTile(popup, name) {
+    return popup.locator('[role=tabpanel]:visible [role=gridcell] [role=link]').filter({hasText:name}).first();
+}
+
+async function checkInstalledTab(popup, installed, other) {
+    const tab = popup.getByRole('tab', {name:/^installed/i});
+    await tab.click({timeout:10000});
+    const panelId = await tab.getAttribute('aria-controls');
+    const panel = popup.locator('[role=tabpanel][id=' + JSON.stringify(panelId) + ']');
+    const tile = panel.getByRole('link', {name:installed, exact:true}).first();
+    await tile.waitFor({state:'visible'});
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    assert.equal(await panel.getByRole('link', {name:other, exact:true}).count(), 0);
+    return tile;
+}
+async function readSeen(page) {
+    return page.evaluate(async () => {
+        let r; webpackChunksteamui.push([['fixture-tour-read-' + crypto.randomUUID()], {}, value => { r = value; }]);
+        return r(14255).TT();
+    });
+}
+
+async function readMembership(page) {
+    const membership = await page.evaluate(async () => {
+        let runtime;
+        webpackChunksteamui.push([['fixture-library-membership'], {}, value => { runtime = value; }]);
+        let subscription;
+        const change = await new Promise(resolve => {
+            subscription = SteamClient.Apps.RegisterForAppOverviewChanges(bytes => {
+                resolve(runtime(76142).bs.deserializeBinary(bytes).toObject());
+            });
+        });
+        subscription.unregister();
+        const store = runtime(90544).tw;
+        return {identity: runtime(30610).iA.steamid, initialized: !!store.m_bIsInitialized,
+            store: store.allApps.map(app => app.appid).sort((a, b) => a - b),
+            full: change.full_update, complete: change.update_complete,
+            overviews: change.app_overview.map(app => [app.appid, app.display_name, app.per_client_data[0].installed])};
+    });
+    assert(membership.initialized && membership.full && membership.complete, 'Expected a complete original Steam app overview');
+    return membership;
+}
+
+async function checkOtherAccount(page) {
+    const popup = page.frameLocator('#xbox-steam-gamepad-surface');
+    const welcome = popup.getByText('Welcome to Big Picture', {exact:true}).first();
+    await welcome.waitFor({state:'visible', timeout:60000});
+    await page.waitForFunction(() => App.GetServicesInitialized(), undefined, {timeout:50000});
+    const expected = catalogs[secondAccount];
+    const membership = await readMembership(page);
+    assert.equal(membership.identity, secondAccount);
+    assert.deepEqual(membership.store, expected.map(g=>g.id));
+    assert.deepEqual(membership.overviews, expected.map(g=>[g.id,g.name,g.installed]));
+    for (const prior of catalogs[fixtureAccount]) assert.equal(await popup.getByText(prior.name,{exact:true}).count(), 0);
+    await completeTour(page, popup);
+    await pressNative(page, 3);
+    await popup.frameLocator('iframe[name="MainMenu_uid2"]').getByText('Library', {exact:true}).click();
+    for (const game of expected) await popup.getByText(game.name, {exact:true}).first().waitFor({state:'visible'});
+    const installed = await checkInstalledTab(popup, 'Second Lantern', 'Second Atlas');
+    await installed.click();
+    await popup.getByText(/^play$/i).first().click();
+    await page.waitForFunction(() => fixtureCalls.some(c => c.method === 'play' && c.appId === 93));
+    console.log('Fresh B completed its own tour, saw only its two owned games, filtered its installed title and played its own AppID.');
+}
+
+async function nativeLibraryPredicates() {
+    const header = await fs.readFile(path.resolve(__dirname, '../probe/big-picture-webview/library-capture.h'), 'utf8');
+    const entries = [...header.matchAll(/constexpr wchar_t (\w+)\[\] = LR"JS\(([\s\S]*?)\)JS"/g)];
+    const predicates = Object.fromEntries(entries.map(match => [match[1], match[2]]));
+    const renderer = await fs.readFile(path.resolve(__dirname, '../probe/big-picture-webview/renderer.cpp'), 'utf8');
+    predicates.warmLayout = renderer.match(/fire_and_forget observeGamepad[\s\S]*?wchar_t check\[\] = LR"JS\(([\s\S]*?)\)JS"/)?.[1];
+    for (const name of ['emptyLibrary', 'emptyForeground', 'library', 'warmLayout']) assert(predicates[name]);
+    return predicates;
+}
+
+async function checkEmptyLibrary(page) {
+    const root = page.frameLocator('#xbox-steam-gamepad-surface');
+    const popup = await (await page.locator('#xbox-steam-gamepad-surface').elementHandle()).contentFrame();
+    const predicates = await nativeLibraryPredicates();
+    const membership = await readMembership(page);
+    assert.equal(membership.identity, emptyAccount);
+    assert.deepEqual(membership.store, []);
+    assert.deepEqual(membership.overviews, []);
+    const welcome = root.getByText(tourPrompts[0], {exact: true}).first();
+    await welcome.waitFor({state: 'visible', timeout: 20000});
+    const underTour = await popup.evaluate(({warmLayout, emptyLibrary, emptyForeground}) => ({
+        warm: eval(warmLayout), empty: eval(emptyLibrary), foreground: eval(emptyForeground)
+    }), predicates);
+    assert.equal(underTour.warm, 1, 'The original tour supplies an actionable native warm-up layout');
+    assert.equal(underTour.foreground, false, 'The welcome covers the Library');
+    if (process.argv.includes('--hold-tour')) {
+        await page.waitForTimeout(111000); // Longer than the normal startup routing deadline.
+        assert(await welcome.isVisible(), 'Steam must wait for user input for the entire tour');
+    }
+    await completeTour(page, root);
+    await popup.waitForFunction(predicates.emptyLibrary, undefined, {timeout: 20000});
+    await popup.waitForFunction(predicates.emptyForeground, undefined, {timeout: 15000});
+    assert(await popup.evaluate(predicates.emptyLibrary));
+    assert.equal(await popup.evaluate(predicates.library), false);
+    const panel = root.locator('#Main [role=tabpanel][id$="AllGames_Content"]');
+    const selected = root.locator('#Main [role=tab][aria-selected=true][aria-controls$="AllGames_Content"]');
+    assert.equal(await selected.getAttribute('aria-controls'), await panel.getAttribute('id'));
+    const grid = panel.locator('.rz1mrOnj9WN6UErES7qsq');
+    assert.equal(await grid.locator('[role=gridcell] [role=link]').count(), 0);
+    assert.equal((await grid.innerText()).trim(), '');
+    console.log('Fresh empty account passed native setup while the tour was visible and strict empty Library after dismissal.', underTour);
+}
+
+async function checkSignedOutShell(page) {
+    await page.waitForFunction(() => window.App?.BFinishedInitBeforeLogin(), undefined, {timeout:50000});
+    const sample = await page.evaluate(async () => {
+        let r; webpackChunksteamui.push([['fixture-signed-out'], {}, value => { r = value; }]);
+        const store = r(90544).tw;
+        let blocked = false;
+        try { await SteamClient.Apps.RunGame('93', '', -1, 0); } catch (_) { blocked = true; }
+        return {user:App.BHasCurrentUser(), after:App.m_bStartedInitAfterLogin,
+            games:store.m_bIsInitialized ? store.allApps.map(app => app.appid) : [], blocked};
+    });
+    assert(!sample.user && !sample.after && !sample.games.length && sample.blocked);
+    for (const frame of page.frames()) for (const group of Object.values(catalogs))
+        for (const game of group) assert.equal(await frame.getByText(game.name, {exact:true}).count(), 0);
+    console.log('Signed-out original shared shell has no current user, catalog, or allowed launch.');
 }
 
 async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
@@ -396,14 +574,14 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             page.evaluate(seed => hostEvent({event: 'xbox-window', state: {...seed, popupOpen: true, popupVisible: true}}), state)
                 .catch(error => errors.add('Fixture window notification: ' + error.message));
         });
-        async function openOwner() {
+        async function openOwner(account = steamId) {
             openingOwner = true;
             try { page = await context.newPage(); } finally { openingOwner = false; }
             await serve(page);
             observe(page);
             page.setDefaultTimeout(10000);
             await page.addInitScript({content: 'if(window===top){ const xboxNativeWindow=Object.freeze(' + JSON.stringify(state) + ');\n' +
-                '(' + setupHost.toString() + ')(' + JSON.stringify(steamId) + ', xboxNativeWindow);\n' + source + '\n}'});
+                '(' + setupHost.toString() + ')(' + JSON.stringify(account) + ', xboxNativeWindow, ' + JSON.stringify(catalogs) + ');\n' + source + '\n}'});
             await page.goto(entry);
         }
         await openOwner();
@@ -448,6 +626,11 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             assert.deepEqual(boot.identity, [steamId, Number(BigInt(steamId) & 0xffffffffn), false]);
             assert(boot.servicesInitialized);
             assert(boot.calls.includes('xbox-app-initialized'));
+            if (steamId === emptyAccount) {
+                assert.deepEqual(boot.ownedAppStore, []);
+                await checkEmptyLibrary(page);
+                return;
+            }
             assert.deepEqual(boot.ownedAppStore, [[42, 'Fixture A'], [73, 'Fixture B']]);
             await checkPlatform(page);
             const gamepad = windows.findIndex(win => /^(SP BPM)(?:$|_uid\d+$)/.test(win.name));
@@ -457,7 +640,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 assert(await popup.evaluate(() => opener === parent && parent.origin === origin && !window.chrome?.webview));
             }
             assert(popup, 'Expected Valve to create its Big Picture window');
-            await popup.getByText('Fixture A', {exact: true}).first().waitFor({state: 'visible', timeout: 15000}).catch(async error => {
+            if (!framedGamepad) await popup.getByText('Fixture A', {exact: true}).first().waitFor({state: 'visible', timeout: 15000}).catch(async error => {
                 const route = await page.evaluate(() => {
                     let r; webpackChunksteamui.push([['startup-route'], {}, require => { r = require; }]);
                     return r(5757).oy.WindowStore.GamepadUIMainWindowInstance?.History.location.pathname;
@@ -469,39 +652,69 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             if (nativeGamepads) {
                 // Chromium exposes an idle controller. All actual button transitions
                 // come through the native Windows.Gaming.Input reply.
-                async function pressNative(bits) {
-                    await page.evaluate(value => { fixtureNativePad.bits = value; }, bits);
-                    await popup.waitForTimeout(200);
-                    await page.evaluate(() => { fixtureNativePad.bits = 0; });
-                    await popup.waitForTimeout(350);
-                }
-                const tour = ['Welcome to Big Picture', 'Steam Menu', 'Quick Access Menu', 'Set up Parental Controls', 'Have fun'];
                 const welcome = popup.getByText('Welcome to Big Picture', {exact: true}).first();
+                if (framedGamepad) await welcome.waitFor({state:'visible', timeout:20000}).catch(async err => {
+                    throw new Error(err.message + '\nGenuine fresh tour state: ' + JSON.stringify(await page.evaluate(async () => {
+                        let r; webpackChunksteamui.push([['tour-observation'],{}, v=>{r=v;}]);
+                        return {seen: await r(14255).TT(), session: r(14255).sp.IsGuidedTourSession(),
+                            pathname: r(5757).oy.WindowStore.GamepadUIMainWindowInstance?.History?.location?.pathname,
+                            prefs: Object.keys(localStorage).filter(k=>k.endsWith('Deck_GuidedTourVersionSeen')).map(k=>localStorage.getItem(k))};
+                    })));
+                });
                 const hasTour = await welcome.isVisible();
-                if (framedGamepad) assert(hasTour, 'Fresh signed-in Steam tour missing');
-                for (const step of hasTour ? tour : []) {
-                    const heading = popup.getByText(new RegExp('^' + step + '[!.]?$', 'i')).first();
-                    await heading.waitFor({state: 'visible', timeout: 4000}).catch(async error => { throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700)); });
-                    await pressNative(4);
-                    await heading.waitFor({state: 'hidden', timeout: 4000});
+                if (hasTour) await completeTour(page, popup);
+                if (accounts) {
+                    const predicates = await nativeLibraryPredicates();
+                    await popup.waitForFunction(predicates.library);
+                    assert.equal(await popup.evaluate(predicates.emptyLibrary), false);
                 }
-                await pressNative(3); // View + Menu opens Valve's own main menu.
+                await pressNative(page, 3); // View + Menu opens Valve's own main menu.
                 const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
                 await menu.getByText('Library', {exact: true}).waitFor({state: 'visible', timeout: 7000}).catch(async error => {
                     throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 450));
                 });
-                await pressNative(8); // B closes the menu and returns to the library.
+                await pressNative(page, 8); // B closes the menu and returns to the library.
                 await menu.getByText('Library', {exact: true}).waitFor({state: 'hidden'});
                 if (framedGamepad) {
-                    await pressNative(3);
+                    await pressNative(page, 3);
                     await menu.getByText('Library', {exact: true}).click();
                     await popup.getByText('All Games', {exact: true}).first().waitFor({state: 'visible'});
                     await openStockLibrary(page, popup);
                     await checkRunningControls(page, popup);
+                    const tourKey = 'xbox-steamui:1:' + steamId + ':Deck_GuidedTourVersionSeen';
+                    await page.waitForFunction(key => localStorage.getItem(key) === '1', tourKey);
+                    console.log('Account A completed the original tour and Steam recorded its preference.');
+                    await page.close();
+                    await openOwner();
+                    const reopened = page.frameLocator('#xbox-steam-gamepad-surface');
+                    const tile = stockTile(reopened, 'Fixture A');
+                    await tile.waitFor({state:'visible', timeout:60000});
+                    await page.waitForFunction(() => App.GetServicesInitialized(), undefined, {timeout:45000});
+                    assert.equal(await readSeen(page), true);
+                    assert(!await reopened.getByText('Welcome to Big Picture', {exact:true}).first().isVisible());
+                    const installed = await checkInstalledTab(reopened, 'Fixture A', 'Fixture B');
+                    await installed.click({timeout:10000});
+                    await reopened.getByText(/^play$/i).first().waitFor({state:'visible'});
+                    assert(!(await reopened.getByText('Welcome to Big Picture', {exact:true}).isVisible()));
+                    assert.equal(await readSeen(page),true);
+                    console.log('Reopened A, Steam reports tour seen and original game details accept input.');
+                    if (accounts) {
+                        await page.close();
+                        await openOwner(secondAccount);
+                        await checkOtherAccount(page);
+                        await page.evaluate(() => SteamClient.User.SignOutAndRestart());
+                        assert.equal(await page.evaluate(() => fixtureSteamId), null);
+                        await page.close();
+                        await openOwner(null);
+                        await checkSignedOutShell(page);
+                    }
                 }
                 console.log('Native View + Menu opened Steam and B returned to the library. Tour shown:', hasTour);
                 return;
             }
+            const welcome = popup.getByText(tourPrompts[0], {exact: true}).first();
+            await welcome.waitFor({state: 'visible', timeout: 15000});
+            await completeTour(page, popup, () => pressPad(page, popup, 0));
             await openStockLibrary(page, popup);
             await checkAppAdapter(page);
             await checkRunningControls(page, popup);
@@ -518,7 +731,8 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
     const browser = await chromium.launch({headless: true, chromiumSandbox: true,
         executablePath: process.env.CHROMIUM_PATH, args: ['--host-resolver-rules=MAP * ~NOTFOUND', '--disable-background-networking']});
     try {
-        if (framedGamepad || process.argv.includes('--native-startup')) await verifyStartup(browser, source, fixtureAccount, true);
+        if (emptyOnly) await verifyStartup(browser, source, emptyAccount, true);
+        else if (framedGamepad || process.argv.includes('--native-startup')) await verifyStartup(browser, source, fixtureAccount, true);
         else {
             await verifyStartup(browser, source, null);
             await verifyStartup(browser, source, fixtureAccount);

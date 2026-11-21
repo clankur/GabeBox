@@ -24,12 +24,14 @@
         if (data?.event === 'xbox-game') {
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
+            const exited = data.appId === 0 ? activeApp : 0;
             activeApp = data.appId;
             controlsApp = data.overlay ? activeApp : 0;
             if (controlsApp && !focusStore) attachRunningGameFocus();
             const requested = controlsApp;
             function updateControls() {
                 if (controlsApp === requested) showGameOverlay(requested);
+                if (exited && !activeApp) returnToLibrary(exited);
             }
             if (changed) refresh().then(updateControls, error => console.error('Steam library unavailable', error.message));
             else updateControls();
@@ -82,6 +84,36 @@
         focusStore = store;
     }
 
+    function returnToLibrary(appId) {
+        const gamepad = runtime(5757).oy.WindowStore.GamepadUIMainWindowInstance;
+        if (!gamepad) return;
+        const details = '/library/app/' + appId, overlay = '/app/' + appId + '/overlay/';
+        const end = Date.now() + 8000;
+        const popup = xboxGamepadPopup?.document;
+        let timer, selectedAt;
+        function stop() {
+            clearTimeout(timer);
+            popup?.removeEventListener('pointerdown', stop, true);
+            popup?.removeEventListener('keydown', stop, true);
+        }
+        function check() {
+            if (activeApp || Date.now() >= end) return stop();
+            const path = gamepad.History.location.pathname;
+            // After Valve unmounts its running controls it restores the pre-game
+            // details asynchronously. Wait for that route before replacing it.
+            if (path === details) {
+                gamepad.Navigator.LibraryTab('AllGames', {bReplace:true});
+                selectedAt = Date.now();
+            } else if (path === '/library/tab/AllGames') {
+                if (selectedAt && Date.now() - selectedAt > 400) return stop();
+            } else if (!path.startsWith(overlay)) return stop();
+            timer = setTimeout(check, 120);
+        }
+        popup?.addEventListener('pointerdown', stop, true);
+        popup?.addEventListener('keydown', stop, true);
+        check();
+    }
+
     function refresh() {
         if (updating) {
             refreshAgain = true;
@@ -120,7 +152,7 @@
                 subscription.callback(bytes);
             }
             // The native broker serves the catalog only to its signed-in owner.
-            openStartupLibrary();
+            openStartupLibrary(apps.length === 0);
             const byId = new Map(apps.map(app => [app.appid, app]));
             for (const sub of detailListeners) {
                 const app = byId.get(sub.id);
@@ -195,34 +227,55 @@
     // A full ownership snapshot is delivered only after the Xbox QR broker
     // validates the session. Valve's BHasCurrentUser() additionally waits on
     // unrelated online services, including Friends, during InitAfterLogin.
-    async function openStartupLibrary() {
+    async function openStartupLibrary(emptyCatalog) {
         if (startupLibraryRequested) return;
         startupLibraryRequested = true;
+        let awaitingTour;
         try {
             const owner = (await send('session'))?.steamId;
             if (typeof owner !== 'string' || !/^[1-9][0-9]{16,19}$/.test(owner)) {
                 startupLibraryRequested = false;
                 return;
             }
+            // Valve reads this account's preference before mounting the guided tour,
+            // then records it at mount. It does not indicate tour completion.
+            awaitingTour = !(await runtime(14255).TT());
         } catch (_) { startupLibraryRequested = false; return; }
-        const deadline = Date.now() + 110000;
-        let previous, previousPopup, selected = false;
+        const startupTimeout = 110000;
+        let deadline = Date.now() + startupTimeout;
+        let previous, previousPopup, selected = false, tourActive = false;
         function trace(stage) {
             if (stage === previous) return;
             previous = stage;
             host.postMessage({method: 'startup-route', stage});
         }
         function whenMounted() {
-            if (activeApp || Date.now() > deadline) return;
+            if (activeApp) return;
             const gamepad = runtime(5757).oy.WindowStore.GamepadUIMainWindowInstance;
             const path = gamepad?.History?.location?.pathname;
             const popup = xboxGamepadPopup;
+            // ActiveTourPage belongs to Valve's transition group and remains mounted
+            // through all five pages. Changing its route here dismisses the tour.
+            if (popup?.document.querySelector('#popup_target ._16IUnAiPD_1s1KQ0g8vJpq')) {
+                tourActive = true;
+                setTimeout(whenMounted, 250);
+                return;
+            }
+            if (tourActive) {
+                tourActive = false;
+                awaitingTour = false;
+                deadline = Date.now() + startupTimeout;
+            }
+            if (Date.now() > deadline) return;
+            if (awaitingTour && path === '/library/home') {
+                setTimeout(whenMounted, 150);
+                return;
+            }
             const tracked = popup && runtime(16724).Of.GetPopupForWindow(popup);
             const waiting = tracked?.m_renderWhenReady?.m_rgLoadingLinks || [];
             const styles = popup?.document.querySelectorAll('link[rel=stylesheet]') || [];
             function loaded(link) {
-                try { return link.isConnected && !!link.sheet?.cssRules.length; }
-                catch (_) { return false; }
+                return link.isConnected && !!link.sheet;
             }
             const phase = [!!popup, !!tracked, !!tracked?.m_bCreated, !!tracked?.m_onCreateRender,
                 waiting.length, waiting.filter(loaded).length, styles.length, [...styles].filter(loaded).length,
@@ -235,7 +288,9 @@
             else if (path === '/library/tab/AllGames') {
                 trace('library-selected');
                 // Once the original tiles mount, further routes belong to the player.
-                if (xboxGamepadPopup?.document.querySelector('[role=tabpanel][id$="AllGames_Content"] [role=gridcell]')) return;
+                const panel = popup?.document.querySelector('[role=tabpanel][id$="AllGames_Content"]');
+                if (!awaitingTour && (panel?.querySelector('[role=gridcell]') ||
+                    (emptyCatalog && panel?.querySelector('.rz1mrOnj9WN6UErES7qsq')))) return;
             } else if (!selected || /^\/(?:init|login|oobe(?:\/.*)?|library\/home)$/.test(path)) {
                 selected = true;
                 trace('selecting-library');
