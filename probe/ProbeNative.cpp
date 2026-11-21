@@ -102,19 +102,17 @@ static std::wstring PipeResult(std::wstring const& child) {
         return result;
     }
 
-    ULONG peer = 0;
-    if (!GetNamedPipeClientProcessId(pipe.get(), &peer)) return PipeFailure(L"identify-peer", GetLastError());
-    if (peer != processInfo.dwProcessId) return PipeFailure(L"peer-mismatch", ERROR_INVALID_DATA);
     winrt::handle readEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
+    if (!readEvent) return PipeFailure(L"create-event", GetLastError());
     winrt::handle writeEvent(CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS));
-    if (!readEvent || !writeEvent) return PipeFailure(L"create-event", GetLastError());
+    if (!writeEvent) return PipeFailure(L"create-event", GetLastError());
 
     OVERLAPPED read{};
     read.hEvent = readEvent.get();
     DWORD request = 0;
     error = CompletePipeIo(pipe.get(), read, bytes, ReadFile(pipe.get(), &request, sizeof(request), &bytes, &read), deadline);
     if (error != ERROR_SUCCESS) return PipeFailure(L"read-request", error);
-    if (bytes != sizeof(request) || request != (peer ^ PROBE_PIPE_HELLO))
+    if (bytes != sizeof(request) || request != (processInfo.dwProcessId ^ PROBE_PIPE_HELLO))
         return PipeFailure(L"invalid-request", ERROR_INVALID_DATA);
 
     OVERLAPPED write{};
