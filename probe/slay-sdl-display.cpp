@@ -6,6 +6,7 @@
 namespace {
 HMODULE sdl;
 void *window;
+void *gamepad;
 
 struct MouseEvent {
     jint button, pressed, x, y, timestamp;
@@ -46,6 +47,13 @@ void *(*createCursor)(void *, int, int);
 void (*setCursor)(void *);
 void *(*defaultCursor)();
 void (*freeCursor)(void *);
+int (*numJoysticks)();
+int (*isGameController)(int);
+void *(*openGameController)(int);
+void (*closeGameController)(void *);
+int (*gameControllerAttached)(void *);
+short (*gameControllerAxis)(void *, int);
+unsigned char (*gameControllerButton)(void *, int);
 
 bool loadSdl() {
     if (sdl) return true;
@@ -71,9 +79,18 @@ bool loadSdl() {
     setCursor = resolve<decltype(setCursor)>("SDL_SetCursor");
     defaultCursor = resolve<decltype(defaultCursor)>("SDL_GetDefaultCursor");
     freeCursor = resolve<decltype(freeCursor)>("SDL_FreeCursor");
+    numJoysticks = resolve<decltype(numJoysticks)>("SDL_NumJoysticks");
+    isGameController = resolve<decltype(isGameController)>("SDL_IsGameController");
+    openGameController = resolve<decltype(openGameController)>("SDL_GameControllerOpen");
+    closeGameController = resolve<decltype(closeGameController)>("SDL_GameControllerClose");
+    gameControllerAttached = resolve<decltype(gameControllerAttached)>("SDL_GameControllerGetAttached");
+    gameControllerAxis = resolve<decltype(gameControllerAxis)>("SDL_GameControllerGetAxis");
+    gameControllerButton = resolve<decltype(gameControllerButton)>("SDL_GameControllerGetButton");
     if (mainReady && init && createWindow && destroyWindow && createContext && makeCurrent &&
         currentContext && deleteContext && swapWindow && setInterval && glAddress && pollEvent && mouseState &&
-        warpMouse && createSurface && freeSurface && createCursor && setCursor && defaultCursor && freeCursor) return true;
+        warpMouse && createSurface && freeSurface && createCursor && setCursor && defaultCursor && freeCursor &&
+        numJoysticks && isGameController && openGameController && closeGameController && gameControllerAttached &&
+        gameControllerAxis && gameControllerButton) return true;
     FreeLibrary(sdl);
     sdl = nullptr;
     return false;
@@ -96,7 +113,9 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_open(JNIEnv *env
         !SetEnvironmentVariableW(L"XBOX_SDL_SURFACELESS", L"1") ||
         !loadSdl()) return JNI_FALSE;
     mainReady();
-    return init(0x20) == 0 ? JNI_TRUE : JNI_FALSE;  // SDL_INIT_VIDEO
+    wchar_t controller[2]{};
+    const bool hostedPad = GetEnvironmentVariableW(L"XBOX_SDL_HOST_GAMEPAD", controller, 2) == 1 && controller[0] == L'1';
+    return init(hostedPad ? 0x2020 : 0x20) == 0 ? JNI_TRUE : JNI_FALSE;  // SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER
 }
 
 JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_create(JNIEnv *, jclass, jint width, jint height) {
@@ -108,6 +127,8 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_create(JNIEnv *,
 
 JNIEXPORT void JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_destroy(JNIEnv *, jclass) {
     if (window) destroyWindow(window);
+    if (gamepad) closeGameController(gamepad);
+    gamepad = nullptr;
     window = nullptr;
     mouseEventHead = mouseEventCount = 0;
 }
@@ -196,6 +217,23 @@ JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_readMouseEvents(
 JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_mouse(JNIEnv *env, jclass, jobject coordinates) {
     auto point = static_cast<int*>(env->GetDirectBufferAddress(coordinates));
     return point && env->GetDirectBufferCapacity(coordinates) >= 8 ? mouseState(point, point + 1) : 0;
+}
+
+JNIEXPORT jint JNICALL Java_org_lwjgl_opengl_XboxSdlGamepad_readNative(JNIEnv *env, jclass, jobject axes) {
+    auto values = static_cast<jint*>(env->GetDirectBufferAddress(axes));
+    if (!window || !values || env->GetDirectBufferCapacity(axes) < 6) return -1;
+    if (gamepad && !gameControllerAttached(gamepad)) {
+        closeGameController(gamepad);
+        gamepad = nullptr;
+    }
+    for (int index = 0; !gamepad && index < numJoysticks(); ++index) {
+        if (isGameController(index)) gamepad = openGameController(index);
+    }
+    if (!gamepad) return -1;
+    jint mask = 0;
+    for (int button = 0; button < 15; ++button) mask |= gameControllerButton(gamepad, button) << button;
+    for (int axis = 0; axis < 6; ++axis) values[axis] = gameControllerAxis(gamepad, axis);
+    return mask;
 }
 
 JNIEXPORT jobject JNICALL Java_org_lwjgl_opengl_XboxSdlDisplay_makeCursor(

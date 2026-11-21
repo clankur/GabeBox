@@ -95,7 +95,12 @@ final class XboxSdlDisplay implements DisplayImplementation {
     public boolean isVisible() { return visible; }
     public boolean isActive() { return visible; }
     public boolean isDirty() { return false; }
-    public void update() { if (visible && pollClose()) closeRequested = true; }
+    public void update() {
+        if (visible) {
+            if (pollClose()) closeRequested = true;
+            XboxSdlGamepad.poll();
+        }
+    }
     public void reshape(int x, int y, int w, int h) {}
     public DisplayMode[] getAvailableDisplayModes() { return new DisplayMode[] { INITIAL }; }
     public int getPbufferCapabilities() { return 0; }
