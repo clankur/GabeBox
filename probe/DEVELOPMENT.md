@@ -4,49 +4,58 @@ The probe tests one `CreateProcessW` call against a fixed helper packaged with t
 
 ## Build, deploy, and collect a result
 
-Run these commands from the repository root with the Xbox in Developer Mode, signed in to an Xbox profile, and with Device Portal enabled. Use Python 3.9 or later. The build uses Clang, `lld-link`, the x64 `WindowsApp.lib` from the Windows SDK, `makemsix` from Microsoft’s MSIX SDK, OpenSSL, and `osslsigncode`. The prior build used `c/um/x64/WindowsApp.lib` from `Microsoft.Windows.SDK.CPP.x64` version `10.0.26100.8249`. Use the x64 umbrella library even on an ARM64 build host. [Windows SDK package](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP.x64/10.0.26100.8249) · [Microsoft MSIX SDK](https://github.com/microsoft/msix-packaging)
+Run these commands from the repository root with the Xbox in Developer Mode, signed in to an Xbox profile, and with Device Portal enabled. Use Python 3.9 or later for the CLI and GitHub CLI to download the build. The [Windows SDK workflow](../.github/workflows/xbox-probe.yml) runs on pushes that touch the probe or workflow. It sets `StartPage` to the packaged `index.html`, builds `ProbeNative.dll` and its WinRT metadata, generates `resources.pri` with `MakePri.exe`, packages with `MakeAppx.exe`, and signs with `SignTool.exe`.
 
 Use the Git-ignored `.env` documented in [the probe README](README.md). `--env-file` lets a checkout use the setup workspace’s existing file without copying it into the repository. Keep saved credentials in the local file and share only the CLI’s diagnostic output.
 
-For an updated build, increment `Identity Version` in [`Package.appxmanifest`](Package.appxmanifest) so the install can be identified on the console. Keep the package name and publisher consistent during an in-place upgrade. Build to a new output directory outside the checkout.
+For an updated build, increment `Identity Version` in [`Package.appxmanifest`](Package.appxmanifest) so the install can be identified on the console. Keep the package name and publisher consistent during an in-place upgrade. Use the workflow run whose commit matches the change being tested. Download the signed packages to separate directories because both artifacts use the same filenames.
 
 ```sh
 trial_dir=$(mktemp -d)
-build_dir="$trial_dir/probe"
-bash probe/package.sh /path/to/x64/WindowsApp.lib "$build_dir"
-(cd "$build_dir" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file /path/to/setup-workspace/.env deploy \
-  "$build_dir/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
+run_id=YOUR_WORKFLOW_RUN_ID
+xbox_env=/path/to/setup-workspace/.env
+gh run download "$run_id" --name xbox-probe-windows-sdk --dir "$trial_dir/probe"
+gh run download "$run_id" --name xbox-probe-fresh-identity --dir "$trial_dir/control"
+(cd "$trial_dir/probe" && shasum -a 256 -c SHA256SUMS)
+(cd "$trial_dir/control" && shasum -a 256 -c SHA256SUMS)
+python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+  "$trial_dir/control/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
+python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+  "$trial_dir/probe/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
 ```
 
-`package.sh` runs the existing cross-build, creates and signs the APPX, and emits the package, public certificate, and checksums. It uses a temporary development signing key. If Device Portal explicitly asks for a certificate during deployment, retry with `--certificate` and the generated `.cer` path. The `.cer` is for package signing. The separate `XBOX_PORTAL_CERT_SHA256` setting identifies the Device Portal HTTPS service.
+The control installs as **Packaged process startup control** beside the main package. Both use the same HTML startup and signer. The control omits the WinRT extension, component, metadata, and child binaries, so its report checks HTML activation and storage on the console. If Device Portal explicitly asks for a certificate during deployment, retry with `--certificate` and the artifact’s `.cer` path. The `.cer` is for package signing. The separate `XBOX_PORTAL_CERT_SHA256` setting identifies the Device Portal HTTPS service.
 
 `deploy --test-probe` waits for installation, looks up the version from the APPX manifest in the live package inventory, requests a launch, and waits for a changed report. The Portal can return HTTP `202` before registration completes. Save the CLI output and the SHA-256 of the APPX you tested alongside the branch commit and console OS build. [Device Portal API](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core)
 
-The [Windows SDK build workflow](../.github/workflows/xbox-probe.yml) runs on pushes that touch the probe. It builds the C++/WinRT host in `bootstrap.cpp`, generates `resources.pri` with `MakePri.exe`, packages with `MakeAppx.exe`, and signs with `SignTool.exe`. The local `package.sh` instead builds the C host in `probe.c`. Download the Windows artifact for the intended commit with `gh run download RUN_ID --name xbox-probe-windows-sdk --dir BUILD_DIR`, verify `SHA256SUMS`, and use the same CLI command to deploy it.
-
-The same workflow also builds `xbox-probe-fresh-identity` from the identical binaries and signer. It installs beside the main package as **Packaged process startup control**. This tests whether a fresh package registration changes the result without removing the main app. `deploy --test-probe` reads the control’s identity from its APPX. For subsequent runs, pass `--control` to `probe`.
-
-For another run of the installed build, use `probe` without uploading again. If remote launch fails or the launch needs to be observed on the TV, start the watcher first and launch **Packaged process test** once from Dev Home when prompted.
+For another run of the installed build, use `probe` without uploading again. Omit `--control` to launch **Packaged process test**. Use `--manual-launch` only when reproducing a TV-only launch symptom or recovering from a remote launch error. Start the watcher before launching from Dev Home so it can record the existing file as its baseline.
 
 ```sh
-python3 xbox-deploy.py --env-file /path/to/setup-workspace/.env probe \
-  --version 1.0.1.0 --manual-launch --timeout 30
+python3 xbox-deploy.py --env-file "$xbox_env" probe --control --timeout 30
+python3 xbox-deploy.py --env-file "$xbox_env" probe --version 1.0.9.0 --timeout 30
 ```
 
-Substitute the installed version in that command. `--manual-launch` also works with `deploy --test-probe`. Starting the watcher before launch lets it record the existing file as its baseline.
+Substitute the installed version in those commands. `--manual-launch` also works with `deploy --test-probe`. The HTML report includes a timestamp as `run_id` so two runs with the same result still produce distinct reports.
+
+### Rebuild the original native executable host
+
+Use `bash probe/package.sh /path/to/x64/WindowsApp.lib NEW_OUTPUT_DIR` when isolating the earlier native launcher in `probe.c`. That build uses Clang, `lld-link`, `makemsix`, OpenSSL, and `osslsigncode`, and emits the signed APPX, public development certificate, and checksums. The prior cross-build used `c/um/x64/WindowsApp.lib` from `Microsoft.Windows.SDK.CPP.x64` version `10.0.26100.8249`, including on an ARM64 build host. The HTML-to-WinRT package comes from the Windows SDK workflow above. [Windows SDK package](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP.x64/10.0.26100.8249) · [Microsoft MSIX SDK](https://github.com/microsoft/msix-packaging)
 
 ## Interpret the feedback
 
 | Observation | What it establishes |
 | --- | --- |
 | Deployment succeeded and the intended version appears in package inventory | That build registered on the console. |
-| Fresh startup checkpoint | The executable reached the named stage and wrote to `LocalState`. Capture the stage and HRESULT, when present. |
+| Fresh startup checkpoint | The app reached the named stage and wrote to `LocalState`. Capture the stage and HRESULT, when present. |
+| `status=control-ready` | The control launched its local HTML and wrote the final result to `LocalState`. |
+| `status=web-started` | The main package’s HTML started and wrote a checkpoint before it called the native component. |
+| `status=native-component-error` | JavaScript caught an error during component lookup, activation, or invocation. Capture `hresult` and `message`. |
+| `status=child-module-load-error` or `status=child-module-export-error` | The WinRT component ran and could not load or resolve the helper’s packaged library. Capture `win32_error`. |
 | `create_process=failure` | The startup path reached `CreateProcessW`. Capture `win32_error`. |
 | `exit_code_matches=yes` | The same-package helper returned `0x000051A7` on this console build. |
 | Timeout, unchanged file, or HTTP `404` for `probe-report.txt` | The watcher obtained no fresh report. Child execution remains unverified. |
 
-The last available checkpoint narrows the failure to the next observable stage. If a manual pass returns to Dev Home without a fresh report, record how far the UI got and the exact Portal launch response. Check for an existing probe dump in Device Portal’s Crash data and record whether one appeared. Preserve the build and console evidence before changing the manifest, launch path, or storage implementation.
+The last available checkpoint shows how far execution got. The HTML also displays the result or a report-write error on the TV. If a launch returns to Dev Home without a fresh report, record how far the UI got and the exact Portal launch response. Check for an existing probe dump in Device Portal’s Crash data and record whether one appeared. Preserve the build and console evidence before changing the manifest, launch path, or storage implementation.
 
 ## Observed baseline
 
@@ -57,5 +66,9 @@ The last available checkpoint narrows the failure to the next observable stage. 
 - `1.0.4.0` processed the window’s pending activation events and gave the shell time before running the helper and exiting. It still returned `0x8027025B` remotely with no report, including when the public package-signing certificate was uploaded with it.
 - The `1.0.5.0` Windows SDK build replaced the C startup host with C++/WinRT, waited for the activation event, and awaited `StorageFolder.CreateFileAsync` and `FileIO.WriteTextAsync`. It registered, remote launch returned `0x8027025B`, and the report endpoint still returned HTTP `404` after a manual Dev Home launch.
 - The `1.0.5.0` fresh-identity control registered beside the main app. Its `probe.exe`, `child.exe`, and `child-process.dll` matched the main artifact from the same build byte for byte. Its remote launch also returned `0x8027025B`, and both report endpoints returned HTTP `404` after a brief console screen appeared. This reproduced the failure without updating the existing app registration. [Control build and artifacts](https://github.com/clankur/steam-xbox-devmode/actions/runs/44855896834)
+- The HTML-only `1.0.6.0` build used the same control identity. Device Portal launched it remotely and retrieved `status=control-ready` from `LocalState`. This confirmed remote launch and report collection for that package on the same console and narrowed the original failure to native executable startup. The exact loader or activation failure remains unknown.
+- `1.0.7.0` applied the HTML startup path to the main diagnostic. Remote launch and file retrieval succeeded twice. The probe reported `create_process=success`, `wait_result=0x00000000`, and `child_exit_code=0xC000007B` (`STATUS_INVALID_IMAGE_FORMAT`). The component and file writer ran even though the helper returned a loader error. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44856763230)
+- `1.0.8.0` retained an actual x64 relocation table in `child.exe` while preserving AppContainer and ASLR. It again wrote a report with `child_exit_code=0xC000007B`. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44856940304)
+- `1.0.9.0` built `child.exe` with Microsoft’s compiler and linker, embedded a Windows manifest, and signed the executable individually before signing the APPX. The console reported `create_process=success`, `child_exit_code=0x000051A7`, and `exit_code_matches=yes`. A second CLI launch without reinstalling produced a fresh report with the same result. These helper-image changes were tested together. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44857081600)
 
-These observations still leave an activation failure and an early report-writing failure open. To distinguish them, use Visual Studio on Windows to debug the installed package on the Series X. Break first at `wWinMain`, then at the activation callback and `RunDiagnostic`. Record the first HRESULT from the runtime or storage call while keeping a copy of the exact tested APPX. [Debug an installed UWP package](https://learn.microsoft.com/en-us/visualstudio/debugger/debug-installed-app-package?view=visualstudio)
+If the exact failure in the old executable host needs to be identified, debug the archived `1.0.5.0` package from Visual Studio on the Series X. Break first at `wWinMain`, then at the activation callback and `RunDiagnostic`. Record the first HRESULT from the runtime or storage call and preserve the exact tested APPX. [Debug an installed UWP package](https://learn.microsoft.com/en-us/visualstudio/debugger/debug-installed-app-package?view=visualstudio)
