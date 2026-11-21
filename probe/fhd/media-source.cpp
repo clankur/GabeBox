@@ -1,6 +1,7 @@
 // A live video source for the primary WWA view. The existing receiver converts
 // both the shared GPU texture and CPU SDL mailbox into the same BGRA target.
 #include "gpu-receiver.h"
+#include "media-frame-clock.h"
 #include "media-frame-count.h"
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/Windows.Foundation.h>
@@ -74,20 +75,24 @@ struct Stream : std::enable_shared_from_this<Stream> {
     uint64_t extraAllocations = 0, peak = 0, lastSequence = 0;
     MediaStreamSource source{nullptr};
     MediaFrameCount frames;
-    Clock::time_point firstSample{};
+    MediaFrameClock clock;
+    winrt::handle stopEvent;
 
     ~Stream() { FhdReleaseMedia(token); }
 
     void initialize(HSTRING path, bool pad) {
         nativePad = pad;
         check_hresult(FhdClaimMedia(path, &token));
+        stopEvent = winrt::handle{CreateEventExW(nullptr, nullptr, CREATE_EVENT_MANUAL_RESET,
+            EVENT_MODIFY_STATE | SYNCHRONIZE)};
+        if (!stopEvent) throw_last_error();
         check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             nullptr, 0, D3D11_SDK_VERSION, device.put(), nullptr, context.put()));
         auto multithread = context.try_as<ID3D11Multithread>();
         if (multithread) multithread->SetMultithreadProtected(TRUE);
         for (auto& slot : slots) allocate(slot, false);
         auto props = VideoEncodingProperties::CreateUncompressed(MediaEncodingSubtypes::Bgra8(), width, height);
-        props.FrameRate().Numerator(60); props.FrameRate().Denominator(1);
+        props.FrameRate().Numerator(MediaFrameClock::rate); props.FrameRate().Denominator(1);
         props.PixelAspectRatio().Numerator(1); props.PixelAspectRatio().Denominator(1);
         source = MediaStreamSource(VideoStreamDescriptor(props));
         source.IsLive(true); source.CanSeek(false); source.BufferTime(0ms);
@@ -139,6 +144,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
         {
             std::lock_guard guard(lock);
             closed = true;
+            SetEvent(stopEvent.get());
             std::swap(release, token);
         }
         FhdReleaseMedia(release);
@@ -146,9 +152,12 @@ struct Stream : std::enable_shared_from_this<Stream> {
 
     // Each SDL mailbox acquisition represents a distinct producer frame. MF
     // may drop one; only SampleRendered contributes to the presentation count.
-    MediaStreamSample next() {
+    MediaStreamSample next(TimeSpan& delay) {
         std::lock_guard guard(lock);
         if (closed) throw hresult_error(RO_E_CLOSED);
+        delay = clock.wait(std::chrono::duration_cast<TimeSpan>(Clock::now().time_since_epoch()));
+        if (delay > TimeSpan::zero()) return nullptr;
+        delay = 4ms;
         size_t index = 0;
         while (index < slots.size() && slots[index].busy) ++index;
         const bool extra = index == slots.size();
@@ -164,11 +173,9 @@ struct Stream : std::enable_shared_from_this<Stream> {
         lastSequence = sequence;
         check_hresult(hr);
         context->Flush();
-        auto now = Clock::now();
-        if (!frames.cpu && !frames.gpu) firstSample = now;
-        auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface,
-            std::chrono::duration_cast<TimeSpan>(now - firstSample));
-        sample.Duration(TimeSpan{10000000 / 60});
+        const auto timing = clock.advance(std::chrono::duration_cast<TimeSpan>(Clock::now().time_since_epoch()));
+        auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface, timing.timestamp);
+        sample.Duration(timing.duration);
         sample.KeyFrame(true);
         sample.Processed([weak = weak_from_this(),index](auto const&, auto const&) {
             if (auto self = weak.lock()) {
@@ -192,8 +199,9 @@ struct Stream : std::enable_shared_from_this<Stream> {
             }
             co_await resume_background();
             for (;;) {
-                if (auto frame = self->next()) { request.Sample(frame); break; }
-                co_await resume_after(4ms);
+                TimeSpan delay;
+                if (auto frame = self->next(delay)) { request.Sample(frame); break; }
+                co_await resume_on_signal(self->stopEvent.get(), delay);
             }
         } catch (...) {
             auto hr = to_hresult();
