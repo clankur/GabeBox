@@ -136,6 +136,8 @@ A later retry on the same build transferred 271,127,152 bytes and installed Slay
 
 ## Test Steam’s normal launch path
 
+See the [game compatibility findings](GAME-COMPATIBILITY.md) for the last measured result and the next launch test for each title.
+
 Select a downloaded game in the library and choose **Play**. For a CLI launch test, prepare the sign-in package with `--launch-app-id APPID` for a game already installed in the Xbox app's own library. After Steam Guard approval, the probe makes one automatic launch attempt per package version. It refreshes the library and, if Steam needs to reopen a completed local install, asks the app manager to register the existing files. Launch requires Steam to confirm the current account owns the game and reports it fully installed in that library. The probe records Steam’s numeric response and whether the client observed a running game and ready window.
 
 ```sh
