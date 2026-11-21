@@ -29,6 +29,7 @@
         var nativePad = appId !== 975370;
         var view, savedBounds, enteredFullscreen;
         var foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
+        var blockedMenuButtons = 0;
         var layoutWidth = 0, layoutHeight = 0;
         var held = {};
         var pointerHeld = false;
@@ -80,6 +81,7 @@
         }
 
         function hideMenu() {
+            blockedMenuButtons = lastButtons & (padButtons.a | padButtons.b);
             menu.hidden = true;
             canvas.focus();
         }
@@ -219,6 +221,10 @@
                     if (frame && !firstFrame) {
                         firstFrame = now;
                         status.textContent = "";
+                        if (nativePad && attempt.automaticTrial) {
+                            sendPad([gamepad.connected, 0, 0, 0, 0, -32768, -32768]);
+                            trialRetry = now + 12000;
+                        }
                         if (!attempt.automaticTrial) {
                             complete(result + "steam_sdl_host_frame=presented\r\n");
                         }
@@ -267,10 +273,22 @@
                 var pressed = pad[0] & ~lastButtons;
                 lastButtons = pad[0];
                 if (!menu.hidden) {
+                    if (pressed & (padButtons.left | padButtons.up)) resume.focus();
+                    if (pressed & (padButtons.right | padButtons.down)) exit.focus();
                     if (pressed & padButtons.b) hideMenu();
-                    if (pressed & padButtons.a) quit();
+                    else if (pressed & padButtons.a) {
+                        if (document.activeElement === exit) quit(); else hideMenu();
+                    }
                 } else if (!closing && foreground) {
-                    if (nativePad && (!attempt.automaticTrial || trialComplete)) sendPad(pad);
+                    blockedMenuButtons &= pad[0];
+                    if (blockedMenuButtons) {
+                        pad = pad.slice();
+                        pad[0] &= ~blockedMenuButtons;
+                    }
+                    if (nativePad && (!attempt.automaticTrial || trialComplete)) {
+                        if (attempt.automaticTrial && pad === gamepad.idle) neutralPad();
+                        else sendPad(pad);
+                    }
                     var input = movePointer(lastTime ? Math.min(50, now - lastTime) : 0, pad);
                     if (input.pointer !== lastPointer || input.keys !== lastKeys) {
                         if (!nativePad || pointerHeld || lastPointer !== -1) {
