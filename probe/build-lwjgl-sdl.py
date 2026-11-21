@@ -32,7 +32,7 @@ def main():
     providers = Path(__file__).with_name('lwjgl')
     gdx = (args.gdx_api, args.gdx_controllers_api)
     if any(gdx) and not all(gdx):
-        parser.error('Supply both libGDX 1.9.5 API JARs for the controller adapter.')
+        parser.error('Supply both libGDX 1.9.5 API JARs for the controller and scene texture adapters.')
     if all(gdx):
         for file, digest in zip(gdx, (
             'dee9df299c0aa8f7872851433fe383103bf476df4d22461693bdcf3fbdb68c1b',
@@ -62,7 +62,7 @@ def main():
             original.write_bytes(bytecode)
             subprocess.run(['java', '-cp', os.pathsep.join((str(root), str(args.asm))), 'BuildXboxFactories',
                             str(original), str(root / entry)], check=True)
-        replacements = {str(path.relative_to(root)): path for package in ('org', 'com')
+        replacements = {path.relative_to(root).as_posix(): path for package in ('org', 'com')
                         for path in (root / package).rglob('*.class')}
         license_body = sources.read('org/lwjgl/opengl/Display.java').decode('utf-8').split('package org.lwjgl.opengl;', 1)[0]
         with ZipFile(args.output, 'x', ZIP_DEFLATED) as output:
@@ -76,6 +76,8 @@ def main():
             for name, path in sorted(replacements.items()):
                 output.write(path, name)
             output.writestr('LICENSE.lwjgl', license_body)
+            if all(gdx):
+                output.write(providers / 'LICENSE.libgdx', 'LICENSE.libgdx')
 
 
 if __name__ == '__main__':
