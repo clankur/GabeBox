@@ -33,6 +33,7 @@ typedef void *HSTRING;
 #define S_OK ((HRESULT)0)
 #define E_POINTER ((HRESULT)0x80004003L)
 #define E_NOINTERFACE ((HRESULT)0x80004002L)
+#define RPC_E_CHANGED_MODE ((HRESULT)0x80010106L)
 #define FAILED(hr) (((HRESULT)(hr)) < 0)
 #define SUCCEEDED(hr) (((HRESULT)(hr)) >= 0)
 #define RO_INIT_MULTITHREADED 1u
@@ -40,7 +41,10 @@ typedef void *HSTRING;
 #define GENERIC_WRITE 0x40000000u
 #define FILE_SHARE_READ 0x00000001u
 #define CREATE_ALWAYS 2u
+#define SYNCHRONIZE 0x00100000u
 #define WAIT_OBJECT_0 0x00000000u
+#define WAIT_FAILED 0xffffffffu
+#define PROCESS_ALL_IF_PRESENT 3
 #define ERROR_SUCCESS 0u
 #define ERROR_INSUFFICIENT_BUFFER 122u
 #define ERROR_WRITE_FAULT 29u
@@ -73,6 +77,8 @@ __declspec(dllimport) RunPackagedChildFn WINAPI GetProcAddress(HINSTANCE module,
 __declspec(dllimport) BOOL WINAPI FreeLibrary(HINSTANCE module);
 __declspec(dllimport) DWORD WINAPI GetCurrentProcessId(void);
 __declspec(dllimport) void WINAPI GetSystemTimeAsFileTime(FILETIME *time);
+__declspec(dllimport) HANDLE WINAPI CreateEventExW(void *, PCWSTR, DWORD, DWORD);
+__declspec(dllimport) DWORD WINAPI WaitForSingleObjectEx(HANDLE, DWORD, BOOL);
 __declspec(dllimport) BOOL WINAPI CloseHandle(HANDLE handle);
 __declspec(dllimport) HANDLE WINAPI CreateFile2(PCWSTR fileName, DWORD access, DWORD shareMode,
     DWORD creationDisposition, const void *parameters);
@@ -88,6 +94,7 @@ typedef struct ICoreApplicationExit ICoreApplicationExit;
 typedef struct IFrameworkView IFrameworkView;
 typedef struct IFrameworkViewSource IFrameworkViewSource;
 typedef struct ICoreWindow ICoreWindow;
+typedef struct ICoreDispatcher ICoreDispatcher;
 typedef struct IApplicationDataStatics IApplicationDataStatics;
 typedef struct IApplicationData IApplicationData;
 typedef struct IStorageFolder IStorageFolder;
@@ -135,12 +142,21 @@ typedef struct ICoreWindowVtbl {
     ULONG (STDMETHODCALLTYPE *AddRef)(void *);
     ULONG (STDMETHODCALLTYPE *Release)(void *);
     void *GetIids, *GetRuntimeClassName, *GetTrustLevel;
-    void *get_AutomationHostProvider, *get_Bounds, *get_CustomProperties, *get_Dispatcher;
+    void *get_AutomationHostProvider, *get_Bounds, *get_CustomProperties;
+    HRESULT (STDMETHODCALLTYPE *get_Dispatcher)(ICoreWindow *, ICoreDispatcher **);
     void *get_FlowDirection, *put_FlowDirection, *get_IsInputEnabled, *put_IsInputEnabled;
     void *get_PointerCursor, *put_PointerCursor, *get_PointerPosition, *get_Visible;
     HRESULT (STDMETHODCALLTYPE *Activate)(ICoreWindow *);
 } ICoreWindowVtbl;
 struct ICoreWindow { const ICoreWindowVtbl *lpVtbl; };
+
+typedef struct ICoreDispatcherVtbl {
+    void *QueryInterface, *AddRef;
+    ULONG (STDMETHODCALLTYPE *Release)(ICoreDispatcher *);
+    void *GetIids, *GetRuntimeClassName, *GetTrustLevel, *get_HasThreadAccess;
+    HRESULT (STDMETHODCALLTYPE *ProcessEvents)(ICoreDispatcher *, int);
+} ICoreDispatcherVtbl;
+struct ICoreDispatcher { const ICoreDispatcherVtbl *lpVtbl; };
 
 typedef struct IFrameworkViewVtbl {
     HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *, REFIID, void **);
@@ -197,6 +213,7 @@ struct IStorageItem { const void *lpVtbl; };
 /* Slot numbers in the x64 WinRT ABI, independently checked against SDK 26100. */
 _Static_assert(__builtin_offsetof(ICoreApplicationVtbl, Run) == 13 * sizeof(void *), "ICoreApplication.Run");
 _Static_assert(__builtin_offsetof(ICoreWindowVtbl, Activate) == 18 * sizeof(void *), "ICoreWindow.Activate");
+_Static_assert(__builtin_offsetof(ICoreDispatcherVtbl, ProcessEvents) == 7 * sizeof(void *), "ICoreDispatcher.ProcessEvents");
 _Static_assert(__builtin_offsetof(IApplicationDataVtbl, get_LocalFolder) == 12 * sizeof(void *), "IApplicationData.LocalFolder");
 enum { STORAGE_ITEM_GET_PATH = 12 };
 
@@ -290,6 +307,7 @@ static ULONG STDMETHODCALLTYPE ViewRelease(void *self) {
 static HRESULT RunProbe(void);
 static HRESULT WriteReport(PCWSTR content);
 static HRESULT ReportStartupError(PCWSTR status, HRESULT error);
+static HRESULT ReportWin32Error(PCWSTR status, DWORD error);
 
 static HRESULT STDMETHODCALLTYPE ViewInitialize(IFrameworkView *self, IInspectableLike *applicationView) {
     (void)self; (void)applicationView;
@@ -312,14 +330,42 @@ static HRESULT STDMETHODCALLTYPE ViewLoad(IFrameworkView *self, HSTRING entryPoi
     return S_OK;
 }
 
+static HRESULT PumpWindow(ICoreDispatcher *dispatcher, DWORD passes) {
+    HANDLE delay = CreateEventExW((void *)0, (PCWSTR)0, 0, SYNCHRONIZE);
+    HRESULT hr = S_OK;
+    if (!delay) return ReportWin32Error(L"window-dispatch-error", GetLastError());
+    for (DWORD pass = 0; pass < passes; ++pass) {
+        hr = dispatcher->lpVtbl->ProcessEvents(dispatcher, PROCESS_ALL_IF_PRESENT);
+        if (FAILED(hr)) break;
+        if (WaitForSingleObjectEx(delay, 50, FALSE) == WAIT_FAILED) {
+            hr = ReportWin32Error(L"window-dispatch-error", GetLastError());
+            break;
+        }
+    }
+    CloseHandle(delay);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE ViewRun(IFrameworkView *self) {
     ViewObject *view = (ViewObject *)self;
     static const WCHAR className[] = L"Windows.ApplicationModel.Core.CoreApplication";
     HSTRING hClass = (HSTRING)0;
     ICoreApplicationExit *coreExit = (ICoreApplicationExit *)0;
+    ICoreDispatcher *dispatcher = (ICoreDispatcher *)0;
     HRESULT hr = view->window ? view->window->lpVtbl->Activate(view->window) : E_POINTER;
     if (FAILED(hr)) return ReportStartupError(L"window-activation-error", hr);
-    hr = RunProbe();
+    hr = view->window->lpVtbl->get_Dispatcher(view->window, &dispatcher);
+    if (FAILED(hr)) return ReportStartupError(L"window-dispatch-error", hr);
+
+    /* Let the shell process activation before starting and closing the one-shot view. */
+    hr = PumpWindow(dispatcher, 10);
+    if (SUCCEEDED(hr)) {
+        hr = RunProbe();
+        if (SUCCEEDED(hr)) (void)PumpWindow(dispatcher, 20);
+    } else {
+        ReportStartupError(L"window-dispatch-error", hr);
+    }
+    dispatcher->lpVtbl->Release(dispatcher);
     if (SUCCEEDED(WindowsCreateString(className,
         (DWORD)(sizeof(className) / sizeof(className[0]) - 1), &hClass))) {
         if (SUCCEEDED(RoGetActivationFactory(hClass, &IID_CORE_APPLICATION_EXIT, (void **)&coreExit))) {
@@ -565,6 +611,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
     HSTRING className = (HSTRING)0;
     ICoreApplication *coreApp = (ICoreApplication *)0;
     HRESULT hr;
+    HRESULT apartment;
     (void)instance; (void)previous; (void)commandLine; (void)showCommand;
 
     g_view.iface.lpVtbl = &g_view_vtbl;
@@ -574,8 +621,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
 
     GetSystemTimeAsFileTime(&g_runTime);
     g_processId = GetCurrentProcessId();
-    hr = RoInitialize(RO_INIT_MULTITHREADED);
-    if (FAILED(hr)) return (int)hr;
+    apartment = RoInitialize(RO_INIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return (int)apartment;
     (void)WriteReport(L"probe=packaged-child-process\r\nstatus=core-application-starting\r\n");
     hr = WindowsCreateString(coreClass, (DWORD)(sizeof(coreClass) / sizeof(coreClass[0]) - 1), &className);
     if (SUCCEEDED(hr)) hr = RoGetActivationFactory(className, &IID_CORE_APPLICATION, (void **)&coreApp);
@@ -586,6 +633,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
     }
     if (coreApp) coreApp->lpVtbl->Release(coreApp);
     if (className) WindowsDeleteString(className);
-    RoUninitialize();
+    if (SUCCEEDED(apartment)) RoUninitialize();
     return (int)hr;
 }

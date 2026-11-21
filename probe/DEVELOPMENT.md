@@ -23,6 +23,8 @@ python3 xbox-deploy.py --env-file /path/to/setup-workspace/.env deploy \
 
 `deploy --test-probe` waits for installation, looks up the version from the APPX manifest in the live package inventory, requests a launch, and waits for a changed report. The Portal can return HTTP `202` before registration completes. Save the CLI output and the SHA-256 of the APPX you tested alongside the branch commit and console OS build. [Device Portal API](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core)
 
+The [Windows SDK build workflow](../.github/workflows/xbox-probe.yml) runs on pushes that touch the probe. It produces the same artifact filenames and adds `resources.pri` with `MakePri.exe`, packages with `MakeAppx.exe`, and signs with `SignTool.exe`. Download the artifact for the intended commit with `gh run download RUN_ID --name xbox-probe-windows-sdk --dir BUILD_DIR`, verify `SHA256SUMS`, and use the same CLI command to deploy it. This gives a packaging comparison when the cross-built APPX installs but fails to activate.
+
 For another run of the installed build, use `probe` without uploading again. If remote launch fails or the launch needs to be observed on the TV, start the watcher first and launch **Packaged process test** once from Dev Home when prompted.
 
 ```sh
@@ -48,5 +50,7 @@ The last available checkpoint narrows the failure to the next observable stage. 
 
 - The signed `process-probe-v0.1.0` package registered on a Series X in Developer Mode on OS build `26100.9673.amd64fre.xb_flt_2610ge.261116-2200`. Dev Home showed `0x80070002` on launch, and `LocalState` contained no report. Both executables and the manifest-referenced assets were present in the APPX.
 - In-place update `1.0.1.0` registered over the CLI. After manual launch, Dev Home briefly opened the app and returned to the dashboard. The Portal’s remote launch returned `0x8027025B`. The app’s actual `LocalState` folder was empty, the direct report download returned HTTP `404`, and the Portal listed no crash dump for this probe.
+- `1.0.2.0` moved `CreateProcessW` into a fixed packaged library loaded after app startup and changed the report opener to `CreateFile2`. It registered. Remote launch returned `0x8027025B` and a manual launch showed no error. No report or probe crash dump appeared.
+- `1.0.3.0`, produced by the Windows SDK workflow, contained `resources.pri` and `AppxMetadata/CodeIntegrity.cat`. It registered and reproduced the remote launch error with no report. The original packaging route alone cannot explain the failure observed across both builds.
 
 Possible causes at this baseline include activation stopping before the first checkpoint and the app reaching the checkpoint while its report write fails. A fresh checkpoint, a precise startup HRESULT, or a matching helper exit code provides stronger evidence than the dashboard behavior alone.

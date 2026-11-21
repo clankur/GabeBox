@@ -200,8 +200,10 @@ def wait_for_probe(portal, version, manual, timeout):
             if report.endswith('\n') and report != last_report:
                 last_report = report
                 print(report, end='', flush=True)
-                if 'exit_code_matches=' in report or 'status=complete' in report:
+                if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
                     return
+                if re.search(r'^exit_code_matches=no\s*$', report, re.MULTILINE):
+                    raise ValueError('The probe ran, but the helper did not return its expected exit code.')
                 if re.search(r'^status=.*(?:error|failed)\s*$', report, re.MULTILINE):
                     raise ValueError('The probe reported a startup or test error above.')
         time.sleep(0.5)

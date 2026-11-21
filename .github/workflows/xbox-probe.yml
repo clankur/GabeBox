@@ -65,10 +65,11 @@ jobs:
           } finally {
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
           }
-          Get-ChildItem $artifacts -File | ForEach-Object {
+          $hashes = Get-ChildItem $artifacts -File | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
-          } | Set-Content "$artifacts/SHA256SUMS" -Encoding ascii
+          }
+          [IO.File]::WriteAllText("$artifacts/SHA256SUMS", ($hashes -join "`n") + "`n")
       - uses: actions/upload-artifact@v4
         with:
           name: xbox-probe-windows-sdk
