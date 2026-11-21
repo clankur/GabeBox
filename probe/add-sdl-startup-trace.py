@@ -44,12 +44,14 @@ def wrap_definition(source, return_type, function, arguments, stage, worked):
     parameters = match[1]
     implementation = f'XboxSdlOriginal{function[4:]}'
     flags = '    XboxSdlTraceInitFlags(flags);\n' if function == 'SDL_InitSubSystem' else ''
+    preferences = '    if (!value) value = XboxSdlAppLocalPrefPath(org, app);\n' if function == 'SDL_GetPrefPath' else ''
     wrapper = (
         f'static {return_type} {implementation}({parameters});\n\n'
         f'{return_type}\n{function}({parameters})\n{{\n'
         f'    XboxSdlTrace("sdl_{stage}=begin\\n");\n'
         f'{flags}'
         f'    {return_type} value = {implementation}({arguments});\n'
+        f'{preferences}'
         f'    XboxSdlTrace({worked} ? "sdl_{stage}=ready\\n" : "sdl_{stage}=error\\n");\n'
         '    return value;\n}\n\n'
         f'static {return_type}\n{implementation}({parameters})\n{{'
@@ -60,6 +62,7 @@ def wrap_definition(source, return_type, function, arguments, stage, worked):
 def add_startup_trace(tree):
     source_root = tree / 'src'
     shutil.copyfile(Path(__file__).with_name('sdl-startup-trace.h'), source_root / 'sdl-startup-trace.h')
+    shutil.copyfile(Path(__file__).with_name('sdl-local-preferences.h'), source_root / 'sdl-local-preferences.h')
     for filename, hooks in HOOKS.items():
         file = source_root / filename
         source = file.read_text(encoding='utf-8')
@@ -83,6 +86,8 @@ def add_startup_trace(tree):
             if not ending:
                 raise ValueError('Expected an SDL filesystem implementation guarded for Windows.')
             source, suffix = windows, ending + after
+            include = '#include "SDL_filesystem.h"'
+            source = source.replace(include, include + '\n#include "../../sdl-local-preferences.h"', 1)
         for hook in hooks:
             source = wrap_definition(source, *hook)
         file.write_text(source + suffix, encoding='utf-8')
