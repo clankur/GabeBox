@@ -14,9 +14,12 @@
     var entryName = document.getElementById("entry-name");
     var entryType = document.getElementById("entry-type");
     var signOut = document.getElementById("sign-out");
+    var download = document.getElementById("download");
+    var downloadStatus = document.getElementById("download-status");
     var current;
     var entries = [];
     var selected;
+    var transfer;
 
     function httpClient() {
         var filter = new Windows.Web.Http.Filters.HttpBaseProtocolFilter();
@@ -143,6 +146,9 @@
         if (button) button.setAttribute("aria-pressed", "true");
         entryName.textContent = button ? button.entry.name : "";
         entryType.textContent = button ? button.entry.type : "";
+        download.hidden = !button || !button.entry.game;
+        download.disabled = !!transfer || !!(button && button.entry.installed);
+        download.textContent = button && button.entry.installed ? "Downloaded" : "Download";
     }
 
     function renderList() {
@@ -197,6 +203,86 @@
             attempt.file, approved, reply.account_name, reply.refresh_token, id
         );
         return operation.then(function (payload) { return finishNative(attempt, payload); });
+    }
+
+    var downloadMessages = {
+        "starting": "Preparing the download",
+        "queued": "Queued in Steam",
+        "downloading": "Downloading from Steam",
+        "staging": "Writing game files",
+        "installed": "Download complete",
+        "stalled": "Steam stopped reporting progress",
+        "session-lost": "Steam disconnected. Sign in again to retry",
+        "no-license": "Steam could not confirm access to this game",
+        "library-folder-error": "Steam could not open this Xbox storage folder",
+        "install-rejected": "Steam declined the download",
+        "install-path-error": "Steam reported a different install location",
+        "interrupted": "Download monitoring stopped on sign-out"
+    };
+
+    function updateDownload(job, checkpoint) {
+        if (transfer !== job) return;
+        var parts = /^(\w+(?:-\w+)*)(?::(-?\d+))?$/.exec(checkpoint);
+        var stage = parts ? parts[1] : "failed";
+        var detail = parts ? parts[2] : "";
+        var active = stage === "starting" || stage === "queued" ||
+            stage === "downloading" || stage === "staging";
+        if (checkpoint !== job.last) {
+            job.last = checkpoint;
+            var message = downloadMessages[stage] || "Steam could not start or track the download";
+            downloadStatus.textContent = job.entry.name + " · " + message;
+            if (job.file) {
+                var report = "probe=steam-download\r\nrun_id=" + job.id + "\r\nsteam_download=" + stage + "\r\n";
+                if (detail) {
+                    var metric = stage === "install-rejected" || stage === "library-folder-error" ? "result" : "state";
+                    report += "steam_download_" + metric + "=" + detail + "\r\n";
+                }
+                report += "status=steam-download-" + (active ? "in-progress" : "complete") + "\r\n";
+                var write = function () { return Windows.Storage.FileIO.writeTextAsync(job.file, report); };
+                job.write = job.write ? job.write.then(write, write) : write();
+                job.write.done(null, function () {});
+            }
+        }
+        if (active) return;
+        clearTimeout(job.timer);
+        if (stage === "installed") job.entry.installed = true;
+        transfer = null;
+        select(selected);
+    }
+
+    function pollDownload(job) {
+        if (transfer !== job) return;
+        try {
+            updateDownload(job, XboxProbe.Native.ProbeRunner.steamDownloadStatus());
+        } catch (error) {
+            updateDownload(job, "failed");
+        }
+        if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 2000);
+    }
+
+    function startDownload() {
+        if (transfer || !selected || !selected.entry.game || selected.entry.installed) return;
+        var job = { entry: selected.entry, id: Date.now() };
+        transfer = job;
+        download.disabled = true;
+        signOut.disabled = true;
+        updateDownload(job, "starting");
+        Windows.Storage.ApplicationData.current.localFolder.createFileAsync(
+            "steam-download-report.txt", Windows.Storage.CreationCollisionOption.replaceExisting
+        ).then(function (file) {
+            job.file = file;
+            return Windows.Storage.FileIO.writeTextAsync(file, "probe=steam-download\r\nrun_id=" + job.id +
+                "\r\nsteam_download=starting\r\nstatus=steam-download-in-progress\r\n");
+        }).then(function () {
+            return XboxProbe.Native.ProbeRunner.queueSteamDownload(job.entry.id);
+        }).done(function (checkpoint) {
+            signOut.disabled = false;
+            updateDownload(job, checkpoint);
+            if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 1000);
+        }, function () {
+            signOut.disabled = false;
+            updateDownload(job, "failed");
+        });
     }
 
     function schedulePoll(attempt, challenge) {
@@ -263,7 +349,7 @@
     });
     search.addEventListener("input", renderList);
     search.addEventListener("keydown", function (event) {
-        if ((event.keyCode === 40 || event.keyCode === 211) && list.firstElementChild) {
+        if ((event.keyCode === 40 || event.keyCode === 204 || event.keyCode === 212) && list.firstElementChild) {
             event.preventDefault();
             list.firstElementChild.focus();
         }
@@ -280,12 +366,19 @@
         var next;
         switch (event.keyCode) {
         case 38:
-        case 210:
+        case 203:
+        case 211:
             next = button.previousElementSibling || search;
             break;
         case 40:
-        case 211:
+        case 204:
+        case 212:
             next = button.nextElementSibling;
+            break;
+        case 39:
+        case 206:
+        case 213:
+            next = download.hidden || download.disabled ? signOut : download;
             break;
         default:
             return;
@@ -293,12 +386,21 @@
         event.preventDefault();
         if (next) next.focus();
     });
+    download.addEventListener("click", startDownload);
+    download.addEventListener("keydown", function (event) {
+        if (selected && (event.keyCode === 37 || event.keyCode === 205 || event.keyCode === 214)) {
+            event.preventDefault();
+            selected.focus();
+        }
+    });
     signOut.addEventListener("click", function () {
+        if (transfer) updateDownload(transfer, "interrupted");
         XboxProbe.Native.ProbeRunner.signOutSteam();
         entries = [];
         renderList();
         library.hidden = true;
         signin.hidden = false;
+        downloadStatus.textContent = "";
         status.textContent = "Signed out of Steam.";
         retry.hidden = false;
         retry.focus();

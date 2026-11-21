@@ -271,6 +271,7 @@ def main():
     probe.set_defaults(probe_name=PROBE_NAME)
     report_command = commands.add_parser('report', help='read the current Steam probe report without launching it')
     report_command.add_argument('--version', required=True, help='installed Steam package version')
+    report_command.add_argument('--download', action='store_true', help='read the Steam download checkpoint')
     for command in (deploy, probe):
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait for a fresh report')
@@ -322,7 +323,8 @@ def main():
         return
     if args.command == 'report':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        _, raw = portal.request('GET', probe_report_path(app))
+        filename = 'steam-download-report.txt' if args.download else PROBE_REPORT
+        _, raw = portal.request('GET', probe_report_path(app, filename))
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
