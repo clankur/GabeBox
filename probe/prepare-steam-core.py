@@ -130,10 +130,18 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
                    startup_sdl_late_frame=False, startup_sdl_host=False):
     version_parts = tuple(int(part) for part in version.split('.'))
+    startup_app_id = launch_app_id
+    if startup_sdl_host and launch_app_id is None:
+        startup_app_id = 975370
+        startup_snapshot = True
+        startup_sdl_renderer = 'software'
+        startup_sdl_dummy_video = True
+        startup_sdl_working_directory = True
+        startup_sdl_local_preferences = True
     configured_options = dict(launch_options)
     if launch_option is not None:
         configured_options[launch_app_id] = launch_option
-    if startup_snapshot and (not steam_sign_in or not launch_app_id or (xcom_runtime_archive and launch_app_id == 7760)):
+    if startup_snapshot and (not steam_sign_in or not startup_app_id or (xcom_runtime_archive and startup_app_id == 7760)):
         raise ValueError('A startup snapshot needs a native Steam Play target.')
     if startup_sdl_renderer and (not startup_snapshot or startup_sdl_renderer not in ('software', 'direct3d11')):
         raise ValueError('An SDL renderer trial needs a startup snapshot and a supported renderer name.')
@@ -141,7 +149,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The SDL startup compatibility trial needs a startup snapshot.')
     if startup_sdl_late_frame and (startup_sdl_renderer != 'software' or not startup_sdl_dummy_video):
         raise ValueError('The delayed SDL capture requires the dummy video and software renderer trial.')
-    if startup_sdl_host and (launch_app_id != 975370 or not startup_snapshot or startup_sdl_renderer != 'software'
+    if startup_sdl_host and (startup_app_id != 975370 or not startup_snapshot or startup_sdl_renderer != 'software'
                              or not startup_sdl_dummy_video or not startup_sdl_working_directory
                              or not startup_sdl_local_preferences):
         raise ValueError('The SDL host requires the licensed Dwarf Fortress software-rendering profile.')
@@ -195,19 +203,19 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         for app_id, index in configured_options.items():
             (layout / f'steam-launch-option-{app_id}.txt').write_text(str(index), encoding='ascii')
         if startup_snapshot:
-            (layout / f'steam-startup-snapshot-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-snapshot-{startup_app_id}.txt').touch()
         if startup_wait_only:
-            (layout / f'steam-startup-wait-only-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-wait-only-{startup_app_id}.txt').touch()
         if startup_sdl_renderer:
-            (layout / f'steam-startup-sdl-renderer-{launch_app_id}.txt').write_text(startup_sdl_renderer, encoding='ascii')
+            (layout / f'steam-startup-sdl-renderer-{startup_app_id}.txt').write_text(startup_sdl_renderer, encoding='ascii')
         if startup_sdl_dummy_video:
-            (layout / f'steam-startup-sdl-dummy-video-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-sdl-dummy-video-{startup_app_id}.txt').touch()
         if startup_sdl_working_directory:
-            (layout / f'steam-startup-sdl-working-directory-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-sdl-working-directory-{startup_app_id}.txt').touch()
         if startup_sdl_local_preferences:
-            (layout / f'steam-startup-sdl-local-preferences-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-sdl-local-preferences-{startup_app_id}.txt').touch()
         if startup_sdl_late_frame:
-            (layout / f'steam-startup-sdl-late-frame-{launch_app_id}.txt').touch()
+            (layout / f'steam-startup-sdl-late-frame-{startup_app_id}.txt').touch()
         if startup_sdl_host:
             html_path = layout / 'steam-signin.html'
             html = html_path.read_text(encoding='utf-8')
