@@ -123,6 +123,63 @@ def title_launch_option(spec):
     raise argparse.ArgumentTypeError('expected APPID:INDEX with a 24-bit AppID and unsigned 32-bit index')
 
 
+FHD_COMPONENT = ('Fhd.Native.dll', 'Fhd.Native.winmd')
+
+
+def presenter_payload(artifact, checksum):
+    """Verify both members against a pinned CI checksum manifest before staging."""
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', checksum or ''):
+        raise ValueError('Provide the SHA-256 of the presenter artifact SHA256SUMS file.')
+    sums = (artifact / 'SHA256SUMS').read_bytes()
+    if hashlib.sha256(sums).hexdigest() != checksum.lower():
+        raise ValueError('Presenter checksum manifest differs from the supplied SHA-256.')
+    expected = {}
+    for line in sums.decode('ascii').splitlines():
+        match = re.fullmatch(r'([0-9a-fA-F]{64})  (Fhd\.Native\.(?:dll|winmd))', line)
+        if not match or match[2] in expected:
+            raise ValueError('Unexpected presenter checksum entry.')
+        expected[match[2]] = match[1].lower()
+    if expected.keys() != set(FHD_COMPONENT):
+        raise ValueError('Presenter checksum manifest must cover the DLL and WinMD.')
+    payload = {name: (artifact / name).read_bytes() for name in FHD_COMPONENT}
+    if any(hashlib.sha256(data).hexdigest() != expected[name] for name, data in payload.items()):
+        raise ValueError('Presenter component does not match its checksum manifest.')
+    return payload
+
+
+def presenter_manifest(manifest):
+    root = ElementTree.fromstring(manifest)
+    servers = root.findall('{*}Extensions/{*}Extension/{*}InProcessServer')
+    for server in servers:
+        for klass in server.findall('{*}ActivatableClass'):
+            if klass.get('ActivatableClassId') == 'Fhd.Native.RenderHost':
+                if server.findtext('{*}Path') != FHD_COMPONENT[0] or klass.get('ThreadingModel') != 'both':
+                    raise ValueError('The template has a conflicting native presenter registration.')
+                return manifest
+    # Insert beside the existing package-level ProbeNative registration, without rewriting
+    # the namespace declarations referenced by IgnorableNamespaces.
+    server_pattern = rb'<Extension\b[^>]*>[^<]*<InProcessServer>.*?</InProcessServer>\s*</Extension>'
+    registrations = [m for m in re.finditer(server_pattern, manifest, re.DOTALL)
+                     if b'<Path>ProbeNative.dll</Path>' in m[0]]
+    if len(registrations) != 1:
+        raise ValueError('Expected exactly one native probe server in this SDK template.')
+    end = registrations[0].end()
+    extra = (b'\n    <Extension Category="windows.activatableClass.inProcessServer">'
+             b'<InProcessServer><Path>Fhd.Native.dll</Path><ActivatableClass '
+             b'ActivatableClassId="Fhd.Native.RenderHost" ThreadingModel="both" />'
+             b'</InProcessServer></Extension>')
+    return manifest[:end] + extra + manifest[end:]
+
+
+def stage_native_presenter(layout, artifact, checksum):
+    payload = presenter_payload(artifact, checksum)
+    path = layout / 'AppxManifest.xml'
+    manifest = presenter_manifest(path.read_bytes())
+    for name, data in payload.items():
+        (layout / name).write_bytes(data)
+    path.write_bytes(manifest)
+
+
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
@@ -131,7 +188,10 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
                    startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
-                   measure_sdl_frames=False):
+                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None):
+    if (fhd_presenter is None) != (fhd_presenter_checksum is None):
+        raise ValueError('Supply the presenter artifact directory and its checksum together.')
+    presenter = presenter_payload(fhd_presenter, fhd_presenter_checksum) if fhd_presenter else {}
     imports = {}
     for binary in inspect_binaries:
         for module, symbols in system_imports(objdump, binary).items():
@@ -172,6 +232,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The hosted Slay profile requires sign-in and the built Java and SDL adapters.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
+        if presenter:
+            manifest = presenter_manifest(manifest)
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
         if (identity is None or identity.get('Name') != PROBE_ID
                 or identity.get('ProcessorArchitecture') != 'x64'):
@@ -205,6 +267,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
 
         layout.mkdir()
         signed.extractall(layout, entries)
+        for name, data in presenter.items():
+            (layout / name).write_bytes(data)
         # Preserve manifest namespace declarations used by IgnorableNamespaces.
         old_version = f'Version="{base_version}"'.encode()
         if manifest.count(old_version) != 1:
@@ -319,6 +383,10 @@ def main():
     parser.add_argument('layout', type=Path, help='new directory outside the repository')
     parser.add_argument('--version', required=True)
     parser.add_argument('--valve-archive', type=Path, help='pinned bins_win64 ZIP, omit for the repack control')
+    parser.add_argument('--fhd-presenter', type=Path, metavar='ARTIFACT_DIR',
+                        help='stage the signed xbox-fhd-present-x64 workflow artifact')
+    parser.add_argument('--fhd-presenter-checksum', metavar='SHA256',
+                        help='pin the SHA-256 of the supplied presenter artifact SHA256SUMS file')
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
     parser.add_argument('--inspect-pe', type=Path, action='append', default=[],
                         help='report the system imports of a local PE file without packaging it')
@@ -438,7 +506,8 @@ def main():
                    startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
                    stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
-                   measure_sdl_frames=args.measure_sdl_frames)
+                   measure_sdl_frames=args.measure_sdl_frames, fhd_presenter=args.fhd_presenter,
+                   fhd_presenter_checksum=args.fhd_presenter_checksum)
 
 
 if __name__ == '__main__':

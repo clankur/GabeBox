@@ -1,6 +1,7 @@
 name: Build Xbox native game presenter
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp']
