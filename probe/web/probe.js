@@ -22,13 +22,20 @@
                 function finish(inventory) {
                     var result;
                     try {
-                        var probe = steamCore ? XboxProbe.Native.ProbeRunner.runSteamCore(inventory) :
+                        result = steamCore ? XboxProbe.Native.ProbeRunner.runSteamCore(inventory) :
                             (control ? "status=control-ready\r\n" : XboxProbe.Native.ProbeRunner.run());
-                        result = probe;
                     } catch (error) {
                         result = "status=native-component-error\r\n" + errorText(error);
                     }
                     output.textContent = result;
+                    if (steamCore && result.indexOf("create_interface=present\r\n") !== -1) {
+                        var prefix = header + result.replace("status=steam-core-complete\r\n", "");
+                        return XboxProbe.Native.ProbeRunner.runSteamRuntime(file, prefix).then(function () {
+                            return storage.FileIO.readTextAsync(file).then(function (report) {
+                                output.textContent = report;
+                            });
+                        });
+                    }
                     return storage.FileIO.writeTextAsync(file, header + result);
                 }
 

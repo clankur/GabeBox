@@ -4,6 +4,8 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/XboxProbe.Native.h>
+#include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -207,6 +209,59 @@ static std::wstring SteamCoreResult(std::wstring const& packagePath, winrt::hstr
     return result + InspectSteamImports(inventory) + L"status=steam-core-complete\r\n";
 }
 
+static winrt::Windows::Foundation::IAsyncAction SteamRuntime(
+        winrt::Windows::Storage::StorageFile file, winrt::hstring prefix) {
+    using winrt::Windows::Storage::FileIO;
+    using Factory = void *(__cdecl *)(const char *, int *);
+    using CreatePipe = std::int32_t (__cdecl *)();
+    using ReleasePipe = bool (__cdecl *)(std::int32_t);
+    constexpr auto complete = L"status=steam-core-complete\r\n";
+
+    std::wstring report(prefix);
+    co_await FileIO::WriteTextAsync(file, winrt::hstring(report + L"status=steam-factory-starting\r\n"));
+    std::unique_ptr<std::remove_pointer_t<HMODULE>, decltype(&FreeLibrary)> module(
+        LoadPackagedLibrary(L"steamclient64.dll", 0), FreeLibrary);
+    if (!module) {
+        report += L"steam_factory=reload-error\r\nsteam_factory_error=" + Hex(GetLastError()) + L"\r\n";
+        co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
+        co_return;
+    }
+
+    auto factory = reinterpret_cast<Factory>(GetProcAddress(module.get(), "CreateInterface"));
+    if (!factory) {
+        report += L"steam_factory=export-error\r\nsteam_factory_error=" + Hex(GetLastError()) + L"\r\n";
+        co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
+        co_return;
+    }
+    int code = -1;
+    bool ready = factory("SteamClient023", &code) != nullptr && code == 0;
+    report += std::wstring(L"steam_interface=SteamClient023\r\nsteam_factory=") +
+        (ready ? L"success" : L"failed") + L"\r\nsteam_factory_code=" + std::to_wstring(code) + L"\r\n";
+    if (!ready) {
+        co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
+        co_return;
+    }
+
+    auto createPipe = reinterpret_cast<CreatePipe>(GetProcAddress(module.get(), "Steam_CreateSteamPipe"));
+    auto releasePipe = reinterpret_cast<ReleasePipe>(GetProcAddress(module.get(), "Steam_BReleaseSteamPipe"));
+    if (!createPipe || !releasePipe) {
+        report += L"steam_pipe=export-error\r\n";
+        co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
+        co_return;
+    }
+    co_await FileIO::WriteTextAsync(file, winrt::hstring(report + L"status=steam-pipe-starting\r\n"));
+
+    std::int32_t pipe = createPipe();
+    if (pipe > 0) {
+        bool released = releasePipe(pipe);
+        report += std::wstring(L"steam_pipe=") + (released ? L"open-and-release\r\n" : L"release-failed\r\n");
+    } else {
+        report += L"steam_pipe=create-failed\r\n";
+    }
+    report += L"steam_pipe_handle=" + std::to_wstring(pipe) + L"\r\n";
+    co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
+}
+
 struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation::IActivationFactory,
                                         winrt::XboxProbe::Native::IProbeRunnerStatics> {
     winrt::Windows::Foundation::IInspectable ActivateInstance() {
@@ -222,6 +277,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
     winrt::hstring RunSteamCore(winrt::hstring const& inventory) {
         auto package = winrt::Windows::ApplicationModel::Package::Current();
         return winrt::hstring(SteamCoreResult(std::wstring(package.InstalledLocation().Path()) + L"\\", inventory));
+    }
+
+    winrt::Windows::Foundation::IAsyncAction RunSteamRuntime(
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return SteamRuntime(file, prefix);
     }
 };
 
