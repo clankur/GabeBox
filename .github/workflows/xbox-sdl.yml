@@ -12,6 +12,19 @@ permissions:
 jobs:
   sdl2-x64:
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '2.32.10'
+            sha256: '5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165'
+            artifact: xbox-sdl2-x64
+          - version: '2.26.2'
+            sha256: '95d39bc3de037fbdfa722623737340648de4f180a601b0afad27645d150b99e0'
+            artifact: xbox-sdl2-2.26.2-x64
+    env:
+      SDL_VERSION: ${{ matrix.version }}
+      SDL_SOURCE_SHA256: ${{ matrix.sha256 }}
     steps:
       - name: Build SDL2 with the desktop IME disabled
         shell: pwsh
@@ -20,14 +33,15 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $work = New-Item -ItemType Directory "$env:RUNNER_TEMP\xbox-sdl"
           Set-Location $work.FullName
-          $version = '2.32.10'
+          $version = $env:SDL_VERSION
           $archive = "SDL2-$version.tar.gz"
           Invoke-WebRequest "https://github.com/libsdl-org/SDL/releases/download/release-$version/$archive" -OutFile $archive
-          $expected = '5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165'
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) {
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:SDL_SOURCE_SHA256) {
             throw 'Unexpected SDL2 source digest.'
           }
           tar -xf $archive
+          # SDL 2.26.2 declares a CMake 3.0 minimum; CMake 4 needs this policy floor.
+          if ($version -eq '2.26.2') { $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5' }
           cmake -S "SDL2-$version" -B build -G "Visual Studio 17 2022" -A x64 `
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_C_FLAGS=/DSDL_DISABLE_WINDOWS_IME
           cmake --build build --config Release --target SDL2
@@ -42,6 +56,6 @@ jobs:
           [IO.File]::WriteAllText("$output/SHA256SUMS", "$hash  SDL2.dll`n")
       - uses: actions/upload-artifact@v4
         with:
-          name: xbox-sdl2-x64
+          name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/xbox-sdl/output/
           if-no-files-found: error
