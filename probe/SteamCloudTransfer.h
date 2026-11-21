@@ -109,16 +109,34 @@ inline IAsyncOperation<winrt::hstring> StageFile(HttpClient client, File candida
 
     HttpResponseMessage response{nullptr};
     Uri uri{winrt::to_hstring(candidate.url)};
-    for (unsigned redirects = 0; redirects <= 3; ++redirects) {
+    unsigned redirects = 0;
+    unsigned retries = 0;
+    for (;;) {
         if (!ValidCloudUri(uri)) co_return L"transfer-untrusted-host";
         auto operation = client.GetAsync(uri, HttpCompletionOption::ResponseHeadersRead);
         CloudDeadline requestDeadline{operation, deadline};
         response = co_await operation;
         const auto status = static_cast<int>(response.StatusCode());
         if (status == 200) break;
-        if (redirects == 3 || (status != 301 && status != 302 && status != 303 && status != 307 && status != 308)) {
-            co_return L"transfer-http-error";
+        if (retries < 2 && (status == 408 || status == 429 || (status >= 500 && status <= 504))) {
+            auto delay = std::chrono::milliseconds(1000u << retries++);
+            const auto retryAfter = response.Headers().RetryAfter();
+            if (retryAfter) {
+                using namespace std::chrono;
+                if (auto seconds = retryAfter.Delta()) delay = (std::max)(delay, ceil<milliseconds>(seconds.Value()));
+                else if (auto date = retryAfter.Date()) delay = (std::max)(delay, ceil<milliseconds>(date.Value() - winrt::clock::now()));
+            }
+            response.Close();
+            const auto now = GetTickCount64();
+            if (now >= deadline || static_cast<ULONGLONG>(delay.count()) >= deadline - now)
+                co_return winrt::hstring(L"transfer-http-" + std::to_wstring(status));
+            winrt::apartment_context caller;
+            co_await winrt::resume_after(delay);
+            co_await caller;
+            continue;
         }
+        if (redirects++ == 3 || (status != 301 && status != 302 && status != 303 && status != 307 && status != 308))
+            co_return winrt::hstring(L"transfer-http-" + std::to_wstring(status));
         uri = response.Headers().Location();
         response.Close();
     }
@@ -236,6 +254,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
         filter.AllowUI(false);
         filter.CookieUsageBehavior(HttpCookieUsageBehavior::NoCookies);
         filter.CacheControl().WriteBehavior(HttpCacheWriteBehavior::NoCache);
+        filter.CacheControl().ReadBehavior(HttpCacheReadBehavior::NoCache);
         HttpClient client{filter};
         const auto transferDeadline = GetTickCount64() + 120000;
         JsonArray files;
