@@ -37,16 +37,30 @@
     }
 
     function read(windows, navigator) {
+        var first, chord = buttons.start | buttons.back;
         try {
             var pads = windows.Gaming.Input.Gamepad.gamepads;
-            if (pads.size) return windowsSample(pads.getAt(0).getCurrentReading());
+            var count = typeof pads.size === "number" ? pads.size : pads.length;
+            for (var i = 0; i < count; ++i) {
+                var device = pads.getAt ? pads.getAt(i) : pads[i];
+                var reading = device.getCurrentReading();
+                if (!first) first = windowsSample(reading);
+                // Keep the game's normal input on its first controller. Allow
+                // another connected controller to bring up Steam.
+                if ((reading.buttons & 3) === 3) return windowsSample(reading);
+            }
+            if (first) return first;
         } catch (_) {
             // Web Gamepad also covers hosts without the Xbox Runtime projection.
         }
         var web = navigator.getGamepads ? navigator.getGamepads() : [];
-        for (var i = 0; i < web.length; ++i) {
-            if (web[i] && web[i].connected && web[i].mapping === "standard") return browserSample(web[i]);
+        for (var j = 0; j < web.length; ++j) {
+            if (!web[j] || !web[j].connected || web[j].mapping !== "standard") continue;
+            var sample = browserSample(web[j]);
+            if (!first) first = sample;
+            if ((sample[0] & chord) === chord) return sample;
         }
+        if (first) return first;
         return idle;
     }
 

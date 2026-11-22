@@ -25,3 +25,12 @@ test("the standard web gamepad fallback preserves D-pad and trigger inputs", () 
     assert.deepEqual(sample, [pad.connected | pad.buttons.b | pad.buttons.right, 0, 0, 0, 32767, 0, -32768]);
     assert.strictEqual(pad.read({}, {}), pad.idle);
 });
+
+test("a controller in the second Xbox slot can open Steam over a single-player game", () => {
+    const reading = {buttons: 0, leftTrigger: 0, rightTrigger: 0};
+    const devices = [{getCurrentReading: () => reading}, {getCurrentReading: () => ({...reading, buttons: 3})}];
+    for (const gamepads of [devices, {size: 2, getAt: i => devices[i]}]) {
+        assert.equal(pad.read({Gaming: {Input: {Gamepad: {gamepads}}}}, {})[0],
+            pad.connected | pad.buttons.start | pad.buttons.back);
+    }
+});

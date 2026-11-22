@@ -111,7 +111,7 @@
             if (!host || failed || value === gameForeground) return;
             gameForeground = value;
             host.reply(JSON.stringify({nativeGameForeground: value}));
-            if (primaryXaml) window.dispatchEvent(new CustomEvent("steam-game-foreground", {detail: value}));
+            if (window.dispatchEvent) window.dispatchEvent(new CustomEvent("steam-game-foreground", {detail: value}));
         }
         function gameEvent(overlay) {
             if (!host || failed) return;

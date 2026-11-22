@@ -82,7 +82,8 @@
         var pointerHeld = false;
         var pointerX = 0.5, pointerY = 0.5;
         var lastPointer = -1, lastKeys = -1;
-        var animation, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0, trialRetry = 0;
+        var mouseEdges = [], awaitingMouse = 0;
+        var animation, inputTimer, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0, trialRetry = 0;
         var trialComplete = false;
         var lastTime = 0;
         var ready = false, closing = false, stopped = false;
@@ -98,6 +99,7 @@
             var restored = nativeView && nativeView.close();
             ready = false;
             cancelAnimationFrame(animation);
+            if (inputTimer !== undefined) clearTimeout(inputTimer);
             exit.removeEventListener("click", quit);
             resume.removeEventListener("click", hideMenu);
             keyboard.removeEventListener("click", openText);
@@ -106,10 +108,10 @@
             textCancel.removeEventListener("click", closeText);
             window.removeEventListener("keydown", setKey, true);
             window.removeEventListener("keyup", setKey, true);
-            canvas.removeEventListener("pointermove", setPointer);
-            canvas.removeEventListener("pointerdown", setPointer);
-            canvas.removeEventListener("pointerup", setPointer);
-            canvas.removeEventListener("pointercancel", setPointer);
+            screen.removeEventListener("pointermove", setPointer, true);
+            screen.removeEventListener("pointerdown", setPointer, true);
+            screen.removeEventListener("pointerup", setPointer, true);
+            screen.removeEventListener("pointercancel", setPointer, true);
             window.removeEventListener("blur", onBlur);
             window.removeEventListener("focus", onFocus);
             window.removeEventListener("steam-game-foreground", onGameForeground);
@@ -248,6 +250,8 @@
         function releaseKeys() {
             held = {};
             pointerHeld = false;
+            mouseEdges.length = 0;
+            awaitingMouse = 0;
             if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
             if (ready && nativePad) neutralPad();
             if (keyboardReady) runner.resetSteamSdlKeyboard();
@@ -271,15 +275,42 @@
         }
 
         function setPointer(event) {
-            if (!ready || !firstFrame || !menu.hidden || !textForm.hidden) return;
-            var bounds = canvas.getBoundingClientRect();
+            if (!ready || firstFrame === undefined || !gameInput || !foreground || closing || !menu.hidden || !textForm.hidden) return;
+            var bounds = (nativeView && nativeView.primary ? screen : canvas).getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
             pointerX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
             pointerY = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
-            pointerHeld = !!(event.buttons & 1);
+            var wasHeld = pointerHeld;
+            pointerHeld = event.type !== "pointercancel" && !!(event.buttons & 1);
+            // Publish mouse events as they arrive. Media Foundation can keep playing
+            // its video plane while the HTML canvas has no animation frames due.
+            var pointer = encodePointer(pointerHeld);
+            if (wasHeld !== pointerHeld) {
+                if (mouseEdges.length < 32) mouseEdges.push(pointer);
+                else mouseEdges[mouseEdges.length - 1] = pointer;
+            }
+            publishMouse(pointer, lastKeys < 0 ? 0 : lastKeys);
             if (event.type === "pointerdown") {
                 canvas.focus();
-                if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+                if (screen.setPointerCapture) screen.setPointerCapture(event.pointerId);
+            }
+        }
+
+        // The SDL mailbox holds one state. Preserve each real button edge until
+        // the game acknowledges it, even when down/up arrive within one tick.
+        function publishMouse(pointer, keys) {
+            if (awaitingMouse && runner.steamSdlInputAck() !== awaitingMouse) return;
+            awaitingMouse = 0;
+            var edge = mouseEdges.length > 0;
+            if (edge) pointer = mouseEdges[0];
+            if (!edge && pointer === lastPointer && keys === lastKeys) return;
+            var serial = runner.sendSteamSdlInput(pointer, keys);
+            if (!serial) return;
+            lastPointer = pointer;
+            lastKeys = keys;
+            if (edge) {
+                mouseEdges.shift();
+                if (runner.steamSdlInputAck) awaitingMouse = serial;
             }
         }
 
@@ -436,11 +467,17 @@
             if (!timing || timingReport) complete(report + (timingReport || ""));
         }
 
+        function scheduleTick() {
+            if (nativeView && nativeView.primary) {
+                inputTimer = setTimeout(function () { tick(performance.now()); }, foreground ? 16 : 150);
+            } else animation = requestAnimationFrame(tick);
+        }
+
         function tick(now) {
             if (stopped) return;
             // The secondary view owns rendering and live input until the user opens a player overlay.
             if (nativeView && !nativeView.primary && menu.hidden && textForm.hidden) {
-                animation = requestAnimationFrame(tick);
+                scheduleTick();
                 return;
             }
             try {
@@ -549,20 +586,17 @@
                         else sendPad(pad);
                     }
                     var input = movePointer(lastTime ? Math.min(50, now - lastTime) : 0, pad);
-                    if (input.pointer !== lastPointer || input.keys !== lastKeys) {
-                        if (!nativePad || pointerHeld || lastPointer !== -1) {
-                            runner.sendSteamSdlInput(input.pointer, input.keys);
-                        }
+                    if (nativePad && lastPointer === -1 && !pointerHeld && !mouseEdges.length && !input.keys) {
                         lastPointer = input.pointer;
-                        lastKeys = input.keys;
-                    }
+                        lastKeys = 0;
+                    } else publishMouse(input.pointer, input.keys);
                     if (!nativePad) {
                         cursor.style.left = pointerX * 100 + "%";
                         cursor.style.top = pointerY * 100 + "%";
                     }
                 }
                 lastTime = now;
-                animation = requestAnimationFrame(tick);
+                scheduleTick();
             } catch (_) {
                 runner.quitSteamSdl();
                 stop("steam_sdl_host_frame=presentation-error\r\n");
@@ -595,10 +629,10 @@
         textCancel.addEventListener("click", closeText);
         window.addEventListener("keydown", setKey, true);
         window.addEventListener("keyup", setKey, true);
-        canvas.addEventListener("pointermove", setPointer);
-        canvas.addEventListener("pointerdown", setPointer);
-        canvas.addEventListener("pointerup", setPointer);
-        canvas.addEventListener("pointercancel", setPointer);
+        screen.addEventListener("pointermove", setPointer, true);
+        screen.addEventListener("pointerdown", setPointer, true);
+        screen.addEventListener("pointerup", setPointer, true);
+        screen.addEventListener("pointercancel", setPointer, true);
         window.addEventListener("blur", onBlur);
         window.addEventListener("focus", onFocus);
         window.addEventListener("steam-game-foreground", onGameForeground);
@@ -655,7 +689,7 @@
                     }
                 }, nativePad, bigPictureMode ? screen : null);
             }
-            animation = requestAnimationFrame(tick);
+            scheduleTick();
         }, function () { stop("steam_sdl_host=launch-error\r\n"); });
         return finished;
     }

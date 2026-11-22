@@ -85,7 +85,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         stage_session = runpy.run_path(str(PROBE / "big-picture-bridge/stage-session.py"))["stage_session_component"]
         stage_session(staged, session_artifact, session_checksum)
         for name in ("xbox-system-mode.js", "steam-signin.js", "steam-signin.css", "steam-game-launch.js", "steam-sdl-host.js",
-                     "steam-sdl-native-view.js", "steam-big-picture-broker.js", "xcom-dos.js"):
+                     "steam-sdl-native-view.js", "steam-sdl-gamepad.js", "steam-big-picture-broker.js", "xcom-dos.js"):
             shutil.copyfile(PROBE / "signin" / name, staged / name)
         shutil.copyfile(staged / "xcom-dos.js", staged / "xcom-runtime/xcom-dos.js")
 

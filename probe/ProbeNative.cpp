@@ -2367,6 +2367,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return steamSdlSurface ? steamSdlSurface->Gamepad(buttons, {leftX, leftY, rightX, rightY, leftTrigger, rightTrigger}) : 0;
     }
 
+    std::uint32_t SteamSdlInputAck() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->InputAck() : 0;
+    }
+
     std::uint32_t SteamSdlGamepadAck() {
         std::lock_guard lock(steamSdlMutex);
         return steamSdlSurface ? steamSdlSurface->GamepadAck() : 0;

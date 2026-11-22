@@ -36,5 +36,6 @@ namespace XboxProbe.Native
         static void QuitSteamSdl();
         static String SteamSdlRgbDeltaFrame(UInt32 previousSequence);
         static String SteamSessionSteamId();
+        static UInt32 SteamSdlInputAck();
     };
 }
