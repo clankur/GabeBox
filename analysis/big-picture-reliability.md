@@ -164,6 +164,10 @@ The signed native XAML APPX has SHA-256 `c095fc30012ffd4ba983485d8a8fb77aa4a468c
 
 The signed native XAML APPX has SHA-256 `4276875f0a52ac4dd715b53e9837b16ce974765e094beb40987f1ef4cf21ee8c`. A comparison of all 1,266 signed members against the verified, reconstructed `.31` package found changes to `steam-sdl-native-view.js`, `steam-sdl-host.js`, the manifest, block map, content types and signature. All Valve assets and native binaries match `.31`. No controlled hardware result has been recorded for this package yet.
 
+### Build 1.0.230.33
+
+The signed native XAML APPX has SHA-256 `714a906c907c2e35b1c940755ea59f69d46b8ff48806a44079ce109dc2b3c970`. All 1,266 member names match `.32`. The changed application files are the FHD DLL and WinMD, the Valve host adapter, and three SDL presenter and input scripts. All Valve assets match. Hardware acceptance requires a separately recorded run.
+
 ## Direct native game display
 
 For a build that presents game frames through the primary XAML panel, retain the following original whole-output captures from the same run. Index each with its source, capture time, dimensions and SHA-256. Open the originals to identify the actual content.
@@ -175,6 +179,16 @@ For a build that presents game frames through the primary XAML panel, retain the
 5. Record stock Exit and confirmation as a separate test. Verify the matched game PID disappears naturally, the host persists and a fresh whole-output capture shows the foreground Library. Document how the controls were operated.
 
 If the console screenshot endpoint fails, identify the missing TV frame and retain any direct physical observation with its time and source. A WebView image, decoded-video frame, source framebuffer or successful native Present call alone cannot prove that the game appeared on the TV.
+
+Retain a JSON object with the independently recorded PNG SHA-256 values keyed by `library-before-play`, `stock-play`, `title`, `overlay`, `library-while-running`, `resume` and `resumed-title`. Each original PNG has a same-stem JSON capture receipt. The checker verifies the pinned package and TV images, acquisition order, process continuity, native panel visibility, and advancing CPU/GPU swap counts. It rejects duplicate image bytes across phases because identical stills cannot resolve whether an old capture was reused. When consecutive game title frames are pixel-identical, obtain a fresh capture showing a visible change. [Direct display checker](../probe/verify-big-picture-display.py)
+
+```sh
+python3 probe/verify-big-picture-display.py "$APPX33" "$RUN_DIR" "$TV_PHASE_PINS" \
+  --sha256 714a906c907c2e35b1c940755ea59f69d46b8ff48806a44079ce109dc2b3c970 \
+  --captures "$RUN_DIR/cycle-1-slay" --app-id 646570 --game-image java.exe
+```
+
+Review the seven original images to identify the Valve controls, game title and visible screen edges. The phase labels come from the capture operator. A successful mechanical check alone cannot authenticate a physical button press or prove graceful exit.
 
 ## Game launches and returns
 
