@@ -53,7 +53,8 @@ def release_layout(base, destination, version):
 
 
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
-                   presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None):
+                   presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
+                   dwarf_sdl=None, shared_sdl=None):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if (presenter_artifact is None) != (presenter_checksum is None):
@@ -64,6 +65,21 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         staged = Path(temp) / "layout"
         staged.mkdir()
         release_layout(base, staged, version)
+        if dwarf_sdl or shared_sdl:
+            load_sdl = runpy.run_path(str(PROBE.parent / "xbox-deploy.py"))["load_sdl_artifact"]
+            for profile, app_id in ((dwarf_sdl, 975370), (shared_sdl, 413150)):
+                if not profile:
+                    continue
+                artifact, digest = profile
+                data = load_sdl(Path(artifact), app_id)
+                if hashlib.sha256(data).hexdigest() != digest:
+                    raise ValueError(f"SDL runtime differs from its pinned Windows build for {app_id}.")
+                target = staged
+                if app_id == 975370:
+                    target = staged / "DwarfRuntime"
+                    target.mkdir()
+                (target / "SDL2.dll").write_bytes(data)
+                shutil.copyfile(Path(artifact) / "LICENSE.txt", target / "LICENSE.SDL2")
         if presenter_artifact is not None:
             STEAM_CORE["stage_native_presenter"](staged, presenter_artifact, presenter_checksum)
         stage_session = runpy.run_path(str(PROBE / "big-picture-bridge/stage-session.py"))["stage_session_component"]
@@ -110,7 +126,11 @@ if __name__ == "__main__":
     parser.add_argument("--presenter-checksum", help="SHA256 of the presenter artifact SHA256SUMS file")
     parser.add_argument("--primary-xaml", type=Path, help="optional Windows native primary XAML host artifact")
     parser.add_argument("--primary-checksum", help="SHA256 of the XAML host artifact SHA256SUMS file")
+    parser.add_argument("--dwarf-sdl", nargs=2, metavar=("ARTIFACT", "DLL_SHA256"),
+                        help="Windows SDL 2.26.2 artifact for Dwarf Fortress")
+    parser.add_argument("--shared-sdl", nargs=2, metavar=("ARTIFACT", "DLL_SHA256"),
+                        help="Windows SDL 2.30.9 artifact for Slay the Spire and Stardew Valley")
     args = parser.parse_args()
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
-                   args.primary_xaml, args.primary_checksum)
+                   args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl)

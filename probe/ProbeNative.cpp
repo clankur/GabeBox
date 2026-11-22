@@ -9,6 +9,7 @@
 #include <winrt/Windows.Security.Cryptography.DataProtection.h>
 #include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.System.Diagnostics.h>
 #include <winrt/Windows.System.h>
@@ -1016,6 +1017,73 @@ static bool IsLocalSteamInstall(std::wstring const& directory, std::wstring cons
         directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
 }
 
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SdlFileDigest(
+        winrt::Windows::Storage::StorageFile file) {
+    using namespace winrt::Windows::Security::Cryptography;
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExFromAppW(file.Path().c_str(), GetFileExInfoStandard, &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw winrt::hresult_access_denied();
+    auto properties = co_await file.GetBasicPropertiesAsync();
+    if (!properties.Size() || properties.Size() > 8 * 1024 * 1024) co_return winrt::hstring{};
+    auto bytes = co_await winrt::Windows::Storage::FileIO::ReadBufferAsync(file);
+    auto digest = Core::HashAlgorithmProvider::OpenAlgorithm(L"SHA256").HashData(bytes);
+    co_return CryptographicBuffer::EncodeToHexString(digest);
+}
+
+// The native Dwarf executable loads its adjacent SDL, unlike the managed and
+// Java hosts which select the signed package's shared SDL explicitly.
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> PrepareDwarfRuntime(
+        winrt::Windows::Storage::StorageFolder library, bool completedManifest) {
+    using namespace winrt::Windows::Storage;
+    auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+    auto runtime = (co_await package.TryGetItemAsync(L"DwarfRuntime")).try_as<StorageFolder>();
+    if (!runtime) co_return winrt::hstring(L"existing-install");
+    if (!completedManifest) co_return winrt::hstring(L"not-installed");
+    auto replacement = co_await runtime.GetFileAsync(L"SDL2.dll");
+    auto desired = co_await SdlFileDigest(replacement);
+    if (desired.empty()) throw winrt::hresult_invalid_argument();
+    auto directory = library;
+    for (const auto component : {L"steamapps", L"common", L"Dwarf Fortress"}) {
+        directory = co_await directory.GetFolderAsync(component);
+        if (!SlayCloudDirectoryExists(std::wstring(directory.Path()))) throw winrt::hresult_access_denied();
+    }
+    auto installed = co_await directory.GetFileAsync(L"SDL2.dll");
+    auto original = co_await SdlFileDigest(installed);
+    auto data = ApplicationData::Current();
+    auto settings = data.LocalSettings().Values();
+    const winrt::hstring setting = L"DwarfRuntimeDigest";
+    if (original == desired) {
+        settings.Insert(setting, winrt::box_value(desired));
+        co_return winrt::hstring(L"ready");
+    }
+    auto previous = winrt::unbox_value_or<winrt::hstring>(settings.TryLookup(setting), L"");
+    // Accept the publisher's pinned 2.26.2 and the previously deployed FHD
+    // adapter. Preserve a player's modified or newly updated runtime.
+    if (original != L"9603fdfd2b4bd75b3574bb993e25332bae820a66f18e7ffb6f8c82cb4f6c004a" &&
+        original != L"3a8d9e8c8e0fdcc9c29d3725f38e2384c26217333ea0fc48a3e26e6e2c872cc9" &&
+        (previous.empty() || original != previous))
+        co_return winrt::hstring(L"existing-custom-version");
+    auto backups = co_await data.LocalFolder().CreateFolderAsync(L"SteamRuntimeBackups", CreationCollisionOption::OpenIfExists);
+    if (!SlayCloudDirectoryExists(std::wstring(backups.Path()))) throw winrt::hresult_access_denied();
+    auto name = L"975370-SDL2-" + original + L".dll";
+    auto backup = (co_await backups.TryGetItemAsync(name)).try_as<StorageFile>();
+    // Publish a verified copy under its final name only after the copy is complete.
+    if (!backup) {
+        backup = co_await installed.CopyAsync(data.TemporaryFolder(), L"Dwarf-backup.tmp", NameCollisionOption::GenerateUniqueName);
+        if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
+        co_await backup.MoveAsync(backups, name, NameCollisionOption::FailIfExists);
+    }
+    if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
+    auto pending = co_await replacement.CopyAsync(data.TemporaryFolder(), L"Dwarf-SDL2.tmp", NameCollisionOption::GenerateUniqueName);
+    if (co_await SdlFileDigest(pending) != desired || co_await SdlFileDigest(installed) != original)
+        throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
+    co_await pending.MoveAndReplaceAsync(installed);
+    if (co_await SdlFileDigest(co_await directory.GetFileAsync(L"SDL2.dll")) != desired)
+        throw winrt::hresult_error(E_FAIL);
+    settings.Insert(setting, winrt::box_value(desired));
+    co_return winrt::hstring(L"updated");
+}
+
 static const wchar_t *SteamPathScope(std::wstring const& directory, std::wstring const& library,
         std::wstring const& data, std::wstring const& package) {
     if (directory.empty()) return L"unresolved";
@@ -1825,6 +1893,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
     if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay) && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+    }
+    if (hostedSdl && app == dwarfFortressAppId) {
+        try {
+            auto state = co_await PrepareDwarfRuntime(folder, installedManifest);
+            if (state == L"not-installed") co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+            report += std::wstring(L"steam_dwarf_runtime=") + state.c_str() + L"\r\n";
+        } catch (winrt::hresult_error const& error) {
+            co_return winrt::hstring(report + L"steam_launch=sdl-runtime-error\r\nsteam_sdl_hresult=" + Hex(error.code()) + L"\r\n");
+        }
     }
     {
         std::lock_guard lock(steamSessionMutex);
