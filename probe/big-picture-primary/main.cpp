@@ -1,9 +1,7 @@
 // The existing packaged account/game host shares the XAML view with Valve's isolated WebView2.
 #include <windows.h>
 #include <cstdio>
-#include <algorithm>
 #include <memory>
-#include <string>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Web.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
@@ -44,37 +42,16 @@ bool sameOrdinal(hstring const& a, hstring const& b) noexcept
     return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
-// NavigationStarting checks only package URIs. The engine may report a translated
-// address on completion; match only the installed, signed page of this very package.
-bool matchesCommittedAccount(Uri const& uri, Uri const& local, Uri const& qualified)
+// EdgeHTML reports a qualified and normalized package authority upon commit.
+// Uri.Equals can disagree across representations even though each component
+// matches. Compare the scheme and package authority case-insensitively, keeping
+// the path exact and rejecting all optional URL components.
+bool matchesCommittedAccount(Uri const& uri, Uri const& qualified)
 {
-    if (!uri) { checkpoint("completion-uri-absent"); return false; }
-    auto package = Windows::ApplicationModel::Package::Current();
-    auto host = uri.Host();
-    auto scheme = uri.SchemeName();
-    bool clean = uri.Query().empty() && uri.Fragment().empty() && uri.UserName().empty() && uri.Password().empty();
-    checkpoint(clean ? "completion-no-parameters" : "completion-parameters");
-    if (!clean) return false;
-    checkpoint(scheme == L"ms-appx-web" ? "completion-scheme-package-web" :
-               scheme == L"ms-appx" ? "completion-scheme-package" :
-               scheme == L"file" ? "completion-scheme-file" :
-               scheme == L"about" ? "completion-scheme-about" :
-               scheme == L"https" ? "completion-scheme-https" : "completion-scheme-other");
-    checkpoint(host.empty() ? "completion-authority-empty" :
-               sameOrdinal(host, package.Id().Name()) ? "completion-authority-package-name" :
-               sameOrdinal(host, package.Id().FamilyName()) ? "completion-authority-package-family" :
-               sameOrdinal(host, package.Id().FullName()) ? "completion-authority-package-full" :
-               "completion-authority-other");
-    if (uri.Equals(local) || uri.Equals(qualified)) return true;
-    bool page = uri.Path() == L"/steam-signin.html";
-    checkpoint(page ? "completion-path-package-page" : "completion-path-other");
-    if (scheme != L"file" || !host.empty()) return false;
-    std::wstring filePath{package.InstalledLocation().Path()};
-    std::replace(filePath.begin(), filePath.end(), L'\\', L'/');
-    Uri signedFile{L"file:///" + filePath + L"/steam-signin.html"};
-    bool matches = uri.Equals(signedFile);
-    checkpoint(matches ? "completion-exact-installed-file" : "completion-other-file");
-    return matches;
+    return uri && sameOrdinal(uri.SchemeName(), L"ms-appx-web") &&
+           (uri.Host().empty() || sameOrdinal(uri.Host(), qualified.Host())) &&
+           uri.Port() == qualified.Port() && uri.Path() == L"/steam-signin.html" &&
+           uri.Query().empty() && uri.Fragment().empty() && uri.UserName().empty() && uri.Password().empty();
 }
 
 struct SteamApplication : ApplicationT<SteamApplication>
@@ -118,7 +95,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
                         checkpoint("account-navigation-error", static_cast<HRESULT>(event.WebErrorStatus()));
                         return;
                     }
-                    if (!matchesCommittedAccount(event.Uri(), local, qualified) || !approvedStart) {
+                    if (!matchesCommittedAccount(event.Uri(), qualified) || !approvedStart) {
                         checkpoint("account-document-unrecognized", E_ACCESSDENIED);
                         return;
                     }
