@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <winstring.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
 #include <windows.ui.xaml.media.dxinterop.h>
