@@ -299,6 +299,19 @@ Some collector receipts record only the native run and the TV capture source. Su
 
 ## Account and first-install coverage
 
+### Verify a public Store visit on Xbox
+
+For the first Store visit in a fresh production run, retain original TV frames from the Library, the focused Store entry, the loaded storefront, a linked product if visited, the returned Library, and Settings → Internet. Record the acquisition filename and SHA-256 of each frame independently in a JSON object keyed by its phase. The Store checker compares both process snapshots around each capture, the native HTTPS result, Windows' preferred Internet route and the operator's recorded keyboard selection. A prior successful Store request cannot satisfy a new first-visit check. [Store evidence checker](../probe/verify-big-picture-store.py)
+
+```sh
+python3 probe/verify-big-picture-store.py "$APPX" "$LAUNCH_RECEIPT" "$STORE_CAPTURE_DIR" "$PHASE_PINS" \
+  --sha256 "$SIGNED_RELEASE_SHA256"
+```
+
+Inspect the landing frame for actual public offerings and the side menu frame for its focused row. A status line, a screenshot of the local Valve shell alone, or WDP keyboard input alone cannot establish what the separate Store surface displayed.
+
+### Account coverage
+
 The `.19` TV and frame receipts use a previously authenticated Steam account on the test console. A cold process start preserves saved credentials, game installations and browser storage. They do not verify a fresh installation, a second real account, or an account with no games.
 
 The signed `.19` archive contains no Steam user directory, WebView2 profile, license catalog or automatic game-launch configuration. Inspection found no fixed individual SteamID in the app-authored JavaScript. The native client checks the live Steam identity against the requested identity before asking for its licenses. The broker rechecks the native owner around asynchronous library and launch operations. The three game-specific presenter adapters explain explicit AppIDs in the game path. [Native sign-in](../probe/ProbeNative.cpp) · [Broker](../probe/signin/steam-big-picture-broker.js)
