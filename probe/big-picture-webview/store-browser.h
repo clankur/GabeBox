@@ -16,9 +16,9 @@ using namespace Windows::Data::Json;
 using namespace Windows::UI::Composition;
 using namespace Windows::UI::Core;
 
-// Valve supplies this exact, inert initial page to MainBrowser. A new
-// controller can already be at about:blank before event handlers are installed.
-inline constexpr wchar_t initialPage[] = L"data:text/html,%3Cbody%3E%3C%2Fbody%3E";
+// Distinct from every external origin and from the controller's implicit
+// about:blank. WebResourceRequested serves only this exact empty HTML page.
+inline constexpr wchar_t initialPage[] = L"https://xbox-store-bootstrap.invalid/index.html";
 
 inline bool allowed(hstring const& raw, bool resource = false) noexcept {
     try {
@@ -151,23 +151,36 @@ public:
             page.PermissionRequested([](auto const&, auto const& e) { e.State(CoreWebView2PermissionState::Deny); });
             page.DownloadStarting([](auto const&, auto const& e) { e.Cancel(true); });
             page.AddWebResourceRequestedFilter(L"*",CoreWebView2WebResourceContext::All);
-            page.WebResourceRequested([env](auto const&, auto const& e) {
+            auto weak = weak_from_this();
+            page.WebResourceRequested([env, weak](auto const&, auto const& e) {
                 auto url = e.Request().Uri();
+                if (url == initialPage) {
+                    e.Response(env.CreateWebResourceResponse(nullptr, 200, L"OK",
+                        L"Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'"));
+                    if (auto s = weak.lock(); s && !s->stopped) s->reportStage(L"bootstrap-served", 0);
+                    return;
+                }
                 if (url == L"about:blank" || std::wstring_view(url).starts_with(L"data:") ||
                     std::wstring_view(url).starts_with(L"blob:https://store.steampowered.com/") || allowed(url,true)) return;
                 e.Response(env.CreateWebResourceResponse(nullptr,403,L"Forbidden",L""));
             });
-            auto weak = weak_from_this();
             page.FrameNavigationStarting([](auto const&, auto const& e) {
                 if (e.Uri() != L"about:blank" && !allowed(e.Uri(),true)) e.Cancel(true);
             });
             page.NavigationStarting([weak](auto const&, auto const& e) {
                 auto s = weak.lock();
-                if (!s || s->stopped || (e.Uri() != initialPage && e.Uri() != L"about:blank" && !allowed(e.Uri()))) { e.Cancel(true); return; }
-                if (e.Uri() == L"about:blank") return;
+                if (!s || s->stopped) { e.Cancel(true); return; }
+                if (e.Uri() != initialPage && e.Uri() != L"about:blank" && !allowed(e.Uri())) {
+                    if (!s->booted) s->reportStage(L"bootstrap-denied", 0);
+                    e.Cancel(true); return;
+                }
+                if (e.Uri() == L"about:blank") {
+                    if (!s->booted) s->reportStage(L"initial-about-blank", 0);
+                    return;
+                }
                 s->navigationId = e.NavigationId(); s->navigating = e.Uri();
-                if (allowed(e.Uri())) s->reportNavigation(false, 0, false);
-                else s->reportStage(L"bootstrap-started", 0);
+                if (e.Uri() == initialPage) s->reportStage(L"bootstrap-started", 0);
+                else s->reportNavigation(false, 0, false);
                 JsonObject data; data.SetNamedValue(L"url",JsonValue::CreateStringValue(e.Uri() == initialPage ? hstring(L"about:blank") : e.Uri())); s->emit(L"start",data);
             });
             page.NavigationCompleted([weak](auto const& sender, auto const& e) {
@@ -208,6 +221,26 @@ public:
                 }
             });
             apply();
+            // Some Xbox controllers already own a complete empty document and
+            // emit no initial navigation events. Inspect only our script-free
+            // initial context, before any external navigation is permitted.
+            bool hasInitialDocument = false;
+            try {
+                auto initial = co_await page.ExecuteScriptAsync(
+                    L"location.href === 'about:blank' && window === window.top && !window.opener && "
+                    L"document.readyState === 'complete' && !!document.body && !document.body.hasChildNodes()");
+                hasInitialDocument = initial == L"true";
+            } catch (hresult_error const&) {}
+            if (stopped) co_return;
+            if (hasInitialDocument) {
+                booted = true;
+                reportStage(L"initial-document-confirmed", 0);
+                JsonObject data;
+                data.SetNamedValue(L"url", JsonValue::CreateStringValue(L"about:blank"));
+                emit(L"initial-document", data);
+                if (!pendingUrl.empty()) page.Navigate(std::exchange(pendingUrl, hstring{}));
+                co_return;
+            }
             reportStage(L"opening-bootstrap", 0);
             page.Navigate(initialPage);
         } catch (...) { if (!stopped) error(to_hresult().value); }

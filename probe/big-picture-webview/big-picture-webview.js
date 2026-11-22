@@ -231,7 +231,7 @@
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
             if (request.method === "store-native-stage") {
-                if (!/^(create-received|creating-controller|configuring-controller|opening-bootstrap|bootstrap-started|bootstrap-complete|bootstrap-failed|public-requested|command-error|error|visible|hidden|http-status-unavailable|browser-process-failed)$/.test(request.stage) ||
+                if (!/^(create-received|creating-controller|configuring-controller|initial-document-confirmed|opening-bootstrap|bootstrap-started|bootstrap-served|bootstrap-denied|initial-about-blank|bootstrap-complete|bootstrap-failed|public-requested|command-error|error|visible|hidden|http-status-unavailable|browser-process-failed)$/.test(request.stage) ||
                     !Number.isInteger(request.code)) return;
                 if (request.stage === "create-received") { storeStages = []; storeNavigation = ""; }
                 if (storeStages.length >= 16) storeStages.shift();
