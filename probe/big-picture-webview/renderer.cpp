@@ -53,6 +53,19 @@ hstring openingAccount;
 hstring status = L"closed";
 std::deque<hstring> requests;
 hstring captureResult;
+hstring storeNavigationResult;
+std::deque<hstring> storeStages;
+
+void storeProgress(wchar_t const* stage, int code) {
+    Windows::Data::Json::JsonObject event;
+    using Windows::Data::Json::JsonValue;
+    event.SetNamedValue(L"method", JsonValue::CreateStringValue(L"store-native-stage"));
+    event.SetNamedValue(L"stage", JsonValue::CreateStringValue(stage));
+    event.SetNamedValue(L"code", JsonValue::CreateNumberValue(code));
+    slim_lock_guard lock(gate);
+    if (storeStages.size() >= 16) storeStages.pop_front();
+    storeStages.push_back(event.Stringify());
+}
 
 void checkpoint(std::wstring_view stage) {
     slim_lock_guard lock(gate);
@@ -165,6 +178,7 @@ struct View : implements<View, IFrameworkView> {
             auto action = message.GetNamedString(L"action");
             if (action == L"create") {
                 if (store) return;
+                storeProgress(L"create-received", 0);
                 auto report = [](bool complete, int http, bool success) {
                     Windows::Data::Json::JsonObject event;
                     using Windows::Data::Json::JsonValue;
@@ -173,16 +187,16 @@ struct View : implements<View, IFrameworkView> {
                     event.SetNamedValue(L"http", JsonValue::CreateNumberValue(http));
                     event.SetNamedValue(L"success", JsonValue::CreateBooleanValue(success));
                     slim_lock_guard lock(gate);
-                    if (requests.size() < maxPending) requests.push_back(event.Stringify());
+                    storeNavigationResult = event.Stringify();
                 };
-                store = std::make_shared<steam_store::Browser>(id, web, document, root, report);
+                store = std::make_shared<steam_store::Browser>(id, web, document, root, report, storeProgress);
                 layoutStore();
                 store->start(environment, window);
             } else if (store && store->identifier() == id) {
                 if (action == L"close") { store->close(); store.reset(); }
                 else store->command(id,action,message);
             }
-        } catch (hresult_error const&) {}
+        } catch (hresult_error const& e) { storeProgress(L"command-error", e.code().value); }
     }
 
     fire_and_forget suspendHidden(CoreWebView2 browser) {
@@ -366,7 +380,7 @@ struct View : implements<View, IFrameworkView> {
         closePopup();
         cloudCache->cancel();
         document->committed = false;
-        { slim_lock_guard lock(gate); requests.clear(); }
+        { slim_lock_guard lock(gate); requests.clear(); storeStages.clear(); storeNavigationResult = hstring{}; }
         checkpoint(L"navigation");
         web.Navigate(signedEntry);
     }
@@ -863,7 +877,7 @@ struct View : implements<View, IFrameworkView> {
                 const auto method = parsed.GetNamedString(L"method", L"");
                 if (method == L"store-browser") { storeCommand(parsed); return; }
                 if (method == L"capture-library-result" || method == L"capture-surface-result" ||
-                    method == L"surface-sizing" || method == L"store-navigation") return;
+                    method == L"surface-sizing" || method == L"store-navigation" || method == L"store-native-stage") return;
                 message = parsed.Stringify(); // WWA receives exactly the object validated above.
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
@@ -972,6 +986,8 @@ struct View : implements<View, IFrameworkView> {
         openingAccount = hstring{};
         closeRequested = false;
         requests.clear();
+        storeNavigationResult = hstring{};
+        storeStages.clear();
     }
 };
 
@@ -1077,6 +1093,12 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     hstring Read() {
         slim_lock_guard lock(gate);
         if (!captureResult.empty()) return std::exchange(captureResult, hstring{});
+        if (!storeStages.empty()) {
+            auto message = std::move(storeStages.front());
+            storeStages.pop_front();
+            return message;
+        }
+        if (!storeNavigationResult.empty()) return std::exchange(storeNavigationResult, hstring{});
         if (requests.empty()) return {};
         auto message = std::move(requests.front());
         requests.pop_front();

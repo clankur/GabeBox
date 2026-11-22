@@ -16,6 +16,10 @@ using namespace Windows::Data::Json;
 using namespace Windows::UI::Composition;
 using namespace Windows::UI::Core;
 
+// Valve supplies this exact, inert initial page to MainBrowser. A new
+// controller can already be at about:blank before event handlers are installed.
+inline constexpr wchar_t initialPage[] = L"data:text/html,%3Cbody%3E%3C%2Fbody%3E";
+
 inline bool allowed(hstring const& raw, bool resource = false) noexcept {
     try {
         Windows::Foundation::Uri uri(raw);
@@ -35,12 +39,13 @@ class Browser : public std::enable_shared_from_this<Browser> {
     CoreWebView2 owner;
     std::shared_ptr<steam_document::Owner> document;
     std::function<void(bool, int, bool)> reportNavigation;
+    std::function<void(wchar_t const*, int)> reportStage;
     ContainerVisual parent, surface;
     CoreWebView2CompositionController controller{nullptr};
     Windows::Foundation::Rect bounds{};
     steam_display::Placement placement{{},1.f};
     double dpi = 1.;
-    bool requested = false, shell = false, stopped = false, booted = false, focused = false;
+    bool requested = false, shell = false, stopped = false, booted = false, focused = false, attached = false;
     hstring pendingUrl, navigating;
     uint64_t navigationId = 0;
     std::deque<hstring> keys;
@@ -54,6 +59,7 @@ class Browser : public std::enable_shared_from_this<Browser> {
         owner.PostWebMessageAsJson(data.Stringify());
     }
     void error(int32_t code) const {
+        reportStage(L"error", code);
         JsonObject data;
         data.SetNamedValue(L"code",JsonValue::CreateNumberValue(code));
         emit(L"error",data);
@@ -64,7 +70,10 @@ class Browser : public std::enable_shared_from_this<Browser> {
         auto h = std::round(placement.pixelHeight() * bounds.Height);
         bool show = requested && shell && w > 0 && h > 0;
         controller.IsVisible(show);
-        if (!show) { controller.RootVisualTarget(nullptr); return; }
+        if (!show) {
+            if (attached) { controller.RootVisualTarget(nullptr); attached = false; reportStage(L"hidden", 0); }
+            return;
+        }
         controller.BoundsMode(CoreWebView2BoundsMode::UseRawPixels);
         controller.ShouldDetectMonitorScaleChanges(false);
         controller.RasterizationScale(dpi);
@@ -73,7 +82,7 @@ class Browser : public std::enable_shared_from_this<Browser> {
                         placement.view.y + bounds.Y * placement.view.height, 0});
         surface.Size({w,h});
         surface.Scale({placement.visualScaleX(),placement.visualScaleY(),1.f});
-        controller.RootVisualTarget(surface);
+        if (!attached) { controller.RootVisualTarget(surface); attached = true; reportStage(L"visible", 0); }
     }
     fire_and_forget dispatchKeys() {
         auto self = shared_from_this();
@@ -107,8 +116,9 @@ class Browser : public std::enable_shared_from_this<Browser> {
     }
 public:
     Browser(unsigned clientId, CoreWebView2 const& host, std::shared_ptr<steam_document::Owner> doc,
-            ContainerVisual const& root, std::function<void(bool, int, bool)> report) : id(clientId), owner(host),
-            document(std::move(doc)), reportNavigation(std::move(report)), parent(root),
+            ContainerVisual const& root, std::function<void(bool, int, bool)> report,
+            std::function<void(wchar_t const*, int)> progress) : id(clientId), owner(host),
+            document(std::move(doc)), reportNavigation(std::move(report)), reportStage(std::move(progress)), parent(root),
             surface(root.Compositor().CreateContainerVisual()) { parent.Children().InsertAtTop(surface); }
     void layout(steam_display::Placement value, double scale, bool visible) {
         placement = value; dpi = scale; shell = visible; apply();
@@ -123,10 +133,12 @@ public:
     fire_and_forget start(CoreWebView2Environment env, CoreWindow window) {
         auto self = shared_from_this();
         try {
+            reportStage(L"creating-controller", 0);
             auto result = co_await env.CreateCoreWebView2CompositionControllerAsync(
                 CoreWebView2ControllerWindowReference::CreateFromCoreWindow(window));
             if (stopped) { result.Close(); co_return; }
             controller = result;
+            reportStage(L"configuring-controller", 0);
             auto page = result.CoreWebView2();
             auto settings = page.Settings();
             settings.AreHostObjectsAllowed(false); settings.IsWebMessageEnabled(false);
@@ -151,24 +163,29 @@ public:
             });
             page.NavigationStarting([weak](auto const&, auto const& e) {
                 auto s = weak.lock();
-                if (!s || s->stopped || (e.Uri() != L"about:blank" && !allowed(e.Uri()))) { e.Cancel(true); return; }
+                if (!s || s->stopped || (e.Uri() != initialPage && e.Uri() != L"about:blank" && !allowed(e.Uri()))) { e.Cancel(true); return; }
+                if (e.Uri() == L"about:blank") return;
                 s->navigationId = e.NavigationId(); s->navigating = e.Uri();
                 if (allowed(e.Uri())) s->reportNavigation(false, 0, false);
-                JsonObject data; data.SetNamedValue(L"url",JsonValue::CreateStringValue(e.Uri())); s->emit(L"start",data);
+                else s->reportStage(L"bootstrap-started", 0);
+                JsonObject data; data.SetNamedValue(L"url",JsonValue::CreateStringValue(e.Uri() == initialPage ? hstring(L"about:blank") : e.Uri())); s->emit(L"start",data);
             });
             page.NavigationCompleted([weak](auto const& sender, auto const& e) {
                 auto s = weak.lock();
                 if (!s || s->stopped || e.NavigationId() != s->navigationId) return;
                 JsonObject data;
-                data.SetNamedValue(L"url",JsonValue::CreateStringValue(s->navigating));
-                auto http = e.HttpStatusCode();
-                const bool blank = s->navigating == L"about:blank";
+                const bool blank = s->navigating == initialPage;
+                data.SetNamedValue(L"url",JsonValue::CreateStringValue(blank ? hstring(L"about:blank") : s->navigating));
+                int http = 0;
+                if (!blank) try { http = e.HttpStatusCode(); }
+                catch (hresult_error const& hr) { s->reportStage(L"http-status-unavailable", hr.code().value); }
                 const bool ok = e.IsSuccess() && (blank || (allowed(sender.Source()) && http >= 200 && http < 300));
                 data.SetNamedValue(L"success",JsonValue::CreateBooleanValue(ok));
                 data.SetNamedValue(L"code",JsonValue::CreateNumberValue(http > 0 ? http : static_cast<int>(e.WebErrorStatus())));
                 if (!blank) s->reportNavigation(true, http, ok);
                 s->emit(L"complete",data);
-                if (!s->booted && s->navigating == L"about:blank" && e.IsSuccess()) {
+                if (blank) s->reportStage(ok ? L"bootstrap-complete" : L"bootstrap-failed", static_cast<int>(e.WebErrorStatus()));
+                if (!s->booted && blank && ok) {
                     s->booted = true;
                     if (!s->pendingUrl.empty()) sender.Navigate(std::exchange(s->pendingUrl, hstring{}));
                 }
@@ -179,6 +196,10 @@ public:
                     s->emit(L"title",data);
                 }
             });
+            page.ProcessFailed([weak](auto const&, auto const& e) {
+                if (auto s = weak.lock(); s && !s->stopped)
+                    s->reportStage(L"browser-process-failed", static_cast<int>(e.ProcessFailedKind()));
+            });
             page.HistoryChanged([weak](auto const& sender, auto const&) {
                 if (auto s = weak.lock()) {
                     JsonObject data; data.SetNamedValue(L"canGoBack",JsonValue::CreateBooleanValue(sender.CanGoBack()));
@@ -186,7 +207,9 @@ public:
                     s->emit(L"history",data);
                 }
             });
-            apply(); page.Navigate(L"about:blank");
+            apply();
+            reportStage(L"opening-bootstrap", 0);
+            page.Navigate(initialPage);
         } catch (...) { if (!stopped) error(to_hresult().value); }
     }
     void command(unsigned target, hstring const& action, JsonObject const& data) {
@@ -194,6 +217,7 @@ public:
         if (action == L"navigate") {
             auto url = data.GetNamedString(L"url");
             if (!allowed(url)) { error(E_INVALIDARG); return; }
+            reportStage(L"public-requested", 0);
             if (booted) controller.CoreWebView2().Navigate(url);
             else pendingUrl = url;
         } else if (action == L"bounds") {

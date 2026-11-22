@@ -25,6 +25,8 @@
             window.document.documentElement.getAttribute("data-steam-primary-xaml") === "true");
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var network, networkDiagnostic = "", storeNavigation = "";
+        var storeStages = [];
+        var storeJsStages = [];
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
         var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
@@ -72,7 +74,9 @@
                 (memoryRequest ? "shell_memory_request=" + memoryRequest + "\r\n" : "") +
                 (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
                 (networkDiagnostic ? "xbox_network=" + networkDiagnostic + "\r\n" : "") +
+                (storeJsStages.length ? "store_js_stages=" + storeJsStages.join(",") + "\r\n" : "") +
                 (storeNavigation ? "public_store_navigation=" + storeNavigation + "\r\n" : "") +
+                (storeStages.length ? "public_store_native=" + storeStages.join(",") + "\r\n" : "") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
@@ -226,6 +230,23 @@
             var request;
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
+            if (request.method === "store-native-stage") {
+                if (!/^(create-received|creating-controller|configuring-controller|opening-bootstrap|bootstrap-started|bootstrap-complete|bootstrap-failed|public-requested|command-error|error|visible|hidden|http-status-unavailable|browser-process-failed)$/.test(request.stage) ||
+                    !Number.isInteger(request.code)) return;
+                if (request.stage === "create-received") { storeStages = []; storeNavigation = ""; }
+                if (storeStages.length >= 16) storeStages.shift();
+                storeStages.push(request.stage + (request.code ? "=" + request.code : ""));
+                record(last, true);
+                return;
+            }
+            if (request.method === "store-js-stage") {
+                var stage = request.stage;
+                if (["create", "visible", "geometry", "blank-complete", "navigate", "remote-start",
+                        "remote-complete", "failed", "closed"].indexOf(stage) < 0) return;
+                if (stage === "create") storeJsStages = [];
+                if (storeJsStages.indexOf(stage) < 0) { storeJsStages.push(stage); record(last, true); }
+                return;
+            }
             if (request.method === "store-navigation") {
                 if (typeof request.complete !== "boolean" || typeof request.success !== "boolean" ||
                     !Number.isInteger(request.http) || request.http < 0 || request.http > 599) return;
