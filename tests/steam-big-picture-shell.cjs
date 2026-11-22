@@ -134,6 +134,16 @@ async function checkAppAdapter(page) {
 }
 
 async function checkRunningControls(page, popup) {
+    if (accounts) await page.evaluate(() => {
+        let runtime;
+        webpackChunksteamui.push([['fixture-overlay-history'], {}, value => { runtime = value; }]);
+        const history = runtime(5757).oy.WindowStore.GamepadUIMainWindowInstance.History;
+        const route = runtime(72500).BV.GamepadUI.AppOverlay.Root(42);
+        window.fixtureOverlayPushes = 0;
+        window.fixtureStopObservingHistory = history.listen((location, action) => {
+            if (action === 'PUSH' && location.pathname === route) fixtureOverlayPushes++;
+        });
+    });
     await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 42, overlay: true}));
     const resume = popup.getByText('Resume game', {exact: true});
     await resume.waitFor({state: 'visible'});
@@ -150,6 +160,10 @@ async function checkRunningControls(page, popup) {
         await confirm.waitFor({state: 'visible'});
         assert.equal(await confirm.getAttribute('type'), 'submit');
         assert.equal(await cancel.getAttribute('type'), 'button');
+        assert.equal(await page.evaluate(() => {
+            fixtureStopObservingHistory();
+            return fixtureOverlayPushes;
+        }), 1, 'Reopening the running controls after Resume must preserve the original Back destination');
         await cancel.click();
         await confirm.waitFor({state: 'hidden'});
         assert.equal(await page.evaluate(() => fixtureCalls.filter(c => c.method === 'quit-game').length), 0);

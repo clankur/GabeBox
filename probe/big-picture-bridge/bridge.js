@@ -30,7 +30,15 @@
             if (controlsApp && !focusStore) attachRunningGameFocus();
             const requested = controlsApp;
             function updateControls() {
-                if (controlsApp === requested) showGameOverlay(requested);
+                if (controlsApp === requested) {
+                    const path = runtime?.(5757).oy.WindowStore.GamepadUIMainWindowInstance?.History?.location.pathname;
+                    // Valve goes Back when this game stops. A second copy of its
+                    // controls would lead straight back to the stopped game's overlay.
+                    const alreadyOpen = requested && path && runtime(49519).B6(path, {
+                        path: runtime(72500).BV.GamepadUI.AppOverlay.Root(requested), exact: false
+                    });
+                    if (!alreadyOpen) showGameOverlay(requested);
+                }
                 if (exited && !activeApp) returnToLibrary(exited);
             }
             if (changed) refresh().then(updateControls, error => console.error('Steam library unavailable', error.message));
