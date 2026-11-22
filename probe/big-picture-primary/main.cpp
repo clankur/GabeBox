@@ -56,6 +56,13 @@ bool matchesCommittedAccount(Uri const& uri, Uri const& qualified)
 
 struct SteamApplication : ApplicationT<SteamApplication>
 {
+    SteamApplication()
+    {
+        // Xbox defaults to driving a system cursor with the controller. The
+        // QR page uses directional focus and Steam reads the gamepad directly.
+        RequiresPointerMode(ApplicationRequiresPointerMode::WhenRequested);
+    }
+
     hstring GetRuntimeClassName() const override { return L"BigPicture.Primary.App"; }
 
     void OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEventArgs const&)

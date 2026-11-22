@@ -87,6 +87,8 @@ struct View : implements<View, IFrameworkView> {
     bool warming;
     bool frameOpen = false;
     bool xboxDisplay = false;
+    CoreCursor previousCursor{nullptr};
+    bool shellOwnsCursor = false;
     float backingCorrection = 1.f;
     uint64_t frameGeneration = 0;
     bool capturePending = false;
@@ -166,6 +168,22 @@ struct View : implements<View, IFrameworkView> {
         if (!show) accountPanel.Focus(FocusState::Programmatic);
     }
 
+    void updateShellCursor(bool visible) {
+        if (!xboxDisplay || account.empty()) return;
+        if (visible) {
+            auto current = window.PointerCursor();
+            if (!shellOwnsCursor) {
+                previousCursor = current;
+                shellOwnsCursor = true;
+            }
+            if (current) window.PointerCursor(nullptr);
+        } else if (shellOwnsCursor) {
+            if (!window.PointerCursor()) window.PointerCursor(previousCursor);
+            previousCursor = nullptr;
+            shellOwnsCursor = false;
+        }
+    }
+
     void applyVisibility() {
         if (closed || !controller) return;
         const bool visible = !warming && !gameForeground && window.Visible();
@@ -173,6 +191,7 @@ struct View : implements<View, IFrameworkView> {
         const bool showPopup = visible && popup && popupRequestedVisible;
         const bool showOwner = visible && !showPopup;
         showPrimaryShell(visible);
+        updateShellCursor(visible);
         if (showOwner != ownerAttached) {
             controller.RootVisualTarget(showOwner ? mainSurface : nullptr);
             ownerAttached = showOwner;
@@ -287,6 +306,9 @@ struct View : implements<View, IFrameworkView> {
         if (closed || gameForeground || !gamepadVisible() || !window.Visible()) return;
         auto point = args.CurrentPoint();
         if (point.PointerDevice().PointerDeviceType() != Windows::Devices::Input::PointerDeviceType::Mouse) return;
+        // Reapply after XAML handles a real mouse movement. The composition
+        // controller still receives the pointer coordinates and buttons below.
+        if (shellOwnsCursor) updateShellCursor(true);
         auto props = point.Properties();
         using Update = Windows::UI::Input::PointerUpdateKind;
         switch (props.PointerUpdateKind()) {
@@ -876,6 +898,8 @@ struct View : implements<View, IFrameworkView> {
     void onClosed(CoreWindow const&, CoreWindowEventArgs const&) { close(); }
     void onActivated(CoreWindow const&, WindowActivatedEventArgs const& args) {
         if (args.WindowActivationState() == CoreWindowActivationState::Deactivated) ++popupVisibilityEpoch;
+        updateShellCursor(!warming && !gameForeground && window.Visible() &&
+            args.WindowActivationState() != CoreWindowActivationState::Deactivated);
         if (controller && args.WindowActivationState() != CoreWindowActivationState::Deactivated)
             focusVisible();
         publishWindow();
@@ -884,6 +908,7 @@ struct View : implements<View, IFrameworkView> {
         if (closed) return;
         auto lifetime = get_strong();
         closed = true;
+        updateShellCursor(false);
         if (cloudCache) cloudCache->cancel();
         closePopup();
         if (controller) controller.Close();

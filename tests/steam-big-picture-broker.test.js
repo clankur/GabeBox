@@ -107,10 +107,14 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const document = {
             documentElement: { getAttribute: name => name === "data-steam-big-picture" ? "true" : null },
             getElementById(id) {
-                if (!elements.has(id)) elements.set(id, { hidden: true, addEventListener() {} });
+                if (!elements.has(id)) elements.set(id, {
+                    hidden: true, value: "", addEventListener(type, listener) { this[type] = listener; },
+                    appendChild() {}, setAttribute() {}, focus() {}
+                });
                 return elements.get(id);
             },
             createElement() { return { setAttribute() {} }; },
+            createDocumentFragment() { return {}; },
             body: { appendChild: item => statuses.push(item) }
         };
         const window = { steamBigPictureBroker: context.steamBigPictureBroker };
@@ -125,7 +129,8 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         }
         const localFolder = { createFileAsync: () => Operation.resolve({}), tryGetItemAsync: () => Operation.resolve(null) };
         const globals = {
-            window, document, navigator: {}, Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker,
+            window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
+            Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker, libraryArt: {schedule() {}},
             Windows: {
                 Storage: {
                     ApplicationData: { current: { localFolder } },
@@ -138,6 +143,9 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 Operation.resolve(JSON.stringify([{ id: 12, name: "A", game: true }])) } } }
         };
         vm.runInNewContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), globals);
+        // The platform's first session lookup has not completed. Fresh QR
+        // must already use focus navigation, even when no session is restored.
+        assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(document.getElementById("signin").hidden, true);
         assert.equal(document.getElementById("library").hidden, true);
@@ -154,6 +162,11 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         if (outcome === "ready") {
             assert.equal(statuses[0].hidden, true);
             assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
+            globals.navigator.gamepadInputEmulation = "mouse";
+            globals.XboxProbe.Native.ProbeRunner.signOutSteam = () => Operation.resolve(true);
+            assert.equal(await elements.get("sign-out").click(), "signed-out");
+            assert.equal(elements.get("signin").hidden, false);
+            assert.equal(globals.navigator.gamepadInputEmulation, "keyboard");
         }
     }
 });

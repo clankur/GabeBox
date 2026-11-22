@@ -23,6 +23,9 @@
     var cloudStatus = document.getElementById("cloud-saves-status");
     var downloadStatus = document.getElementById("download-status");
     var bigPictureMode = document.documentElement.getAttribute("data-steam-big-picture") === "true";
+    // Set EdgeHTML's navigation mode before QR or saved-session recovery starts.
+    var originalInputMode = navigator.gamepadInputEmulation;
+    if (bigPictureMode && originalInputMode !== undefined) navigator.gamepadInputEmulation = "keyboard";
     var bigPictureStatus;
     function showBigPictureStatus(message) {
         if (!bigPictureStatus) {
@@ -744,7 +747,6 @@
         var action = primaryAction();
         if (!action.hidden && !action.disabled) action.focus();
     });
-    var originalInputMode = navigator.gamepadInputEmulation;
     // EdgeHTML can emit arrow keys, Navigation keys, or gamepad virtual keys.
     var directions = {
         37: "left", 140: "left", 205: "left", 214: "left",
@@ -848,7 +850,7 @@
             entries = [];
             manifestFolder = null;
             renderList();
-            if ("gamepadInputEmulation" in navigator) navigator.gamepadInputEmulation = originalInputMode;
+            if (originalInputMode !== undefined) navigator.gamepadInputEmulation = bigPictureMode ? "keyboard" : originalInputMode;
             library.hidden = true;
             signin.hidden = false;
             if (bigPictureMode) showBigPictureStatus("");
