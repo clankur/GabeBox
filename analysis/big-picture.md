@@ -111,6 +111,12 @@ python3 probe/prepare-big-picture-library.py /path/to/regular/PackagedProcessPro
 bash probe/package.sh --layout ./integrated-31 ./signed-31
 ```
 
+### Reproduce the direct game display on Series X
+
+For version `1.0.230.33`, use source revision `b0e4ce7` and the single-window recipe above. Set `--version 1.0.230.33`, use new layout and signing directories, and point `--presenter-artifact` at the output of Windows build `44970388092`. Its `--presenter-checksum` is `ea54c9227e08b312e71ad463ca02c75997f7f5d645471a2b598771bcc9f0dd15`. The primary host, renderer, session and SDL inputs are identical to the preceding recipe. [Direct-display presenter build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44970388092)
+
+The signed game presenter draws the running game's SDL frames into a 1920×1080 DirectX swap chain in the primary XAML window. Steam's canvas sits above the game surface when the overlay is open. In a game, hold **View + Menu** together and release both buttons to open Steam. A second chord in Steam opens its main menu, where **Library** is available. On return to the game, the frame-rate measurement starts a fresh interval. The presenter counts successful swaps. A full-screen Xbox capture or a player's observation is required to confirm what actually appeared on the TV. [Panel implementation](../probe/fhd/panel-presenter.cpp) · [Hardware evidence](big-picture-reliability.md) · [Microsoft's DirectX and XAML documentation](https://learn.microsoft.com/en-us/windows/uwp/gaming/directx-and-xaml-interop)
+
 ### Test the Windows Steam bootstrap
 
 After configuring Device Portal, deploy and launch the signed package. [Device Portal setup](../README.md#setup)
