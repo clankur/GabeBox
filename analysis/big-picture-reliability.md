@@ -152,6 +152,14 @@ The recovery APPX has SHA-256 `d7613e571ac68eb72c517dede0ca1256b7392841649894eb0
 |---|---|---|
 | tour-30-194855 | 6e1b6fa8-e573-4721-9fbe-f4d7d98f0109 | Passed from an empty package-process baseline. Raw full-HD Xbox output shows All Games 134, Installed 8 and the controller footer. |
 
+### Build 1.0.230.31
+
+The signed native XAML APPX has SHA-256 `c095fc30012ffd4ba983485d8a8fb77aa4a468c5791afa1b06726c00836b5be1`. Its differences from `.29` are the native primary executable, renderer DLL and WinMD, manifest version, block map and signature. All original Valve assets match.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-31-195449 | 63c85157-2858-499a-bbf2-a59d006f073d | Passed from an empty package-process baseline. The original Library appeared through the production native XAML host with 134 games, the Installed tab and the controller footer on raw 1920×1080 Xbox output. |
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -220,6 +228,7 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `media-element-975370-1795307337932312000.png`, .28 resumed Dwarf Fortress static title menu in foreground video | 1920×1080 | `6c7de2e41d127bebc0e4396be4d5b901ec4569074a93d1aca987342e5c5ef73f` |
 | `valve-878.png`, .30 first cold start whole-output Library | 1920×1080 | `4d95f614b73fe1f6dd496aa2bd7d777d842d05fec75bbdc1846cd99046a35753` |
 | `media-element-646570-1795308705713245000.png`, .30 Slay the Spire title in the foreground video element | 1920×1080 | `627d57e01357656e03c6bd3e54d32f3e43822ce34ca392b68bcc5ef5e07a5e24` |
+| `physical-tv-1795308960338265000.png`, .31 first native XAML cold start whole-output Library | 1920×1080 | `b433be2295c963bf66601e08fe2e0169d663c65b1f7c327371899e2ec29a5d47` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
