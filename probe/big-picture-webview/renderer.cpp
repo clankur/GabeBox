@@ -951,8 +951,10 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             if (!grid || grid.Children().Size() != 2) throw hresult_error(E_UNEXPECTED);
             auto account = grid.Children().GetAt(0).try_as<Controls::WebView>();
             auto panel = grid.Children().GetAt(1).try_as<Controls::Canvas>();
+            Uri local{L"ms-appx-web:///steam-signin.html"};
+            Uri qualified{L"ms-appx-web://" + Package::Current().Id().Name() + L"/steam-signin.html"};
             if (!panel || panel.Name() != L"SteamCompositionHost" || !account || account.Name() != L"SteamAccountHost" ||
-                !account.Source() || account.Source().AbsoluteUri() != L"ms-appx-web:///steam-signin.html")
+                !account.Source() || (!account.Source().Equals(local) && !account.Source().Equals(qualified)))
                 throw hresult_access_denied();
             auto view = make_self<View>(true, owner);
             {
