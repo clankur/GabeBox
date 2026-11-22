@@ -7,18 +7,17 @@ const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native
 
 test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
     const calls = [], samples = [], first = [];
-    let now = 0, swaps = 0, tick, visible = true, finishClose, keyboardSerial = 0, menus = 0;
+    let now = 0, swaps = 0, tick, visible = true, finishClose;
     const drain = () => new Promise(resolve => setImmediate(resolve));
     const host = {
         async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
         async setPanelVisible(value) { visible = value; calls.push(["visible", value]); },
         closePanel() { calls.push(["close"]); return new Promise(resolve => { finishClose = resolve; }); },
         panelStatus() { return "width=1920\r\nheight=1080\r\nprimary_panel=1\r\nvisible=" +
-            Number(visible) + "\r\npresented=" + swaps + "\r\npanel_keyboard=1\r\nmenu_serial=" + keyboardSerial + "\r\n"; },
+            Number(visible) + "\r\npresented=" + swaps + "\r\n"; },
         openMedia() { assert.fail("The XAML panel should own playback"); }
     };
     const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
-        menu: id => { assert.equal(id, 1); menus++; },
         presented: stats => first.push(stats), measured: (frames, us) => samples.push([frames, us])};
     const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
         steamBigPictureHost: {switchView: async (to, from) => { assert.equal(to, from); }}};
@@ -32,15 +31,11 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     await drain();
     tick(); assert.equal(first.length, 0);
     swaps = 1; tick(); assert.match(first[0], /primary_panel=1/);
-    assert.equal(game.ownsMenuKey(), true);
-    keyboardSerial++; tick(); tick(); assert.equal(menus, 1);
     now += 10000; swaps += 600; tick();
     game.cover(); await drain();
-    keyboardSerial++; tick(); assert.equal(menus, 1);
     now += 50000; swaps += 1200; tick();
     assert.deepEqual(samples, []);
     await game.resume(1); tick();
-    assert.equal(menus, 1);
     now += 30000; swaps += 1780; tick();
     assert.deepEqual(samples, [[1780, 30000000]]);
     const stopped = game.close(); assert.equal(game.close(), stopped);

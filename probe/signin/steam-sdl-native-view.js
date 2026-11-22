@@ -15,7 +15,6 @@
     function openPanel(host, path, events, nativePad, screen, mainId) {
         var owner = ++activeSession, closed = false, opened = false, covered = false, shown = false;
         var timer, stopped, sampleStart, sampleWindow = 0, started = performance.now(), nextReport = 0;
-        var nativeMenuKey = false, lastMenuSerial = 0;
         function resetSample() { sampleStart = null; }
         function reportError(error) {
             if (events.mediaError) events.mediaError("panel", (error && (error.number || error.code) || 0) >>> 0);
@@ -45,13 +44,6 @@
                 var stats = host.panelStatus(), now = performance.now();
                 var error = /^error=([0-9]+)\r?$/m.exec(stats);
                 if (error && +error[1]) { fail({code: Number(error[1])}); return; }
-                nativeMenuKey = /^panel_keyboard=1\r?$/m.test(stats);
-                var serial = nativeMenuKey && /^menu_serial=([0-9]+)\r?$/m.exec(stats);
-                if (serial && +serial[1] !== lastMenuSerial) {
-                    lastMenuSerial = +serial[1];
-                    if (shown && !covered && !document.hidden && !screen.hidden && /^visible=1\r?$/m.test(stats))
-                        events.menu(mainId);
-                }
                 if (events.mediaProgress && now >= nextReport) {
                     nextReport = now + 5000;
                     events.mediaProgress(stats);
@@ -91,7 +83,7 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         }).catch(fail);
-        return {primary: true, ownsMenuKey: function () { return nativeMenuKey; }, close: close, cover: function () {
+        return {primary: true, close: close, cover: function () {
             if (closed || covered) return;
             covered = true;
             resetSample();

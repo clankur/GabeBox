@@ -225,7 +225,6 @@
         function setKey(event) {
             if (!gameInput) return;
             if (event.keyCode === 121 || event.code === "F10") {
-                if (nativeView && nativeView.ownsMenuKey && nativeView.ownsMenuKey()) return;
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
                     if (chordTracker && chordStarted !== null) {
