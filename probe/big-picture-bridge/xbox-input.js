@@ -17,11 +17,21 @@ function installXboxInput(client, gamepads, storeBrowser) {
         return [-y, y, -x, x].map((value, i) =>
             !!pad.buttons[12 + i]?.pressed || value >= (last.has(20 + i) ? 0.45 : 0.6));
     }
-    function button(index, code, down) {
-        if (!storeBrowser?.button(index, code, down)) dispatch(digital, index, code, down, 0, 0);
+    function button(index, state, code, down) {
+        if (down && storeBrowser?.button(index, code, true)) {
+            state.storeButtons.add(code);
+            return;
+        }
+        // A press can change routes before release. Its original recipient
+        // still owns the release, including when Valve has hidden the Store.
+        if (!down && state.storeButtons.delete(code)) {
+            storeBrowser.button(index, code, false);
+            return;
+        }
+        dispatch(digital, index, code, down, 0, 0);
     }
     function release(index, state) {
-        for (const code of state.down) button(index, code, false);
+        for (const code of state.down) button(index, state, code, false);
         if (analogEnabled && (state.x || state.y)) dispatch(analog, index, 24, false, 0, 0);
     }
     function samplePad(pad) {
@@ -32,7 +42,7 @@ function installXboxInput(client, gamepads, storeBrowser) {
             state = undefined;
         }
         if (!state) {
-            state = {name: pad.id, down: new Set(), x: 0, y: 0, guide: false};
+            state = {name: pad.id, down: new Set(), storeButtons: new Set(), x: 0, y: 0, guide: false};
             states.set(pad.index, state);
         }
         const view = !!pad.buttons[8]?.pressed, menu = !!pad.buttons[9]?.pressed;
@@ -46,8 +56,8 @@ function installXboxInput(client, gamepads, storeBrowser) {
         // Valve's navigation map uses LEFTSTICK_* for UI directions. The
         // D-pad and left stick share those actions, including overlapping holds.
         padDirections(pad, state.down).forEach((pressed, index) => { if (pressed) next.add(20 + index); });
-        for (const code of state.down) if (!next.has(code)) button(pad.index, code, false);
-        for (const code of next) if (!state.down.has(code)) button(pad.index, code, true);
+        for (const code of state.down) if (!next.has(code)) button(pad.index, state, code, false);
+        for (const code of next) if (!state.down.has(code)) button(pad.index, state, code, true);
         state.down = next;
         // Xbox reserves its Guide button. Use the same View + Menu chord as
         // the game presenter to open Valve's menu inside the Steam window.

@@ -78,3 +78,41 @@ test('clips native bounds and forwards controller edges only while Valve focuses
     owner.dispatchEvent(new Event('pagehide'));
     assert.equal(sent.at(-1).action,'close');
 });
+
+test('a controller release follows its press across Store focus changes and disconnects', () => {
+    const inputSource = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-input.js'), 'utf8');
+    for (const [index, code, key] of [[0, 0, 'enter'], [12, 20, 'up']]) {
+        const {client, owner, view, sent, adapter} = environment();
+        let tick, connected = true, pressed = false;
+        Object.assign(owner, {document: {hidden: false}, setTimeout(callback) { tick = callback; return 1; }});
+        client.System = {};
+        const gamepads = {read() {
+            const buttons = Array.from({length: 16}, (_, i) => ({pressed: i === index && pressed}));
+            return connected ? [{id: 'pad', index: 1, mapping: 'standard', axes: [0, 0], buttons}] : [];
+        }};
+        const install = runInNewContext(inputSource + '\ninstallXboxInput', {
+            window: owner, getXboxGamepadWindow: () => owner, notifyXboxControllerListChanged() {}
+        });
+        install(client, gamepads, adapter);
+        const valve = [];
+        client.Input.RegisterForControllerInputMessages((slot, code, down) => valve.push([slot, code, down]));
+        adapter.setActionset(true);
+        pressed = true; tick();
+        view.SetVisible(true); view.SetFocus(true);
+        pressed = false; tick();
+        assert.deepEqual(valve, [[1, code, true], [1, code, false]]);
+        assert.deepEqual(sent.filter(x => x.action === 'input'), []);
+
+        pressed = true; tick();
+        view.SetVisible(false);
+        connected = false; tick();
+        assert.deepEqual(valve, [[1, code, true], [1, code, false]]);
+        assert.deepEqual(sent.filter(x => x.action === 'input').map(x => [x.key, x.down]),
+            [[key, true], [key, false]]);
+
+        // Reconnecting starts a new press, even in the same controller slot.
+        connected = true; tick();
+        pressed = false; tick();
+        assert.deepEqual(valve.slice(2), [[1, code, true], [1, code, false]]);
+    }
+});
