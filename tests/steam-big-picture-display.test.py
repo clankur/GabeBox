@@ -85,8 +85,19 @@ class DisplayEvidence(unittest.TestCase):
 
     def test_stale_receipt(self):
         self.captures["resumed-title"]["captured_at"] = 1040.5
-        with self.assertRaisesRegex(ValueError, "out of order"):
+        with self.assertRaisesRegex(ValueError, "filename and capture time disagree"):
             self.verify()
+
+    def test_choose_exact_acquisition_of_identical_phase(self):
+        original = self.captures["title"]
+        repeated = dict(original, captured_at=1041.5, file="physical-tv-1041500000000.png")
+        path = self.directory / repeated["file"]
+        path.write_bytes((self.directory / original["file"]).read_bytes())
+        path.with_suffix(".json").write_text(json.dumps(repeated))
+        with self.assertRaisesRegex(ValueError, "Duplicate receipt"):
+            self.verify()
+        self.pins["title"] = {"sha256": original["sha256"], "file": repeated["file"]}
+        self.verify()
 
     def test_same_pixels_in_two_phases(self):
         self.pins["resumed-title"] = self.pins["title"]

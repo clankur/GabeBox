@@ -12,7 +12,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-from big_picture_evidence import check_png, check_release, load, require
+from big_picture_evidence import capture_time, check_png, check_release, load, require
 
 
 PHASES = ("library-before-play", "stock-play", "title", "overlay", "library-while-running", "resume", "resumed-title")
@@ -20,19 +20,23 @@ PHASES = ("library-before-play", "stock-play", "title", "overlay", "library-whil
 
 def read_captures(directory, pins):
     require(set(pins) == set(PHASES), "Supply one independently retained PNG digest for each of the seven phases")
-    require(all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in pins.values()), "Invalid SHA-256 phase pin")
-    require(len(set(pins.values())) == len(PHASES), "Identical phase PNGs cannot establish distinct screen content")
+    named = {phase: pin if isinstance(pin, dict) else {"sha256": pin} for phase, pin in pins.items()}
+    digests = [pin["sha256"] for pin in named.values()]
+    require(all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests), "Invalid SHA-256 phase pin")
+    require(len(set(digests)) == len(PHASES), "Identical phase PNGs cannot establish distinct screen content")
     captures = {}
     for path in directory.glob("*.json"):
         receipt = load(path)
         phase = receipt.get("phase") if isinstance(receipt, dict) else None
-        if phase not in pins or receipt.get("sha256") != pins[phase]:
+        pin = named.get(phase, {})
+        if not pin or receipt.get("sha256") != pin["sha256"] or ("file" in pin and pin["file"] != receipt.get("file")):
             continue
         require(phase not in captures, f"Duplicate receipt for pinned {phase} image")
         require(receipt.get("source") == "official TV capture" and receipt.get("file") == path.with_suffix(".png").name,
                 f"{phase} needs an original official TV image with its matching sidecar")
         require(receipt.get("host_live") is True and math.isfinite(receipt["captured_at"]), f"{phase} lacks a live host or timestamp")
-        check_png(path, pins[phase])
+        require(abs(capture_time(path) - receipt["captured_at"]) <= 2, f"{phase} filename and capture time disagree")
+        check_png(path, pin["sha256"])
         captures[phase] = receipt
     require(set(captures) == set(PHASES), f"Missing pinned TV phases: {', '.join(p for p in PHASES if p not in captures)}")
     timestamps = [captures[phase]["captured_at"] for phase in PHASES]
@@ -136,7 +140,7 @@ def verify(directory, pins, appx, release, app_id, image, capture_directory=None
     frames, elapsed = samples[0]
     print(f"First observed qualifying panel sample: {frames} swaps in {elapsed / 1_000_000:.3f} s ({frames * 1_000_000 / elapsed:.2f} FPS).")
     for phase in PHASES:
-        print(f"{phase}: {shots[phase]['file']} {pins[phase]}")
+        print(f"{phase}: {shots[phase]['file']} {shots[phase]['sha256']}")
     print("Independently inspect every image for its actual UI or game. Physical controller input and normal Exit require separate evidence.")
 
 

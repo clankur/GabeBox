@@ -166,7 +166,11 @@ The signed native XAML APPX has SHA-256 `4276875f0a52ac4dd715b53e9837b16ce974765
 
 ### Build 1.0.230.33
 
-The signed native XAML APPX has SHA-256 `714a906c907c2e35b1c940755ea59f69d46b8ff48806a44079ce109dc2b3c970`. All 1,266 member names match `.32`. The changed application files are the FHD DLL and WinMD, the Valve host adapter, and three SDL presenter and input scripts. All Valve assets match. Hardware acceptance requires a separately recorded run.
+The signed native XAML APPX has SHA-256 `714a906c907c2e35b1c940755ea59f69d46b8ff48806a44079ce109dc2b3c970`. All 1,266 member names match `.32`. The changed application files are the FHD DLL and WinMD, the Valve host adapter, and three SDL presenter and input scripts. All Valve assets match.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-33-201627 | d20d9cc1-b732-41c0-82af-910b2dac2597 | Passed from an empty package-process baseline. The original All Games 134 grid and both controller footer corners are visible in `valve-703.png`, SHA-256 `6b6f614e1cbba3295bd01325e6983d380d0eacf12157fe5b1d29367435e04320`. A later stock Installed 8 grid confirms eight installed tiles including Dwarf Fortress, Slay the Spire and Stardew Valley. |
 
 ## Direct native game display
 
@@ -181,6 +185,8 @@ For a build that presents game frames through the primary XAML panel, retain the
 If the console screenshot endpoint fails, identify the missing TV frame and retain any direct physical observation with its time and source. A WebView image, decoded-video frame, source framebuffer or successful native Present call alone cannot prove that the game appeared on the TV.
 
 Retain a JSON object with the independently recorded PNG SHA-256 values keyed by `library-before-play`, `stock-play`, `title`, `overlay`, `library-while-running`, `resume` and `resumed-title`. Each original PNG has a same-stem JSON capture receipt. The checker verifies the pinned package and TV images, acquisition order, process continuity, native panel visibility, and advancing CPU/GPU swap counts. It rejects duplicate image bytes across phases because identical stills cannot resolve whether an old capture was reused. When consecutive game title frames are pixel-identical, obtain a fresh capture showing a visible change. [Direct display checker](../probe/verify-big-picture-display.py)
+
+Multiple official requests for the same phase sometimes return identical bytes. Use an object containing `file` and `sha256` for that phase's pin to select the independently recorded acquisition time.
 
 ```sh
 python3 probe/verify-big-picture-display.py "$APPX33" "$RUN_DIR" "$TV_PHASE_PINS" \
