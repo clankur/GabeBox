@@ -1,6 +1,9 @@
 // The existing packaged account/game host shares the XAML view with Valve's isolated WebView2.
 #include <windows.h>
 #include <cstdio>
+#include <algorithm>
+#include <memory>
+#include <string>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Web.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
@@ -36,6 +39,44 @@ void checkpoint(char const* stage, HRESULT status = S_OK, bool first = false) no
     } catch (...) {}
 }
 
+bool sameOrdinal(hstring const& a, hstring const& b) noexcept
+{
+    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+// NavigationStarting checks only package URIs. The engine may report a translated
+// address on completion; match only the installed, signed page of this very package.
+bool matchesCommittedAccount(Uri const& uri, Uri const& local, Uri const& qualified)
+{
+    if (!uri) { checkpoint("completion-uri-absent"); return false; }
+    auto package = Windows::ApplicationModel::Package::Current();
+    auto host = uri.Host();
+    auto scheme = uri.SchemeName();
+    bool clean = uri.Query().empty() && uri.Fragment().empty() && uri.UserName().empty() && uri.Password().empty();
+    checkpoint(clean ? "completion-no-parameters" : "completion-parameters");
+    if (!clean) return false;
+    checkpoint(scheme == L"ms-appx-web" ? "completion-scheme-package-web" :
+               scheme == L"ms-appx" ? "completion-scheme-package" :
+               scheme == L"file" ? "completion-scheme-file" :
+               scheme == L"about" ? "completion-scheme-about" :
+               scheme == L"https" ? "completion-scheme-https" : "completion-scheme-other");
+    checkpoint(host.empty() ? "completion-authority-empty" :
+               sameOrdinal(host, package.Id().Name()) ? "completion-authority-package-name" :
+               sameOrdinal(host, package.Id().FamilyName()) ? "completion-authority-package-family" :
+               sameOrdinal(host, package.Id().FullName()) ? "completion-authority-package-full" :
+               "completion-authority-other");
+    if (uri.Equals(local) || uri.Equals(qualified)) return true;
+    bool page = uri.Path() == L"/steam-signin.html";
+    checkpoint(page ? "completion-path-package-page" : "completion-path-other");
+    if (scheme != L"file" || !host.empty()) return false;
+    std::wstring filePath{package.InstalledLocation().Path()};
+    std::replace(filePath.begin(), filePath.end(), L'\\', L'/');
+    Uri signedFile{L"file:///" + filePath + L"/steam-signin.html"};
+    bool matches = uri.Equals(signedFile);
+    checkpoint(matches ? "completion-exact-installed-file" : "completion-other-file");
+    return matches;
+}
+
 struct SteamApplication : ApplicationT<SteamApplication>
 {
     hstring GetRuntimeClassName() const override { return L"BigPicture.Primary.App"; }
@@ -60,19 +101,24 @@ struct SteamApplication : ApplicationT<SteamApplication>
                 auto matchesAccountPage = [local, qualified](Uri const& uri) {
                     return uri && (uri.Equals(local) || uri.Equals(qualified));
                 };
-                account.NavigationStarting([matchesAccountPage](WebView const& sender, auto const& event) {
+                auto expectedNavigation = std::make_shared<bool>(false);
+                account.NavigationStarting([matchesAccountPage, expectedNavigation](WebView const& sender, auto const& event) {
                     sender.Tag(nullptr);
                     bool approved = matchesAccountPage(event.Uri());
+                    *expectedNavigation = approved;
+                    checkpoint(approved ? "account-navigation-approved" : "account-navigation-other");
                     event.Cancel(!approved);
                     if (!approved) checkpoint("account-navigation-denied", E_ACCESSDENIED);
                 });
-                account.NavigationCompleted([local, matchesAccountPage](WebView const& sender, auto const& event) {
+                account.NavigationCompleted([local, qualified, expectedNavigation](WebView const& sender, auto const& event) {
                     sender.Tag(nullptr);
+                    bool approvedStart = *expectedNavigation;
+                    *expectedNavigation = false;
                     if (!event.IsSuccess()) {
                         checkpoint("account-navigation-error", static_cast<HRESULT>(event.WebErrorStatus()));
                         return;
                     }
-                    if (!matchesAccountPage(event.Uri())) {
+                    if (!matchesCommittedAccount(event.Uri(), local, qualified) || !approvedStart) {
                         checkpoint("account-document-unrecognized", E_ACCESSDENIED);
                         return;
                     }
