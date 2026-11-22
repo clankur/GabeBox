@@ -1,0 +1,6 @@
+{
+  "kernel32.dll": {
+    "LoadLibraryA": "XboxWin32LoaderTrace.dll",
+    "GetProcAddress": "XboxWin32LoaderTrace.dll"
+  }
+}

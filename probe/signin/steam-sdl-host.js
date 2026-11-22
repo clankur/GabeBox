@@ -27,7 +27,6 @@
     };
     var keys = { 27: 32, 32: 64, 143: 32, 196: 32 };
     var clickCodes = { 13: true, 142: true, 195: true };
-    var titles = { 975370: "Dwarf Fortress", 413150: "Stardew Valley", 646570: "Slay the Spire" };
     // SDL scancodes follow USB HID usage IDs. The virtual-key fallback is for older Xbox HTML hosts.
     var scans = {
         Enter: 40, Escape: 41, Backspace: 42, Tab: 43, Space: 44, Minus: 45, Equal: 46,
@@ -366,8 +365,9 @@
 
         function sendPad(pad) {
             if (lastPad && pad.every(function (value, i) { return value === lastPad[i]; })) return 0;
-            lastPad = pad;
-            return runner.sendSteamSdlGamepad(pad[0], pad[1], pad[2], pad[3], pad[4], pad[5], pad[6]);
+            var serial = runner.sendSteamSdlGamepad(pad[0], pad[1], pad[2], pad[3], pad[4], pad[5], pad[6]);
+            if (serial) lastPad = pad;
+            return serial;
         }
 
         function neutralPad() {
@@ -659,8 +659,8 @@
         keyboard.hidden = true;
         textForm.hidden = true;
         library.hidden = true;
-        title.textContent = titles[appId];
-        status.textContent = "Starting " + titles[appId] + "…";
+        title.textContent = attempt.gameName;
+        status.textContent = "Starting " + attempt.gameName + "…";
         exit.disabled = true;
         exit.addEventListener("click", quit);
         resume.addEventListener("click", hideMenu);
@@ -714,7 +714,7 @@
                         if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
                             window.steamBigPictureHost.recordGameFrame(appId, "sample", stats);
                         if (!attempt.automaticTrial) return;
-                        var padAcknowledged = nativePad && runner.steamSdlGamepadAck() > 0;
+                        var padAcknowledged = nativePad && trialSerial && runner.steamSdlGamepadAck() === trialSerial;
                         complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_presentation=native\r\n" +
                             "steam_sdl_sample_frames=" + frames + "\r\nsteam_sdl_sample_us=" + microseconds + "\r\n" +
                             "steam_sdl_host_input=" + (padAcknowledged ? "delivered" : "unconfirmed") + "\r\n" +
@@ -737,6 +737,7 @@
     }
 
     var apps = document.getElementById("steam-sdl-profiles").getAttribute("data-apps").split(" ");
-    window.steamSdlRuntimes = apps.map(Number).filter(function (appId) { return !!titles[appId]; })
+    window.steamSdlRuntimes = apps.filter(function (appId) { return /^[1-9]\d{0,7}$/.test(appId); })
+        .map(Number).filter(function (appId) { return appId <= 0x00ffffff; })
         .map(function (appId) { return { appId: appId, backend: "sdl-host", launch: start }; });
 }());

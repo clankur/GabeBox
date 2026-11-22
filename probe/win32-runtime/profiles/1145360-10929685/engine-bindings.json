@@ -1,0 +1,61 @@
+{
+  "shell32.dll": {
+    "#189": "XboxWin32Desktop.dll"
+  },
+  "user32.dll": {
+    "LoadCursorFromFileW": "XboxWin32Input.dll",
+    "RegisterClassW": "XboxWin32Window.dll",
+    "CreateWindowExW": "XboxWin32Window.dll",
+    "DefWindowProcW": "XboxWin32Window.dll",
+    "GetClientRect": "XboxWin32Window.dll",
+    "GetWindowRect": "XboxWin32Window.dll",
+    "GetDC": "XboxWin32Window.dll",
+    "ReleaseDC": "XboxWin32Window.dll",
+    "ShowWindow": "XboxWin32Window.dll",
+    "SetWindowPos": "XboxWin32Window.dll",
+    "MonitorFromWindow": "XboxWin32Window.dll",
+    "MonitorFromPoint": "XboxWin32Window.dll",
+    "EnumDisplayMonitors": "XboxWin32Window.dll",
+    "EnumDisplayDevicesW": "XboxWin32Window.dll",
+    "GetMonitorInfoW": "XboxWin32Window.dll",
+    "GetMonitorInfoA": "XboxWin32Window.dll",
+    "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "GetSystemMetrics": "XboxWin32Window.dll",
+    "PeekMessageA": "XboxWin32Window.dll",
+    "DispatchMessageA": "XboxWin32Window.dll"
+  },
+  "winmm.dll": {
+    "PlaySoundA": "XboxWin32Desktop.dll"
+  },
+  "xinput9_1_0.dll": {
+    "XInputGetState": "XboxWin32Input.dll",
+    "XInputSetState": "xinput1_4.dll"
+  },
+  "BasecampBugReporter.Native.dll": {
+    "?ReportBug@BasecampBugReporterNative@@YAXPEAUBugReportInfo@sgg@@@Z": "XboxWin32CrashReport.dll",
+    "?WaitReportComplete@BasecampBugReporterNative@@YA_NXZ": "XboxWin32CrashReport.dll"
+  },
+  "gdi32.dll": {
+    "CreateDCW": "XboxWin32Window.dll",
+    "DeleteDC": "XboxWin32Window.dll",
+    "GetDeviceCaps": "XboxWin32Window.dll"
+  },
+  "dxgi.dll": {
+    "CreateDXGIFactory1": "XboxWin32Dxgi.dll"
+  },
+  "d3dcompiler_47.dll": {
+    "D3DReflect": "XboxWin32Dxgi.dll",
+    "D3DGetInputSignatureBlob": "XboxWin32Dxgi.dll"
+  },
+  "kernel32.dll": {
+    "GetFileAttributesW": "XboxWin32LoaderTrace.dll",
+    "CreateFileA": "XboxWin32LoaderTrace.dll",
+    "CreateFileW": "XboxWin32LoaderTrace.dll",
+    "GetFileAttributesA": "XboxWin32LoaderTrace.dll",
+    "GetModuleFileNameW": "XboxWin32LoaderTrace.dll"
+  },
+  "api-ms-win-crt-stdio-l1-1-0.dll": {
+    "fopen": "XboxWin32LoaderTrace.dll",
+    "_wfsopen": "XboxWin32LoaderTrace.dll"
+  }
+}

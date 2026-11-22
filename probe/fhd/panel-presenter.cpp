@@ -15,6 +15,8 @@
 #include <mutex>
 #include <string>
 
+#include "frame-trace.h"
+
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
 extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
@@ -33,6 +35,7 @@ struct Status {
     LONG token = 0;
     bool visible = false;
     UINT64 gpu = 0, cpu = 0, sequence = 0;
+    UINT64 renderCallbacks = 0, sourceEmpty = 0, presentBusy = 0;
     HRESULT error = S_OK;
 };
 Status published;
@@ -52,6 +55,7 @@ struct Presenter {
     com_ptr<ID3D11DeviceContext> context;
     com_ptr<IDXGISwapChain2> chain;
     com_ptr<ID3D11RenderTargetView> target;
+    FhdFrameTrace trace;
     bool nativePad = false, attached = false, inserted = false;
     bool watchingFrames = false, watchingVisibility = false, watchingActivation = false;
     event_token frames{}, visibility{}, activation{};
@@ -90,22 +94,32 @@ struct Presenter {
             if (!status.visible) {
                 queuedSequence = 0;
             } else {
+                ++status.renderCallbacks;
                 if (!queuedSequence) {
                     UINT64 seq = 0;
                     bool gpu = false;
                     HRESULT hr = FhdDrawMedia(status.token, device.get(), context.get(), target.get(), nativePad, seq, gpu);
                     check_hresult(hr);
                     if (hr == S_OK) { queuedSequence = seq; queuedGpu = gpu; }
+                    else if (hr == S_FALSE) ++status.sourceEmpty;
                 }
                 if (queuedSequence) {
                     // XAML supplies the render cadence. Never hold its UI thread
                     // waiting for DXGI to free a buffer; retry this exact frame.
                     HRESULT hr = chain->Present(1, DXGI_PRESENT_DO_NOT_WAIT);
-                    if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+                    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+                        ++status.presentBusy;
+                    } else {
                         check_hresult(hr);
                         if (hr == S_OK) {
                             ++(queuedGpu ? status.gpu : status.cpu);
                             status.sequence = queuedSequence;
+                            if (trace.enabled()) {
+                                LARGE_INTEGER timestamp{};
+                                QueryPerformanceCounter(&timestamp);
+                                trace.record(timestamp.QuadPart, queuedSequence,
+                                    static_cast<UINT>(status.gpu + status.cpu), queuedGpu);
+                            }
                         }
                         queuedSequence = 0;
                     }
@@ -162,6 +176,7 @@ struct Presenter {
         inserted = true;
         check_hresult(panel.as<ISwapChainPanelNative>()->SetSwapChain(chain.get()));
         attached = true;
+        trace.open();
         visibility = window.VisibilityChanged([this](auto const&, auto const&) { updateVisibility(); });
         watchingVisibility = true;
         activation = window.Activated([this](auto const&, auto const&) { updateVisibility(); });
@@ -171,6 +186,7 @@ struct Presenter {
         updateVisibility();
     }
     void close() noexcept {
+        trace.close();
         if (watchingFrames) CompositionTarget::Rendering(frames);
         if (watchingVisibility) window.VisibilityChanged(visibility);
         if (watchingActivation) window.Activated(activation);
@@ -260,6 +276,8 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"width", width); field(L"height", height);
         field(L"presented", s.gpu + s.cpu); field(L"gpu_presented", s.gpu); field(L"cpu_presented", s.cpu);
         field(L"source_sequence", s.sequence); field(L"gpu_sequence", gpuSeq); field(L"cpu_sequence", cpuSeq);
+        field(L"render_callbacks", s.renderCallbacks); field(L"source_empty_callbacks", s.sourceEmpty);
+        field(L"present_busy_callbacks", s.presentBusy);
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);
     } catch (...) { return winrt::to_hresult(); }

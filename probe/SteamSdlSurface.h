@@ -1,16 +1,51 @@
 #pragma once
 
 #include "sdl-host-protocol.h"
+#include "sdl-gpu-protocol.h"
 #include "sdl-frame-copy.h"
+#include "SteamWin32Stage.h"
 
 class SteamSdlSurface {
     winrt::handle file_;
+    winrt::handle gpuFile_;
+    bool gpuFrameSequence_ = false;
     SdlHostMailbox *view_ = nullptr;
     mutable winrt::Windows::Storage::Streams::Buffer transfer_{nullptr};
     winrt::handle process_;
+    winrt::Windows::Storage::StorageFolder stagedGame_{nullptr};
     std::vector<std::uint8_t> previousPixels_;
     std::vector<std::uint16_t> encodedPixels_;
     SdlHostFrame previousHeader_{};
+
+    std::uint32_t PublishGamepad(std::uint32_t buttons,
+            std::array<std::int32_t, SDL_HOST_PAD_AXES> const& axes) const {
+        auto &pad = view_->gamepad;
+        InterlockedIncrement(&pad.serial);
+        InterlockedExchange(&pad.buttons, buttons & (SDL_HOST_PAD_CONNECTED | ((1u << SDL_HOST_PAD_BUTTONS) - 1)));
+        for (size_t i = 0; i < axes.size(); ++i) {
+            InterlockedExchange(&pad.axes[i], std::clamp(axes[i], -32768, 32767));
+        }
+        return static_cast<std::uint32_t>(InterlockedIncrement(&pad.serial));
+    }
+
+    template<class Mailbox> static Mailbox* OpenMailbox(std::wstring const& path, winrt::handle& file, LONG magic) {
+        CREATEFILE2_EXTENDED_PARAMETERS options{};
+        options.dwSize = sizeof(options);
+        options.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;
+        options.dwFileFlags = FILE_FLAG_DELETE_ON_CLOSE;
+        auto handle = CreateFile2(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  CREATE_NEW, &options);
+        if (handle == INVALID_HANDLE_VALUE) winrt::throw_last_error();
+        winrt::handle created{handle};
+        winrt::handle mapping{CreateFileMappingFromApp(created.get(), nullptr, PAGE_READWRITE, sizeof(Mailbox), nullptr)};
+        if (!mapping) winrt::throw_last_error();
+        auto* view = static_cast<Mailbox*>(MapViewOfFileFromApp(mapping.get(), FILE_MAP_WRITE, 0, sizeof(Mailbox)));
+        if (!view) winrt::throw_last_error();
+        InterlockedExchange(&view->magic, magic);
+        file = std::move(created);
+        return view;
+    }
 
 public:
     SteamSdlSurface() = default;
@@ -20,29 +55,30 @@ public:
     ~SteamSdlSurface() {
         Quit();
         if (view_) UnmapViewOfFile(view_);
+        if (stagedGame_) steam_win32_stage::RemoveStageAfterExit(std::move(stagedGame_), std::move(process_));
     }
 
-    void Open(std::wstring const& path) {
-        CREATEFILE2_EXTENDED_PARAMETERS options{};
-        options.dwSize = sizeof(options);
-        options.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;
-        options.dwFileFlags = FILE_FLAG_DELETE_ON_CLOSE;
-        auto file = CreateFile2(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                CREATE_NEW, &options);
-        if (file == INVALID_HANDLE_VALUE) winrt::throw_last_error();
-        file_.attach(file);
-        winrt::handle mapping{CreateFileMappingFromApp(file_.get(), nullptr, PAGE_READWRITE,
-                                                       sizeof(SdlHostMailbox), nullptr)};
-        if (!mapping) winrt::throw_last_error();
-        view_ = static_cast<SdlHostMailbox*>(MapViewOfFileFromApp(mapping.get(), FILE_MAP_WRITE, 0, sizeof(SdlHostMailbox)));
-        if (!view_) winrt::throw_last_error();
-        InterlockedExchange(&view_->magic, SDL_HOST_MAGIC);
+    void Open(std::wstring const& path, bool hostedDxgi) {
+        view_ = OpenMailbox<SdlHostMailbox>(path, file_, SDL_HOST_MAGIC);
+        if (hostedDxgi) {
+            auto* gpu = OpenMailbox<SdlGpuMailbox>(path + L".gpu", gpuFile_, SDL_GPU_MAGIC);
+            UnmapViewOfFile(gpu);
+            gpuFrameSequence_ = true;
+        }
     }
 
-    void Attach(winrt::handle process) { process_ = std::move(process); }
+    void Attach(winrt::handle process, winrt::Windows::Storage::StorageFolder stagedGame = nullptr) {
+        process_ = std::move(process);
+        stagedGame_ = std::move(stagedGame);
+    }
+    void PrimeGamepadConnection() const {
+        if (view_ && !process_) PublishGamepad(SDL_HOST_PAD_CONNECTED, {0, 0, 0, 0, -32768, -32768});
+    }
     bool Alive() const { return process_ && WaitForSingleObject(process_.get(), 0) == WAIT_TIMEOUT; }
-    bool HasFrame() const { return view_ && SdlHostLoad(&view_->frame_state) == SDL_HOST_READY; }
+    bool HasFrame() const {
+        return view_ && (gpuFrameSequence_ ? SdlHostLoad(&view_->frame_sequence) != 0 :
+                                            SdlHostLoad(&view_->frame_state) == SDL_HOST_READY);
+    }
 
     void Quit() const {
         if (view_) InterlockedExchange(&view_->quit, 1);
@@ -58,13 +94,7 @@ public:
 
     std::uint32_t Gamepad(std::uint32_t buttons, std::array<std::int32_t, SDL_HOST_PAD_AXES> const& axes) const {
         if (!Alive() || SdlHostLoad(&view_->quit)) return 0;
-        auto &pad = view_->gamepad;
-        InterlockedIncrement(&pad.serial);
-        InterlockedExchange(&pad.buttons, buttons & (SDL_HOST_PAD_CONNECTED | ((1u << SDL_HOST_PAD_BUTTONS) - 1)));
-        for (size_t i = 0; i < axes.size(); ++i) {
-            InterlockedExchange(&pad.axes[i], std::clamp(axes[i], -32768, 32767));
-        }
-        return static_cast<std::uint32_t>(InterlockedIncrement(&pad.serial));
+        return PublishGamepad(buttons, axes);
     }
 
     std::uint32_t InputAck() const {

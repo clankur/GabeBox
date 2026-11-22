@@ -14,11 +14,24 @@ PRESENT = struct.Struct('<QQII')
 FILETIME_EPOCH = 116444736000000000
 
 
+def reaches_gpu_60(sample):
+    if not isinstance(sample, dict):
+        return False
+    duration = sample.get('duration_s')
+    frames = sample.get('presented')
+    rolling = sample.get('min_rolling_1s_fps')
+    return (sample.get('hardware_adapter_verified') is True and type(duration) in (float, int)
+            and math.isfinite(duration) and duration >= 30
+            and type(frames) is int and frames / duration >= 59.5
+            and sample.get('shared_texture_presented') == frames and sample.get('cpu_presented') == 0
+            and type(rolling) is int and rolling >= 57)
+
+
 def summarize(trace, start, utc, duration):
     if len(trace) < HEADER.size:
         raise ValueError('Missing trace header.')
     magic, version, frequency, filetime, anchor = HEADER.unpack_from(trace)
-    if magic != 0x31444846 or version != 1 or not frequency:
+    if magic != 0x31444846 or version not in (1, 2) or not frequency:
         raise ValueError('Unsupported presentation trace.')
     epoch = (filetime - FILETIME_EPOCH) / 10_000_000
     if utc is not None:
@@ -56,12 +69,15 @@ def summarize(trace, start, utc, duration):
     def percentile(fraction):
         return round(intervals[math.ceil(fraction * len(intervals)) - 1], 3) if intervals else None
 
-    return {'start_utc': datetime.fromtimestamp(epoch + start, timezone.utc).isoformat(),
-            'duration_s': duration, 'presented': len(times), 'fps': round(len(times) / duration, 3),
-            'min_rolling_1s_fps': minimum, 'p50_ms': percentile(.50), 'p95_ms': percentile(.95),
-            'p99_ms': percentile(.99), 'worst_ms': percentile(1),
-            'intervals_over_33_33ms': sum(gap > 1000 / 30 for gap in intervals),
-            'cpu_presented': modes[1], 'shared_texture_presented': modes[2]}
+    result = {'start_utc': datetime.fromtimestamp(epoch + start, timezone.utc).isoformat(),
+              'duration_s': duration, 'presented': len(times), 'fps': round(len(times) / duration, 3),
+              'min_rolling_1s_fps': minimum, 'p50_ms': percentile(.50), 'p95_ms': percentile(.95),
+              'p99_ms': percentile(.99), 'worst_ms': percentile(1),
+              'intervals_over_33_33ms': sum(gap > 1000 / 30 for gap in intervals),
+              'cpu_presented': modes[1], 'shared_texture_presented': modes[2],
+              'hardware_adapter_verified': version == 2 and bool(times) and modes[2] == len(times)}
+    result['gpu_60fps'] = reaches_gpu_60(result)
+    return result
 
 
 if __name__ == '__main__':
@@ -71,9 +87,12 @@ if __name__ == '__main__':
     origin.add_argument('--start-utc', type=lambda s: datetime.fromisoformat(s.replace('Z', '+00:00')))
     origin.add_argument('--start-offset-s', type=float, default=0)
     parser.add_argument('--duration', type=float, default=30)
+    parser.add_argument('--require-gpu-60', action='store_true', help='require sustained 60 fps on the verified hardware adapter')
     args = parser.parse_args()
     try:
         result = summarize(args.trace.read_bytes(), args.start_offset_s, args.start_utc, args.duration)
     except (OSError, ValueError, struct.error) as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2))
+    if args.require_gpu_60 and not result['gpu_60fps']:
+        raise SystemExit(1)

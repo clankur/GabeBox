@@ -105,6 +105,7 @@
             var fields = stats.split(/\r?\n/).filter(function (line) {
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|primary_panel|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
+                    /^sample_(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=[0-9]{1,16}$/.test(line) ||
                     /^(capture_saved|video_ms|sample_window)=[0-9]{1,16}$/.test(line) || /^media_phase=(open|attach|playback|panel)$/.test(line);
             });
             if (!fields.length) return;
@@ -122,7 +123,7 @@
         }
         function gameEvent(overlay) {
             if (!host || failed) return;
-            var hosted = playingApp === 646570 || playingApp === 975370 || playingApp === 413150;
+            var hosted = (window.steamSdlRuntimes || []).some(function (runtime) { return runtime.appId === playingApp; });
             host.reply(JSON.stringify({event: "xbox-game", appId: presented && hosted ? playingApp : 0, overlay: overlay}));
         }
         function showValve(from) {

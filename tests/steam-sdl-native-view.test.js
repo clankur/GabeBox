@@ -7,18 +7,20 @@ const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native
 
 test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
     const calls = [], samples = [], first = [];
-    let now = 0, swaps = 0, tick, visible = true, finishClose;
+    let now = 0, swaps = 0, callbacks = 2, empty = 1, busy = 0, generated = 1, tick, visible = true, finishClose;
     const drain = () => new Promise(resolve => setImmediate(resolve));
     const host = {
         async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
         async setPanelVisible(value) { visible = value; calls.push(["visible", value]); },
         closePanel() { calls.push(["close"]); return new Promise(resolve => { finishClose = resolve; }); },
         panelStatus() { return "width=1920\r\nheight=1080\r\nprimary_panel=1\r\nvisible=" +
-            Number(visible) + "\r\npresented=" + swaps + "\r\n"; },
+            Number(visible) + "\r\npresented=" + swaps + "\r\nrender_callbacks=" + callbacks +
+            "\r\nsource_empty_callbacks=" + empty + "\r\npresent_busy_callbacks=" + busy +
+            "\r\ngpu_sequence=" + generated + "\r\n"; },
         openMedia() { assert.fail("The XAML panel should own playback"); }
     };
     const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
-        presented: stats => first.push(stats), measured: (frames, us) => samples.push([frames, us])};
+        presented: stats => first.push(stats), measured: (frames, us, stats) => samples.push([frames, us, stats])};
     const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
         steamBigPictureHost: {switchView: async (to, from) => { assert.equal(to, from); }}};
     const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
@@ -36,8 +38,12 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     now += 50000; swaps += 1200; tick();
     assert.deepEqual(samples, []);
     await game.resume(1); tick();
-    now += 30000; swaps += 1780; tick();
-    assert.deepEqual(samples, [[1780, 30000000]]);
+    now += 30000; swaps += 1780; callbacks += 1800; empty += 12; busy += 8; generated += 1794; tick();
+    assert.deepEqual(samples.map(sample => sample.slice(0, 2)), [[1780, 30000000]]);
+    assert.match(samples[0][2], /sample_render_callbacks=1800\r\n/);
+    assert.match(samples[0][2], /sample_source_empty_callbacks=12\r\n/);
+    assert.match(samples[0][2], /sample_present_busy_callbacks=8\r\n/);
+    assert.match(samples[0][2], /sample_gpu_sequence=1794\r\n/);
     const stopped = game.close(); assert.equal(game.close(), stopped);
     const next = open(3);
     await drain();

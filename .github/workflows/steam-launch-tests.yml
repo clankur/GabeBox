@@ -9,7 +9,11 @@ on:
       - 'probe/prepare-big-picture-library.py'
       - 'probe/prepare-steam-core.py'
       - 'probe/ProbeNative.cpp'
+      - 'probe/steam-launch-detail.h'
       - 'probe/SteamCloud*.h'
+      - 'probe/SteamWin32Stage.h'
+      - 'probe/redirect-pe-imports.py'
+      - 'probe/fhd/measure.py'
       - 'probe/sdl-frame-copy.h'
       - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
@@ -22,7 +26,11 @@ on:
       - 'probe/prepare-big-picture-library.py'
       - 'probe/prepare-steam-core.py'
       - 'probe/ProbeNative.cpp'
+      - 'probe/steam-launch-detail.h'
       - 'probe/SteamCloud*.h'
+      - 'probe/SteamWin32Stage.h'
+      - 'probe/redirect-pe-imports.py'
+      - 'probe/fhd/measure.py'
       - 'probe/sdl-frame-copy.h'
       - 'probe/XboxProbe.Native.idl'
       - 'tests/**'
@@ -44,5 +52,6 @@ jobs:
           python-version: '3.12'
       - run: node --test tests/*.test.js probe/big-picture-webview/*.test.js
       - run: python -m unittest discover -s tests
+      - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-launch-detail.test.cpp -o /tmp/steam-launch-detail-test && /tmp/steam-launch-detail-test
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-cloud-manifest.test.cpp -o /tmp/steam-cloud-manifest-test && /tmp/steam-cloud-manifest-test
       - run: g++ -std=c++20 -O2 -Wall -Wextra -Werror tests/steam-sdl-frame.test.cpp -o /tmp/steam-sdl-frame-test && /tmp/steam-sdl-frame-test

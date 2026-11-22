@@ -14,6 +14,10 @@ You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on t
 
 To run the original packaged-process diagnostic, follow its separate deployment instructions. [Probe setup and report fields](probe/README.md)
 
+### Play Hades on Xbox Series X
+
+The signed Hades profile runs the Steam x64 DirectX build through Big Picture. Controller gameplay works on Series X. Expect intermittent stutter in the current build. [Hades setup and hardware results](analysis/hades-compatibility.md)
+
 ### Try the earlier Steam Core prototype
 
 Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml) · [Steam setup guide](probe/STEAM-CORE.md)

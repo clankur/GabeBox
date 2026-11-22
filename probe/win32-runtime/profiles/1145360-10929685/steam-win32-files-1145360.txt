@@ -1,0 +1,12 @@
+BasecampBugReporter.Native.dll
+EOSSDK-Win64-Shipping.dll
+Hades.exe	launcher
+OpenGLRenderer.dll
+SteamWrapper.dll
+WindowsInput.dll
+bink2w64.dll
+discord_game_sdk.dll
+fmod.dll
+fmodstudio.dll
+steam_api64.dll
+vcruntime140.dll

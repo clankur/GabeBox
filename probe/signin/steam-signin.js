@@ -326,6 +326,7 @@
             return launch.start({
                 file: attempt.file,
                 report: report,
+                gameName: entry.name,
                 automaticTrial: automaticTrial === true,
                 bigPicture: bigPictureMode,
                 onExit: onExit,

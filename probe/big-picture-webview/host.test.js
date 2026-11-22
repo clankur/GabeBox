@@ -6,7 +6,7 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, primary = false, xaml = false, warm = false, expected = 0, findRequest, openReport = async () => ({})} = {}) {
+function fixture({activationError = false, primary = false, xaml = false, warm = false, expected = 0, hostedApps = [], findRequest, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
@@ -24,7 +24,7 @@ function fixture({activationError = false, primary = false, xaml = false, warm =
     };
     renderer.openForAccount = id => { owners.push(id); if (warm) warmOpens++; else opens++; stage = "composition"; };
     renderer.openForPrimaryAccount = id => { assert(xaml); owners.push(id); stage = "composition"; };
-    const window = {}, memory = {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
+    const window = {steamSdlRuntimes: hostedApps.map(appId => ({appId}))}, memory = {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
         expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }};
     if (xaml) window.document = {documentElement:{getAttribute: key => key === "data-steam-primary-xaml" ? "true" : null}};
     vm.runInNewContext(source, {
@@ -409,54 +409,54 @@ test("a visible Valve first-run screen keeps the session open during setup", asy
 });
 
 test("a game chord keeps both views alive and returns only to the owning game", async () => {
-    const app = fixture();
+    const app = fixture({hostedApps: [1145360]});
     let signedIn = true, launches = 0, raises = 0;
     const ready = app.start({
         session: async () => ({steamId: signedIn ? "76561191111111111" : null}),
-        async play(id, handoff) { assert.equal(id, 975370); await handoff(); launches++; return "presented"; }
+        async play(id, handoff) { assert.equal(id, 1145360); await handoff(); launches++; return "presented"; }
     });
     await drain();
     await app.advance("gamepad-ready");
     await ready;
-    app.incoming.push('{"method":"play","id":1,"appId":975370}');
+    app.incoming.push('{"method":"play","id":1,"appId":1145360}');
     await app.advance("gamepad-ready");
     const restore = async view => { assert.equal(view, 10); raises++; return true; };
     assert.equal(await app.shell.showForGame(1, 90, restore), false);
     let quitRequests = 0;
     const quit = () => { quitRequests++; return true; };
-    assert.equal(await app.shell.showForGame(975370, 90, restore, quit), true);
+    assert.equal(await app.shell.showForGame(1145360, 90, restore, quit), true);
     assert.deepEqual(app.switches.slice(-2), [[3,10],[10,90]]);
     signedIn = false;
-    app.incoming.push('{"method":"resume-game","id":2,"appId":975370}');
+    app.incoming.push('{"method":"resume-game","id":2,"appId":1145360}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 2 && e.result === "signed-out"));
     signedIn = true;
-    app.incoming.push('{"method":"resume-game","id":3,"appId":646570}', '{"method":"resume-game","id":4,"appId":975370}');
+    app.incoming.push('{"method":"resume-game","id":3,"appId":646570}', '{"method":"resume-game","id":4,"appId":1145360}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 3 && e.result === "unavailable"));
     assert.ok(app.replies.some(e => e.id === 4 && e.result === "presented"));
     assert.equal(launches, 1); assert.equal(raises, 1);
-    app.incoming.push('{"method":"quit-game","id":5,"appId":975370}');
+    app.incoming.push('{"method":"quit-game","id":5,"appId":1145360}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 5 && e.result === "unavailable"));
     assert.match(app.reports.at(-1), /game-quit-received/);
     assert.doesNotMatch(app.reports.at(-1), /game-quit-requested/);
-    assert.equal(await app.shell.showForGame(975370, 90, restore, quit), true);
-    app.incoming.push('{"method":"quit-game","id":6,"appId":413150}', '{"method":"quit-game","id":7,"appId":975370}');
+    assert.equal(await app.shell.showForGame(1145360, 90, restore, quit), true);
+    app.incoming.push('{"method":"quit-game","id":6,"appId":413150}', '{"method":"quit-game","id":7,"appId":1145360}');
     await app.advance("gamepad-ready");
     assert.ok(app.replies.some(e => e.id === 6 && e.result === "unavailable"));
     assert.ok(app.replies.some(e => e.id === 7 && e.result === "quit-requested"));
     assert.match(app.reports.at(-1), /game-quit-requested/);
     assert.equal(quitRequests, 1);
-    await app.shell.resume(975370);
+    await app.shell.resume(1145360);
     await drain();
     const events = app.replies.filter(e => e.event === "xbox-game").map(e => [e.appId,e.overlay]);
     const foreground = app.replies.filter(e => 'nativeGameForeground' in e).map(e => e.nativeGameForeground);
     assert.deepEqual(foreground, [true, false, true, false]);
-    assert.deepEqual(events, [[975370,false],[975370,true],[975370,false],[975370,true],[0,false]]);
+    assert.deepEqual(events, [[1145360,false],[1145360,true],[1145360,false],[1145360,true],[0,false]]);
     assert.ok(app.reports.at(-1).includes("memory_first_frame_limit_bytes=1073741824"));
     assert.equal(app.opens(), 1);
-    assert.equal(await app.shell.showForGame(975370, 90, restore), false);
+    assert.equal(await app.shell.showForGame(1145360, 90, restore), false);
 });
 
 test("only fixed Store JS milestones persist and stay separate from native HTTP results", async () => {

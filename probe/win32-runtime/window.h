@@ -1,0 +1,31 @@
+#pragma once
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#define XBOX_DESKTOP_DC ((HDC)(ULONG_PTR)0x584244000001ULL)
+
+/* Private HWND and HDC values belong to this backend. */
+typedef struct XboxWindow {
+    HWND handle;
+    WNDPROC procedure;
+    HINSTANCE instance;
+    RECT bounds;
+    DWORD style;
+    DWORD extendedStyle;
+    LONG_PTR userData;
+    ATOM classAtom;
+    UINT contexts;
+    int pixelFormat;
+    BOOL destroying;
+} XboxWindow;
+
+BOOL XboxWindowThread(void);
+XboxWindow *XboxFindWindow(HWND handle);
+BOOL WINAPI XboxDestroyWindow(HWND handle);
+BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam);
+BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int width, int height, UINT flags);
+void XboxPollWglHostEvents(void);
+void XboxResizeCurrentContext(XboxWindow *window);
+RECT XboxDesktopBounds(void);
+void XboxWindowTrace(const char *line);

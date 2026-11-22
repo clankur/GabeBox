@@ -1,0 +1,5 @@
+LIBRARY XboxWin32Dxgi.dll
+EXPORTS
+    CreateDXGIFactory1=XboxCreateDXGIFactory1
+    D3DReflect=XboxD3DReflect
+    D3DGetInputSignatureBlob=XboxD3DGetInputSignatureBlob
