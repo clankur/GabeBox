@@ -180,6 +180,7 @@ The signed native XAML APPX has SHA-256 `c095fc30012ffd4ba983485d8a8fb77aa4a468c
 | 1.0.230.27 · tour-27-192039 | Slay the Spire | Stock Play launched the matching JVM. | Two separate foreground video captures showed the game menu, including its Quit command. | The first video sample counted 1,081 frames in 30.051300 s (35.97 FPS). A Device Portal pointer click on Quit produced no mapped input acknowledgement. The operator closed the game and stopped the host. No normal Library return. |
 | 1.0.230.28 · tour-28-192556 | Dwarf Fortress | Stock Play launched the matching process. | A foreground video capture showed the game's menu. The stock Steam menu opened the Library on TV while the game stayed live. The same PID resumed and the foreground video again showed the menu. | 1,777 foreground video frames in 30.090400 s (59.06 FPS). Valve's Exit confirmation reached the native quit receiver. The game did not exit and the operator closed the matched PID. This is one game launch and one resume. |
 | 1.0.230.30 · tour-30-194855 | Slay the Spire | The original Library led to the matching JVM. | The player confirmed the Slay title on the physical TV. A separate foreground video frame showed its menu. After opening Steam's menu the player saw black, a brief flash of the game, then black again. | Two foreground windows counted 24 frames in 30.012000 s and 14 in 30.074700 s (0.80 and 0.47 FPS). The game and host disappeared before any operator stop. No normal exit, Library return or successful overlay cycle. |
+| 1.0.230.31 · tour-31-195449, reactivated host 972f4e49-27ea-46e9-b755-d77ca3399ce5 | Slay the Spire | Original Play launched the matching JVM in a later application lifetime. | The player reported black TV output on game boot. A foreground HTML video capture later showed the Slay menu. The exact timing of the black interval relative to this capture is unknown. | 1,077 foreground video frames in 30.080700 s (35.80 FPS). The stock Steam menu and Library appeared on raw TV while the same game PID was active. The player confirmed controller use and remote input also occurred. Normal exit and post-Library game visibility require separate evidence. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -229,6 +230,9 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `valve-878.png`, .30 first cold start whole-output Library | 1920×1080 | `4d95f614b73fe1f6dd496aa2bd7d777d842d05fec75bbdc1846cd99046a35753` |
 | `media-element-646570-1795308705713245000.png`, .30 Slay the Spire title in the foreground video element | 1920×1080 | `627d57e01357656e03c6bd3e54d32f3e43822ce34ca392b68bcc5ef5e07a5e24` |
 | `physical-tv-1795308960338265000.png`, .31 first native XAML cold start whole-output Library | 1920×1080 | `b433be2295c963bf66601e08fe2e0169d663c65b1f7c327371899e2ec29a5d47` |
+| `media-element-646570-1795309272746961000.png`, .31 Slay title in foreground HTML video | 1920×1080 | `8e4d9351c54731c047b9e49a0fc7cfd45d8f77176a7008426243c43e40fbfdb9` |
+| `stock-real-main-menu-1795309375265663000.png`, .31 raw TV stock Steam menu with Slay running | 1920×1080 | `871ac42767aadc6913053959779b387ca1fdc949f93943e7425b24439e264379` |
+| `stock-library-while-running-1795309382091303000.png`, .31 raw TV Library while the same Slay PID remained live | 1920×1080 | `7c754d51008988d96b7509e4ec76ed3a827739d32087f17de0dd93835b7b851a` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
@@ -248,6 +252,8 @@ python3 probe/verify-big-picture-resume.py "$APPX28" \
 ```
 
 The check matched 64 process samples with a maximum gap of 1.99 s. The signed package's pinned bytes and manifest version matched the launch receipt. The same game PID and image bracketed the Library and both foreground captures. Deliberately changing the recorded native run, PID or Library image digest caused the check to fail. The collector supplies capture provenance. Inspect the original PNGs to identify the screens and retain separate observations for physical input, TV output during gameplay and normal process exit.
+
+Some collector receipts record only the native run and the TV capture source. Supply `--library-sha256` with the independently retained image digest for those runs. The checker then reads the active AppID and PID from the bracketing process samples. It still requires video captures from both sides of the Library in the same run.
 
 ## Account and first-install coverage
 
