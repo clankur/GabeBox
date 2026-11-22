@@ -1,0 +1,128 @@
+"""Check one retained Series X Library-while-running and resume observation offline."""
+
+import argparse
+from bisect import bisect_left
+import hashlib
+import json
+from pathlib import Path
+import struct
+import sys
+import uuid
+import xml.etree.ElementTree as ET
+import zipfile
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def load(path):
+    return json.loads(path.read_bytes())
+
+
+def capture_time(path):
+    return int(path.stem.rsplit("-", 1)[1]) / 1_000_000_000
+
+
+def check_png(receipt, digest):
+    data = receipt.with_suffix(".png").read_bytes()
+    require(data[:16] == b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" and
+            struct.unpack(">II", data[16:24]) == (1920, 1080), f"Expected full-HD PNG paired with {receipt.name}")
+    require(hashlib.sha256(data).hexdigest() == digest, f"PNG digest mismatch for {receipt.name}")
+
+
+def check_release(appx, digest, launch):
+    with appx.open("rb") as source:
+        computed = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            computed.update(chunk)
+    require(computed.hexdigest() == digest.lower(), "APPX differs from the supplied release pin")
+    with zipfile.ZipFile(appx) as files:
+        identity = ET.fromstring(files.read("AppxManifest.xml")).find("{*}Identity")
+        require(files.read("AppxSignature.p7x").startswith(b"PKCX"), "Missing APPX signature record")
+    require(identity is not None and identity.get("Name") == "XboxPortabilityProbe.ChildProcess.SteamCore",
+            "Expected the production Steam Core identity")
+    require(launch["version"] == identity.get("Version") and
+            launch["package"] == f'{identity.get("Name")}_{identity.get("Version")}_{identity.get("ProcessorArchitecture")}__47az75d01t3xc',
+            "Installed package identity/version differs from pinned APPX")
+
+
+def verify(appx, digest, library_path, game_image):
+    directory = library_path.parent
+    launch = load(directory / "launch-receipt.json")
+    check_release(appx, digest, launch)
+    library = load(library_path)
+    require(library_path.name.startswith("stock-library-while-running-") and
+            library["source"] == "official TV capture" and library["native_status"] == "game-switch-to-steam",
+            "Expected a Library-while-running TV receipt")
+    run = str(uuid.UUID(library["same_run"]))
+    require(run != launch["baseline_run_id"], "Run ID was already present before activation")
+    app_id, pid = library["active_appid"], library["active_pid"]
+    require(type(pid) is int and pid > 0 and type(app_id) is int and app_id > 0, "Missing active game identity")
+    check_png(library_path, library["sha256"])
+    middle = capture_time(library_path)
+    media = sorted(directory.glob(f"media-element-{app_id}-*.json"), key=capture_time)
+    before = [path for path in media if capture_time(path) < middle]
+    after = [path for path in media if capture_time(path) > middle]
+    require(before and after, "Need a foreground video receipt on both sides of the Library")
+    first, last = before[-1], after[0]
+    require(launch["timestamp_before_launch"] < capture_time(first), "Video precedes this activation")
+
+    rows = [json.loads(line) for line in (directory / "stock-game-events.jsonl").read_bytes().splitlines() if line]
+    times = [row["t"] for row in rows]
+    require(all(b > a for a, b in zip(times, times[1:])), "Process observations are out of order")
+
+    def bracket(path, *states):
+        index = bisect_left(times, capture_time(path))
+        require(0 < index < len(rows), f"Missing bracketing samples for {path.name}")
+        pair = rows[index - 1:index + 1]
+        require(all(row["status"] in states for row in pair), f"Unexpected native state at {path.name}")
+        return pair
+
+    bracket(library_path, "game-switch-to-steam")
+    start = bisect_left(times, capture_time(first)) - 1
+    stop = bisect_left(times, capture_time(last)) + 1
+    require(start >= 0 and stop <= len(rows), "Missing observation window")
+    window = rows[start:stop]
+    require(len(window) >= 2, "No process samples across the three captures")
+    max_gap = max(b["t"] - a["t"] for a, b in zip(window, window[1:]))
+    # The collector polls about once per second. A long unobserved gap cannot establish continuity.
+    require(max_gap <= 5, f"Process sampling gap of {max_gap:.1f} s")
+    for row in window:
+        require(row["run_id"] == run and row["host_live"] is True and row["matched_pid"] == pid and
+                row["current_appid"] == app_id and any(proc["pid"] == pid and proc["image"].casefold() == game_image.casefold()
+                for proc in row["processes"]), f"Run, AppID or process identity changed at {row['t']}")
+
+    counters = []
+    for path, states in [(first, ("game-presented", "game-switch-to-game")), (last, ("game-switch-to-game",))]:
+        pair = bracket(path, *states)
+        receipt = load(path)
+        require(receipt["source"] == "foreground HTML video element" and receipt["run_id"] == run,
+                f"Video receipt has a different run or source at {path.name}")
+        check_png(path, receipt["sha256"])
+        raw = receipt["media_receipt"]
+        require(any(row["native"].get("game_frame_media_capture") == raw for row in pair),
+                f"No matching live native capture receipt at {path.name}")
+        fields = dict(token.split("=", 1) for token in raw.split())
+        require(all(fields.get(k) == v for k, v in {"appid": str(app_id), "capture_saved": "1", "width": "1920",
+                "height": "1080", "visible": "1", "primary_media": "1"}.items()), f"Invalid media capture at {path.name}")
+        counters.append((int(fields["video_ms"]), int(fields["presented"])))
+    require(all(b > a > 0 for a, b in zip(*counters)), "Foreground media time and presented count must advance")
+    print(f"Verified {launch['version']} run {run}, AppID {app_id}, PID {pid} ({game_image}).")
+    print(f"{len(window)} process samples. Longest gap {max_gap:.2f} s. Library PNG SHA-256 {library['sha256']}.")
+    print(f"Video time {counters[0][0]} → {counters[1][0]} ms. Presented count {counters[0][1]} → {counters[1][1]}.")
+    print("Inspect the images for Library and title content. Physical input, TV game output and normal exit require separate evidence.")
+
+
+if __name__ == "__main__":
+    cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument("appx", type=Path)
+    cli.add_argument("library_receipt", type=Path, help="stock-library-while-running-<time>.json in the retained run directory")
+    cli.add_argument("--sha256", required=True, help="independently recorded signed APPX SHA-256")
+    cli.add_argument("--game-image", required=True, help="expected executable name in the sampled process list")
+    args = cli.parse_args()
+    try:
+        verify(args.appx, args.sha256, args.library_receipt, args.game_image)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, struct.error, ET.ParseError, zipfile.BadZipFile) as error:
+        sys.exit(f"Evidence check failed: {error}")

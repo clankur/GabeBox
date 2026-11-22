@@ -207,6 +207,19 @@ For `.19`, the operator fetched the raw PNG from Xbox Device Portal's `/ext/scre
 
 The `.28` Dwarf Fortress title images have the same digest before and after resume and as one earlier `.24` image. Fresh `.28` capture receipts record video time advancing from 15.024 s to 45.609 s and the presentation count advancing from 879 to 1,940 on the same process. The still image establishes menu content. The counters establish presentation and the raw TV Library frame between them establishes the intervening UI. The identical menu pixels do not show movement or physical controller input.
 
+### Recheck a retained resume
+
+Run the offline checker with the signed APPX, the original Library-while-running JSON and the release hash recorded above. It reads the PNGs and process log alongside the receipt. This example uses the first `.28` run. [Offline checker](../probe/verify-big-picture-resume.py)
+
+```sh
+python3 probe/verify-big-picture-resume.py "$APPX28" \
+  big-picture-signed/console-check/production-230-28/tour-28-192556/stock-library-while-running-1795307302426968000.json \
+  --game-image 'dwarf fortress.exe' \
+  --sha256 045da0be57a4b4852272e9de885d49fb0d6fe2a4be1069fb49e06895f840a585
+```
+
+The check matched 64 process samples with a maximum gap of 1.99 s. The signed package's pinned bytes and manifest version matched the launch receipt. The same game PID and image bracketed the Library and both foreground captures. Deliberately changing the recorded native run, PID or Library image digest caused the check to fail. The collector supplies capture provenance. Inspect the original PNGs to identify the screens and retain separate observations for physical input, TV output during gameplay and normal process exit.
+
 ## Account and first-install coverage
 
 The `.19` TV and frame receipts use a previously authenticated Steam account on the test console. A cold process start preserves saved credentials, game installations and browser storage. They do not verify a fresh installation, a second real account, or an account with no games.
