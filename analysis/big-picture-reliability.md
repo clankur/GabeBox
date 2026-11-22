@@ -189,6 +189,10 @@ Signed production APPX SHA-256 `93d816a83769f58653238a95c201073eb7b9b06bdb14a55e
 
 The Home capture's operator label says Internet Settings. A different capture labeled Home shows the Storage settings spinner. The unedited Library and Home PNGs are also retained as `steam-big-picture-library-on-xbox-1920x1080.png` and `steam-big-picture-home-on-xbox-1920x1080.png` under `big-picture-signed/console-check/production-230-36/`. Public Store content and the Internet settings screen require their own captures.
 
+The first controlled cold start began with an empty process baseline. Later in that run, after the Home search field gained focus, a separate full-screen exception appeared: `SteamClient.Input.SetKeyboardActionset is not a function` (`Shared SteamUI_11229305_8f83e06b33ffde9b`). The official screenshot SHA-256 is `dce5f9c8b98f205b6361ca51efa829eb6be7669d8237295742375c2c6aae93ba`.
+
+A second cold activation began with only RuntimeBroker present. It reached `gamepad-ready` in run `fa4597cf-d8e6-4a24-a71e-3773183578a0`, PID `15376`. Its first official image, labeled Library, showed a black browser pane and Steam's browser toolbar. A later original menu capture showed the focused Store row, SHA-256 `2160aca42329662722e7964cc76e422442ec8edec697af10bbbdb4b1e3a77df7`. After the logged selection the pane remained black, SHA-256 `4d059127c97429fa89c94d9cf1201c7232d2f3be784ac47caed886e2c63bbc06`. The native stages reached controller creation, configuration, opening the bootstrap document and visibility. The corresponding report recorded no external navigation result. Across these two launches the retained full-TV startup evidence proves one populated Library. No public storefront or new game launch is established by these captures.
+
 ## Direct native game display
 
 For a build that presents game frames through the primary XAML panel, retain the following original whole-output captures from the same run. Index each with its source, capture time, dimensions and SHA-256. Open the originals to identify the actual content.
