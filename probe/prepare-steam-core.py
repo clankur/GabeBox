@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tarfile
@@ -123,6 +124,63 @@ def title_launch_option(spec):
     raise argparse.ArgumentTypeError('expected APPID:INDEX with a 24-bit AppID and unsigned 32-bit index')
 
 
+FHD_COMPONENT = ('Fhd.Native.dll', 'Fhd.Native.winmd')
+
+
+def presenter_payload(artifact, checksum):
+    """Verify both members against a pinned CI checksum manifest before staging."""
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', checksum or ''):
+        raise ValueError('Provide the SHA-256 of the presenter artifact SHA256SUMS file.')
+    sums = (artifact / 'SHA256SUMS').read_bytes()
+    if hashlib.sha256(sums).hexdigest() != checksum.lower():
+        raise ValueError('Presenter checksum manifest differs from the supplied SHA-256.')
+    expected = {}
+    for line in sums.decode('ascii').splitlines():
+        match = re.fullmatch(r'([0-9a-fA-F]{64})  (Fhd\.Native\.(?:dll|winmd))', line)
+        if not match or match[2] in expected:
+            raise ValueError('Unexpected presenter checksum entry.')
+        expected[match[2]] = match[1].lower()
+    if expected.keys() != set(FHD_COMPONENT):
+        raise ValueError('Presenter checksum manifest must cover the DLL and WinMD.')
+    payload = {name: (artifact / name).read_bytes() for name in FHD_COMPONENT}
+    if any(hashlib.sha256(data).hexdigest() != expected[name] for name, data in payload.items()):
+        raise ValueError('Presenter component does not match its checksum manifest.')
+    return payload
+
+
+def presenter_manifest(manifest):
+    root = ElementTree.fromstring(manifest)
+    servers = root.findall('{*}Extensions/{*}Extension/{*}InProcessServer')
+    for server in servers:
+        for klass in server.findall('{*}ActivatableClass'):
+            if klass.get('ActivatableClassId') == 'Fhd.Native.RenderHost':
+                if server.findtext('{*}Path') != FHD_COMPONENT[0] or klass.get('ThreadingModel') != 'both':
+                    raise ValueError('The template has a conflicting native presenter registration.')
+                return manifest
+    # Insert beside the existing package-level ProbeNative registration, without rewriting
+    # the namespace declarations referenced by IgnorableNamespaces.
+    server_pattern = rb'<Extension\b[^>]*>[^<]*<InProcessServer>.*?</InProcessServer>\s*</Extension>'
+    registrations = [m for m in re.finditer(server_pattern, manifest, re.DOTALL)
+                     if b'<Path>ProbeNative.dll</Path>' in m[0]]
+    if len(registrations) != 1:
+        raise ValueError('Expected exactly one native probe server in this SDK template.')
+    end = registrations[0].end()
+    extra = (b'\n    <Extension Category="windows.activatableClass.inProcessServer">'
+             b'<InProcessServer><Path>Fhd.Native.dll</Path><ActivatableClass '
+             b'ActivatableClassId="Fhd.Native.RenderHost" ThreadingModel="both" />'
+             b'</InProcessServer></Extension>')
+    return manifest[:end] + extra + manifest[end:]
+
+
+def stage_native_presenter(layout, artifact, checksum):
+    payload = presenter_payload(artifact, checksum)
+    path = layout / 'AppxManifest.xml'
+    manifest = presenter_manifest(path.read_bytes())
+    for name, data in payload.items():
+        (layout / name).write_bytes(data)
+    path.write_bytes(manifest)
+
+
 def prepare_layout(template, layout, version, valve_archive, objdump, unicode_keyboard, steam_sign_in,
                    launch_app_id=None, probe_java_runtime=False, repeat_launch=False, install_before_launch=False,
                    library_inventory=False, vclibs_framework=None, xcom_runtime_archive=None, launch_option=None,
@@ -131,15 +189,26 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
                    startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
-                   measure_sdl_frames=False):
+                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None, stardew_sdl_runtime=None):
+    if (fhd_presenter is None) != (fhd_presenter_checksum is None):
+        raise ValueError('Supply the presenter artifact directory and its checksum together.')
+    presenter = presenter_payload(fhd_presenter, fhd_presenter_checksum) if fhd_presenter else {}
+    if stardew_sdl_runtime:
+        if not stardew_sdl_host:
+            raise ValueError('The Stardew SDL runtime requires its managed host.')
+        deploy = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.py'))
+        stardew_sdl = deploy['load_sdl_artifact'](stardew_sdl_runtime, 413150)
+        if slay_sdl_host and stardew_sdl != (slay_sdl_host / 'SDL2.dll').read_bytes():
+            raise ValueError('Use the same shared SDL 2.30.9 build for both hosted profiles.')
     imports = {}
     for binary in inspect_binaries:
         for module, symbols in system_imports(objdump, binary).items():
             imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
     startup_app_id = launch_app_id
-    if measure_sdl_frames and not (launch_app_id == 646570 and slay_sdl_host and repeat_launch):
-        raise ValueError('Frame measurement requires the hosted Slay repeat launch trial.')
+    hosted_profiles = {646570: slay_sdl_host, 413150: stardew_sdl_host, 975370: startup_sdl_host}
+    if measure_sdl_frames and not (repeat_launch and hosted_profiles.get(launch_app_id)):
+        raise ValueError('Frame measurement requires a repeat launch of an enabled SDL host profile.')
     if startup_sdl_host and launch_app_id is None:
         startup_app_id = 975370
         startup_snapshot = True
@@ -172,6 +241,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The hosted Slay profile requires sign-in and the built Java and SDL adapters.')
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
+        if presenter:
+            manifest = presenter_manifest(manifest)
         identity = ElementTree.fromstring(manifest).find('{*}Identity')
         if (identity is None or identity.get('Name') != PROBE_ID
                 or identity.get('ProcessorArchitecture') != 'x64'):
@@ -205,6 +276,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
 
         layout.mkdir()
         signed.extractall(layout, entries)
+        for name, data in presenter.items():
+            (layout / name).write_bytes(data)
         # Preserve manifest namespace declarations used by IgnorableNamespaces.
         old_version = f'Version="{base_version}"'.encode()
         if manifest.count(old_version) != 1:
@@ -255,6 +328,12 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                 profiles.append('646570')
             script = f'<script id="steam-sdl-profiles" data-apps="{" ".join(profiles)}" src="steam-sdl-host.js"></script>'
             helper = '<script src="steam-sdl-gamepad.js"></script>'
+            if (layout / 'Fhd.Native.winmd').is_file():
+                if not (layout / 'steam-sdl-native-view.js').is_file():
+                    raise ValueError('The native SDL presenter requires its library view script.')
+                helper += '\n    <script src="steam-sdl-native-view.js"></script>'
+                if measure_sdl_frames:
+                    (layout / 'fhd-measure.txt').touch()
             if measure_sdl_frames:
                 if not (layout / 'steam-sdl-timing.js').is_file():
                     raise ValueError('Use the SDK template containing the SDL frame timing script.')
@@ -264,6 +343,9 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             (layout / 'steam-sdl-host-975370.txt').touch()
         if stardew_sdl_host:
             shutil.copyfile(stardew_sdl_host, layout / 'StardewStartupDiagnostic.dll')
+            if stardew_sdl_runtime:
+                (layout / 'SDL2.dll').write_bytes(stardew_sdl)
+                shutil.copyfile(stardew_sdl_runtime / 'LICENSE.txt', layout / 'LICENSE.SDL2')
             for name in ('steam-sdl-host-413150.txt', 'stardew-game-directory.txt', 'stardew-low-memory.txt'):
                 (layout / name).touch()
         if slay_sdl_host:
@@ -315,6 +397,10 @@ def main():
     parser.add_argument('layout', type=Path, help='new directory outside the repository')
     parser.add_argument('--version', required=True)
     parser.add_argument('--valve-archive', type=Path, help='pinned bins_win64 ZIP, omit for the repack control')
+    parser.add_argument('--fhd-presenter', type=Path, metavar='ARTIFACT_DIR',
+                        help='stage the signed xbox-fhd-present-x64 workflow artifact')
+    parser.add_argument('--fhd-presenter-checksum', metavar='SHA256',
+                        help='pin the SHA-256 of the supplied presenter artifact SHA256SUMS file')
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
     parser.add_argument('--inspect-pe', type=Path, action='append', default=[],
                         help='report the system imports of a local PE file without packaging it')
@@ -345,8 +431,10 @@ def main():
     parser.add_argument('--startup-sdl-host', action='store_true', help='present and control the Dwarf Fortress SDL session')
     parser.add_argument('--stardew-sdl-host', type=Path, metavar='STARTUP_DLL',
                         help='enable the hosted Stardew Valley SDL profile with its built startup hook')
+    parser.add_argument('--stardew-sdl-runtime', type=Path, metavar='ARTIFACT_DIR',
+                        help='stage the version-matched SDL 2.30.9 CI artifact for hosted MonoGame')
     parser.add_argument('--measure-sdl-frames', action='store_true',
-                        help='measure 30 seconds of presentation after an eight-second hosted Slay warmup')
+                        help='measure presented frames during a hosted game trial')
     parser.add_argument('--slay-sdl-host', type=Path, metavar='RUNTIME_DIR',
                         help='enable the hosted Slay the Spire profile with its built Java and SDL adapters')
     parser.add_argument('--install-before-launch', action='store_true',
@@ -434,7 +522,8 @@ def main():
                    startup_wait_only=args.startup_wait_only, startup_sdl_local_preferences=args.startup_sdl_local_preferences,
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
                    stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
-                   measure_sdl_frames=args.measure_sdl_frames)
+                   measure_sdl_frames=args.measure_sdl_frames, fhd_presenter=args.fhd_presenter,
+                   fhd_presenter_checksum=args.fhd_presenter_checksum, stardew_sdl_runtime=args.stardew_sdl_runtime)
 
 
 if __name__ == '__main__':

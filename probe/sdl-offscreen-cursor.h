@@ -9,6 +9,8 @@ typedef struct XboxSdlCursor
     SDL_Surface *image;
     int hot_x;
     int hot_y;
+    Uint32 shape;
+    SDL_bool plain_rgba;
 } XboxSdlCursor;
 
 static SDL_Cursor *XboxSdlCreateOffscreenCursor(SDL_Surface *surface, int hot_x, int hot_y)
@@ -27,6 +29,12 @@ static SDL_Cursor *XboxSdlCreateOffscreenCursor(SDL_Surface *surface, int hot_x,
     cursor->cursor.driverdata = cursor;
     cursor->hot_x = hot_x;
     cursor->hot_y = hot_y;
+    static SDL_atomic_t next_shape;
+    cursor->shape = (Uint32)SDL_AtomicAdd(&next_shape, 1) + 1;
+    Uint8 r, g, b, a;
+    SDL_GetSurfaceColorMod(cursor->image, &r, &g, &b);
+    SDL_GetSurfaceAlphaMod(cursor->image, &a);
+    cursor->plain_rgba = !SDL_HasColorKey(cursor->image) && r == 255 && g == 255 && b == 255 && a == 255;
     return &cursor->cursor;
 }
 
@@ -44,16 +52,21 @@ static inline void XboxSdlInitOffscreenCursor(void)
     mouse->FreeCursor = XboxSdlFreeOffscreenCursor;
 }
 
-static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, Uint8 *pixels, int width, int height)
+static inline XboxSdlCursor *XboxSdlVisibleCursor(SDL_Window *window)
 {
     SDL_Mouse *mouse = SDL_GetMouse();
     if (!mouse->cursor_shown || mouse->focus != window || !mouse->CreateCursor ||
         (mouse->relative_mode && !mouse->relative_mode_cursor_visible)) {
-        return;
+        return NULL;
     }
     SDL_Cursor *active = SDL_GetCursor();
-    if (active && active->driverdata) {
-        XboxSdlCursor *cursor = active->driverdata;
+    return active ? (XboxSdlCursor *)active->driverdata : NULL;
+}
+
+static inline void XboxSdlBlitOffscreenCursor(SDL_Window *window, Uint8 *pixels, int width, int height)
+{
+    XboxSdlCursor *cursor = XboxSdlVisibleCursor(window);
+    if (cursor) {
         SDL_Surface *target = SDL_CreateRGBSurfaceWithFormatFrom(pixels, width, height,
                                                                  32, width * 4, SDL_PIXELFORMAT_RGBA32);
         if (!target) return;

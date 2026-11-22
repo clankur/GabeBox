@@ -132,6 +132,14 @@ static void XboxSdlPollHostGamepad(SdlHostGamepad *pad)
     InterlockedExchange(&pad->ack, serial);
 }
 
+SDL_bool XboxSdlBindHostWindow(SDL_Window *window)
+{
+    XboxSdlOpenHost();
+    if (!window || !xbox_host_mailbox || SdlHostLoad(&xbox_host_mailbox->quit)) return SDL_FALSE;
+    xbox_host_window = SDL_GetWindowID(window);
+    return SDL_TRUE;
+}
+
 Uint8 *XboxSdlBeginHostFrame(SDL_Window *window, int width, int height)
 {
     SdlHostMailbox *mailbox;

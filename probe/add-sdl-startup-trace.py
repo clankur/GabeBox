@@ -45,6 +45,9 @@ def wrap_definition(source, return_type, function, arguments, stage, worked):
     implementation = f'XboxSdlOriginal{function[4:]}'
     flags = '    XboxSdlTraceInitFlags(flags);\n' if function == 'SDL_InitSubSystem' else ''
     preferences = '    if (!value) value = XboxSdlAppLocalPrefPath(org, app);\n' if function == 'SDL_GetPrefPath' else ''
+    if function == 'SDL_CreateWindow':
+        flags += ('    if ((flags & SDL_WINDOW_RESIZABLE) && !(flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FOREIGN)))\n'
+                  '        XboxSdlHostedDisplaySize(&w, &h);\n')
     wrapper = (
         f'static {return_type} {implementation}({parameters});\n\n'
         f'{return_type}\n{function}({parameters})\n{{\n'
@@ -66,6 +69,17 @@ def add_startup_trace(tree):
     shutil.copyfile(Path(__file__).with_name('sdl-software-frame.h'), source_root / 'sdl-software-frame.h')
     for header in ('sdl-host-protocol.h', 'sdl-host-runtime.h'):
         shutil.copyfile(Path(__file__).with_name(header), source_root / 'render' / header)
+    shutil.copyfile(Path(__file__).with_name('sdl-host-display-size.h'), source_root / 'sdl-host-display-size.h')
+    for driver in ('dummy/SDL_nullvideo.c', 'offscreen/SDL_offscreenvideo.c'):
+        file = source_root / 'video' / driver
+        content = file.read_text(encoding='utf-8')
+        include = '#include "../../SDL_internal.h"'
+        register = '    if (SDL_AddBasicVideoDisplay(&mode) < 0) {'
+        if content.count(include) != 1 or content.count(register) != 1:
+            raise ValueError(f'Expected the pinned SDL virtual desktop in {driver}.')
+        content = content.replace(include, include + '\n#include "../../sdl-host-display-size.h"')
+        size = '    if (XboxSdlHostedDisplaySize(&mode.w, &mode.h)) mode.refresh_rate = 60;\n'
+        file.write_text(content.replace(register, size + register), encoding='utf-8')
     dummy = source_root / 'video/dummy/SDL_nullevents.c'
     source = dummy.read_text(encoding='utf-8')
     marker = '    /* do nothing. */'
@@ -82,6 +96,8 @@ def add_startup_trace(tree):
             raise ValueError(f'Expected one SDL internal header in {filename}.')
         define = '\n#define XBOX_SDL_MAIN_TRACE' if filename == 'SDL.c' else ''
         source = source.replace(include, include + define + f'\n#include "{prefix}sdl-startup-trace.h"')
+        if filename == 'video/SDL_video.c':
+            source = source.replace(include, include + '\n#include "../sdl-host-display-size.h"', 1)
         if filename == 'SDL.c':
             declaration = r'^(void\s+SDL_SetMainReady\(void\)\s*\{)'
             source, count = re.subn(declaration, r'\1\n    XboxSdlTrace("sdl_main_ready=begin\\n");'

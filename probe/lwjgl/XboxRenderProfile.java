@@ -15,14 +15,27 @@ public final class XboxRenderProfile {
         try (InputStream input = XboxRenderProfile.class.getResourceAsStream("/xbox-slay-render-size.txt")) {
             String mode = input == null ? "1280x720"
                     : new BufferedReader(new InputStreamReader(input, StandardCharsets.US_ASCII)).readLine();
-            if ("960x540".equals(mode)) { WIDTH = 960; HEIGHT = 540; }
-            else if ("854x480".equals(mode)) { WIDTH = 854; HEIGHT = 480; }
-            else if ("640x360".equals(mode)) { WIDTH = 640; HEIGHT = 360; }
-            else if ("1280x720".equals(mode)) { WIDTH = 1280; HEIGHT = 720; }
-            else throw new IllegalArgumentException("Unsupported signed Slay render size");
+            int split = mode == null ? -1 : mode.indexOf('x');
+            int width = split < 0 ? 0 : dimension(mode.substring(0, split), 640, 1920);
+            int height = split < 0 ? 0 : dimension(mode.substring(split + 1), 360, 1080);
+            if (width == 0 || height == 0) throw new IllegalArgumentException("Unsupported signed Slay render size");
+            int hostWidth = HOSTED ? dimension(System.getenv("XBOX_SDL_RENDER_WIDTH"), 640, 1920) : 0;
+            int hostHeight = HOSTED ? dimension(System.getenv("XBOX_SDL_RENDER_HEIGHT"), 360, 1080) : 0;
+            boolean useHost = hostWidth != 0 && hostHeight != 0;
+            WIDTH = useHost ? hostWidth : width;
+            HEIGHT = useHost ? hostHeight : height;
         } catch (IOException e) {
             throw new ExceptionInInitializerError(e);
         }
+    }
+
+    private static int dimension(String value, int minimum, int maximum) {
+        if (value == null || value.isEmpty() || value.length() > 4) return 0;
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) < '0' || value.charAt(i) > '9') return 0;
+        }
+        int pixels = Integer.parseInt(value);
+        return pixels >= minimum && pixels <= maximum ? pixels : 0;
     }
 
     // The game's windowed minimum (800x450) otherwise substitutes a 1280x720 window.

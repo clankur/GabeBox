@@ -58,6 +58,11 @@ internal static class StartupHook
             }
             else Record("stardew_game_directory=unexpected");
         }
+        if (package != null)
+        {
+            try { HostedMonoGame.Configure(package, Record); }
+            catch (Exception error) { Record("stardew_shared_setup=" + error.GetBaseException().GetType().Name); }
+        }
         int remaining = 12;
         int startupErrors = 8;
         AppDomain.CurrentDomain.FirstChanceException += (_, args) =>

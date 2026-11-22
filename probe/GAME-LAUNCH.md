@@ -64,7 +64,7 @@ The library's Play action uses Steam to check the license and launch the install
 
 ### Play Stardew Valley in the Steam library
 
-Build the Stardew startup hook from the managed diagnostic and supply its DLL to `--stardew-sdl-host`. Stage Mesa 26.2.2 with `--sdl-surfaceless --dxil-archive "$dxc_zip"` and deploy both official VC++ frameworks. Use the shared SDL `2.30.9` build with OpenGL frame delivery and resizing. Install that artifact for AppID `413150` with the same `sdl-trial --install-only` workflow and a dedicated backup directory. The library starts the verified Steam installation and reuses the SDL player, mailbox and pointer controls. [Stardew startup hook](https://github.com/clankur/steam-xbox-devmode/pull/50) · [Mesa and DXIL staging](https://github.com/clankur/steam-xbox-devmode/pull/53)
+Supply the Windows CI artifact `xbox-hosted-monogame/StardewStartupDiagnostic.dll` to `--stardew-sdl-host` and the extracted `xbox-sdl2-2.30.9-x64` artifact directory to `--stardew-sdl-runtime`. The package builder verifies the SDL checksum, architecture and version. Stage Mesa with `--sdl-surfaceless --dxil-archive "$dxc_zip"` and deploy both official VC++ frameworks. The library starts the installed game through Steam. [Mesa and DXIL staging](https://github.com/clankur/steam-xbox-devmode/pull/53)
 
 For a console trial, add `--launch-app-id 413150 --repeat-launch` to the hosted Stardew layout and run `probe --steam-core` through the Xbox CLI. `1.0.211.0` presented the full title menu, acknowledged the host's test pointer event and remained on the title menu at the 40-second screenshot. The trial verifies startup, display and pointer delivery. Gameplay, audio and saves still need console validation. [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047) · [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965212)
 
@@ -96,9 +96,9 @@ Pass the resulting runtime directory to the existing `--slay-sdl-host` packaging
 
 On Series X, the original libGDX pixmap decoder failed on both `title/title.jpg` and `bottomScene/scene.jpg`. The hosted adapter decodes the title and act atlas pages at half size on each axis and retains the original atlas coordinates. The Series X loaded the title and entered an Act 1 encounter with those assets. Other game textures use the original loader.
 
-For a presentation trace, add `--launch-app-id 646570 --repeat-launch --measure-sdl-frames` to a hosted Slay test package. The player counts a frame after it submits a new SDL sequence to the fullscreen canvas. The report includes a 30-second average, the lowest rolling one-second count, and frame intervals. A slow load can lower that first sample. For steady-state gameplay comparisons, start each sample after the scene has finished loading. Capture Device Portal screenshots outside the sample period because a capture can stall the game for about half a second.
+For a presentation trace, add `--launch-app-id 646570 --repeat-launch --measure-sdl-frames` to a hosted Slay test package. In the HTML fallback, the player counts submissions of new SDL sequences to the fullscreen canvas. Native measurements use the swapchain trace described below. A slow load can lower that first sample. For steady-state gameplay comparisons, start each sample after the scene has finished loading. Capture Device Portal screenshots outside the sample period because a capture can stall the game for about half a second.
 
-The default hosted resolution is 854×480, scaled to fill the 16:9 player. In a Series X test with a fresh, isolated Ironclad profile, each scene warmed up for eight seconds before a 30-second sample. Fullscreen presentation used lossless RGB frame differences. A player with an older native bridge uses the existing full-frame transfer.
+The earlier HTML player used an 854×480 render target, scaled to fill the 16:9 display. In a Series X test with a fresh, isolated Ironclad profile, each scene warmed up for eight seconds before a 30-second sample. Fullscreen presentation used lossless RGB frame differences. A player with an older native bridge uses the existing full-frame transfer.
 
 | Scene | New frames presented per second | Lowest rolling one-second count | Longest frame interval |
 | --- | ---: | ---: | ---: |
@@ -107,3 +107,29 @@ The default hosted resolution is 854×480, scaled to fill the 16:9 player. In a 
 | Act 1 combat | 61.52 | 56 | 48.4 ms |
 
 The combat sample included two attacks, three blocks, enemy turns, and hand redraws. These counts measure the application submitting distinct frames to the canvas. At 960×540 the same transfer averaged 55.82 FPS during combat, including a Device Portal screenshot. The baseline title test with the original frame timers averaged 15.25 FPS at 1280×720.
+
+A hosted launcher can request a shared virtual desktop with the environment variables `XBOX_SDL_RENDER_WIDTH` and `XBOX_SDL_RENDER_HEIGHT`. Supply both as decimal pixel counts between 640×360 and 1920×1080. The SDL dummy and offscreen backends advertise the virtual desktop at 60 Hz and use it for resizable windows. Games retain control of fixed-size windows, exclusive display modes and logical rendering sizes. Slay uses the same dimensions for its libGDX viewport, offscreen display and input. With no valid request, the game uses its packaged display profile.
+
+### Native fullscreen presentation
+
+The Steam SDK template includes a native fullscreen player. The library requests a 1920×1080 render target for hosted games. Mesa games publish their completed color buffer through two shared Direct3D textures. GPU fences let the player present the latest finished frame on the next display refresh. Software-rendered games use the same player through a pixel upload. Hold Menu and View together, or press F10, to open the player menu.
+
+On Xbox Series X, both games below used a native 1920×1080 game backbuffer, viewport and renderbuffer. Each 30-second window counted distinct frames submitted to the visible swapchain. Slay’s combat sample included two attacks, three blocks, three turns and damage to both sides. Stardew’s farmer walked 9,503 pixels during the outdoor sample.
+
+| Scene | Distinct GPU frames presented | Average FPS | Lowest rolling second | Longest frame interval |
+| --- | ---: | ---: | ---: | ---: |
+| Slay the Spire title | 1,799 | 59.97 | 58 | 32.3 ms |
+| Slay the Spire map | 1,798 | 59.93 | 59 | 29.6 ms |
+| Slay the Spire combat | 1,799 | 59.97 | 58 | 48.4 ms |
+| Stardew Valley title | 1,798 | 59.93 | 58 | 34.0 ms |
+| Stardew Valley outdoor farm | 1,800 | 59.97 | 58 | 34.9 ms |
+
+The same native player presented Dwarf Fortress’s 1920×1080 software-rendered title screen at 49.97 FPS with the default graphics cap of 50. Setting the game’s graphical FPS cap to 60 produced 1,797 distinct frames in 30 seconds (59.90 FPS), with a lowest rolling second of 58 and a longest interval of 39.0 ms. Its simulation cap remained 100.
+
+Stardew kept its original fixed simulation step and requested a swap interval of one. Carrying the fractional 60 Hz deadline between SDL swaps raised outdoor presentation from 58.85 FPS to 59.97 FPS.
+
+Add `--measure-sdl-frames` to a repeat launch of an enabled SDL profile to record native presentation timestamps to `LocalState/fhd-present-times.bin`. Copy the trace after the scene finishes. Analyze a 30-second interval starting eight seconds after the scene became playable, using the console’s UTC clock. The output includes the source transport, distinct frames per second, lowest rolling one-second rate and frame intervals.
+
+```sh
+python3 probe/fhd/measure.py fhd-present-times.bin --start-utc "$scene_start_plus_eight_seconds" --duration 30
+```

@@ -1485,6 +1485,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool waitOnly = false;
     bool dummyVideo = false;
     bool sdlWorkingDirectory = false;
+    bool nativeSdlView = false;
     bool sdlLateFrame = false;
     std::wstring sdlPreferencesPath;
     std::wstring diagnosticRenderer;
@@ -1493,6 +1494,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (hostedSdl && !co_await packageFolder.TryGetItemAsync(winrt::hstring(
                 L"steam-sdl-host-" + std::to_wstring(app) + L".txt"))) {
             co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
+        }
+        if (hostedSdl) {
+            nativeSdlView = static_cast<bool>(co_await packageFolder.TryGetItemAsync(L"Fhd.Native.winmd"));
         }
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
@@ -1740,6 +1744,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
       gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
       frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"},
       sdlGamepadHint{L"XBOX_SDL_HOST_GAMEPAD"},
+      renderWidth{L"XBOX_SDL_RENDER_WIDTH"}, renderHeight{L"XBOX_SDL_RENDER_HEIGHT"},
       managedHook{L"DOTNET_STARTUP_HOOKS"}, managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHeap{L"DOTNET_GCHeapHardLimit"};
     std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
     winrt::handle slayProcess;
@@ -1875,6 +1880,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             } catch (winrt::hresult_error const& error) {
                 co_return winrt::hstring(report + L"steam_sdl_host=mailbox-error\r\nsteam_sdl_host_hresult=" +
                     Hex(error.code()) + L"\r\n");
+            }
+            if (nativeSdlView) {
+                if (!renderWidth.Set(L"1920") || !renderHeight.Set(L"1080")) {
+                    co_return winrt::hstring(report + L"steam_sdl_host=display-environment-error\r\n");
+                }
+                const auto separator = mailbox.find_last_of(L"\\");
+                report += L"steam_sdl_mailbox=" + mailbox.substr(separator + 1) + L"\r\n";
             }
             if (!sdlHostHint.Set(mailbox.c_str()) || ((hostedStardew || hostedSlay) && !sdlGamepadHint.Set(L"1"))) {
                 co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");

@@ -13,8 +13,22 @@ def replace_once(source, old, new):
 
 def add_surfaceless(tree):
     offscreen = tree / 'src/video/offscreen'
-    for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h'):
+    for filename in ('sdl-surfaceless-framebuffer.h', 'sdl-gl-trace.h', 'sdl-offscreen-cursor.h',
+                     'sdl-gpu-producer.cpp', 'sdl-gpu-protocol.h', 'mesa-glinterop.h', 'sdl-swap-clock.h'):
         shutil.copyfile(Path(__file__).with_name(filename), offscreen / filename)
+
+    cmake = tree / 'CMakeLists.txt'
+    source = cmake.read_text(encoding='utf-8')
+    old = '    list(APPEND SOURCE_FILES ${VIDEO_OFFSCREEN_SOURCES})'
+    source = replace_once(source, old, old + '''
+    if(WIN32)
+      set(SDL_GPU_SOURCE ${SDL2_SOURCE_DIR}/src/video/offscreen/sdl-gpu-producer.cpp)
+      list(APPEND SOURCE_FILES ${SDL_GPU_SOURCE})
+      if(MSVC)
+        set_source_files_properties(${SDL_GPU_SOURCE} PROPERTIES COMPILE_FLAGS "/EHs-c- /GR-")
+      endif()
+    endif()''')
+    cmake.write_text(source, encoding='utf-8')
 
     video = offscreen / 'SDL_offscreenvideo.c'
     source = video.read_text(encoding='utf-8')
@@ -70,6 +84,7 @@ def add_surfaceless(tree):
 
     window_header = offscreen / 'SDL_offscreenwindow.h'
     source = window_header.read_text(encoding='utf-8')
+    source = '#include "sdl-swap-clock.h"\n' + source
     old = '    EGLSurface egl_surface;'
     source = replace_once(source, old, old + '''
     SDL_GLContext xbox_context;
@@ -77,10 +92,14 @@ def add_surfaceless(tree):
     unsigned xbox_color, xbox_depth_stencil;
     void *xbox_get_integer, *xbox_pixel_store, *xbox_read_pixels;
     void *xbox_bind_framebuffer, *xbox_bind_buffer;
+    void *xbox_gpu;
+    int xbox_gpu_retry;
+    Uint64 xbox_gpu_retry_after;
     SDL_bool xbox_pack_invert;
     unsigned xbox_readback_samples;
     Uint64 xbox_readback_ticks;
     int xbox_width, xbox_height;
+    XboxSdlSwapClock xbox_swap_clock;
     Uint64 xbox_last_swap;
     Uint64 xbox_first_swap;
     SDL_bool xbox_capture_attempted;''')
@@ -123,6 +142,9 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
         if (interval < 0 || interval > 4) {
             return SDL_SetError("Unsupported offscreen swap interval");
         }
+        char value[40];
+        SDL_snprintf(value, sizeof(value), "sdl_swap_interval=%d\\n", interval);
+        XboxSdlTrace(value);
         _this->egl_data->egl_swapinterval = interval;
         return 0;
     }
@@ -169,10 +191,19 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
     }''')
     old = '    return SDL_EGL_SwapBuffers(_this, offscreen_wind->egl_surface);'
     source = replace_once(source, old, '''    if (offscreen_wind->egl_surface == EGL_NO_SURFACE) {
-        Uint32 frame_time = (Uint32)_this->egl_data->egl_swapinterval * 16;
-        Uint64 elapsed = SDL_GetTicks64() - offscreen_wind->xbox_last_swap;
-        if (elapsed < frame_time) {
-            SDL_Delay(frame_time - (Uint32)elapsed);
+        int interval = _this->egl_data->egl_swapinterval;
+        XboxSdlSwapClock *clock = &offscreen_wind->xbox_swap_clock;
+        if (interval > 0) {
+            if (!clock->frequency) clock->frequency = SDL_GetPerformanceFrequency();
+            Uint64 now = SDL_GetPerformanceCounter();
+            Uint64 deadline = XboxSdlNextSwap(clock, now, interval);
+            while (now < deadline) {
+                Uint64 remaining = deadline - now;
+                SDL_Delay((Uint32)((remaining * 1000 + clock->frequency - 1) / clock->frequency));
+                now = SDL_GetPerformanceCounter();
+            }
+        } else {
+            clock->interval = 0;
         }
         offscreen_wind->xbox_last_swap = SDL_GetTicks64();
         XboxSdlResizeFramebuffer(_this, offscreen_wind);
@@ -194,6 +225,12 @@ int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval)
 ''' + old)
     old = '#include "../SDL_egl_c.h"'
     source = replace_once(source, old, old + '\n#include "SDL_hints.h"')
+    old = '        SDL_EGL_DestroySurface(_this, offscreen_window->egl_surface);'
+    source = replace_once(source, old, '''#ifdef _WIN32
+        extern void XboxSdlDestroyGpu(void *state);
+        XboxSdlDestroyGpu(offscreen_window->xbox_gpu);
+#endif
+''' + old)
     window.write_text(source, encoding='utf-8')
 
 

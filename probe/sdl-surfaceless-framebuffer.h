@@ -6,6 +6,21 @@
 #include "sdl-gl-trace.h"
 #include "sdl-offscreen-cursor.h"
 
+#ifdef _WIN32
+extern void *XboxSdlCreateGpu(void *egl, void *display, void *context, void *flush, unsigned color, int w, int h, int *retry);
+extern SDL_bool XboxSdlBindHostWindow(SDL_Window *window);
+extern int XboxSdlGpuFrame(void *state, unsigned color, Uint32 shape, int x, int y, int w, int h, int pitch, const void *rgba);
+extern void XboxSdlDestroyGpu(void *state);
+static void XboxSdlRecreateGpu(_THIS, OFFSCREEN_Window *window)
+{
+    XboxSdlDestroyGpu(window->xbox_gpu);
+    window->xbox_gpu = XboxSdlCreateGpu(_this->egl_data->egl_dll_handle, _this->egl_data->egl_display,
+        window->xbox_context, SDL_EGL_GetProcAddress(_this, "glFlush"), window->xbox_color,
+        window->xbox_width, window->xbox_height, &window->xbox_gpu_retry);
+    if (window->xbox_gpu_retry) window->xbox_gpu_retry_after = SDL_GetTicks64() + 500;
+}
+#endif
+
 /* This is a back buffer for one SDL window and its own GL context. */
 static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLContext context)
 {
@@ -55,6 +70,9 @@ static int XboxSdlCreateFramebuffer(_THIS, OFFSCREEN_Window *offscreen, SDL_GLCo
     offscreen->xbox_readback_ticks = 0;
     offscreen->xbox_width = window->w;
     offscreen->xbox_height = window->h;
+#ifdef _WIN32
+    XboxSdlRecreateGpu(_this, offscreen);
+#endif
     offscreen->xbox_capture_attempted = SDL_FALSE;
     offscreen->xbox_first_swap = 0;
     return 0;
@@ -86,6 +104,9 @@ static void XboxSdlResizeFramebuffer(_THIS, OFFSCREEN_Window *offscreen)
     if (check(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
         offscreen->xbox_width = window->w;
         offscreen->xbox_height = window->h;
+#ifdef _WIN32
+        XboxSdlRecreateGpu(_this, offscreen);
+#endif
         XboxSdlTrace("sdl_surfaceless_resize=ready\n");
     } else {
         storage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, offscreen->xbox_width, offscreen->xbox_height);
@@ -197,6 +218,22 @@ static SDL_bool XboxSdlReadFrame(OFFSCREEN_Window *offscreen, Uint8 *pixels)
 static void XboxSdlPresentHostFrame(OFFSCREEN_Window *offscreen)
 {
     if (offscreen->xbox_context != SDL_GL_GetCurrentContext()) return;
+#ifdef _WIN32
+    if (offscreen->xbox_gpu_retry && SDL_GetTicks64() >= offscreen->xbox_gpu_retry_after)
+        XboxSdlRecreateGpu(SDL_GetVideoDevice(), offscreen);
+    if (offscreen->xbox_gpu && XboxSdlBindHostWindow(offscreen->sdl_window)) {
+        XboxSdlCursor *cursor = XboxSdlVisibleCursor(offscreen->sdl_window);
+        int x = 0, y = 0;
+        if (cursor) {
+            SDL_GetMouseState(&x, &y);
+            x -= cursor->hot_x;
+            y -= cursor->hot_y;
+        }
+        if (XboxSdlGpuFrame(offscreen->xbox_gpu, offscreen->xbox_color, cursor ? cursor->shape : 0, x, y,
+                cursor ? cursor->image->w : 0, cursor ? cursor->image->h : 0, cursor ? cursor->image->pitch : 0,
+                cursor && cursor->plain_rgba ? cursor->image->pixels : NULL)) return;
+    }
+#endif
     Uint8 *pixels = XboxSdlBeginHostFrame(offscreen->sdl_window, offscreen->xbox_width, offscreen->xbox_height);
     if (pixels) XboxSdlEndHostFrame(XboxSdlReadFrame(offscreen, pixels));
 }

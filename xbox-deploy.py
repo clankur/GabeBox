@@ -446,12 +446,10 @@ def stop_probe_for_sdl_trial(portal, package):
             raise
 
 
-def trial_sdl(portal, args):
-    name, upstream, original_hash = SDL_TRIALS[args.app_id]
-    package = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-    folder = f'{STEAMAPPS_PATH}\\common\\{name}'
-    artifact = args.artifact / 'SDL2.dll'
-    checksum = (args.artifact / 'SHA256SUMS').read_text(encoding='ascii').strip()
+def load_sdl_artifact(directory, app_id):
+    name, upstream, _ = SDL_TRIALS[app_id]
+    artifact = directory / 'SDL2.dll'
+    checksum = (directory / 'SHA256SUMS').read_text(encoding='ascii').strip()
     expected = re.fullmatch(r'([0-9a-f]{64})  SDL2\.dll', checksum)
     if artifact.stat().st_size > SDL_LIMIT or not expected:
         raise ValueError('Use a checked SDL2 workflow artifact containing SHA256SUMS.')
@@ -466,6 +464,14 @@ def trial_sdl(portal, args):
     version = f'{major_minor >> 16}.{major_minor & 0xffff}.{patch_build >> 16}'
     if version != upstream:
         raise ValueError(f'{name} requires the version-matched SDL {upstream} workflow artifact.')
+    return candidate
+
+
+def trial_sdl(portal, args):
+    name, upstream, original_hash = SDL_TRIALS[args.app_id]
+    package = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+    folder = f'{STEAMAPPS_PATH}\\common\\{name}'
+    candidate = load_sdl_artifact(args.artifact, args.app_id)
     if args.install_only:
         raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{args.app_id}.acf', 65536)
         manifest = decode_report(raw or b'')
