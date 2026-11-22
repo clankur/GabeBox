@@ -10,15 +10,36 @@ import uuid
 from big_picture_evidence import capture_time, check_png, check_release, load, require
 
 
+def release_launch(path, first):
+    if path.suffix != ".jsonl":
+        return load(path)
+    boot, *samples = [json.loads(line) for line in path.read_bytes().splitlines() if line]
+    require(boot["event"] == "cold-activation" and
+            all(image.lower() == "runtimebroker.exe" for image in boot["processes"]),
+            "Cold activation requires an empty host, renderer and game baseline")
+    require(any(row.get("foreground_status") == "gamepad-ready" and
+                row["run_id"] == first["run_id"] and row["host_pid"] == first["host_pid"] and
+                boot["timestamp"] < row["timestamp"] <= first["captured_at"] for row in samples),
+            "Cold-start log did not reach the captured live host")
+    return {"version": boot["version"], "package": boot.get("package") or first["package"],
+            "timestamp_before_launch": boot["timestamp"], "baseline_run_id": boot["previous"]}
+
+
+def is_key(action, name, vk):
+    return (action["action"] == "WDP keyboard " + name or
+            (action["action"] == "WDP keyboard QA" and action.get("vk") == vk))
+
+
 def verify(appx, release_pin, launch_path, directory, phase_pins):
-    launch = load(launch_path)
-    check_release(appx, release_pin, launch)
     route = ["library-before-store", "store-menu", "store-landing"]
     if "store-product" in phase_pins:
         route.append("store-product")
     route.append("library-after-store")
     require(set(phase_pins) == set(route + ["internet-settings"]),
             "Missing or unexpected phase pins for the Store and Internet settings checks")
+    first = load((directory / Path(phase_pins[route[0]]["file"]).name).with_suffix(".json"))
+    launch = release_launch(launch_path, first)
+    check_release(appx, release_pin, launch)
     captures = {}
     hashes = set()
     for phase, pin in phase_pins.items():
@@ -32,6 +53,8 @@ def verify(appx, release_pin, launch_path, directory, phase_pins):
                 receipt["sha256"] == pin["sha256"], f"Capture source, version or digest differs for {phase}")
         require(launch["timestamp_before_launch"] < receipt["captured_at"] <= capture_time(path) and
                 receipt["sha256"] not in hashes, f"Stale or reused capture for {phase}")
+        if launch_path.suffix == ".jsonl":
+            require(receipt.get("package") == launch["package"], f"Installed package changed at {phase}")
         hashes.add(receipt["sha256"])
         check_png(path, pin["sha256"])
         captures[phase] = receipt
@@ -63,8 +86,8 @@ def verify(appx, release_pin, launch_path, directory, phase_pins):
     require(all(a["run_id"] == run and a["host_pid"] == pid and a["action"].startswith("WDP keyboard ") for a in within),
             "Different native host or a non-keyboard operator action during this sequence")
     selection = captures["store-menu"]
-    require(any(a["action"] == "WDP keyboard menu" and a["time"] < selection["captured_at"] for a in within) and
-            any(a["action"] == "WDP keyboard accept" and capture_time(directory / selection["file"]) < a["time"] <
+    require(any(is_key(a, "menu", 112) and a["time"] < selection["captured_at"] for a in within) and
+            any(is_key(a, "accept", 13) and capture_time(directory / selection["file"]) < a["time"] <
                 captures["store-landing"]["captured_at"] for a in within), "Missing WDP menu or Store selection evidence")
     print(f"Verified retained TV receipts for {launch['version']} run {run}, SteamPrimary PID {pid}, {net}.")
     print(f"Native Store result at landing: {captures['store-landing']['public_store_navigation']}.")
