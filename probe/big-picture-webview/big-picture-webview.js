@@ -171,6 +171,14 @@
             return showValve(from).then(function () {
                 if (!playing || playingApp !== appId) return false;
                 sampleMemory("overlay"); gameEvent(true); record("game-switch-to-steam");
+                // Xbox can revise the budget after the view switch resolves.
+                [500, 2000, 5000].forEach(function (delay) {
+                    setTimeout(function () {
+                        if (!visible || !played(appId) || returnToGame !== restore) return;
+                        sampleMemory("overlay_" + delay + "ms");
+                        record(last, true);
+                    }, delay);
+                });
                 return true;
             });
         }

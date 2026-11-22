@@ -11,7 +11,7 @@ test("the primary game video confirms rendered frames, resets its sample across 
     let captureRequest = true, drawn = null;
     const video = {
         paused:false, readyState:2, videoWidth:1920, videoHeight:1080, currentTime:1.5,
-        play:async () => {}, pause() {}, removeAttribute() {}, setAttribute() {},
+        async play() { this.paused = false; }, pause() { this.paused = true; }, removeAttribute() {}, setAttribute() {},
         addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({width:1920})
     };
     const screen = {hidden:false, contains:node => node === video, classList:{add() {}, remove() {}},
@@ -60,10 +60,13 @@ test("the primary game video confirms rendered frames, resets its sample across 
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(drawn,video);
     assert.match(captures[0], /capture_saved=1[\s\S]*video_ms=1500/);
+    control.pause();
+    assert.equal(video.paused,true);
     document.hidden = true; listeners.get("visibilitychange")();
     now = 40000; tick();
     assert.deepEqual(measurements, []);
     await control.resume(11);
+    assert.equal(video.paused,false);
     assert.deepEqual(switches, [[3,11]]);
     document.hidden = false; listeners.get("visibilitychange")();
     now = 41000; total = 2003; tick();

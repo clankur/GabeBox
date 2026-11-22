@@ -166,7 +166,9 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         } catch (error) { failed(error); return null; }
-        return {primary: true, close: close, resume: resume};
+        return {primary: true, close: close, resume: resume, pause: function () {
+            if (!closed) { video.pause(); resetSample(); }
+        }};
     }
 
     function open(report, events, nativePad, primaryScreen) {

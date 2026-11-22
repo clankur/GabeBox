@@ -150,6 +150,7 @@
                 var steam = window.steamBigPictureHost;
                 if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
                 if (steam && gameViewId) {
+                    if (nativeView && nativeView.primary) nativeView.pause();
                     steam.showForGame(appId, gameViewId, function (steamViewId) {
                         if (!runner.steamSdlRunning()) return false;
                         return nativeView ? nativeView.resume(steamViewId) :
