@@ -144,6 +144,14 @@ The XAML production APPX has SHA-256 `ce2123914a284588b794c0d600cecec74c38211fd2
 |---|---|---|
 | tour-29-193715 | f02d07fb-bd8f-4ce0-b36a-33581c86f8a3 | Failed from an empty package-process baseline. SteamPrimary.exe started. The report recorded primary-view error 0x80070005 (access denied) with no Valve surface or route. The isolated XAML control was a separate application. |
 
+### Build 1.0.230.30
+
+The recovery APPX has SHA-256 `d7613e571ac68eb72c517dede0ca1256b7392841649894eb034e365e93205d98`. All its application payloads match `.28`. The manifest version, block map and signature changed.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-30-194855 | 6e1b6fa8-e573-4721-9fbe-f4d7d98f0109 | Passed from an empty package-process baseline. Raw full-HD Xbox output shows All Games 134, Installed 8 and the controller footer. |
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -163,6 +171,7 @@ The XAML production APPX has SHA-256 `ce2123914a284588b794c0d600cecec74c38211fd2
 | 1.0.230.25 · tour-25-191228 | Dwarf Fortress | The stock Play control launched the matching process. | A foreground video frame at 20.119 s showed the original title and menu. The TV showed Steam's running overlay, then the main menu and Library. | 1,783 foreground video frames in 30.069700 s (59.30 FPS). The PID remained live when the user-facing Library grid returned on TV. The operator then closed the game and stopped the host for the next build. This verifies navigating the Library during a game. An ordinary game exit remains unverified. |
 | 1.0.230.27 · tour-27-192039 | Slay the Spire | Stock Play launched the matching JVM. | Two separate foreground video captures showed the game menu, including its Quit command. | The first video sample counted 1,081 frames in 30.051300 s (35.97 FPS). A Device Portal pointer click on Quit produced no mapped input acknowledgement. The operator closed the game and stopped the host. No normal Library return. |
 | 1.0.230.28 · tour-28-192556 | Dwarf Fortress | Stock Play launched the matching process. | A foreground video capture showed the game's menu. The stock Steam menu opened the Library on TV while the game stayed live. The same PID resumed and the foreground video again showed the menu. | 1,777 foreground video frames in 30.090400 s (59.06 FPS). Valve's Exit confirmation reached the native quit receiver. The game did not exit and the operator closed the matched PID. This is one game launch and one resume. |
+| 1.0.230.30 · tour-30-194855 | Slay the Spire | The original Library led to the matching JVM. | The player confirmed the Slay title on the physical TV. A separate foreground video frame showed its menu. After opening Steam's menu the player saw black, a brief flash of the game, then black again. | Two foreground windows counted 24 frames in 30.012000 s and 14 in 30.074700 s (0.80 and 0.47 FPS). The game and host disappeared before any operator stop. No normal exit, Library return or successful overlay cycle. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -209,6 +218,8 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `stock-library-while-running-1795307302426968000.png`, .28 raw TV Library with Dwarf Fortress still running | 1920×1080 | `803033daa58a56a0b307f6bc0796d56efca8e41867655398c7d8bd9eec585d36` |
 | `physical-tv-1795307469760982000.png`, .28 raw TV Library after exit confirmation, with the same Dwarf Fortress process still running | 1920×1080 | `db348c87ff035931b0ce412fca05121c1fb7319bd75dcf574dc1aa7d578983a8` |
 | `media-element-975370-1795307337932312000.png`, .28 resumed Dwarf Fortress static title menu in foreground video | 1920×1080 | `6c7de2e41d127bebc0e4396be4d5b901ec4569074a93d1aca987342e5c5ef73f` |
+| `valve-878.png`, .30 first cold start whole-output Library | 1920×1080 | `4d95f614b73fe1f6dd496aa2bd7d777d842d05fec75bbdc1846cd99046a35753` |
+| `media-element-646570-1795308705713245000.png`, .30 Slay the Spire title in the foreground video element | 1920×1080 | `627d57e01357656e03c6bd3e54d32f3e43822ce34ca392b68bcc5ef5e07a5e24` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
