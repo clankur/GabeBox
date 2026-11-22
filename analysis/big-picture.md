@@ -88,6 +88,29 @@ bash probe/package.sh --layout ./integrated-28 ./signed-28
 
 On the first entitled launch of a complete Dwarf Fortress installation, the host verifies its version of SDL, backs it up under the package’s `LocalState/SteamRuntimeBackups`, and installs the matching signed adapter. A custom or unknown DLL is preserved. Slay the Spire and Stardew Valley use the shared packaged SDL. [Native launch](../probe/ProbeNative.cpp) · [Package builder](../probe/prepare-big-picture-library.py)
 
+### Reproduce the single-window Series X build
+
+Build `1.0.230.31` uses source revision `86495a9`. One native XAML window hosts both the QR/game WebView and Valve’s Big Picture WebView2 composition surface. On Series X, this build retained a 5 GiB allowance while showing the signed-in Library. See the hardware ledger for game and overlay results. [Series X observations](big-picture-reliability.md) · [XAML host](../probe/big-picture-primary/main.cpp) · [Window composition](../probe/big-picture-webview/renderer.cpp)
+
+Use the same regular FHD base, SDL artifacts, presenter and Valve archive cache as in the preceding recipe. Download the primary host, renderer and session artifacts from these Windows builds. The renderer checksum below identifies its `SHA256SUMS` file. [Primary host](https://github.com/clankur/steam-xbox-devmode/actions/runs/44968126973) · [Renderer](https://github.com/clankur/steam-xbox-devmode/actions/runs/44968178923) · [Session](https://github.com/clankur/steam-xbox-devmode/actions/runs/44966889572)
+
+```sh
+test "$(shasum -a 256 /path/to/xbox-big-picture-webview-x64/SHA256SUMS | cut -d ' ' -f 1)" = \
+  6737c009ebdc5c52c3b86b192ef50f5b60dad8d9c22125b04819e46cd001f591 || exit 1
+python3 probe/prepare-big-picture-library.py /path/to/regular/PackagedProcessProbe-x64.appx \
+  /path/to/xbox-big-picture-webview-x64 ./integrated-31 --version 1.0.230.31 \
+  --primary-xaml /path/to/xbox-big-picture-primary-x64 \
+  --primary-checksum dc2552fa5c1dcc8da30d1580b7c7318d10a18aba4f63b63b32533ab21f1f6647 \
+  --session-artifact /path/to/xbox-steam-core-template \
+  --session-checksum 78f2e733f979efdb8a98c2a6c91a8e19b2151497bdff406c9ea5ca48bf6062b2 \
+  --presenter-artifact /path/to/xbox-fhd-present-x64 \
+  --presenter-checksum 0f62193625b8ac827815874170674353d9d064441599505fd8402f2eebe991a2 \
+  --dwarf-sdl /path/to/xbox-sdl2-2.26.2-x64 04c7e69642a09ed9943fa3fd0ed3ad6c0310e8ef41cc45e5459844b21b988354 \
+  --shared-sdl /path/to/xbox-sdl2-2.30.9-x64 34f8b05b1468e595f7c5a8c6c15ac0a413f9981f0f627be57c82408b5a6acffc \
+  --archive-cache /path/to/valve-archives
+bash probe/package.sh --layout ./integrated-31 ./signed-31
+```
+
 ### Test the Windows Steam bootstrap
 
 After configuring Device Portal, deploy and launch the signed package. [Device Portal setup](../README.md#setup)
