@@ -74,7 +74,7 @@
         var previousInputMode = navigator.gamepadInputEmulation;
         var nativePad = appId !== 975370;
         var view, savedBounds, enteredFullscreen;
-        var foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
+        var gameInput = true, foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
         var blockedMenuButtons = bigPictureMode ? padButtons.a | padButtons.b : 0;
         var keyboardReady = false;
         var layoutWidth = 0, layoutHeight = 0;
@@ -112,6 +112,7 @@
             canvas.removeEventListener("pointercancel", setPointer);
             window.removeEventListener("blur", onBlur);
             window.removeEventListener("focus", onFocus);
+            window.removeEventListener("steam-game-foreground", onGameForeground);
             document.removeEventListener("visibilitychange", onVisibility);
             menu.hidden = true;
             textForm.hidden = true;
@@ -209,6 +210,7 @@
         }
 
         function setKey(event) {
+            if (!gameInput) return;
             if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
@@ -255,10 +257,15 @@
             releaseKeys();
         }
         function onFocus() {
+            if (!gameInput || document.hidden) return;
             foreground = true;
             if (bigPictureMode) blockedMenuButtons = padButtons.a | padButtons.b;
         }
         function onVisibility() { if (document.hidden) onBlur(); else onFocus(); }
+        function onGameForeground(event) {
+            gameInput = event.detail === true;
+            if (gameInput) onFocus(); else onBlur();
+        }
 
         function setPointer(event) {
             if (!ready || !firstFrame || !menu.hidden || !textForm.hidden) return;
@@ -591,6 +598,7 @@
         canvas.addEventListener("pointercancel", setPointer);
         window.addEventListener("blur", onBlur);
         window.addEventListener("focus", onFocus);
+        window.addEventListener("steam-game-foreground", onGameForeground);
         document.addEventListener("visibilitychange", onVisibility);
         if (previousInputMode !== undefined) navigator.gamepadInputEmulation = "keyboard";
         canvas.focus();
@@ -606,6 +614,7 @@
             if (window.steamSdlNativeView) {
                 nativeView = window.steamSdlNativeView.open(report, {
                     running: function () { return runner.steamSdlRunning(); },
+                    foreground: function () { return gameInput; },
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
                     fallback: function () { nativeView = null; },

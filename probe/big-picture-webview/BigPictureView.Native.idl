@@ -11,5 +11,6 @@ namespace BigPictureView.Native
         static void Close();
         static void OpenForWarmup();
         static void OpenForAccount(String steamId);
+        static void OpenForPrimaryAccount(String steamId);
     };
 }

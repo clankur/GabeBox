@@ -31,7 +31,7 @@
             events.fallback();
         }
         function visible() {
-            if (document.hidden || screen.hidden) return false;
+            if (document.hidden || screen.hidden || (events.foreground && !events.foreground())) return false;
             var core = Windows.UI.Core;
             if (core && core.CoreWindow && typeof core.CoreWindow.getForCurrentThread === "function") {
                 var current = core.CoreWindow.getForCurrentThread();

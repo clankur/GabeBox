@@ -14,6 +14,8 @@
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.ViewManagement.h>
+#include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Xaml.Hosting.h>
 #include <algorithm>
 #include <array>
 #include <deque>
@@ -41,6 +43,7 @@ slim_mutex gate;
 weak_ref<IFrameworkView> active;
 CoreDispatcher dispatcher{nullptr};
 CoreApplicationView secondary{nullptr};
+IFrameworkView primaryOwner{nullptr};
 int32_t viewId = 0;
 bool opening = false;
 bool closeRequested = false;
@@ -59,6 +62,9 @@ struct View : implements<View, IFrameworkView> {
     CoreWindow window{nullptr};
     Compositor compositor{nullptr};
     CompositionTarget target{nullptr};
+    Windows::UI::Xaml::Controls::Canvas primaryPanel{nullptr};
+    Windows::UI::Xaml::Controls::WebView accountPanel{nullptr};
+    bool primaryShellVisible = false;
     ContainerVisual root{nullptr};
     ContainerVisual mainSurface{nullptr};
     ContainerVisual popupSurface{nullptr};
@@ -150,12 +156,23 @@ struct View : implements<View, IFrameworkView> {
         }
     }
 
+    void showPrimaryShell(bool show) {
+        if (!primaryPanel || primaryShellVisible == show) return;
+        primaryShellVisible = show;
+        using namespace Windows::UI::Xaml;
+        primaryPanel.Visibility(show ? Visibility::Visible : Visibility::Collapsed);
+        accountPanel.Opacity(show ? 0.0 : 1.0);
+        accountPanel.IsHitTestVisible(!show);
+        if (!show) accountPanel.Focus(FocusState::Programmatic);
+    }
+
     void applyVisibility() {
         if (closed || !controller) return;
         const bool visible = !warming && !gameForeground && window.Visible();
         const bool runBrowser = warming || visible;
         const bool showPopup = visible && popup && popupRequestedVisible;
         const bool showOwner = visible && !showPopup;
+        showPrimaryShell(visible);
         if (showOwner != ownerAttached) {
             controller.RootVisualTarget(showOwner ? mainSurface : nullptr);
             ownerAttached = showOwner;
@@ -195,6 +212,7 @@ struct View : implements<View, IFrameworkView> {
         resize();
         applyVisibility();
         publishWindow();
+        if (primaryPanel && !value) focusVisible();
     }
 
     // IDs 1 and 2 are local to this pair of WebViews. The PID is the
@@ -712,10 +730,15 @@ struct View : implements<View, IFrameworkView> {
         std::wstring_view step = L"composition";
         try {
             checkpoint(step);
-            compositor = Compositor();
-            target = compositor.CreateTargetForCurrentView();
+            using Windows::UI::Xaml::Hosting::ElementCompositionPreview;
+            if (primaryPanel) compositor = ElementCompositionPreview::GetElementVisual(primaryPanel).Compositor();
+            else {
+                compositor = Compositor();
+                target = compositor.CreateTargetForCurrentView();
+            }
             root = compositor.CreateContainerVisual();
-            target.Root(root);
+            if (primaryPanel) ElementCompositionPreview::SetElementChildVisual(primaryPanel, root);
+            else target.Root(root);
             mainSurface = compositor.CreateContainerVisual();
             root.Children().InsertAtBottom(mainSurface);
 
@@ -866,7 +889,11 @@ struct View : implements<View, IFrameworkView> {
         if (controller) controller.Close();
         web = nullptr;
         controller = nullptr;
-        window.Dispatcher().StopProcessEvents();
+        if (primaryPanel) {
+            showPrimaryShell(false);
+            Windows::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(primaryPanel, nullptr);
+            Uninitialize();
+        } else window.Dispatcher().StopProcessEvents();
     }
     void Uninitialize() {
         closed = true;
@@ -875,6 +902,7 @@ struct View : implements<View, IFrameworkView> {
         active = {};
         dispatcher = nullptr;
         secondary = nullptr;
+        primaryOwner = nullptr;
         captureResult = hstring{};
         opening = false;
         openingAccount = hstring{};
@@ -907,14 +935,44 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     IInspectable ActivateInstance() { throw hresult_not_implemented(); }
     void Open() { openView(false); }
     void OpenForWarmup() { openView(true); }
-    void OpenForAccount(hstring const& owner) {
+    static void validateAccount(hstring const& owner) {
         std::wstring_view id(owner);
         if (id.size() < 17 || id.size() > 20 || id.front() == L'0' ||
             id.find_first_not_of(L"0123456789") != id.npos ||
             (id.size() == 20 && id > L"18446744073709551615")) throw hresult_invalid_argument();
-        openView(true, owner);
     }
-    void openView(bool warm, hstring const& owner = {}) {
+    void OpenForAccount(hstring const& owner) { validateAccount(owner); openView(true, owner); }
+    void OpenForPrimaryAccount(hstring const& owner) { validateAccount(owner); openView(true, owner, true); }
+    static void startPrimary(hstring const& owner) {
+        try {
+            using namespace Windows::UI::Xaml;
+            auto window = Window::Current();
+            auto grid = window ? window.Content().try_as<Controls::Grid>() : nullptr;
+            if (!grid || grid.Children().Size() != 2) throw hresult_error(E_UNEXPECTED);
+            auto account = grid.Children().GetAt(0).try_as<Controls::WebView>();
+            auto panel = grid.Children().GetAt(1).try_as<Controls::Canvas>();
+            if (!panel || panel.Name() != L"SteamCompositionHost" || !account || account.Name() != L"SteamAccountHost" ||
+                !account.Source() || account.Source().AbsoluteUri() != L"ms-appx-web:///steam-signin.html")
+                throw hresult_access_denied();
+            auto view = make_self<View>(true, owner);
+            {
+                slim_lock_guard lock(gate);
+                if (closeRequested) { opening = closeRequested = false; return; }
+                primaryOwner = view.as<IFrameworkView>();
+            }
+            view->primaryPanel = panel;
+            view->accountPanel = account;
+            view->SetWindow(window.CoreWindow());
+            view->listen();
+            view->startBrowser();
+        } catch (...) {
+            auto hr = to_hresult();
+            slim_lock_guard lock(gate);
+            opening = false;
+            status = hstring(L"primary-view-error:" + std::to_wstring(hr.value));
+        }
+    }
+    void openView(bool warm, hstring const& owner = {}, bool primary = false) {
         {
             slim_lock_guard lock(gate);
             if (opening && (closeRequested || openingAccount != owner)) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY));
@@ -924,6 +982,11 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             status = L"creating-view";
         }
         try {
+            if (primary) {
+                auto main = CoreApplication::MainView().CoreWindow().Dispatcher();
+                main.RunAsync(CoreDispatcherPriority::Normal, [owner] { startPrimary(owner); });
+                return;
+            }
             auto newView = CoreApplication::CreateNewView(make<Source>(warm, owner));
             slim_lock_guard lock(gate);
             if (opening) secondary = newView;

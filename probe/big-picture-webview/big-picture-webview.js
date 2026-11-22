@@ -21,6 +21,8 @@
             return session.finish("account-changed", true).then(function () { return open(broker, onFailure); });
         }
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
+        var primaryXaml = !!(window.document &&
+            window.document.documentElement.getAttribute("data-steam-primary-xaml") === "true");
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
@@ -109,6 +111,7 @@
             if (!host || failed || value === gameForeground) return;
             gameForeground = value;
             host.reply(JSON.stringify({nativeGameForeground: value}));
+            if (primaryXaml) window.dispatchEvent(new CustomEvent("steam-game-foreground", {detail: value}));
         }
         function gameEvent(overlay) {
             if (!host || failed) return;
@@ -142,7 +145,7 @@
             // while Chromium compiled Valve's shell was observed at 2.28 GiB.
             // Keep the QR view's allocation until the native charge settles.
             var usage = sampleMemory("warm_candidate");
-            if (usage > 992 * 1024 * 1024 || (heldForMemory && !usage)) {
+            if (!primaryXaml && (usage > 992 * 1024 * 1024 || (heldForMemory && !usage))) {
                 belowBudgetSince = 0;
                 if (!heldForMemory) {
                     heldForMemory = true;
@@ -473,7 +476,8 @@
                 if (typeof owner !== "string" || !/^[1-9][0-9]{16,19}$/.test(owner) ||
                     (owner.length === 20 && owner > "18446744073709551615")) throw new Error("signed-out");
                 warming = true;
-                host.openForAccount(owner);
+                if (primaryXaml) host.openForPrimaryAccount(owner);
+                else host.openForAccount(owner);
             });
         }).then(function () {
             if (failed) return;

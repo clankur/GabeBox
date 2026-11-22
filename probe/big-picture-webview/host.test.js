@@ -6,7 +6,7 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, primary = false, warm = false, expected = 0, findRequest, openReport = async () => ({})} = {}) {
+function fixture({activationError = false, primary = false, xaml = false, warm = false, expected = 0, findRequest, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
@@ -23,8 +23,10 @@ function fixture({activationError = false, primary = false, warm = false, expect
         close() { stage = "closed"; }
     };
     renderer.openForAccount = id => { owners.push(id); if (warm) warmOpens++; else opens++; stage = "composition"; };
+    renderer.openForPrimaryAccount = id => { assert(xaml); owners.push(id); stage = "composition"; };
     const window = {}, memory = {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
         expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }};
+    if (xaml) window.document = {documentElement:{getAttribute: key => key === "data-steam-primary-xaml" ? "true" : null}};
     vm.runInNewContext(source, {
         Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
         Windows: {
@@ -189,6 +191,20 @@ test("an already-current Steam view does not request another foreground switch",
     await ready;
     assert.equal(app.opens(), 1);
     assert.deepEqual(app.switches, []);
+});
+
+test("the named primary XAML host reveals Valve in the same Game window during a high memory charge", async () => {
+    const app = fixture({primary:true, xaml:true, warm:true});
+    const ready = app.start({});
+    await drain();
+    app.memory.appMemoryUsage = 2200 * 1024 * 1024;
+    app.memory.appMemoryUsageLimit = 5368709120;
+    await app.advance("warmup-gamepad-layout");
+    assert(app.replies.some(r => r.nativeWarmupComplete));
+    assert.deepEqual(app.switches, []);
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.deepEqual(app.owners, ["76561198000000001"]);
 });
 
 test("a local operator request captures the active console renderer only after startup", async () => {
