@@ -53,7 +53,9 @@ def release_layout(base, destination, version):
 
 
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
-                   presenter_artifact=None, presenter_checksum=None):
+                   presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None):
+    if (primary_xaml is None) != (primary_checksum is None):
+        raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if (presenter_artifact is None) != (presenter_checksum is None):
         raise ValueError("Supply both --presenter-artifact and --presenter-checksum.")
     if layout.exists():
@@ -89,6 +91,9 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         shell.mkdir()
         bundle = runpy.run_path(str(PROBE / "big-picture-bridge/bundle.py"))["bundle"]
         (shell / "bridge.js").write_text(bundle(staged / "ValveClient/public/url_list.txt"), encoding="utf-8")
+        if primary_xaml is not None:
+            stage_primary = runpy.run_path(str(PROBE / "big-picture-primary/stage.py"))["stage_primary"]
+            stage_primary(staged, primary_xaml, primary_checksum)
         staged.rename(layout)
 
 
@@ -103,6 +108,9 @@ if __name__ == "__main__":
     parser.add_argument("--session-checksum", required=True, help="SHA256 of the Windows build SHA256SUMS file")
     parser.add_argument("--presenter-artifact", type=Path, help="optional Windows FHD native game presenter directory")
     parser.add_argument("--presenter-checksum", help="SHA256 of the presenter artifact SHA256SUMS file")
+    parser.add_argument("--primary-xaml", type=Path, help="optional Windows native primary XAML host artifact")
+    parser.add_argument("--primary-checksum", help="SHA256 of the XAML host artifact SHA256SUMS file")
     args = parser.parse_args()
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
-                   args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum)
+                   args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
+                   args.primary_xaml, args.primary_checksum)
