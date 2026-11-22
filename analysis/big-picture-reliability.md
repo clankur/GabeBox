@@ -120,6 +120,22 @@ Production APPX SHA-256 `7a67f30b07296222eb2d9ac92642d078409c6e1b9cee5479f526d2a
 
 The observed Library count is 0/2. The failure preceded a usable Steam UI. There were no stock game-launch attempts on these runs.
 
+### Build 1.0.230.27
+
+The recovery APPX has SHA-256 `c0d3b3af985905785da92e84f9758650ba67a7ef8cbb75cc8c179253df74d2f5`. Its application payloads match build `.25` byte for byte. The manifest version, block map and signature changed.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-27-192039 | 64bf44b7-3fa6-48a3-9011-867b53f512ea | Passed from an empty package-process baseline. The raw TV screenshot shows the original Library, All Games 134 and controller footer. |
+
+### Build 1.0.230.28
+
+The integrated APPX has SHA-256 `045da0be57a4b4852272e9de885d49fb0d6fe2a4be1069fb49e06895f840a585`. Independent verification covered all 1,262 block-map members, the 1,175 pinned Valve resources, the authored bridge rebuilt from commit `d8a12a5` and fresh copies of the five CI artifacts. The GitHub archive digests and all extracted renderer, presenter, SDL and session component bytes matched their local build inputs and corresponding packaged payloads. Private Windows CI runs were 44965443477 for the renderer, 44965540727 for the presenter, 44965540680 for both SDL versions and 44966111814 for the Steam session component.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-28-192556 | 2ea48932-59c1-40f4-9627-e9e3b7c9d117 | Passed from an empty package-process baseline. Original TV output shows All Games 134, Installed 8, game art and controller footer. |
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -137,6 +153,7 @@ The observed Library count is 0/2. The failure preceded a usable Steam UI. There
 | 1.0.230.24 · tour-24-190411 | Dwarf Fortress | The stock Play control launched the matching process. | The foreground HTML video frame showed the title menu, Settings and About DF. The TV showed the stock overlay and exit confirmation. | 1,794 foreground video frames in 30.041200 s (59.72 FPS). Confirm dismissed the dialog, the broker received the request and the native input mapping recorded SDL Quit. The process was still running after 60 s and the operator closed it. No normal Library return. |
 | 1.0.230.25 · tour-25-190849 | Stardew Valley | The stock Play control launched the matching process. | A foreground video frame at 40.328 s showed Stardew Valley's title and New, Load, Co-op and Exit menu. The actual TV output showed Steam's running-game overlay. | Consecutive video samples counted 1,764 frames in 30.008200 s and 1,698 frames in 30.097200 s (58.78 and 56.42 FPS). The game and host disappeared before a graceful exit or Library return. |
 | 1.0.230.25 · tour-25-191228 | Dwarf Fortress | The stock Play control launched the matching process. | A foreground video frame at 20.119 s showed the original title and menu. The TV showed Steam's running overlay, then the main menu and Library. | 1,783 foreground video frames in 30.069700 s (59.30 FPS). The PID remained live when the user-facing Library grid returned on TV. The operator then closed the game and stopped the host for the next build. This verifies navigating the Library during a game. An ordinary game exit remains unverified. |
+| 1.0.230.27 · tour-27-192039 | Slay the Spire | Stock Play launched the matching JVM. | Two separate foreground video captures showed the game menu, including its Quit command. | The first video sample counted 1,081 frames in 30.051300 s (35.97 FPS). A Device Portal pointer click on Quit produced no mapped input acknowledgement. The operator closed the game and stopped the host. No normal Library return. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -177,6 +194,9 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `physical-tv-1795306432888280000.png`, .25 second cold start whole-output Library | 1920×1080 | `3a29a82dd613ae5565a6952f677cc0ed3a4a7502f3eec74ea1acf4469b1ba739` |
 | `media-element-975370-1795306477318106000.png`, .25 Dwarf Fortress title in the foreground video element | 1920×1080 | `2859bd6ca7cd0867bc561dbd3410ddfa7ffb64f26498a3a7b86c6fe0a10b8614` |
 | `physical-tv-1795306512474281000.png`, .25 whole-output Library while Dwarf Fortress was running | 1920×1080 | `eeb959fd0c15fa312aa259955460d33e755fcb5af877ccb31696585e28c0e9ec` |
+| `physical-tv-1795306917763693000.png`, .27 first cold start whole-output Library | 1920×1080 | `4c1e18b81b9477e3a95f50390bf5f38e74ae4ba45f4b263c35a395ba65cfb81e` |
+| `media-element-646570-1795307002691321000.png`, .27 Slay the Spire menu in the foreground video element | 1920×1080 | `681e046db9de8f99eb6be04e0bfeb0d68759c7c02fe5bdbe79b0fbc5396bb8be` |
+| `physical-tv-1795307232992393000.png`, .28 first cold start whole-output Library | 1920×1080 | `1628c73ffeafc6adfaca22e332e0b828f7277b16bcf155b7d708cb6b74226803` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
