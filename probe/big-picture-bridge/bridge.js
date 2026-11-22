@@ -195,6 +195,15 @@
             // Valve's pinned ELaunchOptionType_Default is 1.
             return [{nIndex: 0, eType: 1, strGameName: game.name, strDescription: ''}];
         },
+        ReportLibraryAssetCacheMiss(appId, assetType) {
+            if (!Number.isInteger(appId) || appId <= 0 || appId > 0xffffffff ||
+                !Number.isInteger(assetType) || assetType < 0 || assetType > 31) return;
+            // Valve advances its own artwork fallback after this synchronous notification.
+            // Retain one document-local diagnostic without storing account or game identifiers.
+            const mark = 'steam-library-asset-cache-miss';
+            performance.clearMarks(mark);
+            performance.mark(mark, {detail: {assetType}});
+        },
         RegisterForAppDetails(id, callback) {
             if (!validId(id) || typeof callback !== 'function') throw new TypeError('Expected an AppID and a details listener');
             const sub = {id, callback};

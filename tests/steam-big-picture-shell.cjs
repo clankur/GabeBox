@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--home] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,12 +8,13 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store', '--home'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
 const storeOnly = process.argv.includes('--store');
-const framedGamepad = storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const homeOnly = process.argv.includes('--home');
+const framedGamepad = homeOnly || storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -156,6 +157,31 @@ async function checkStore(browser, page, popup) {
         });
         console.log('Original Store menu requested the public HTTPS Store from /steamweb; network intentionally blocked.');
     } finally { await isolated.close(); }
+}
+
+async function checkHome(page, popup) {
+    await pressNative(page, 3);
+    const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+    await menu.getByText('Home', {exact: true}).click();
+    const target = popup.locator('#popup_target');
+    await popup.getByText('Recent Games', {exact: true}).first().waitFor({state:'visible', timeout:10000})
+        .catch(async error => { throw new Error(error.message + '\nHome content: ' + (await target.innerText()).slice(0,1200)); });
+    assert(!/Something went wrong while displaying this content/i.test(await target.innerText()));
+    const cache = await page.evaluate(() => {
+        let r; webpackChunksteamui.push([['fixture-home-cache'], {}, require => { r = require; }]);
+        const store = r(90544).tw;
+        const mark = 'steam-library-asset-cache-miss';
+        performance.clearMarks(mark);
+        const missing = store.BHasCachedLibraryAsset(81, undefined, 1);
+        const notice = performance.getEntriesByName(mark).map(entry => entry.detail);
+        performance.clearMarks(mark);
+        const repeated = store.BHasCachedLibraryAsset(81, undefined, 1);
+        const present = store.BHasCachedLibraryAsset(42, 1 << 2, 2);
+        const newNotices = performance.getEntriesByName(mark).length;
+        return {missing, notice, repeated, present, newNotices};
+    });
+    assert.deepEqual(cache, {missing:false, notice:[{assetType:1}], repeated:false, present:true, newNotices:0});
+    console.log('Valve Home opened with offline artwork. The original AppStore retained its cache miss, deduplicated its report and recognized a genuine cache bitmap hit.');
 }
 
 async function checkNetwork(page, popup) {
@@ -843,6 +869,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 });
                 const hasTour = await welcome.isVisible();
                 if (hasTour) await completeTour(page, popup);
+                if (homeOnly) { await checkHome(page, popup); return; }
                 if (storeOnly) { await checkStore(browser, page, popup); return; }
                 if (networkOnly) { await checkNetwork(page, popup); return; }
                 if (accounts) {
