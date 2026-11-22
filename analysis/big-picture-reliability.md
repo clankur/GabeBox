@@ -172,6 +172,12 @@ The signed native XAML APPX has SHA-256 `714a906c907c2e35b1c940755ea59f69d46b8ff
 |---|---|---|
 | tour-33-201627 | d20d9cc1-b732-41c0-82af-910b2dac2597 | Passed from an empty package-process baseline. The original All Games 134 grid and both controller footer corners are visible in `valve-703.png`, SHA-256 `6b6f614e1cbba3295bd01325e6983d380d0eacf12157fe5b1d29367435e04320`. A later stock Installed 8 grid confirms eight installed tiles including Dwarf Fortress, Slay the Spire and Stardew Valley. |
 
+### Build 1.0.230.35
+
+The in-place update retained the signed-in production account. Signed APPX SHA-256 `3d4df36df2e5b2bf2446a931a97943979d52ce74e3fd22af9a3a3afcc4ecd397`. Windows reported `internet wifi` in two application sessions. In the first, Valve’s browser toolbar and Wi-Fi indicator appeared above an empty Store. The player saw the empty page on the TV. The official TV image had SHA-256 `fffad2ebcf54a1c838f4e873684b5c53c6e5993fff83a3f9f32ad00212b37f2b`. The native report contained no successful public Store HTTP response.
+
+The next session had a new SteamPrimary PID and run ID. The cause of the transition was unobserved. A player photo of Home showed the original What’s New, Friends and Recommended tabs and the exception `SteamClient.Apps.ReportLibraryAssetCacheMiss is not a function`. The player then returned to All Games with the controller. In run `b5e6180e-8a60-4dae-a16e-2e79a9ac5073`, the official 1920×1080 TV image showed 134 games, 8 installed, the selected Age of Wonders III tile and the connected Wi-Fi glyph. Its SHA-256 was `ae23a7ce18bacaf1432015d9b759ee77a1fa3b0945aea2b42e5a32a84ac9ab90`. This verifies a controller return to the populated Library in that session. Neither activation had a controlled cold-start preflight.
+
 ## Direct native game display
 
 For a build that presents game frames through the primary XAML panel, retain the following original whole-output captures from the same run. Index each with its source, capture time, dimensions and SHA-256. Open the originals to identify the actual content.
