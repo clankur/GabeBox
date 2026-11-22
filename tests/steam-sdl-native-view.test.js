@@ -5,20 +5,21 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
 
-test("the primary game video confirms rendered frames, resets its sample across an overlay and closes once", async () => {
+async function checkPrimaryMedia(sameWindow) {
     let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
     const measurements = [], switches = [], released = [], captures = [], listeners = new Map();
-    let captureRequest = true, drawn = null;
+    let captureRequest = true, drawn = null, playCalls = 0, focused = true;
     const video = {
         paused:false, readyState:2, videoWidth:1920, videoHeight:1080, currentTime:1.5,
-        async play() { this.paused = false; }, pause() { this.paused = true; }, removeAttribute() {}, setAttribute() {},
+        async play() { playCalls++; this.paused = false; }, pause() { this.paused = true; }, removeAttribute() {}, setAttribute() {},
         addEventListener() {}, removeEventListener() {}, getBoundingClientRect: () => ({width:1920})
     };
     const screen = {hidden:false, contains:node => node === video, classList:{add() {}, remove() {}},
         appendChild(node) { node.parentNode = screen; }, removeChild(node) { node.parentNode = null; }};
     const canvas = {getContext:() => ({drawImage:node => { drawn = node; }}),
         msToBlob:() => ({size:4, type:"image/png"})};
-    const document = {hidden:false, elementFromPoint:() => video, createElement:name => name === "canvas" ? canvas : video,
+    const document = {documentElement:{getAttribute: name => name === "data-steam-primary-xaml" && sameWindow ? "true" : null},
+        hidden:false, elementFromPoint:() => video, createElement:name => name === "canvas" ? canvas : video,
         addEventListener: (event, callback) => listeners.set(event, callback),
         removeEventListener: event => listeners.delete(event)};
     const host = {
@@ -27,6 +28,7 @@ test("the primary game video confirms rendered frames, resets its sample across 
         mediaStatus() { return "width=1920\r\nheight=1080\r\npresented=" + total + "\r\nsubmitted=9999\r\n"; }
     };
     const window = {Fhd:{Native:{RenderHost:host}},
+        addEventListener:document.addEventListener, removeEventListener:document.removeEventListener,
         steamBigPictureHost:{switchView:async (to, from) => { switches.push([to,from]); }}};
     const localFolder = {path:"C:\\LocalState",
         async tryGetItemAsync(name) {
@@ -45,7 +47,7 @@ test("the primary game video confirms rendered frames, resets its sample across 
         setInterval:callback => { tick = callback; return 1; }, clearInterval() {},
         URL:{createObjectURL:() => "blob:media", revokeObjectURL:url => released.push(url)}});
     const control = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-1-2.bin\r\n", {
-        running:() => running, presented:() => firstFrames++, mediaProgress() {}, mediaCapture:stats => captures.push(stats),
+        running:() => running, foreground:() => focused, presented:() => firstFrames++, mediaProgress() {}, mediaCapture:stats => captures.push(stats),
         measured:(n,us,stats) => {
             measurements.push([n,us]);
             assert.match(stats,new RegExp("sample_window=" + measurements.length + "\\r"));
@@ -60,23 +62,41 @@ test("the primary game video confirms rendered frames, resets its sample across 
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(drawn,video);
     assert.match(captures[0], /capture_saved=1[\s\S]*video_ms=1500/);
-    control.pause();
-    assert.equal(video.paused,true);
-    document.hidden = true; listeners.get("visibilitychange")();
-    now = 40000; tick();
+    control.cover();
+    assert.equal(video.paused,!sameWindow);
+    captureRequest = true;
+    now = 80000; total = 5000; tick();
+    await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(measurements, []);
+    assert(captureRequest);
+    assert.equal(captures.length, 1);
     await control.resume(11);
     assert.equal(video.paused,false);
+    assert.equal(playCalls, sameWindow ? 1 : 2);
     assert.deepEqual(switches, [[3,11]]);
-    document.hidden = false; listeners.get("visibilitychange")();
-    now = 41000; total = 2003; tick();
-    now = 71000; total += 1798; tick();
+    tick();
+    now += 29000; total += 1700; tick();
+    // The system can lose and regain focus, or hide and show the document,
+    // between two 100 ms media polls. Those are separate sample windows.
+    focused = false; listeners.get("blur")();
+    now += 5000; total += 300;
+    focused = true; listeners.get("focus")(); tick();
+    now += 29000; total += 1700; tick();
+    document.hidden = true; listeners.get("visibilitychange")();
+    now += 5000; total += 300;
+    document.hidden = false; listeners.get("visibilitychange")(); tick();
+    assert.deepEqual(measurements, []);
+    now += 30000; total += 1798; tick();
     assert.deepEqual(measurements, [[1798,30000000]]);
-    now = 101000; tick();
+    now += 30000; tick();
     assert.deepEqual(measurements, [[1798,30000000],[0,30000000]]);
     running = false; tick(); control.close();
     assert.equal(finished, 1); assert.deepEqual(released, ["blob:media"]);
-});
+    assert.equal(listeners.size, 0);
+}
+
+test("WWA pauses the video for another view and counts only foreground frames", () => checkPrimaryMedia(false));
+test("XAML keeps the video running under Valve and counts only foreground frames", () => checkPrimaryMedia(true));
 
 function fixture(accept = true, gate = null, withSteam = false) {
     const calls = [];

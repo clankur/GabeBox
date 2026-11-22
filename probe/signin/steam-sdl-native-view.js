@@ -5,7 +5,8 @@
 
     function openMedia(host, path, events, nativePad, screen, mainId) {
         var video = document.createElement("video");
-        var timer, url, closed = false, opened = false, shown = false;
+        var timer, url, closed = false, opened = false, shown = false, covered = false;
+        var sameWindow = document.documentElement.getAttribute("data-steam-primary-xaml") === "true";
         var sampleWindow = 0;
         var started = Date.now(), owner = ++activeSession, sampleStart, nextReport = 0, phase = "open";
         var capturePending = false;
@@ -15,6 +16,9 @@
             closed = true;
             clearInterval(timer);
             document.removeEventListener("visibilitychange", resetSample);
+            window.removeEventListener("blur", resetSample);
+            window.removeEventListener("focus", resetSample);
+            window.removeEventListener("steam-game-foreground", resetSample);
             video.removeEventListener("error", failed);
             video.pause();
             video.removeAttribute("src");
@@ -31,10 +35,11 @@
             events.fallback();
         }
         function visible() {
-            if (document.hidden || screen.hidden || (events.foreground && !events.foreground())) return false;
+            if (covered || document.hidden || screen.hidden || (events.foreground && !events.foreground())) return false;
             var core = Windows.UI.Core;
             if (core && core.CoreWindow && typeof core.CoreWindow.getForCurrentThread === "function") {
                 var current = core.CoreWindow.getForCurrentThread();
+                if (current && current.visible === false) return false;
                 if (current && core.CoreWindowActivationMode && typeof current.activationMode === "number" &&
                     current.activationMode !== core.CoreWindowActivationMode.activatedInForeground) return false;
             }
@@ -141,6 +146,9 @@
             return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)
                 .then(function () {
                     if (closed || owner !== activeSession) return false;
+                    covered = false;
+                    resetSample();
+                    if (sameWindow && !video.paused) return true;
                     return Promise.resolve(video.play()).then(function () { return !closed; });
                 });
         }
@@ -155,6 +163,9 @@
             video.setAttribute("aria-hidden", "true");
             video.addEventListener("error", failed);
             document.addEventListener("visibilitychange", resetSample);
+            window.addEventListener("blur", resetSample);
+            window.addEventListener("focus", resetSample);
+            window.addEventListener("steam-game-foreground", resetSample);
             screen.classList.add("primary-game-video");
             screen.appendChild(video);
             video.src = url;
@@ -166,8 +177,13 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         } catch (error) { failed(error); return null; }
-        return {primary: true, close: close, resume: resume, pause: function () {
-            if (!closed) { video.pause(); resetSample(); }
+        return {primary: true, close: close, resume: resume, cover: function () {
+            if (closed) return;
+            covered = true;
+            resetSample();
+            // XAML covers the live game in the same CoreWindow. Pausing the
+            // media clock here also stops frame requests and GPU fence retirement.
+            if (!sameWindow) video.pause();
         }};
     }
 

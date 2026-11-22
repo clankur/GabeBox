@@ -153,7 +153,7 @@
                 var steam = window.steamBigPictureHost;
                 if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
                 if (steam && gameViewId) {
-                    if (nativeView && nativeView.primary) nativeView.pause();
+                    if (nativeView && nativeView.primary) nativeView.cover();
                     steam.showForGame(appId, gameViewId, function (steamViewId) {
                         if (!runner.steamSdlRunning()) return false;
                         // A title that deferred its close may still need input
@@ -651,7 +651,7 @@
             if (window.steamSdlNativeView) {
                 nativeView = window.steamSdlNativeView.open(report, {
                     running: function () { return runner.steamSdlRunning(); },
-                    foreground: function () { return gameInput; },
+                    foreground: function () { return gameInput && foreground; },
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
                     fallback: function () { nativeView = null; },

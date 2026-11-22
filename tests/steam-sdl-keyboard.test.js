@@ -160,7 +160,7 @@ test("the primary video polls the controller independently and a quick mouse cli
         steamSdlGamepad: {...gamepad, read: () => [buttons, 0, 0, 0, 0, -32768, -32768]},
         steamSdlNativeView: {open(report, events) {
             events.presented("width=1920");
-            return {primary: true, pause() {}};
+            return {primary: true, cover() {}};
         }},
         steamBigPictureHost: {async showForGame(id, view) { overlays.push([id, view]); return true; }}
     };
