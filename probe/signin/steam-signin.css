@@ -6,6 +6,8 @@ main { margin: 0 auto; max-width: 1480px; padding: 0 6vw; }
 html[data-steam-big-picture="true"] #signin,
 html[data-steam-big-picture="true"] #signin *,
 html[data-steam-big-picture="true"] #big-picture-status { cursor: none; }
+html[data-steam-controller-ui="true"] #signin,
+html[data-steam-controller-ui="true"] #signin * { pointer-events: none; }
 h1 { margin: 0; font-size: 2.6em; font-weight: 650; }
 p { line-height: 1.45; }
 .device { color: #aebbd0; margin: .25em 0 1.6em; }

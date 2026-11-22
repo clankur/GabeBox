@@ -104,8 +104,12 @@ test("integrated sign-in goes directly to the Valve host, including when startup
     for (const outcome of ["ready", "missing", "failed", "lost"]) {
         const elements = new Map();
         const statuses = [];
+        const rootAttributes = {};
         const document = {
-            documentElement: { getAttribute: name => name === "data-steam-big-picture" ? "true" : null },
+            documentElement: {
+                getAttribute: name => name === "data-steam-big-picture" ? "true" : null,
+                setAttribute(name, value) { rootAttributes[name] = value; }
+            },
             getElementById(id) {
                 if (!elements.has(id)) elements.set(id, {
                     hidden: true, value: "", addEventListener(type, listener) { this[type] = listener; },
@@ -132,6 +136,9 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
             Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker, libraryArt: {schedule() {}},
             Windows: {
+                System: { Profile: { AnalyticsInfo: { versionInfo: {
+                    deviceFamily: outcome === "missing" ? "Windows.Desktop" : "Windows.Xbox"
+                } } } },
                 Storage: {
                     ApplicationData: { current: { localFolder } },
                     CreationCollisionOption: { replaceExisting: 1 },
@@ -146,6 +153,20 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         // The platform's first session lookup has not completed. Fresh QR
         // must already use focus navigation, even when no session is restored.
         assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");
+        const qr = elements.get("signin");
+        if (outcome === "missing") {
+            assert.equal(rootAttributes["data-steam-controller-ui"], undefined);
+            assert.equal(qr.click, undefined);
+        } else {
+            assert.equal(rootAttributes["data-steam-controller-ui"], "true");
+            for (const detail of [0, 1, 2]) {
+                const event = {detail, preventDefault() { this.prevented = true; },
+                    stopImmediatePropagation() { this.stopped = true; }};
+                qr.click(event);
+                assert.equal(!!event.prevented, detail > 0);
+                assert.equal(!!event.stopped, detail > 0);
+            }
+        }
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(document.getElementById("signin").hidden, true);
         assert.equal(document.getElementById("library").hidden, true);

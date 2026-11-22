@@ -26,6 +26,18 @@
     // Set EdgeHTML's navigation mode before QR or saved-session recovery starts.
     var originalInputMode = navigator.gamepadInputEmulation;
     if (bigPictureMode && originalInputMode !== undefined) navigator.gamepadInputEmulation = "keyboard";
+    var profile = bigPictureMode && Windows.System && Windows.System.Profile;
+    if (profile && profile.AnalyticsInfo && profile.AnalyticsInfo.versionInfo.deviceFamily === "Windows.Xbox") {
+        document.documentElement.setAttribute("data-steam-controller-ui", "true");
+        signin.addEventListener("click", function (event) {
+            // Keyboard, UI Automation and HTMLElement.click() produce a
+            // zero-detail click. A physical pointer click carries its count.
+            if (event.detail > 0) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }
+        }, true);
+    }
     var bigPictureStatus;
     function showBigPictureStatus(message) {
         if (!bigPictureStatus) {

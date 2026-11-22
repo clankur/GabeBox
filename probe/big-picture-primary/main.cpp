@@ -7,8 +7,11 @@
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.System.Profile.h>
+#include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.h>
+#include "../big-picture-webview/shell-cursor.h"
 
 using namespace winrt;
 using namespace Windows::UI::Xaml;
@@ -54,6 +57,28 @@ bool matchesCommittedAccount(Uri const& uri, Uri const& qualified)
            uri.Query().empty() && uri.Fragment().empty() && uri.UserName().empty() && uri.Password().empty();
 }
 
+void configureXboxInput(Window const& window, WebView const& account) {
+    if (Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() != L"Windows.Xbox") return;
+    using namespace Windows::UI::Core;
+    // The renderer enables hit testing when it hands the account view to a
+    // game. QR, authenticated Steam, and the transition between them use focus.
+    account.IsHitTestVisible(false);
+    auto core = window.CoreWindow();
+    auto cursor = std::make_shared<steam_input::ShellCursor<CoreCursor>>();
+    auto update = [control = make_weak(account), cursor](CoreWindow const& sender) {
+        if (auto host = control.get())
+            cursor->update(sender, !host.IsHitTestVisible() && sender.Visible() &&
+                sender.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground);
+    };
+    account.RegisterPropertyChangedCallback(UIElement::IsHitTestVisibleProperty(),
+        [win = make_weak(core), update](auto const&, auto const&) { if (auto sender = win.get()) update(sender); });
+    auto changed = [update](CoreWindow const& sender, auto const&) { update(sender); };
+    core.PointerMoved(changed);
+    core.Activated(changed);
+    core.VisibilityChanged(changed);
+    update(core);
+}
+
 struct SteamApplication : ApplicationT<SteamApplication>
 {
     SteamApplication()
@@ -78,6 +103,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
                 WebView account{WebViewExecutionMode::SameThread};
                 checkpoint("edge-created");
                 account.Name(L"SteamAccountHost");
+                configureXboxInput(window, account);
                 // Windows accepts either an empty authority or the current package identity.
                 Uri local{accountPage};
                 Uri qualified{L"ms-appx-web://" + Windows::ApplicationModel::Package::Current().Id().Name() +
@@ -109,6 +135,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
                     // Only native code installs this receipt. The renderer reads the
                     // successfully committed document without accessing WebView.Source.
                     sender.Tag(local);
+                    if (!sender.IsHitTestVisible()) sender.Focus(FocusState::Programmatic);
                     checkpoint("account-document-verified");
                 });
                 account.FrameNavigationStarting([](auto const&, auto const& event) { event.Cancel(true); });

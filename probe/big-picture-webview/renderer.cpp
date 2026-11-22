@@ -24,6 +24,7 @@
 #include "display-layout.h"
 #include "library-capture.h"
 #include "process-failure.h"
+#include "shell-cursor.h"
 #include "store-browser.h"
 
 using namespace winrt;
@@ -89,8 +90,7 @@ struct View : implements<View, IFrameworkView> {
     bool warming;
     bool frameOpen = false;
     bool xboxDisplay = false;
-    CoreCursor previousCursor{nullptr};
-    bool shellOwnsCursor = false;
+    steam_input::ShellCursor<CoreCursor> shellCursor;
     float backingCorrection = 1.f;
     uint64_t frameGeneration = 0;
     bool capturePending = false;
@@ -186,29 +186,20 @@ struct View : implements<View, IFrameworkView> {
     }
 
     void showPrimaryShell(bool show) {
-        if (!primaryPanel || primaryShellVisible == show) return;
+        if (!primaryPanel) return;
+        const bool acceptPointer = !show && (!xboxDisplay || gameForeground);
+        if (accountPanel.IsHitTestVisible() != acceptPointer) accountPanel.IsHitTestVisible(acceptPointer);
+        if (primaryShellVisible == show) return;
         primaryShellVisible = show;
         using namespace Windows::UI::Xaml;
         primaryPanel.Visibility(show ? Visibility::Visible : Visibility::Collapsed);
         accountPanel.Opacity(show ? 0.0 : 1.0);
-        accountPanel.IsHitTestVisible(!show);
         if (!show) accountPanel.Focus(FocusState::Programmatic);
     }
 
     void updateShellCursor(bool visible) {
-        if (!xboxDisplay || account.empty()) return;
-        if (visible) {
-            auto current = window.PointerCursor();
-            if (!shellOwnsCursor) {
-                previousCursor = current;
-                shellOwnsCursor = true;
-            }
-            if (current) window.PointerCursor(nullptr);
-        } else if (shellOwnsCursor) {
-            if (!window.PointerCursor()) window.PointerCursor(previousCursor);
-            previousCursor = nullptr;
-            shellOwnsCursor = false;
-        }
+        // The XAML primary owns its cursor from the first QR frame.
+        if (xboxDisplay && !account.empty() && !primaryPanel) shellCursor.update(window, visible);
     }
 
     void applyVisibility() {
@@ -328,15 +319,19 @@ struct View : implements<View, IFrameworkView> {
             (popup && popup.IsVisible() ? popup : controller).MoveFocus(CoreWebView2MoveFocusReason::Programmatic);
     }
 
-    // A composition controller has no child HWND. Forward CoreWindow pointer
-    // input to the visible Valve surface in physical pixels, including underscan.
+    // The Xbox UI receives controller navigation directly. The desktop and
+    // standalone smoke composition views still receive native mouse input.
     void mouse(PointerEventArgs const& args, CoreWebView2MouseEventKind kind) {
-        if (closed || gameForeground || !gamepadVisible() || !window.Visible()) return;
+        auto route = steam_input::pointerRoute(!closed && !gameForeground && gamepadVisible() && window.Visible(),
+                                                xboxDisplay, !account.empty());
+        if (route == steam_input::PointerRoute::otherView) return;
+        if (route == steam_input::PointerRoute::controllerOnly) {
+            updateShellCursor(true);
+            args.Handled(true);
+            return;
+        }
         auto point = args.CurrentPoint();
         if (point.PointerDevice().PointerDeviceType() != Windows::Devices::Input::PointerDeviceType::Mouse) return;
-        // Reapply after XAML handles a real mouse movement. The composition
-        // controller still receives the pointer coordinates and buttons below.
-        if (shellOwnsCursor) updateShellCursor(true);
         auto props = point.Properties();
         using Update = Windows::UI::Input::PointerUpdateKind;
         switch (props.PointerUpdateKind()) {

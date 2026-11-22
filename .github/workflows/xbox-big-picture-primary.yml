@@ -6,6 +6,7 @@ on:
     branches: ['feature/native-steam-big-picture']
     paths:
       - 'probe/big-picture-primary/**'
+      - 'probe/big-picture-webview/shell-cursor.h'
       - '.github/workflows/xbox-big-picture-primary.yml'
 
 permissions:
