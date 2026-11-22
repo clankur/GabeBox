@@ -18,6 +18,7 @@ static HRESULT testDeleteString(HSTRING);
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include "../probe/fhd/pointer-cursor.h"
 static DWORD clockMs;
 static DWORD testTick() { return clockMs; }
 struct Obj {
@@ -160,13 +161,12 @@ int main() {
     assert(focused);
     physical.buttons = 0;
     FhdPollHostedInput(&box, &fakeWindow);
-    physical.buttons = 3;
+    physical.buttons = 2; // View alone is game input.
     clockMs = 100;
     assert(!FhdPollHostedInput(&box, &fakeWindow));
-    assert((box.gamepad.buttons & ((1 << 4) | (1 << 6))) == 0);
-    clockMs = 849;
-    assert(!FhdPollHostedInput(&box, &fakeWindow));
-    clockMs = 850;
+    assert(box.gamepad.buttons & (1 << 4));
+    physical.buttons = 3; // Menu joins View on the next controller sample.
+    clockMs += 16;
     assert(FhdPollHostedInput(&box, &fakeWindow) == 1);
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[4] == -32768);
@@ -236,5 +236,31 @@ int main() {
     event(InputEnabledChanged, (IUnknown *)&arg);
     assert(foreground());
     FhdEndHostedInput();
+    box.input_serial = box.input_pointer = 0;
+    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    FhdSetHostedInputProfile(FALSE, 1024, 768);
+    assert(box.input_pointer == (2048 | 2048 << 12) && box.input_serial > 0);
+    const auto firstSerial = box.input_serial;
+    FhdSetHostedInputProfile(FALSE, 1024, 768);
+    assert(box.input_serial == firstSerial);
+    FhdEndHostedInput();
+    // After genuine input the top-left is a valid position, including on resume.
+    box.input_pointer = 0;
+    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    FhdSetHostedInputProfile(FALSE, 1024, 768);
+    assert(box.input_pointer == 0 && box.input_serial == firstSerial);
+    FhdEndHostedInput();
+    static_assert(FhdPointer::pixel(0, 1024) == 0 && FhdPointer::pixel(4095, 1024) == 1023);
+    static_assert(FhdPointer::pixel(2048, 768) == 383);
+    constexpr auto white = FhdPointer::image(false), amber = FhdPointer::image(true);
+    constexpr int c = FhdPointer::center, n = FhdPointer::size;
+    static_assert(white[c*n+c] == 0xffffffffU && amber[c*n+c] == 0xff00bfffU);
+    // Even if the cursor is clipped at a corner, its inward-facing arms have
+    // a bright fill and dark outline on both axes.
+    for (int sign : {-1, 1}) {
+        assert(white[c*n+c+5*sign] == 0xffffffffU && white[(c+5*sign)*n+c] == 0xffffffffU);
+        assert(white[(c+2*sign)*n+c+5*sign] == 0xff101010U);
+        assert(white[(c+5*sign)*n+c+2*sign] == 0xff101010U);
+    }
     std::cout << "Native input bridge checks passed.\n";
 }

@@ -7,6 +7,7 @@ extern "C" {
    suspended before Begin. End neutralizes input before WWA resumes writing. */
 HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow);
 void FhdSetHostedInputProfile(BOOL gamepad, UINT gameWidth, UINT gameHeight);
+BOOL FhdHostedInputForeground(void);
 int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow); /* 1 requests library overlay */
 void FhdResumeHostedInput(void); /* on the view thread following a switch back or a failed switch away */
 void FhdEndHostedInput(void);

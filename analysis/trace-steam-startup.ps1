@@ -2,13 +2,17 @@
 param(
     [Parameter(Mandatory)]
     [string]$WorkDirectory,
-    [switch]$PinnedClient
+    [switch]$PinnedClient,
+    [switch]$BigPicture
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ((Test-Path $WorkDirectory) -or (Get-Process -Name steam, steamwebhelper, steamservice -ErrorAction SilentlyContinue)) {
     throw 'Use a clean Windows VM and a new work directory.'
+}
+if ($BigPicture -and (!$PinnedClient -or (Test-Path 'HKCU:\Software\Valve\Steam'))) {
+    throw 'Use -PinnedClient and a fresh Windows user profile for the Big Picture reference.'
 }
 
 $work = New-Item -ItemType Directory -Path $WorkDirectory
@@ -54,6 +58,69 @@ function Wait-ForSteamUI {
         Start-Sleep -Seconds 2
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'Steam did not reach a client and webhelper pair before the startup deadline.'
+}
+
+function Test-StagedPayload {
+    if (!(Test-Path -LiteralPath $manifest)) { return $false }
+    $text = Get-Content -Raw -LiteralPath $manifest
+    if ([regex]::Match($text, '"version"\s+"(\d+)"').Groups[1].Value -ne $release.version) { return $false }
+    foreach ($file in $stagedPayload) {
+        if (!(Test-Path -PathType Leaf -LiteralPath $file.Path) -or
+            (Get-FileHash -LiteralPath $file.Path -Algorithm SHA256).Hash -ne $file.Hash) {
+            Write-Host "Staged file changed: $([IO.Path]::GetRelativePath($installation, $file.Path))"
+            return $false
+        }
+    }
+    return $true
+}
+
+function Trace-BigPictureWindow {
+    $result = [ordered]@{
+        argument = '-gamepadui'
+        launchPid = $null
+        steamWindowSeen = $false
+        webhelperSeen = $false
+        bigPictureWindowPid = $null
+        bigPictureWindowOwner = $null
+        pinnedManifestAtEnd = $false
+        stagedFiles = $stagedPayload.Count
+        pinnedPayloadBeforeLaunch = $false
+        pinnedPayloadAtEnd = $false
+    }
+    $helper = Join-Path $installation 'bin\cef\cef.win64\steamwebhelper.exe'
+    try {
+        $result.pinnedPayloadBeforeLaunch = Test-StagedPayload
+        if (!$result.pinnedPayloadBeforeLaunch) {
+            throw 'The installed release version or staged client files changed before the Big Picture cold start.'
+        }
+        $launched = Start-Process -FilePath $steam -ArgumentList $result.argument -WorkingDirectory $installation -PassThru
+        $result.launchPid = $launched.Id
+        $deadline = [DateTime]::UtcNow.AddSeconds(115)
+        do {
+            foreach ($process in (Get-Process -Name steam, steamwebhelper -ErrorAction SilentlyContinue)) {
+                if ($process.Path -notin @($steam, $helper)) { continue }
+                if ($process.Path -eq $helper) { $result.webhelperSeen = $true }
+                if ($process.MainWindowHandle -eq 0) { continue }
+                $result.steamWindowSeen = $true
+                if ($process.MainWindowTitle -eq 'Steam Big Picture Mode') {
+                    $result.bigPictureWindowPid = $process.Id
+                    $result.bigPictureWindowOwner = $process.ProcessName
+                }
+            }
+            if ($result.webhelperSeen -and $result.bigPictureWindowPid) { break }
+            Start-Sleep -Seconds 1
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (!$result.webhelperSeen -or !$result.bigPictureWindowPid) {
+            throw 'The pinned Steam client did not expose a Big Picture main window before the deadline.'
+        }
+    } finally {
+        if (Test-Path -LiteralPath $manifest) {
+            $result.pinnedManifestAtEnd = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -eq $release.manifest_sha256
+        }
+        if ($result.launchPid) { $result.pinnedPayloadAtEnd = Test-StagedPayload }
+        Save-Json 'big-picture-window.json' $result
+    }
+    if (!$result.pinnedPayloadAtEnd) { throw 'The installed release version or staged client files changed during the Big Picture cold start.' }
 }
 
 function Save-StartupStatus($Stage) {
@@ -149,6 +216,17 @@ function Trace-Stage($Stage, [scriptblock]$Action) {
 if ($PinnedClient) {
     & python (Join-Path $PSScriptRoot 'stage-pinned-client.py') $installation
     if ($LASTEXITCODE -ne 0) { throw 'Unable to stage the pinned client.' }
+    if ($BigPicture) {
+        $manifest = Join-Path $installation 'package/steam_client_win64.manifest'
+        $release = Get-Content -Raw (Join-Path $PSScriptRoot 'valve-release.json') | ConvertFrom-Json
+        if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $release.manifest_sha256) {
+            throw 'Staged Valve manifest does not match the pinned SHA-256.'
+        }
+        # Steam rewrites its installed manifest on first start. Compare the original
+        # payload against the verified staging directory on either side of the run.
+        $stagedPayload = @(Get-ChildItem -LiteralPath $installation -File -Recurse -Force |
+            Where-Object { $_.FullName -ne $manifest } | Get-FileHash -Algorithm SHA256)
+    }
     $clientInfo = Describe-Binary $steam
     Save-Json 'provenance.json' ([ordered]@{ distribution = 'pinned Valve CDN archives'; bootstrap = $clientInfo })
 } else {
@@ -199,6 +277,10 @@ while (Get-Process -Name steam, steamwebhelper -ErrorAction SilentlyContinue) {
 }
 
 Trace-Stage 'cold-start' {
-    Start-Process -FilePath $steam -WorkingDirectory $installation
-    Wait-ForSteamUI
+    if ($BigPicture) {
+        Trace-BigPictureWindow
+    } else {
+        Start-Process -FilePath $steam -WorkingDirectory $installation
+        Wait-ForSteamUI
+    }
 }

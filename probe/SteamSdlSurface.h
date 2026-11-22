@@ -67,6 +67,10 @@ public:
         return static_cast<std::uint32_t>(InterlockedIncrement(&pad.serial));
     }
 
+    std::uint32_t InputAck() const {
+        return Alive() ? static_cast<std::uint32_t>(SdlHostLoad(&view_->input_ack)) : 0;
+    }
+
     std::uint32_t GamepadAck() const {
         return Alive() ? static_cast<std::uint32_t>(SdlHostLoad(&view_->gamepad.ack)) : 0;
     }

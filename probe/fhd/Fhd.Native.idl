@@ -9,5 +9,12 @@ namespace Fhd.Native
         static void Close();
         static void LaunchControl();
         static void SetNativeGamepad(Boolean enabled);
+        static Windows.Media.Core.MediaStreamSource OpenMedia(String mailboxPath, Boolean nativePad);
+        static String MediaStatus();
+        static void CloseMedia();
+        static Windows.Foundation.IAsyncAction OpenPanel(String mailboxPath, Boolean nativePad);
+        static Windows.Foundation.IAsyncAction SetPanelVisible(Boolean visible);
+        static String PanelStatus();
+        static Windows.Foundation.IAsyncAction ClosePanel();
     };
 }

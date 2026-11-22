@@ -36,18 +36,45 @@
             trigger(pad.buttons[6] && pad.buttons[6].value), trigger(pad.buttons[7] && pad.buttons[7].value)];
     }
 
-    function read(windows, navigator) {
+    function read(windows, navigator, tracker) {
+        var first, chord = buttons.start | buttons.back;
+        var owner = tracker && tracker.device;
+        function selected(device, sample) {
+            if (!first) first = sample;
+            if (owner != null) return owner === device;
+            if ((sample[0] & chord) !== chord) return false;
+            if (tracker) tracker.device = device;
+            return true;
+        }
+        function remaining() {
+            // A disconnected chord owner cannot supply a release event.
+            if (owner != null) {
+                tracker.device = null;
+                return idle;
+            }
+            return first || idle;
+        }
         try {
             var pads = windows.Gaming.Input.Gamepad.gamepads;
-            if (pads.size) return windowsSample(pads.getAt(0).getCurrentReading());
+            var count = typeof pads.size === "number" ? pads.size : pads.length;
+            for (var i = 0; i < count; ++i) {
+                var device = pads.getAt ? pads.getAt(i) : pads[i];
+                var sample = windowsSample(device.getCurrentReading());
+                // Keep the game's normal input on its first controller. Allow
+                // another connected controller to bring up Steam.
+                if (selected(device, sample)) return sample;
+            }
+            if (first) return remaining();
         } catch (_) {
             // Web Gamepad also covers hosts without the Xbox Runtime projection.
         }
         var web = navigator.getGamepads ? navigator.getGamepads() : [];
-        for (var i = 0; i < web.length; ++i) {
-            if (web[i] && web[i].connected && web[i].mapping === "standard") return browserSample(web[i]);
+        for (var j = 0; j < web.length; ++j) {
+            if (!web[j] || !web[j].connected || web[j].mapping !== "standard") continue;
+            var webSample = browserSample(web[j]);
+            if (selected(j, webSample)) return webSample;
         }
-        return idle;
+        return remaining();
     }
 
     var api = { read: read, idle: idle, connected: connected, buttons: buttons, windowsSample: windowsSample };

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         IgnorableNamespaces="uap">
+  <Identity Name="XboxPortabilityProbe.BigPicture" Publisher="CN=Xbox Portability Probe"
+            Version="1.0.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Steam Big Picture</DisplayName>
+    <PublisherDisplayName>Xbox Portability Probe</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-US" /></Resources>
+  <Applications>
+    <Application Id="App" StartPage="big-picture.html">
+      <uap:VisualElements DisplayName="Steam Big Picture" Description="Launch Steam in Big Picture mode"
+                          BackgroundColor="#202020" Square150x150Logo="Assets\Logo.png"
+                          Square44x44Logo="Assets\SmallLogo.png">
+        <uap:DefaultTile />
+        <uap:SplashScreen Image="Assets\Splash.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>BigPicture.Native.dll</Path>
+        <ActivatableClass ActivatableClassId="BigPicture.Native.Launcher" ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+  <Capabilities><Capability Name="internetClient" /></Capabilities>
+</Package>

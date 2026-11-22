@@ -69,19 +69,23 @@
     }
 
     function start(runner, appId, attempt) {
+        var bigPictureMode = attempt.bigPicture === true;
         var previous = document.activeElement;
         var previousInputMode = navigator.gamepadInputEmulation;
         var nativePad = appId !== 975370;
         var view, savedBounds, enteredFullscreen;
-        var foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
-        var blockedMenuButtons = 0;
+        var gameInput = true, foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
+        var chordTracker = bigPictureMode ? { device: null } : null;
+        var waitForChordRelease = false;
+        var blockedMenuButtons = bigPictureMode ? padButtons.a | padButtons.b : 0;
         var keyboardReady = false;
         var layoutWidth = 0, layoutHeight = 0;
         var held = {};
         var pointerHeld = false;
         var pointerX = 0.5, pointerY = 0.5;
         var lastPointer = -1, lastKeys = -1;
-        var animation, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0, trialRetry = 0;
+        var mouseEdges = [], awaitingMouse = 0;
+        var animation, inputTimer, image, imageBytes, firstFrame, trialSerial = 0, trialEvents = 0, trialRetry = 0;
         var trialComplete = false;
         var lastTime = 0;
         var ready = false, closing = false, stopped = false;
@@ -94,9 +98,10 @@
         function stop(detail) {
             if (stopped) return;
             stopped = true;
-            if (nativeView) nativeView.close();
+            var restored = nativeView && nativeView.close();
             ready = false;
             cancelAnimationFrame(animation);
+            if (inputTimer !== undefined) clearTimeout(inputTimer);
             exit.removeEventListener("click", quit);
             resume.removeEventListener("click", hideMenu);
             keyboard.removeEventListener("click", openText);
@@ -105,18 +110,20 @@
             textCancel.removeEventListener("click", closeText);
             window.removeEventListener("keydown", setKey, true);
             window.removeEventListener("keyup", setKey, true);
-            canvas.removeEventListener("pointermove", setPointer);
-            canvas.removeEventListener("pointerdown", setPointer);
-            canvas.removeEventListener("pointerup", setPointer);
-            canvas.removeEventListener("pointercancel", setPointer);
+            screen.removeEventListener("pointermove", setPointer, true);
+            screen.removeEventListener("pointerdown", setPointer, true);
+            screen.removeEventListener("pointerup", setPointer, true);
+            screen.removeEventListener("pointercancel", setPointer, true);
             window.removeEventListener("blur", onBlur);
+            window.removeEventListener("gamepaddisconnected", onPadDisconnected);
             window.removeEventListener("focus", onFocus);
+            window.removeEventListener("steam-game-foreground", onGameForeground);
             document.removeEventListener("visibilitychange", onVisibility);
             menu.hidden = true;
             textForm.hidden = true;
             textValue.value = "";
             screen.hidden = true;
-            library.hidden = false;
+            library.hidden = bigPictureMode;
             if (previousInputMode !== undefined) navigator.gamepadInputEmulation = previousInputMode;
             if (view) {
                 if (savedBounds !== undefined) view.setDesiredBoundsMode(savedBounds);
@@ -124,6 +131,7 @@
             }
             if (previous && previous.focus) previous.focus();
             if (detail) complete(result + detail);
+            if (attempt.onExit) Promise.resolve(restored).then(attempt.onExit);
         }
 
         function quit() {
@@ -142,8 +150,32 @@
             canvas.focus();
         }
 
-        function showMenu() {
+        function showMenu(gameViewId) {
             releaseKeys();
+            if (bigPictureMode) {
+                var steam = window.steamBigPictureHost;
+                if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
+                if (steam && gameViewId) {
+                    if (nativeView && nativeView.primary) nativeView.cover();
+                    steam.showForGame(appId, gameViewId, function (steamViewId) {
+                        if (!runner.steamSdlRunning()) return false;
+                        // A title that deferred its close may still need input
+                        // in its own save or exit dialog after Valve Resume.
+                        closing = false;
+                        return nativeView ? nativeView.resume(steamViewId) :
+                            steam.switchView(gameViewId, steamViewId).then(function () { return !stopped; });
+                    }, function () {
+                        if (closing || !ready || !runner.steamSdlRunning()) return false;
+                        quit();
+                        return true;
+                    }).then(function (shown) {
+                        if (!shown && nativeView && runner.steamSdlRunning()) nativeView.resume();
+                    }, function () {
+                        if (nativeView && runner.steamSdlRunning()) nativeView.resume();
+                    });
+                } else if (nativeView) nativeView.resume();
+                return;
+            }
             menu.hidden = false;
             resume.focus();
         }
@@ -185,12 +217,21 @@
             if (pressed & (padButtons.down | padButtons.right)) items[Math.min(items.length - 1, index + 1)].focus();
         }
 
+        function toggleMenu() {
+            if (!textForm.hidden) closeText();
+            else if (menu.hidden) showMenu(); else hideMenu();
+        }
+
         function setKey(event) {
+            if (!gameInput) return;
             if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
-                    if (!textForm.hidden) closeText();
-                    else if (menu.hidden) showMenu(); else hideMenu();
+                    if (chordTracker && chordStarted !== null) {
+                        chordStarted = null;
+                        waitForChordRelease = true;
+                    }
+                    toggleMenu();
                 }
                 return;
             }
@@ -220,30 +261,78 @@
         function releaseKeys() {
             held = {};
             pointerHeld = false;
+            mouseEdges.length = 0;
+            awaitingMouse = 0;
             if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
             if (ready && nativePad) neutralPad();
             if (keyboardReady) runner.resetSteamSdlKeyboard();
             lastPointer = -1;
         }
 
+        function cancelChord() {
+            if (chordTracker) {
+                chordTracker.device = null;
+                waitForChordRelease = true;
+                chordStarted = null;
+            }
+        }
+        function onPadDisconnected(event) {
+            if (chordTracker && event.gamepad && chordTracker.device === event.gamepad.index) cancelChord();
+        }
         function onBlur() {
             foreground = false;
+            cancelChord();
             if (timing) timing.reset();
             releaseKeys();
         }
-        function onFocus() { foreground = true; }
+        function onFocus() {
+            if (!gameInput || document.hidden) return;
+            foreground = true;
+            if (bigPictureMode) blockedMenuButtons = padButtons.a | padButtons.b;
+        }
         function onVisibility() { if (document.hidden) onBlur(); else onFocus(); }
+        function onGameForeground(event) {
+            gameInput = event.detail === true;
+            if (gameInput) onFocus(); else onBlur();
+        }
 
         function setPointer(event) {
-            if (!ready || !firstFrame || !menu.hidden || !textForm.hidden) return;
-            var bounds = canvas.getBoundingClientRect();
+            if (!ready || firstFrame === undefined || !gameInput || !foreground || closing || !menu.hidden || !textForm.hidden) return;
+            var bounds = (nativeView && nativeView.primary ? screen : canvas).getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
             pointerX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
             pointerY = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
-            pointerHeld = !!(event.buttons & 1);
+            var wasHeld = pointerHeld;
+            pointerHeld = event.type !== "pointercancel" && !!(event.buttons & 1);
+            // Publish mouse events as they arrive. Media Foundation can keep playing
+            // its video plane while the HTML canvas has no animation frames due.
+            var pointer = encodePointer(pointerHeld);
+            if (wasHeld !== pointerHeld) {
+                if (mouseEdges.length < 32) mouseEdges.push(pointer);
+                else mouseEdges[mouseEdges.length - 1] = pointer;
+            }
+            publishMouse(pointer, lastKeys < 0 ? 0 : lastKeys);
             if (event.type === "pointerdown") {
                 canvas.focus();
-                if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+                if (screen.setPointerCapture) screen.setPointerCapture(event.pointerId);
+            }
+        }
+
+        // The SDL mailbox holds one state. Preserve each real button edge until
+        // the game acknowledges it, even when down/up arrive within one tick.
+        function publishMouse(pointer, keys) {
+            if (awaitingMouse && runner.steamSdlInputAck() !== awaitingMouse) return;
+            awaitingMouse = 0;
+            var edge = mouseEdges.length > 0;
+            if (edge) pointer = mouseEdges[0];
+            if (!edge && pointer === lastPointer && keys === lastKeys) return;
+            var serial = runner.sendSteamSdlInput(pointer, keys);
+            if (!serial) return;
+            lastPointer = pointer;
+            lastKeys = keys;
+            if (edge) {
+                mouseEdges.shift();
+                if (runner.steamSdlInputAck) awaitingMouse = serial;
             }
         }
 
@@ -400,11 +489,17 @@
             if (!timing || timingReport) complete(report + (timingReport || ""));
         }
 
+        function scheduleTick() {
+            if (nativeView && nativeView.primary) {
+                inputTimer = setTimeout(function () { tick(performance.now()); }, foreground ? 16 : 150);
+            } else animation = requestAnimationFrame(tick);
+        }
+
         function tick(now) {
             if (stopped) return;
             // The secondary view owns rendering and live input until the user opens a player overlay.
-            if (nativeView && menu.hidden && textForm.hidden) {
-                animation = requestAnimationFrame(tick);
+            if (nativeView && !nativeView.primary && menu.hidden && textForm.hidden) {
+                scheduleTick();
                 return;
             }
             try {
@@ -466,14 +561,33 @@
                     keyboard.hidden = false;
                     releaseKeys();
                 }
-                var pad = foreground ? gamepad.read(window.Windows, navigator) : gamepad.idle;
+                var pad = foreground ? gamepad.read(window.Windows, navigator, chordTracker) : gamepad.idle;
                 var chord = padButtons.start | padButtons.back;
-                if ((pad[0] & chord) === chord) {
+                var heldChord = pad[0] & chord;
+                if (bigPictureMode) {
+                    if (!(pad[0] & gamepad.connected)) {
+                        if (chordStarted !== null) waitForChordRelease = true;
+                        chordStarted = null;
+                        chordTracker.device = null;
+                    } else if (!heldChord) {
+                        // Valve starts polling this controller as soon as it gains focus.
+                        var openAfterRelease = chordStarted !== null && !waitForChordRelease;
+                        chordStarted = null;
+                        chordTracker.device = null;
+                        waitForChordRelease = false;
+                        if (openAfterRelease) toggleMenu();
+                    } else if (heldChord === chord && !waitForChordRelease) {
+                        chordStarted = now;
+                    }
+                    if (heldChord && (chordStarted !== null || waitForChordRelease)) {
+                        pad = pad.slice();
+                        pad[0] &= ~chord;
+                    }
+                } else if (heldChord === chord) {
                     if (chordStarted === null) chordStarted = now;
                     if (!chordUsed && now - chordStarted >= 750) {
                         chordUsed = true;
-                        if (!textForm.hidden) closeText();
-                        else if (menu.hidden) showMenu(); else hideMenu();
+                        toggleMenu();
                     }
                     pad = pad.slice();
                     pad[0] &= ~chord;
@@ -513,20 +627,17 @@
                         else sendPad(pad);
                     }
                     var input = movePointer(lastTime ? Math.min(50, now - lastTime) : 0, pad);
-                    if (input.pointer !== lastPointer || input.keys !== lastKeys) {
-                        if (!nativePad || pointerHeld || lastPointer !== -1) {
-                            runner.sendSteamSdlInput(input.pointer, input.keys);
-                        }
+                    if (nativePad && lastPointer === -1 && !pointerHeld && !mouseEdges.length && !input.keys) {
                         lastPointer = input.pointer;
-                        lastKeys = input.keys;
-                    }
+                        lastKeys = 0;
+                    } else publishMouse(input.pointer, input.keys);
                     if (!nativePad) {
                         cursor.style.left = pointerX * 100 + "%";
                         cursor.style.top = pointerY * 100 + "%";
                     }
                 }
                 lastTime = now;
-                animation = requestAnimationFrame(tick);
+                scheduleTick();
             } catch (_) {
                 runner.quitSteamSdl();
                 stop("steam_sdl_host_frame=presentation-error\r\n");
@@ -559,12 +670,14 @@
         textCancel.addEventListener("click", closeText);
         window.addEventListener("keydown", setKey, true);
         window.addEventListener("keyup", setKey, true);
-        canvas.addEventListener("pointermove", setPointer);
-        canvas.addEventListener("pointerdown", setPointer);
-        canvas.addEventListener("pointerup", setPointer);
-        canvas.addEventListener("pointercancel", setPointer);
+        screen.addEventListener("pointermove", setPointer, true);
+        screen.addEventListener("pointerdown", setPointer, true);
+        screen.addEventListener("pointerup", setPointer, true);
+        screen.addEventListener("pointercancel", setPointer, true);
         window.addEventListener("blur", onBlur);
+        window.addEventListener("gamepaddisconnected", onPadDisconnected);
         window.addEventListener("focus", onFocus);
+        window.addEventListener("steam-game-foreground", onGameForeground);
         document.addEventListener("visibilitychange", onVisibility);
         if (previousInputMode !== undefined) navigator.gamepadInputEmulation = "keyboard";
         canvas.focus();
@@ -580,26 +693,45 @@
             if (window.steamSdlNativeView) {
                 nativeView = window.steamSdlNativeView.open(report, {
                     running: function () { return runner.steamSdlRunning(); },
+                    foreground: function () { return gameInput && foreground; },
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
                     fallback: function () { nativeView = null; },
-                    measured: attempt.automaticTrial && function (frames, microseconds) {
+                    mediaError: function (phase, code) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "fallback",
+                            "media_phase=" + phase + "\r\nmedia_error=" + code + "\r\n");
+                    },
+                    mediaProgress: function (stats) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "media", stats);
+                    },
+                    mediaCapture: function (stats) {
+                        var steam = window.steamBigPictureHost;
+                        if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "media_capture", stats);
+                    },
+                    measured: function (frames, microseconds, stats) {
+                        if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
+                            window.steamBigPictureHost.recordGameFrame(appId, "sample", stats);
+                        if (!attempt.automaticTrial) return;
                         var padAcknowledged = nativePad && runner.steamSdlGamepadAck() > 0;
                         complete(result + "steam_sdl_host_frame=presented\r\nsteam_sdl_presentation=native\r\n" +
                             "steam_sdl_sample_frames=" + frames + "\r\nsteam_sdl_sample_us=" + microseconds + "\r\n" +
                             "steam_sdl_host_input=" + (padAcknowledged ? "delivered" : "unconfirmed") + "\r\n" +
                             (padAcknowledged ? "steam_sdl_host_gamepad=delivered\r\n" : ""));
                     },
-                    presented: function () {
+                    presented: function (stats) {
+                        if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
+                            window.steamBigPictureHost.recordGameFrame(appId, "first", stats);
                         firstFrame = performance.now();
                         status.textContent = "";
                         keyboardReady = !!(runner.steamSdlKeyboardReady && runner.steamSdlKeyboardReady());
                         keyboard.hidden = !keyboardReady;
                         if (!attempt.automaticTrial) complete(report + "steam_sdl_host_frame=presented\r\n");
                     }
-                }, nativePad);
+                }, nativePad, bigPictureMode ? screen : null);
             }
-            animation = requestAnimationFrame(tick);
+            scheduleTick();
         }, function () { stop("steam_sdl_host=launch-error\r\n"); });
         return finished;
     }

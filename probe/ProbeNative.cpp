@@ -9,6 +9,7 @@
 #include <winrt/Windows.Security.Cryptography.DataProtection.h>
 #include <winrt/Windows.Security.Cryptography.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.System.Diagnostics.h>
 #include <winrt/Windows.System.h>
@@ -31,6 +32,7 @@
 #include "pipe-protocol.h"
 #include "SteamSdlSurface.h"
 #include "SteamCloudRestore.h"
+#include "steam-session-cache-policy.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -528,10 +530,14 @@ struct SteamSignInHandles {
     DownloadRetry downloadRetry = DownloadRetry::NotAttempted;
     std::uint64_t launchCall = 0;
 
-    void PumpCallbacks() const {
+    void PumpCallbacks(bool *credentialRejected = nullptr) const {
         for (unsigned i = 0; i < 32; ++i) {
             SteamCallback event{};
             if (!getCallback(pipe, &event)) break;
+            if (credentialRejected && steam_session_cache::credentialRejected(
+                    user, event.user, event.message, event.data, event.length)) {
+                *credentialRejected = true;
+            }
             freeCallback(pipe);
         }
     }
@@ -694,10 +700,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     auto idText = winrt::to_string(accountId);
     std::uint64_t requestedId = 0;
     auto parsed = std::from_chars(idText.data(), idText.data() + idText.size(), requestedId);
-    if (parsed.ec != std::errc{} || parsed.ptr != idText.data() + idText.size() || !requestedId ||
-            account.empty() || account.size() > 64 || approval.empty() || approval.size() > 8192 ||
-            !(co_await IsPinnedSteamImage())) {
+    const bool invalidApproval = parsed.ec != std::errc{} || parsed.ptr != idText.data() + idText.size() ||
+        !requestedId || account.empty() || account.size() > 64 || approval.empty() || approval.size() > 8192;
+    if (invalidApproval || !(co_await IsPinnedSteamImage())) {
         report += L"steam_signin=input-or-image-error\r\n";
+        if (restoring && invalidApproval) co_await ForgetSteamSession();
         co_await save(complete);
         co_return winrt::hstring{};
     }
@@ -772,9 +779,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     ULONGLONG deadline = GetTickCount64() + (restoring ? 20000 : 60000);
     bool identityMatches = false;
     bool wrongAccount = false;
+    bool credentialRejected = false;
     std::int32_t count = 0;
     while (GetTickCount64() < deadline) {
-        handles.PumpCallbacks();
+        handles.PumpCallbacks(&credentialRejected);
+        if (credentialRejected) break;
         if (loggedOn(clientUser) && connected(clientUser)) {
             std::uint64_t actualId = 0;
             reinterpret_cast<SteamGetId>(methods[10])(clientUser, &actualId);
@@ -783,6 +792,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
                 break;
             }
             if (actualId == requestedId) {
+                // A fresh QR approval now owns this session. Even when the new
+                // user declines Remember or title metadata later times out,
+                // a future launch must not restore the previous QR approval.
+                if (!restoring && !identityMatches && !(co_await ForgetSteamSession())) {
+                    report += L"steam_session_cache=clear-unconfirmed\r\n";
+                    co_await save(complete);
+                    co_return winrt::hstring{};
+                }
                 identityMatches = true;
                 count = reinterpret_cast<SteamListApps>(methods[183])(
                     clientUser, apps.data(), static_cast<std::int32_t>(apps.size()), true);
@@ -793,8 +810,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         co_await caller;
     }
 
-    if (wrongAccount) {
-        report += L"steam_signin=account-mismatch\r\n";
+    if (wrongAccount || credentialRejected) {
+        report += wrongAccount ? L"steam_signin=account-mismatch\r\n" : L"steam_signin=credential-rejected\r\n";
+        if (restoring) co_await ForgetSteamSession();
     } else if (identityMatches) {
         report += L"steam_signin=authenticated\r\nsteam_library_count=" + std::to_wstring(count) + L"\r\n";
         const bool verified = count > 0 && count < static_cast<std::int32_t>(apps.size());
@@ -802,7 +820,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     } else {
         report += L"steam_signin=timeout\r\n";
     }
-    if (wrongAccount || !identityMatches || count <= 0 || count >= static_cast<std::int32_t>(apps.size())) {
+    if (wrongAccount || credentialRejected || !identityMatches || count <= 0 || count >= static_cast<std::int32_t>(apps.size())) {
         co_await save(complete);
         co_return winrt::hstring{};
     }
@@ -885,6 +903,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSi
     using namespace winrt::Windows::Storage;
     using namespace winrt::Windows::Storage::Streams;
     bool optedIn = false;
+    bool recordLoaded = false;
+    bool invalidRecord = false;
     try {
         auto data = ApplicationData::Current();
         auto values = data.LocalSettings().Values();
@@ -925,11 +945,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSi
             account = winrt::hstring(nextField());
             approval = winrt::hstring(fields);
         }
+        recordLoaded = true;
         auto payload = co_await SteamSignIn(reportFile, prefix, std::move(account), std::move(approval),
             std::move(accountId), false, 0, true);
         if (!payload.empty()) co_return payload;
-    } catch (winrt::hresult_error const&) {}
-    if (optedIn) co_await ForgetSteamSession();
+    } catch (winrt::hresult_error const& error) {
+        invalidRecord = steam_session_cache::invalidRecordRead(recordLoaded, static_cast<std::uint32_t>(error.code().value));
+    }
+    // Authenticated Steam sessions can time out while their catalog downloads.
+    // QR remains available and the next cold start can retry the same credential.
+    if (optedIn && invalidRecord) co_await ForgetSteamSession();
     co_return winrt::hstring(L"fallback");
 }
 
@@ -990,6 +1015,73 @@ static bool IsLocalSteamInstall(std::wstring const& directory, std::wstring cons
         directory.c_str(), static_cast<int>(prefix.size()), prefix.c_str(),
         static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL &&
         directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SdlFileDigest(
+        winrt::Windows::Storage::StorageFile file) {
+    using namespace winrt::Windows::Security::Cryptography;
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExFromAppW(file.Path().c_str(), GetFileExInfoStandard, &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw winrt::hresult_access_denied();
+    auto properties = co_await file.GetBasicPropertiesAsync();
+    if (!properties.Size() || properties.Size() > 8 * 1024 * 1024) co_return winrt::hstring{};
+    auto bytes = co_await winrt::Windows::Storage::FileIO::ReadBufferAsync(file);
+    auto digest = Core::HashAlgorithmProvider::OpenAlgorithm(L"SHA256").HashData(bytes);
+    co_return CryptographicBuffer::EncodeToHexString(digest);
+}
+
+// The native Dwarf executable loads its adjacent SDL, unlike the managed and
+// Java hosts which select the signed package's shared SDL explicitly.
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> PrepareDwarfRuntime(
+        winrt::Windows::Storage::StorageFolder library, bool completedManifest) {
+    using namespace winrt::Windows::Storage;
+    auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+    auto runtime = (co_await package.TryGetItemAsync(L"DwarfRuntime")).try_as<StorageFolder>();
+    if (!runtime) co_return winrt::hstring(L"existing-install");
+    if (!completedManifest) co_return winrt::hstring(L"not-installed");
+    auto replacement = co_await runtime.GetFileAsync(L"SDL2.dll");
+    auto desired = co_await SdlFileDigest(replacement);
+    if (desired.empty()) throw winrt::hresult_invalid_argument();
+    auto directory = library;
+    for (const auto component : {L"steamapps", L"common", L"Dwarf Fortress"}) {
+        directory = co_await directory.GetFolderAsync(component);
+        if (!SlayCloudDirectoryExists(std::wstring(directory.Path()))) throw winrt::hresult_access_denied();
+    }
+    auto installed = co_await directory.GetFileAsync(L"SDL2.dll");
+    auto original = co_await SdlFileDigest(installed);
+    auto data = ApplicationData::Current();
+    auto settings = data.LocalSettings().Values();
+    const winrt::hstring setting = L"DwarfRuntimeDigest";
+    if (original == desired) {
+        settings.Insert(setting, winrt::box_value(desired));
+        co_return winrt::hstring(L"ready");
+    }
+    auto previous = winrt::unbox_value_or<winrt::hstring>(settings.TryLookup(setting), L"");
+    // Accept the publisher's pinned 2.26.2 and the previously deployed FHD
+    // adapter. Preserve a player's modified or newly updated runtime.
+    if (original != L"9603fdfd2b4bd75b3574bb993e25332bae820a66f18e7ffb6f8c82cb4f6c004a" &&
+        original != L"3a8d9e8c8e0fdcc9c29d3725f38e2384c26217333ea0fc48a3e26e6e2c872cc9" &&
+        (previous.empty() || original != previous))
+        co_return winrt::hstring(L"existing-custom-version");
+    auto backups = co_await data.LocalFolder().CreateFolderAsync(L"SteamRuntimeBackups", CreationCollisionOption::OpenIfExists);
+    if (!SlayCloudDirectoryExists(std::wstring(backups.Path()))) throw winrt::hresult_access_denied();
+    auto name = L"975370-SDL2-" + original + L".dll";
+    auto backup = (co_await backups.TryGetItemAsync(name)).try_as<StorageFile>();
+    // Publish a verified copy under its final name only after the copy is complete.
+    if (!backup) {
+        backup = co_await installed.CopyAsync(data.TemporaryFolder(), L"Dwarf-backup.tmp", NameCollisionOption::GenerateUniqueName);
+        if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
+        co_await backup.MoveAsync(backups, name, NameCollisionOption::FailIfExists);
+    }
+    if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
+    auto pending = co_await replacement.CopyAsync(data.TemporaryFolder(), L"Dwarf-SDL2.tmp", NameCollisionOption::GenerateUniqueName);
+    if (co_await SdlFileDigest(pending) != desired || co_await SdlFileDigest(installed) != original)
+        throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
+    co_await pending.MoveAndReplaceAsync(installed);
+    if (co_await SdlFileDigest(co_await directory.GetFileAsync(L"SDL2.dll")) != desired)
+        throw winrt::hresult_error(E_FAIL);
+    settings.Insert(setting, winrt::box_value(desired));
+    co_return winrt::hstring(L"updated");
 }
 
 static const wchar_t *SteamPathScope(std::wstring const& directory, std::wstring const& library,
@@ -1179,6 +1271,44 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManife
     if (field == view.npos) co_return false;
     auto value = view.find_first_not_of(L" \t", field + key.size());
     co_return value != view.npos && view.substr(value, 3) == L"\"4\"";
+}
+
+// Observe the Java process we actually launched. The SDL surface can take
+// ownership of its original handle after the first frame and release it while
+// returning to Steam. This independent wait survives that handoff.
+winrt::fire_and_forget ObserveSlayChild(HANDLE child, std::wstring dataRoot, std::uint64_t launch) {
+    try {
+        static std::mutex reportMutex;
+        static std::uint64_t newestLaunch{};
+        const auto path = dataRoot + L"\\slay-child-status.txt";
+        auto write = [&](std::string const& state, bool starting) {
+            std::lock_guard lock(reportMutex);
+            if (starting) newestLaunch = launch;
+            if (newestLaunch != launch) return;
+            HANDLE rawFile = CreateFile2(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, nullptr);
+            if (rawFile == INVALID_HANDLE_VALUE) return;
+            winrt::handle file{rawFile};
+            const auto line = "steam_slay_console_run=" + std::to_string(launch) + "\r\n" + state;
+            DWORD written{};
+            WriteFile(file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+        };
+        winrt::handle process;
+        if (!DuplicateHandle(GetCurrentProcess(), child, GetCurrentProcess(), process.put(),
+                             SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+            write("child_status=observe-error\r\n", true);
+            co_return;
+        }
+        write("child_status=started\r\n", true);
+        co_await winrt::resume_on_signal(process.get());
+        DWORD code{};
+        if (GetExitCodeProcess(process.get(), &code)) {
+            write("child_status=exited\r\nchild_exit_code_u32=" + std::to_string(code) + "\r\n", false);
+        } else {
+            write("child_status=exit-code-unavailable\r\n", false);
+        }
+    } catch (...) {
+        // Recording an observation must never affect launching, returning or quitting.
+    }
 }
 
 struct SteamGameProcess {
@@ -1764,6 +1894,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay) && !co_await HasCompletedSteamManifest(folder, app)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
+    if (hostedSdl && app == dwarfFortressAppId) {
+        try {
+            auto state = co_await PrepareDwarfRuntime(folder, installedManifest);
+            if (state == L"not-installed") co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+            report += std::wstring(L"steam_dwarf_runtime=") + state.c_str() + L"\r\n";
+        } catch (winrt::hresult_error const& error) {
+            co_return winrt::hstring(report + L"steam_launch=sdl-runtime-error\r\nsteam_sdl_hresult=" + Hex(error.code()) + L"\r\n");
+        }
+    }
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -1914,6 +2053,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             }
             slayProcess.attach(child.hProcess);
             CloseHandle(child.hThread);
+            ObserveSlayChild(slayProcess.get(), dataRoot,
+                (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) | launchTime.dwLowDateTime);
             report += L"steam_slay_console_run=" + id + L"\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
@@ -2186,6 +2327,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::DosBox);
     }
 
+    winrt::hstring SteamSessionSteamId() {
+        std::lock_guard lock(steamSessionMutex);
+        if (!liveSteamSession || !liveSteamSession->OwnsSession()) return {};
+        return winrt::to_hstring(liveSteamSession->accountId);
+    }
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchSteamGame(std::uint32_t app,
             winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
         return LaunchLocalSteamGame(app, file, prefix, GameBackend::SteamPlay);
@@ -2219,6 +2365,11 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
             std::int32_t rightX, std::int32_t rightY, std::int32_t leftTrigger, std::int32_t rightTrigger) {
         std::lock_guard lock(steamSdlMutex);
         return steamSdlSurface ? steamSdlSurface->Gamepad(buttons, {leftX, leftY, rightX, rightY, leftTrigger, rightTrigger}) : 0;
+    }
+
+    std::uint32_t SteamSdlInputAck() {
+        std::lock_guard lock(steamSdlMutex);
+        return steamSdlSurface ? steamSdlSurface->InputAck() : 0;
     }
 
     std::uint32_t SteamSdlGamepadAck() {

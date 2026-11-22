@@ -1,0 +1,72 @@
+name: Build isolated Xbox WWA windowed WebView2 control
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feature/native-steam-big-picture']
+    paths:
+      - 'probe/big-picture-windowed/**'
+      - '.github/workflows/xbox-windowed-control.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  component:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the signed account-free windowed controller fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $src = Join-Path $PWD 'probe/big-picture-windowed'
+          $work = Join-Path $env:RUNNER_TEMP 'windowed-control'
+          $out = Join-Path $work 'artifact'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $nuget = "$work/webview2.nupkg"
+          $version = '1.0.3537.50'
+          Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg" -OutFile $nuget
+          if ((Get-FileHash $nuget).Hash -ne '5ea526bbd728adda0da4d31219267e96460494a427e4894c4e09d9f320f4b9aa') { throw 'Unexpected WebView2 SDK' }
+          [IO.Compression.ZipFile]::ExtractToDirectory($nuget, "$work/sdk")
+          $layout = Join-Path $work 'layout'
+          New-Item -ItemType Directory -Path $layout | Out-Null
+          & python "$src/prepare.py" $layout "$work/sdk"
+
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $kit = (Get-ChildItem "$kits/bin" -Directory | Where-Object {
+            $_.Name -match '^10\.' -and (Test-Path "$($_.FullName)/x64/cppwinrt.exe") -and
+              (Test-Path "$kits/UnionMetadata/$($_.Name)/Windows.winmd")
+          } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$kit) { throw 'Windows SDK with C++/WinRT and metadata is required' }
+          $tools = "$kits/bin/$kit/x64"
+          $metadata = "$kits/UnionMetadata/$kit/Windows.winmd"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          & "$tools/midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
+            /out $work /winmd "$layout/WindowedControl.Native.winmd" "$src/WindowedControl.Native.idl"
+          & "$tools/cppwinrt.exe" -input "$layout/WindowedControl.Native.winmd" -input "$layout/Microsoft.Web.WebView2.Core.winmd" `
+            -reference $metadata -output "$work/projection" -overwrite
+          & cl.exe /nologo /LD /MD /O2 /EHsc /std:c++20 /DNOMINMAX /DUNICODE /D_UNICODE /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
+            "/I$work/projection" "/I$kits/Include/$kit/cppwinrt" "/Fo$work/renderer.obj" "/Fe$layout/WindowedControl.Native.dll" `
+            "$src/control.cpp" WindowsApp.lib uuid.lib /link "/LIBPATH:${env:VCToolsInstallDir}lib/x64/store" /APPCONTAINER /SUBSYSTEM:WINDOWS,10.00 "/IMPLIB:$work/renderer.lib" `
+            /EXPORT:DllGetActivationFactory=GetControlFactory /EXPORT:DllCanUnloadNow=CanUnloadControl
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            & "$tools/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/WindowedControl.Native.dll"
+            & "$tools/makeappx.exe" pack /d $layout /p "$out/WindowedControl.appx" /o
+            & "$tools/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out/WindowedControl.appx"
+            Export-Certificate -Cert $cert -FilePath "$out/WindowedControl.cer" | Out-Null
+            Get-ChildItem $out -File | Get-FileHash | ForEach-Object {
+              "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
+            } | Set-Content -Encoding ascii "$out/SHA256SUMS"
+          } finally { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-windowed-control-x64
+          path: ${{ runner.temp }}/windowed-control/artifact/
+          if-no-files-found: error

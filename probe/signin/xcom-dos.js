@@ -111,7 +111,7 @@
         });
     }
 
-    function start(profile, checkpoint, automaticTrial) {
+    function start(profile, checkpoint, automaticTrial, onExit) {
         if (running) return Promise.resolve("steam_dos=already-running\r\n");
         running = true;
         var screen = document.createElement("section");
@@ -155,6 +155,7 @@
             function release() {
                 running = false;
                 complete(result);
+                if (onExit) onExit();
             }
             pendingReport.then(release, release);
             if (stop && game) { try { game.exit(); } catch (ignore) {} }
@@ -266,6 +267,6 @@
     // Bind the public adapter to a trusted profile so its caller can supply only trial controls.
     window.xcomDosRuntime = {
         appId: xcom.appId,
-        start: function (checkpoint, automaticTrial) { return start(xcom, checkpoint, automaticTrial); }
+        start: function (checkpoint, automaticTrial, onExit) { return start(xcom, checkpoint, automaticTrial, onExit); }
     };
 }());

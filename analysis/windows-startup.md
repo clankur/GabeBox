@@ -12,9 +12,23 @@ Use a clean, disposable Windows VM with administrator access, PowerShell 7 and P
 ./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:TEMP/steam-startup" -PinnedClient
 ```
 
+### Native Big Picture reference
+
+For a Big Picture cold start, select **Verify the native Big Picture window on cold start** when manually dispatching **Trace Steam startup on Windows**, or use a fresh Windows user on the disposable VM and run the following command.
+
+```powershell
+./analysis/trace-steam-startup.ps1 -WorkDirectory "$env:TEMP/steam-big-picture" -PinnedClient -BigPicture
+```
+
+After the ordinary first start and shutdown, the trace launches the staged `steam.exe -gamepadui`. Before the first launch, it verifies the pinned distribution manifest and records SHA-256 hashes of every staged payload file. Before and after the Big Picture launch it checks the installed release number and those file hashes. Steam can rewrite its installed manifest, whose byte-level comparison is reported separately. The run passes when it observes the staged web helper and a main window titled `Steam Big Picture Mode` belonging to the staged client or web helper. `evidence/big-picture-window.json` records the launch PID, whether the trace saw a Steam window or helper, and the PID and process name of a matching window. A generic sign-in window, a different localized title, or a runner without an interactive desktop can leave the window check unconfirmed. The workflow retains the observations if the check times out.
+
+The pinned `steamui/sp.js` uses `#SP_WindowTitle_BigPicture` when creating its GamepadUI popup. The release’s `steamui_english-json.js` supplies the English title used by the trace. This reference measures Windows window creation. To verify rendering and input on Xbox, inspect the console display and navigate Steam’s own menus with a controller. Account, install, launch and in-game features each need a separate console check. [Valve’s Big Picture guide](https://help.steampowered.com/en/faqs/view/3725-76D3-3F31-FB63)
+
 The workflow uses Windows Event Tracing to collect process starts, exits and image loads in order. The evidence records only Steam process identifiers, module basenames, window presence and Steam service state. Event timing shows when a module was mapped. It cannot establish which individual calls executed or whether every mapped module is required. Compare SHA-256 values in `client-build.json` with [the static import audit](client-imports.json) before applying older import results to this run. [Microsoft’s ETW documentation](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-tools)
 
 ## Observations
+
+The account-free Big Picture cold start on November 21, 2026 passed on Windows Server 2025 build 26100. Release `1794536281` started with `-gamepadui`, and `steamwebhelper.exe` owned a window titled `Steam Big Picture Mode`. All 6,630 staged payload files matched their pre-launch hashes before and after the window appeared. Steam had rewritten its installed manifest while retaining the same release number. On Series X the same desktop release exited before the web helper started. The Windows run establishes a reference for window creation. Account navigation and game launch require separate evidence. [Windows reference run](https://github.com/clankur/steam-xbox-devmode/actions/runs/44945189559) · [Series X comparison](big-picture.md#series-x-deployment-and-game-checks)
 
 - Valve’s ordinary installer passed Authenticode validation on the first runner. The test reached its startup deadline. The ETL event-log query returned no usable records, so this trial provides no evidence about the client’s runtime dependencies. [Initial workflow run](https://github.com/clankur/steam-xbox-devmode/actions/runs/44859772265)
 

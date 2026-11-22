@@ -3,6 +3,11 @@ body { min-height: 100vh; margin: 0; }
 main { margin: 0 auto; max-width: 1480px; padding: 0 6vw; }
 #signin { display: flex; align-items: center; justify-content: space-between; min-height: 86vh; }
 #signin > div { max-width: 550px; }
+html[data-steam-big-picture="true"] #signin,
+html[data-steam-big-picture="true"] #signin *,
+html[data-steam-big-picture="true"] #big-picture-status { cursor: none; }
+html[data-steam-controller-ui="true"] #signin,
+html[data-steam-controller-ui="true"] #signin * { pointer-events: none; }
 h1 { margin: 0; font-size: 2.6em; font-weight: 650; }
 p { line-height: 1.45; }
 .device { color: #aebbd0; margin: .25em 0 1.6em; }
@@ -57,6 +62,13 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
 }
 #sdl-picture { position: relative; line-height: 0; }
 #sdl-frame { display: block; max-width: none; margin: 0; outline: none; background: #000; }
+.primary-game-video #sdl-picture, .primary-game-video #sdl-frame {
+    width: 100%; height: 100%;
+}
+.primary-game-video #sdl-pointer { display: none; }
+.sdl-primary-video {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none;
+}
 #sdl-status { position: absolute; z-index: 1; top: 42%; left: 0; right: 0; text-align: center; pointer-events: none; }
 #sdl-menu, #sdl-text {
     position: absolute; z-index: 2; top: 0; right: 0; bottom: 0; left: 0;
@@ -74,3 +86,10 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
     transform: translate(-50%, -50%);
     pointer-events: none;
 }
+
+
+html[data-steam-big-picture="true"] #library,
+html[data-steam-big-picture="true"] #sdl-menu,
+html[data-steam-big-picture="true"] #sdl-text,
+html[data-steam-big-picture="true"] #xcom-game > button { display: none !important; }
+#big-picture-status { padding: 10vh 6vw; }

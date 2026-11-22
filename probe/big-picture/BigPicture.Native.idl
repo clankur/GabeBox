@@ -1,0 +1,9 @@
+namespace BigPicture.Native
+{
+    [static_name("BigPicture.Native.ILauncherStatics", d40b9765-f8ae-4494-8a46-d9708701e05c)]
+    runtimeclass Launcher
+    {
+        static UInt32 Start();
+        static Int64 PollExitCode();
+    };
+}

@@ -1,5 +1,6 @@
 #include "gpu-receiver.h"
 #include "sdl-blit-shaders.h"
+#include "pointer-cursor.h"
 #include <d3d12.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -61,7 +62,7 @@ struct HostedGpuReceiver::Resources {
     ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11Buffer> vertices, cursorVertices, matrices;
-    ComPtr<ID3D11ShaderResourceView> cursorView;
+    ComPtr<ID3D11ShaderResourceView> cursorView, pointerView[2];
     UINT cursorShape=0;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11SamplerState> sampler;
@@ -105,22 +106,37 @@ struct HostedGpuReceiver::Resources {
         raster.DepthClipEnable=TRUE; raster.ScissorEnable=TRUE;
         return device->CreateRasterizerState(&raster,&scissor);
     }
-    HRESULT updateCursor(ID3D11Device *device, const SdlGpuCursor &cursor) {
-        if (!cursor.shape || cursor.shape==cursorShape) return S_OK;
-        if (!cursor.width || !cursor.height || cursor.width>SDL_GPU_CURSOR_SIZE || cursor.height>SDL_GPU_CURSOR_SIZE) return E_INVALIDARG;
+    HRESULT makeCursor(ID3D11Device *device, UINT w, UINT h, const void *pixels,
+                       ID3D11ShaderResourceView **view) {
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width=cursor.width; desc.Height=cursor.height; desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.Width=w; desc.Height=h; desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
         desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
         desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA data{}; data.pSysMem=cursor.rgba; data.SysMemPitch=cursor.width*4;
+        D3D11_SUBRESOURCE_DATA data{}; data.pSysMem=pixels; data.SysMemPitch=w*4;
         ComPtr<ID3D11Texture2D> texture;
-        HRESULT hr=device->CreateTexture2D(&desc,&data,&texture); if (FAILED(hr)) return hr;
-        ComPtr<ID3D11ShaderResourceView> view;
-        hr=device->CreateShaderResourceView(texture.Get(),nullptr,&view); if (FAILED(hr)) return hr;
-        cursorView=view; cursorShape=cursor.shape;
+        HRESULT hr=device->CreateTexture2D(&desc,&data,&texture);
+        return FAILED(hr) ? hr : device->CreateShaderResourceView(texture.Get(),nullptr,view);
+    }
+    HRESULT prepareCursor(ID3D11Device *device, LONG hostPointer, const SdlGpuCursor &cursor) {
+        if (hostPointer >= 0) {
+            static constexpr auto idle = FhdPointer::image(false), pressed = FhdPointer::image(true);
+            for (unsigned i=0; i<2; ++i) {
+                if (!pointerView[i]) {
+                    HRESULT hr=makeCursor(device,FhdPointer::size,FhdPointer::size,
+                                          i ? pressed.data() : idle.data(),&pointerView[i]);
+                    if (FAILED(hr)) return hr;
+                }
+            }
+        } else if (cursor.shape && cursor.shape != cursorShape) {
+            if (!cursor.width || !cursor.height || cursor.width>SDL_GPU_CURSOR_SIZE || cursor.height>SDL_GPU_CURSOR_SIZE) return E_INVALIDARG;
+            ComPtr<ID3D11ShaderResourceView> view;
+            HRESULT hr=makeCursor(device,cursor.width,cursor.height,cursor.rgba,&view);
+            if (FAILED(hr)) return hr;
+            cursorView=view; cursorShape=cursor.shape;
+        }
         return S_OK;
     }
-    void draw(ID3D11RenderTargetView *target, UINT w, UINT h, ID3D11ShaderResourceView *source, const SdlGpuCursor &cursor) {
+    void draw(ID3D11RenderTargetView *target, UINT w, UINT h, ID3D11ShaderResourceView *source, const SdlGpuCursor &cursor, LONG hostPointer) {
         float scale=(std::min)(float(w)/width,float(h)/height);
         D3D11_VIEWPORT viewport{(w-width*scale)*0.5f,(h-height*scale)*0.5f,width*scale,height*scale,0.f,1.f};
         const float opaqueBlack[]={0,0,0,1};
@@ -138,17 +154,27 @@ struct HostedGpuReceiver::Resources {
         context->PSSetSamplers(0,1,sampler.GetAddressOf());
         context->PSSetShaderResources(0,1,&source);
         context->Draw(4,0);
-        if (cursor.shape && cursorView) {
+        ID3D11ShaderResourceView *overlayView = hostPointer >= 0 ? pointerView[(hostPointer >> 24) & 1].Get() :
+                                                cursor.shape ? cursorView.Get() : nullptr;
+        if (overlayView) {
             // Clip the cursor to the game's letterboxed viewport if it straddles an edge.
             const D3D11_RECT bounds{static_cast<LONG>(viewport.TopLeftX),static_cast<LONG>(viewport.TopLeftY),
                 static_cast<LONG>(viewport.TopLeftX+viewport.Width),static_cast<LONG>(viewport.TopLeftY+viewport.Height)};
             D3D11_VIEWPORT overlay{viewport.TopLeftX + cursor.x*scale, viewport.TopLeftY + cursor.y*scale,
                                    cursor.width*scale,cursor.height*scale,0.f,1.f};
+            if (hostPointer >= 0) {
+                // Keep the marker at a readable display-pixel size, centered at
+                // the SDL hotspot after the same aspect fit used for the game.
+                const auto x=FhdPointer::pixel(hostPointer,width), y=FhdPointer::pixel(hostPointer >> 12,height);
+                overlay.TopLeftX=viewport.TopLeftX + (x + .5f)*scale - (FhdPointer::center + .5f);
+                overlay.TopLeftY=viewport.TopLeftY + (y + .5f)*scale - (FhdPointer::center + .5f);
+                overlay.Width=overlay.Height=FhdPointer::size;
+            }
             context->RSSetState(scissor.Get());
             context->RSSetScissorRects(1,&bounds); context->RSSetViewports(1,&overlay);
             context->OMSetBlendState(cursorBlend.Get(),nullptr,~0u);
             context->IASetVertexBuffers(0,1,cursorVertices.GetAddressOf(),&stride,&offset);
-            context->PSSetShaderResources(0,1,cursorView.GetAddressOf());
+            context->PSSetShaderResources(0,1,&overlayView);
             context->Draw(4,0);
             context->RSSetState(nullptr);
         }
@@ -158,6 +184,12 @@ struct HostedGpuReceiver::Resources {
 };
 
 HostedGpuReceiver::~HostedGpuReceiver() { Close(); }
+UINT64 HostedGpuReceiver::ProducerSequence() const {
+    if (!mailbox_) return 0;
+    const auto first = load64(&mailbox_->sequence[0]);
+    const auto second = load64(&mailbox_->sequence[1]);
+    return first > second ? first : second;
+}
 HRESULT HostedGpuReceiver::Open(const wchar_t *mailboxPath) {
     if (mailbox_ || !mailboxPath) return E_INVALIDARG;
     WCHAR path[1024]; UINT length=0;
@@ -246,7 +278,7 @@ HRESULT HostedGpuReceiver::Connect(ID3D11Device *device, ID3D11DeviceContext *co
 }
 
 HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11RenderTargetView *target,
-                                UINT width, UINT height, UINT64 &sequence) {
+                                UINT width, UINT height, UINT64 &sequence, LONG hostPointer) {
     sequence=0;
     if (!mailbox_ || !device || !context || !target || !width || !height) return S_FALSE;
     const LONG generation=load(&mailbox_->generation);
@@ -281,9 +313,9 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
             HRESULT wait=r.fences->Wait(slot.ready.Get(),seq[i]);
             if (FAILED(wait)) { stage_="consumer-fence-wait"; failedGeneration_=generation; Disconnect(); return wait; }
             const auto &cursor=mailbox_->cursor[i];
-            HRESULT cursorResult=r.updateCursor(device,cursor);
+            HRESULT cursorResult=r.prepareCursor(device,hostPointer,cursor);
             if (FAILED(cursorResult)) { stage_="cursor-upload"; failedGeneration_=generation; Disconnect(); return cursorResult; }
-            r.draw(target,width,height,slot.srv.Get(),cursor);
+            r.draw(target,width,height,slot.srv.Get(),cursor,hostPointer);
         }
         HRESULT hr=r.fences->Signal(slot.done.Get(),seq[i]);
         if (FAILED(hr)) { stage_="consumer-fence-signal"; failedGeneration_=generation; Disconnect(); return hr; }
@@ -299,7 +331,7 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
 
 
 HRESULT HostedGpuReceiver::DrawCpu(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
-                                   UINT width, UINT height, const BYTE *pixels, UINT sourceWidth, UINT sourceHeight) {
+                                   UINT width, UINT height, const BYTE *pixels, UINT sourceWidth, UINT sourceHeight, LONG hostPointer) {
     if (!pixels || !sourceWidth || !sourceHeight || sourceWidth>1920 || sourceHeight>1080) return E_INVALIDARG;
     if (!cpu_) {
         void *memory=HeapAlloc(GetProcessHeap(),0,sizeof(Resources)); if (!memory) return E_OUTOFMEMORY;
@@ -319,6 +351,8 @@ HRESULT HostedGpuReceiver::DrawCpu(ID3D11Device *device, ID3D11DeviceContext *ct
     }
     ctx->UpdateSubresource(r.cpuTexture.Get(),0,nullptr,pixels,sourceWidth*4,0);
     static const SdlGpuCursor hidden{};
-    r.draw(target,width,height,r.cpuView.Get(),hidden);
+    HRESULT cursorResult=r.prepareCursor(device,hostPointer,hidden);
+    if (FAILED(cursorResult)) return cursorResult;
+    r.draw(target,width,height,r.cpuView.Get(),hidden,hostPointer);
     lastWidth_=sourceWidth;lastHeight_=sourceHeight;return S_OK;
 }

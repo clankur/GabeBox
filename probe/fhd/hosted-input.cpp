@@ -63,12 +63,11 @@ OverlayState overlay;
 BOOL nativePad = TRUE, focused, visible, inputEnabled, blockChord;
 LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
-DWORD chordSince, lastTime;
-bool chordTiming;
+DWORD lastTime;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
 double cursorX, cursorY;
-bool physicalClick, padClick;
+bool physicalClick, padClick, freshPointer;
 LONG heldVirtual[256];
 struct Pad {
     LONG bits;
@@ -129,7 +128,6 @@ void neutral() {
     highSurrogate = 0;
     padClick = false;
     physicalClick = false;
-    chordTiming = false;
     blockChord = true;
 }
 void queueKey(UINT scan, bool down, const char *utf8 = nullptr) {
@@ -452,6 +450,7 @@ bool readPad(Reading *out) {
     return SUCCEEDED(hr);
 }
 } // namespace
+extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
     if (!!nativePad != !!gamepad) {
         if (alive()) {
@@ -462,6 +461,15 @@ extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) 
         }
         nativePad = gamepad;
         sentPad = false;
+    }
+    // A new mailbox starts at zero. WWA resumes and existing input (even a
+    // deliberate top-left position) must keep their original coordinates.
+    if (!nativePad && freshPointer && alive()) {
+        freshPointer = false;
+        if (!SdlHostLoad(&mail->input_serial) && !SdlHostLoad(&mail->input_pointer)) {
+            cursorX = cursorY = .5;
+            sendPointer();
+        }
     }
     if (width && height) {
         gameW = width;
@@ -516,6 +524,7 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     inputEnabled = enabled;
     mouse = SdlHostLoad(&box->input_pointer);
     legacyKeys = SdlHostLoad(&box->input_keys);
+    freshPointer = !mouse && !SdlHostLoad(&box->input_serial);
     cursorX = (mouse & 4095) / 4095.;
     cursorY = ((mouse >> 12) & 4095) / 4095.;
     neutral();
@@ -570,19 +579,12 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
     const LONG chord = (1 << 4) | (1 << 6);
     if ((value.bits & chord) == chord) {
         if (!blockChord) {
-            if (!chordTiming) {
-                chordTiming = true;
-                chordSince = now;
-            }
-            if (now - chordSince >= 750) {
-                requestOverlay();
-                overlay = Reported;
-                return 1;
-            }
+            requestOverlay();
+            overlay = Reported;
+            return 1;
         }
         value.bits &= ~chord;
     } else {
-        chordTiming = false;
         if (!(value.bits & chord))
             blockChord = false;
     }
