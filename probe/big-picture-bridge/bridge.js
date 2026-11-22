@@ -311,7 +311,8 @@
         whenMounted();
     }
     installXboxWindow(client, send, popup => runtime?.(16724).Of.GetPopupForWindow(popup));
-    const storeBrowser = installXboxStoreBrowser(client, host, installXboxBrowserView(client));
+    const storeBrowser = installXboxStoreBrowser(client, host, installXboxBrowserView(client),
+        stage => host.postMessage({method: 'store-js-stage', stage}));
     installXboxUser(client, send, () => runtime);
     client.User.StartRestart = async force => {
         if (force !== false || await send('restart-client') !== 'restart')

@@ -1,11 +1,16 @@
 // Only Valve's MainBrowser in its owned gamepad popup may create the isolated public Store.
-function installXboxStoreBrowser(client, host, ownerWindow) {
+function installXboxStoreBrowser(client, host, ownerWindow, observe) {
     const api = client.BrowserView, destroyPopup = api.Destroy;
     const initialPage = 'data:text/html,%3Cbody%3E%3C%2Fbody%3E';
     const options = ['strName', 'parentPopupBrowserID', 'strInitialURL', 'strUserAgentIdentifier', 'bPreventCloseFromJavascript', 'strVROverlayKey'];
     const keys = new Map([[0, 'enter'], [20, 'up'], [21, 'down'], [22, 'left'], [23, 'right']]);
     let serial = 0, current;
 
+    function trace(record, stage) {
+        if (!observe || record.stages.has(stage)) return;
+        record.stages.add(stage);
+        try { observe(stage); } catch { /* Diagnostics cannot interrupt Store navigation. */ }
+    }
     function publicURL(value) {
         if (typeof value !== 'string' || value.length > 2048) return;
         try {
@@ -30,6 +35,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
         record.owner.removeEventListener('pagehide', record.unload);
         emit(record, 'before-close');
         record.events.clear();
+        trace(record, 'closed');
     }
     function committed(record, url) {
         const {entries} = record;
@@ -47,10 +53,11 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
     host.addEventListener('message', ({data}) => {
         const record = current;
         if (!record || data?.event !== 'store-browser' || data.id !== record.id) return;
-        const url = data.url === 'about:blank' ? data.url : publicURL(data.url);
+        const url = data.url === 'about:blank' || data.url === initialPage ? 'about:blank' : publicURL(data.url);
         switch (data.kind) {
         case 'start':
             if (!url) return;
+            if (url !== 'about:blank') trace(record, 'remote-start');
             record.requested = url;
             record.title = '';
             emit(record, 'start-request', url);
@@ -59,10 +66,12 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
         case 'complete':
             if (!url || typeof data.success !== 'boolean') return;
             if (data.success) {
+                trace(record, url === 'about:blank' ? 'blank-complete' : 'remote-complete');
                 emit(record, 'finished-request', url, record.title);
                 committed(record, url);
             } else {
                 record.step = 0;
+                trace(record, 'failed');
                 emit(record, 'load-error', Number.isInteger(data.code) ? data.code : -1, url, 'Store navigation failed');
             }
             break;
@@ -81,6 +90,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
             if (typeof data.value === 'boolean') emit(record, 'focus-changed', data.value);
             break;
         case 'error':
+            trace(record, 'failed');
             emit(record, 'load-error', Number.isInteger(data.code) ? data.code : -1,
                 record.requested || 'about:blank', 'Store browser unavailable');
             break;
@@ -95,7 +105,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
             throw new Error('Unsupported Xbox Store browser');
         if (current) throw new Error('Xbox Store browser already open');
         const record = {id: ++serial, owner, events: new Map(), entries: [], index: -1, step: 0,
-            requested: '', title: '', visible: false, focus: false, held: new Map()};
+            requested: '', title: '', visible: false, focus: false, held: new Map(), stages: new Set()};
         const view = {
             on(event, callback) {
                 if (current !== record || typeof callback !== 'function') return;
@@ -109,6 +119,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
                     emit(record, 'load-error', -1, '', 'Only the public Steam Store is available');
                     return;
                 }
+                trace(record, 'navigate');
                 post(record, 'navigate', {url});
             },
             SetBounds(x, y, width, height) {
@@ -116,6 +127,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
                 if (!(w > 0 && h > 0) || ![x, y, width, height].every(Number.isFinite)) return;
                 const clamp = value => Math.max(0, Math.min(1, value));
                 const left = clamp(x / w), top = clamp(y / h);
+                if (clamp((x + width) / w) > left && clamp((y + height) / h) > top) trace(record, 'geometry');
                 post(record, 'bounds', {x: left, y: top, width: Math.max(0, clamp((x + width) / w) - left),
                     height: Math.max(0, clamp((y + height) / h) - top)});
             },
@@ -129,6 +141,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
                 if (typeof value !== 'boolean') return;
                 if (!value) release(record);
                 record.visible = value;
+                if (value) trace(record, 'visible');
                 post(record, 'visible', {value: value && !record.glass});
             },
             AddGlass(enabled, style) {
@@ -149,7 +162,7 @@ function installXboxStoreBrowser(client, host, ownerWindow) {
         record.view = view;
         record.unload = () => { if (current === record) close(record, true); };
         owner.addEventListener('pagehide', record.unload, {once: true});
-        try { post(record, 'create'); } catch (error) { close(record, false); throw error; }
+        try { post(record, 'create'); trace(record, 'create'); } catch (error) { close(record, false); throw error; }
         return view;
     };
     api.Destroy = view => {

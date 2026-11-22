@@ -458,3 +458,14 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     assert.equal(app.opens(), 1);
     assert.equal(await app.shell.showForGame(975370, 90, restore), false);
 });
+
+test("only fixed Store JS milestones persist and stay separate from native HTTP results", async () => {
+    const app = fixture();
+    const start = app.start({});
+    await drain(); await app.advance("gamepad-ready"); await start;
+    for (const stage of ["create","geometry","geometry","https://private.invalid/","visible","blank-complete","navigate"])
+        app.incoming.push(JSON.stringify({method:"store-js-stage",stage}));
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /store_js_stages=create,geometry,visible,blank-complete,navigate\r\n/);
+    assert.doesNotMatch(app.reports.at(-1), /private\.invalid|public_store_navigation=/);
+});
