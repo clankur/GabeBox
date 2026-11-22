@@ -109,6 +109,17 @@ Production APPX SHA-256 `f396ae5039068def3c9f62d02c12828a7490d0c491accd906760cac
 | tour-25-190849 | e4884583-cce9-4803-8a09-6289f908344e | Passed from an empty process baseline. The raw 1920×1080 TV screenshot shows All Games 134 and the controller footer. |
 | tour-25-191228 | ef390c9c-62d0-46ec-8a6c-0c052eb78329 | Passed from an empty process baseline. An early capture was 1906×1072. The subsequent original 1920×1080 TV frame shows the populated game grid. |
 
+### Build 1.0.230.26
+
+Production APPX SHA-256 `7a67f30b07296222eb2d9ac92642d078409c6e1b9cee5479f526d2a7ca35a871`. The package introduced a native primary application entrypoint. Its 1,175 original Valve assets match build `.25`.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-26-191610 | None | Failed from an empty process baseline. Device Portal activation returned HTTP 400 with HRESULT 0x8027025B. No new host report or visible Library appeared. |
+| manual-26-191748 | None | Failed from an empty process baseline. Launching the selected Dev Home game tile started two transient package processes. Dev Home appeared again by 2.55 s. No new application run, matching crash dump or Library frame was recorded. |
+
+The observed Library count is 0/2. The failure preceded a usable Steam UI. There were no stock game-launch attempts on these runs.
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
