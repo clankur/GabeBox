@@ -229,6 +229,10 @@ Feature parity also requires a signed-in session to survive restart, a library t
 
 ## Release evidence
 
+### Series X prototype cleanup
+
+On November 21, 2026, Device Portal confirmed removal of twelve superseded packages. The five graphics controls were `DisplayControl`, `FhdPresent`, `FhdComposition`, `FhdWwa` and `FhdMesa`. The five standalone shell controls were `BigPicture`, `SteamPrimaryControl`, `WindowedWwaControl`, `WwaWindowControl` and `PrimaryRendererControl`. The two isolated sign-in trials were `SteamFresh23022` and `SteamFresh23029`. All twelve used the `XboxPortabilityProbe.` identity prefix. The operator checked the installed inventory after each removal. At the end of cleanup the sole project package was `XboxPortabilityProbe.ChildProcess.SteamCore` version `1.0.230.33`, with the same two running processes and 357 entries in its LocalState inventory.
+
 ### Chromium on Xbox
 
 Microsoft supports embedding Chromium in an Xbox UWP app through WinUI 2 WebView2. The renderer on this branch creates a WebView2 composition controller in an Xbox-owned window. Steam’s gamepad bundle expects Valve’s native `SteamClient` object to supply session state, create windows, dispatch controller events and issue library commands. The standalone and signed-in trials above measure how far each layer runs on Series X. [Microsoft’s Xbox WebView2 announcement](https://github.com/MicrosoftEdge/WebView2Announcements/issues/78) · [WinUI 2 WebView2 setup for Xbox](https://learn.microsoft.com/en-us/microsoft-edge/webview2/get-started/winui2)
