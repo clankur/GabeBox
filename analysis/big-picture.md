@@ -182,6 +182,16 @@ The Xbox host reads the preferred Windows network profile again when connectivit
 
 The offline `--network` fixture exercised the pinned Valve UI with simulated Windows profile changes. Its top bar rendered distinct icons for Ethernet, Wi-Fi and offline. With Settings → Internet open, the active Wi-Fi row changed to a wired row, disappeared on disconnect and returned on reconnection. The same test reported local-only access without Internet and kept the Steam connection manager disconnected throughout. [Original UI integration test](../tests/steam-big-picture-shell.cjs) · [Network profile tests](../tests/xbox-network.test.js)
 
+### Opening the Store
+
+Selecting Store in Valve’s Steam menu opens its `/steamweb` route. On build `.33`, Valve’s page reached `SteamClient.BrowserView.Create` and threw because the Xbox bridge lacked that method. The bridge now creates a dedicated WebView2 composition surface for the public Steam Store. Valve’s menu controls its bounds, visibility, focus and navigation history. The sign-in broker keeps account credentials separate from web browsing. This path covers the public catalogue. Purchases and authenticated Store actions still require their own implementation and verification. [Valve browser adapter](../probe/big-picture-bridge/xbox-store-browser.js) · [Xbox Store surface](../probe/big-picture-webview/store-browser.h)
+
+The Xbox host records `public_store_navigation=loaded http=200` when the external Store document completes with HTTP 200. A pending request, a navigation failure and the internal blank startup document each produce a different outcome. To verify what the player sees, capture the full Xbox output after opening the Store from Valve’s menu and inspect the catalogue or product page. [Xbox host report](../probe/big-picture-webview/big-picture-webview.js)
+
+### Controller navigation
+
+The Xbox QR page takes directional focus and accepts the controller’s confirm action. While Steam’s Big Picture shell is visible, the host hides the Xbox pointer and routes the controller through Valve’s gamepad input. Handing focus to a game restores its own input behavior, including Dwarf Fortress’s in-game pointer. [QR and primary window](../probe/big-picture-primary/main.cpp) · [Shell pointer ownership](../probe/big-picture-webview/shell-cursor.h)
+
 ### First sign-in and subsequent sessions
 
 The existing Xbox QR flow authenticates the account. The host passes its validated SteamID to the renderer and opens a separate WebView2 profile for that account. Valve records its own guided-tour preference. Startup waits for the player to finish the original tour before switching to All Games. Valve’s Sign Out confirmation returns to the existing sign-in screen. The native client can retain a valid remembered sign-in when Steam temporarily fails to return the catalog. [QR host](../probe/signin/steam-signin.js) · [WebView2 profiles](../probe/big-picture-webview/renderer.cpp) · [Account tests](../tests/steam-big-picture-shell.cjs)
