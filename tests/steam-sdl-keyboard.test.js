@@ -143,7 +143,7 @@ test("the SDL player presents each refresh and routes keyboard input", () => exe
 test("the SDL player decodes bulk RGB while retaining keyboard input", () => exercisePlayer(true));
 
 test("the primary video polls the controller independently and a quick mouse click reaches SDL in order", async () => {
-    const elements = new Map(), listeners = {}, edges = [], overlays = [];
+    const elements = new Map(), listeners = {}, edges = [], overlays = [], samples = [];
     let now = 100, pump, ack = 0, buttons = 0, serial = 0;
     function element(id) {
         if (!elements.has(id)) elements.set(id, {
@@ -166,7 +166,7 @@ test("the primary video polls the controller independently and a quick mouse cli
     };
     const runner = {
         launchSteamSdlGame: () => "steam_sdl_host=ready\r\n", steamSdlRunning: () => true,
-        sendSteamSdlGamepad() {}, steamSdlInputAck: () => ack,
+        sendSteamSdlGamepad(mask) { samples.push(mask); }, steamSdlInputAck: () => ack,
         sendSteamSdlInput(pointer) { edges.push(pointer); return ++serial; }
     };
     const Windows = {UI: {ViewManagement: {
@@ -188,9 +188,26 @@ test("the primary video polls the controller independently and a quick mouse cli
     ack = serial; now += 16; pump();
     assert.deepEqual(edges, [1024 | 2048 << 12 | 1 << 24, 1024 | 2048 << 12]);
 
-    buttons = gamepad.connected | gamepad.buttons.start | gamepad.buttons.back;
-    now += 16; pump(); now += 16; pump();
+    function sample(mask) { buttons = mask; now += 16; pump(); }
+    const both = gamepad.connected | gamepad.buttons.start | gamepad.buttons.back;
+    sample(both); sample(both);
+    sample(gamepad.connected | gamepad.buttons.back);
+    assert.deepEqual(overlays, []);
+    assert.ok(samples.every(mask => !(mask & (gamepad.buttons.start | gamepad.buttons.back))));
+    sample(gamepad.connected); sample(gamepad.connected);
     assert.deepEqual(overlays, [[646570, 7]]);
+    sample(both);
+    listeners.blur();
+    sample(0); listeners.focus(); sample(both); sample(gamepad.connected);
+    assert.equal(overlays.length, 1, "focus loss cancels the gesture, including a held chord on reactivation");
+    sample(both); sample(0); sample(both); sample(gamepad.connected);
+    assert.equal(overlays.length, 1, "disconnect and reconnect must not synthesize a release");
+    sample(both); sample(gamepad.connected);
+    assert.equal(overlays.length, 2, "a fresh complete gesture still works");
+    sample(both);
+    listeners.keydown({type: "keydown", keyCode: 121, preventDefault() {}});
+    sample(gamepad.connected);
+    assert.equal(overlays.length, 3, "F10 opens immediately without a second overlay on pad release");
     listeners["steam-game-foreground"]({detail: false});
     const count = edges.length;
     screen.handlers.pointerdown({...p, buttons: 1, type: "pointerdown"});

@@ -75,6 +75,8 @@
         var nativePad = appId !== 975370;
         var view, savedBounds, enteredFullscreen;
         var gameInput = true, foreground = true, chordStarted = null, chordUsed = false, lastButtons = 0, lastPad;
+        var chordTracker = bigPictureMode ? { device: null } : null;
+        var waitForChordRelease = false;
         var blockedMenuButtons = bigPictureMode ? padButtons.a | padButtons.b : 0;
         var keyboardReady = false;
         var layoutWidth = 0, layoutHeight = 0;
@@ -113,6 +115,7 @@
             screen.removeEventListener("pointerup", setPointer, true);
             screen.removeEventListener("pointercancel", setPointer, true);
             window.removeEventListener("blur", onBlur);
+            window.removeEventListener("gamepaddisconnected", onPadDisconnected);
             window.removeEventListener("focus", onFocus);
             window.removeEventListener("steam-game-foreground", onGameForeground);
             document.removeEventListener("visibilitychange", onVisibility);
@@ -214,13 +217,21 @@
             if (pressed & (padButtons.down | padButtons.right)) items[Math.min(items.length - 1, index + 1)].focus();
         }
 
+        function toggleMenu() {
+            if (!textForm.hidden) closeText();
+            else if (menu.hidden) showMenu(); else hideMenu();
+        }
+
         function setKey(event) {
             if (!gameInput) return;
             if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
-                    if (!textForm.hidden) closeText();
-                    else if (menu.hidden) showMenu(); else hideMenu();
+                    if (chordTracker && chordStarted !== null) {
+                        chordStarted = null;
+                        waitForChordRelease = true;
+                    }
+                    toggleMenu();
                 }
                 return;
             }
@@ -258,8 +269,19 @@
             lastPointer = -1;
         }
 
+        function cancelChord() {
+            if (chordTracker) {
+                chordTracker.device = null;
+                waitForChordRelease = true;
+                chordStarted = null;
+            }
+        }
+        function onPadDisconnected(event) {
+            if (chordTracker && event.gamepad && chordTracker.device === event.gamepad.index) cancelChord();
+        }
         function onBlur() {
             foreground = false;
+            cancelChord();
             if (timing) timing.reset();
             releaseKeys();
         }
@@ -539,14 +561,33 @@
                     keyboard.hidden = false;
                     releaseKeys();
                 }
-                var pad = foreground ? gamepad.read(window.Windows, navigator) : gamepad.idle;
+                var pad = foreground ? gamepad.read(window.Windows, navigator, chordTracker) : gamepad.idle;
                 var chord = padButtons.start | padButtons.back;
-                if ((pad[0] & chord) === chord) {
+                var heldChord = pad[0] & chord;
+                if (bigPictureMode) {
+                    if (!(pad[0] & gamepad.connected)) {
+                        if (chordStarted !== null) waitForChordRelease = true;
+                        chordStarted = null;
+                        chordTracker.device = null;
+                    } else if (!heldChord) {
+                        // Valve starts polling this controller as soon as it gains focus.
+                        var openAfterRelease = chordStarted !== null && !waitForChordRelease;
+                        chordStarted = null;
+                        chordTracker.device = null;
+                        waitForChordRelease = false;
+                        if (openAfterRelease) toggleMenu();
+                    } else if (heldChord === chord && !waitForChordRelease) {
+                        chordStarted = now;
+                    }
+                    if (heldChord && (chordStarted !== null || waitForChordRelease)) {
+                        pad = pad.slice();
+                        pad[0] &= ~chord;
+                    }
+                } else if (heldChord === chord) {
                     if (chordStarted === null) chordStarted = now;
-                    if (!chordUsed && (bigPictureMode || now - chordStarted >= 750)) {
+                    if (!chordUsed && now - chordStarted >= 750) {
                         chordUsed = true;
-                        if (!textForm.hidden) closeText();
-                        else if (menu.hidden) showMenu(); else hideMenu();
+                        toggleMenu();
                     }
                     pad = pad.slice();
                     pad[0] &= ~chord;
@@ -634,6 +675,7 @@
         screen.addEventListener("pointerup", setPointer, true);
         screen.addEventListener("pointercancel", setPointer, true);
         window.addEventListener("blur", onBlur);
+        window.addEventListener("gamepaddisconnected", onPadDisconnected);
         window.addEventListener("focus", onFocus);
         window.addEventListener("steam-game-foreground", onGameForeground);
         document.addEventListener("visibilitychange", onVisibility);

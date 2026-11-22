@@ -34,3 +34,37 @@ test("a controller in the second Xbox slot can open Steam over a single-player g
             pad.connected | pad.buttons.start | pad.buttons.back);
     }
 });
+
+test("the release must come from the controller that held View and Menu", () => {
+    const first = {getCurrentReading: () => ({buttons: 0})};
+    let held = 3;
+    const second = {getCurrentReading: () => ({buttons: held})};
+    const devices = [first, second];
+    const windows = {Gaming: {Input: {Gamepad: {gamepads: devices}}}};
+    const tracker = {device: null};
+    const read = () => pad.read(windows, {}, tracker);
+    assert.equal(read()[0], pad.connected | pad.buttons.start | pad.buttons.back);
+    held = 2;
+    assert.equal(read()[0], pad.connected | pad.buttons.back);
+    devices.splice(1);
+    assert.strictEqual(read(), pad.idle);
+    assert.equal(tracker.device, null);
+    assert.equal(read()[0], pad.connected);
+});
+
+test("a browser controller in slot zero stays selected until both buttons are released", () => {
+    let pressed = [8, 9];
+    const web = {getGamepads() {
+        return [pressed, [8, 9]].map(indices => ({
+            mapping: "standard", connected: true, axes: [0, 0, 0, 0],
+            buttons: Array.from({length: 17}, (_, i) => ({pressed: indices.includes(i), value: 0}))
+        }));
+    }};
+    const tracker = {device: null};
+    pad.read({}, web, tracker);
+    assert.equal(tracker.device, 0);
+    pressed = [9];
+    assert.equal(pad.read({}, web, tracker)[0], pad.connected | pad.buttons.start);
+    pressed = [];
+    assert.equal(pad.read({}, web, tracker)[0], pad.connected);
+});
