@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--home] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--home] [--startup-history] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,13 +8,14 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store', '--home'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store', '--home', '--startup-history'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
 const storeOnly = process.argv.includes('--store');
 const homeOnly = process.argv.includes('--home');
-const framedGamepad = homeOnly || storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const startupHistory = process.argv.includes('--startup-history');
+const framedGamepad = startupHistory || homeOnly || storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -209,6 +210,38 @@ async function checkHome(page, popup) {
     await menu.getByText('Library', {exact:true}).waitFor({state:'visible'});
     assert(!/Something went wrong while displaying this content/i.test(await target.innerText()));
     console.log('Xbox controller opened Valve search, typed with the original on-screen keyboard, dismissed it and reopened the Steam menu.');
+}
+
+async function checkStartupHistory(page, popup, reopen) {
+    await pressNative(page, 3);
+    const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+    await menu.getByText('Store', {exact: true}).click();
+    await page.waitForFunction(() => fixtureCalls.some(c => c.method === 'store-browser' && c.action === 'create'));
+    await page.close();
+    // Keep the browser profile and completed tour. Create an actual new owner document.
+    page = await reopen();
+    await page.waitForFunction(() => window.App?.GetServicesInitialized(), undefined, {timeout:50000});
+    const target = page.frameLocator('#xbox-steam-gamepad-surface');
+    await stockTile(target, 'Fixture A').waitFor({state:'visible', timeout:15000});
+    const tab = target.getByRole('tab', {name:/^all games/i});
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    const storeOpened = () => page.evaluate(() => fixtureCalls.some(c => c.method === 'store-browser' && c.action === 'create'));
+    // On Xbox the blank Store appeared six seconds after the cold ready receipt.
+    // Observe the route without any input, for twice that interval.
+    await page.waitForTimeout(12000);
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    assert.equal(await storeOpened(), false);
+    const tile = stockTile(target, 'Fixture A');
+    await tile.press('F7'); // Valve's BUMPER_RIGHT binding on its focused Library.
+    await target.getByRole('tab', {name:/^installed/i, selected:true}).waitFor({state:'visible'})
+        .catch(async error => { throw new Error(error.message + '\n' + (await target.locator('#popup_target').innerText()).slice(0,700)); });
+    const route = await page.evaluate(() => {
+        let r; webpackChunksteamui.push([['fixture-installed-route'],{}, get => { r = get; }]);
+        return r(5757).oy.WindowStore.GamepadUIMainWindowInstance.History.location.pathname;
+    });
+    assert.equal(route, '/library/tab/Installed');
+    assert.equal(await storeOpened(), false);
+    console.log('Reopened the same account after Store; cold All Games stayed visible, and F7 opened the original Installed tab.');
 }
 
 async function checkNetwork(page, popup) {
@@ -896,6 +929,10 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 });
                 const hasTour = await welcome.isVisible();
                 if (hasTour) await completeTour(page, popup);
+                if (startupHistory) {
+                    await checkStartupHistory(page, popup, async () => { await openOwner(); return page; });
+                    return;
+                }
                 if (homeOnly) { await checkHome(page, popup); return; }
                 if (storeOnly) { await checkStore(browser, page, popup); return; }
                 if (networkOnly) { await checkNetwork(page, popup); return; }
