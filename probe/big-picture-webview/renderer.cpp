@@ -944,18 +944,28 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
     void OpenForAccount(hstring const& owner) { validateAccount(owner); openView(true, owner); }
     void OpenForPrimaryAccount(hstring const& owner) { validateAccount(owner); openView(true, owner, true); }
     static void startPrimary(hstring const& owner) {
+        std::wstring_view step = L"primary-window";
         try {
             using namespace Windows::UI::Xaml;
             auto window = Window::Current();
-            auto grid = window ? window.Content().try_as<Controls::Grid>() : nullptr;
+            if (!window) throw hresult_error(E_UNEXPECTED);
+            step = L"primary-root";
+            auto grid = window.Content().try_as<Controls::Grid>();
             if (!grid || grid.Children().Size() != 2) throw hresult_error(E_UNEXPECTED);
+            step = L"primary-account";
             auto account = grid.Children().GetAt(0).try_as<Controls::WebView>();
+            if (!account || account.Name() != L"SteamAccountHost") throw hresult_access_denied();
+            step = L"primary-panel";
             auto panel = grid.Children().GetAt(1).try_as<Controls::Canvas>();
+            if (!panel || panel.Name() != L"SteamCompositionHost") throw hresult_access_denied();
+
+            // The signed primary host records the exact successful top-level
+            // navigation on this control, revoking it when navigation begins.
+            step = L"primary-account-document";
+            auto documentUri = account.Tag().try_as<Uri>();
             Uri local{L"ms-appx-web:///steam-signin.html"};
-            Uri qualified{L"ms-appx-web://" + Package::Current().Id().Name() + L"/steam-signin.html"};
-            if (!panel || panel.Name() != L"SteamCompositionHost" || !account || account.Name() != L"SteamAccountHost" ||
-                !account.Source() || (!account.Source().Equals(local) && !account.Source().Equals(qualified)))
-                throw hresult_access_denied();
+            if (!documentUri || !documentUri.Equals(local)) throw hresult_access_denied();
+            step = L"primary-renderer";
             auto view = make_self<View>(true, owner);
             {
                 slim_lock_guard lock(gate);
@@ -964,14 +974,17 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             }
             view->primaryPanel = panel;
             view->accountPanel = account;
+            step = L"primary-corewindow";
             view->SetWindow(window.CoreWindow());
+            step = L"primary-events";
             view->listen();
+            step = L"primary-browser";
             view->startBrowser();
         } catch (...) {
             auto hr = to_hresult();
             slim_lock_guard lock(gate);
             opening = false;
-            status = hstring(L"primary-view-error:" + std::to_wstring(hr.value));
+            status = hstring(std::wstring(step) + L"-error:" + std::to_wstring(hr.value));
         }
     }
     void openView(bool warm, hstring const& owner = {}, bool primary = false) {
