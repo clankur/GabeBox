@@ -136,6 +136,14 @@ The integrated APPX has SHA-256 `045da0be57a4b4852272e9de885d49fb0d6fe2a4be1069f
 |---|---|---|
 | tour-28-192556 | 2ea48932-59c1-40f4-9627-e9e3b7c9d117 | Passed from an empty package-process baseline. Original TV output shows All Games 134, Installed 8, game art and controller footer. |
 
+### Build 1.0.230.29
+
+The XAML production APPX has SHA-256 `ce2123914a284588b794c0d600cecec74c38211fd2115e18adfaa87557cbdfd2`. Its manifest selects `SteamPrimary.exe` and `BigPicture.Primary.App`. All 1,175 original Valve assets are identical to the verified `.28` build.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-29-193715 | f02d07fb-bd8f-4ce0-b36a-33581c86f8a3 | Failed from an empty package-process baseline. SteamPrimary.exe started. The report recorded primary-view error 0x80070005 (access denied) with no Valve surface or route. The isolated XAML control was a separate application. |
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
