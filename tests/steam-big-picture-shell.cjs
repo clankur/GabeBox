@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,11 +8,12 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
-const framedGamepad = networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const storeOnly = process.argv.includes('--store');
+const framedGamepad = storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -71,6 +72,7 @@ function setupHost(steamId, windowState, catalogs) {
             let reply;
             const games = catalogs[window.fixtureSteamId];
             switch (request.method) {
+                case 'store-browser': return; // The Store test drives isolated browser receipts explicitly.
                 case 'network-state': reply = {result: window.fixtureNetwork || {level: 'offline'}}; break;
                 case 'library': reply = games ? {result: games} : {error: 'signed-out'}; break;
                 case 'session': reply = {result: {steamId: window.fixtureSteamId}}; break;
@@ -91,6 +93,58 @@ function setupHost(steamId, windowState, catalogs) {
             queueMicrotask(() => window.hostEvent({id: request.id, ...reply}));
         }
     };
+}
+
+// Exercise Valve's own menu, gateway and history router. The test browser stays
+// offline. Its separate page provides a real blank-document navigation, and
+// intercepts the public Store request before any response bytes are returned.
+async function checkStore(browser, page, popup) {
+    await pressNative(page, 3);
+    const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+    await page.evaluate(() => {
+        const create = SteamClient.BrowserView.Create;
+        window.fixtureStoreCreate = [];
+        SteamClient.BrowserView.Create = options => {
+            try { return create(options); }
+            catch (error) {
+                fixtureStoreCreate.push({keys:Object.keys(options), error:error.message});
+                throw error;
+            }
+        };
+    });
+    await menu.getByText('Store', {exact: true}).click();
+    const request = action => page.waitForFunction(action =>
+        window.fixtureCalls.find(call => call?.method === 'store-browser' && call.action === action), action);
+    const create = await request('create').catch(async error => { throw new Error(error.message + ' ' +
+        JSON.stringify(await page.evaluate(() => fixtureStoreCreate)) + ' ' +
+        (await popup.locator('#popup_target').innerText()).slice(0, 500)); });
+    const {id} = await create.jsonValue();
+    assert(!await page.evaluate(() => fixtureCalls.some(c => c?.method === 'store-browser' && c.action === 'navigate')));
+    const isolated = await browser.newContext();
+    try {
+        const remote = await isolated.newPage();
+        await remote.goto('about:blank');
+        await page.evaluate(({id, url}) => {
+            hostEvent({event:'store-browser', id, kind:'start', url});
+            hostEvent({event:'store-browser', id, kind:'complete', url, success:true, code:0});
+        }, {id, url: remote.url()});
+        const nav = await (await request('navigate')).jsonValue();
+        assert.equal(nav.id, id);
+        assert.equal(nav.url, 'https://store.steampowered.com/');
+        const requested = remote.waitForRequest(nav.url);
+        await isolated.route('**/*', route => route.abort('internetdisconnected'));
+        await remote.goto(nav.url).catch(() => {});
+        assert.equal((await requested).url(), nav.url);
+        await page.evaluate(({id,url}) => {
+            hostEvent({event:'store-browser', id, kind:'start', url});
+            hostEvent({event:'store-browser', id, kind:'complete', url, success:false, code:1});
+        }, nav);
+        await page.waitForFunction(() => {
+            let r; webpackChunksteamui.push([['fixture-store-route'], {}, f => { r=f; }]);
+            return r(5757).oy.WindowStore.GamepadUIMainWindowInstance.History.location.pathname === '/steamweb';
+        });
+        console.log('Original Store menu requested the public HTTPS Store from /steamweb; network intentionally blocked.');
+    } finally { await isolated.close(); }
 }
 
 async function checkNetwork(page, popup) {
@@ -778,6 +832,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 });
                 const hasTour = await welcome.isVisible();
                 if (hasTour) await completeTour(page, popup);
+                if (storeOnly) { await checkStore(browser, page, popup); return; }
                 if (networkOnly) { await checkNetwork(page, popup); return; }
                 if (accounts) {
                     const predicates = await nativeLibraryPredicates();

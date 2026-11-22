@@ -45,6 +45,7 @@
             else updateControls();
             return;
         }
+        if (data?.event) return;
         const request = pending.get(data?.id);
         if (!request) return;
         pending.delete(data.id);
@@ -310,13 +311,13 @@
         whenMounted();
     }
     installXboxWindow(client, send, popup => runtime?.(16724).Of.GetPopupForWindow(popup));
-    installXboxBrowserView(client);
+    const storeBrowser = installXboxStoreBrowser(client, host, installXboxBrowserView(client));
     installXboxUser(client, send, () => runtime);
     client.User.StartRestart = async force => {
         if (force !== false || await send('restart-client') !== 'restart')
             throw new Error('Steam client restart unavailable');
     };
-    installXboxInput(client, gamepads);
+    installXboxInput(client, gamepads, storeBrowser);
     installXboxLifecycle(client, () => runtime);
     installXboxSettings(client, () => runtime);
     installXboxNetwork(client, () => runtime, send, host);

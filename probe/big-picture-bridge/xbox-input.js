@@ -1,6 +1,6 @@
 // Steam's 1794536281 navigation provider consumes logical button edges. It
 // implements hold/repeat itself. These identifiers are from sp.js module 43251.
-function installXboxInput(client, gamepads) {
+function installXboxInput(client, gamepads, storeBrowser) {
     const digital = new Set(), analog = new Set(), system = new Set(), unbound = new Set(), keyboards = new Set();
     const states = new Map();
     // W3C standard buttons A, B, X, Y, bumpers, triggers, View, Menu and stick clicks.
@@ -17,8 +17,11 @@ function installXboxInput(client, gamepads) {
         return [-y, y, -x, x].map((value, i) =>
             !!pad.buttons[12 + i]?.pressed || value >= (last.has(20 + i) ? 0.45 : 0.6));
     }
+    function button(index, code, down) {
+        if (!storeBrowser?.button(index, code, down)) dispatch(digital, index, code, down, 0, 0);
+    }
     function release(index, state) {
-        for (const code of state.down) dispatch(digital, index, code, false, 0, 0);
+        for (const code of state.down) button(index, code, false);
         if (analogEnabled && (state.x || state.y)) dispatch(analog, index, 24, false, 0, 0);
     }
     function samplePad(pad) {
@@ -43,8 +46,8 @@ function installXboxInput(client, gamepads) {
         // Valve's navigation map uses LEFTSTICK_* for UI directions. The
         // D-pad and left stick share those actions, including overlapping holds.
         padDirections(pad, state.down).forEach((pressed, index) => { if (pressed) next.add(20 + index); });
-        for (const code of state.down) if (!next.has(code)) dispatch(digital, pad.index, code, false, 0, 0);
-        for (const code of next) if (!state.down.has(code)) dispatch(digital, pad.index, code, true, 0, 0);
+        for (const code of state.down) if (!next.has(code)) button(pad.index, code, false);
+        for (const code of next) if (!state.down.has(code)) button(pad.index, code, true);
         state.down = next;
         // Xbox reserves its Guide button. Use the same View + Menu chord as
         // the game presenter to open Valve's menu inside the Steam window.
@@ -136,6 +139,7 @@ function installXboxInput(client, gamepads) {
         dispatch(keyboards, keyboardPresent);
     });
     client.Input = {
+        SetWebBrowserActionset(value) { storeBrowser?.setActionset(value); },
         RegisterForUnboundControllerListChanges: callback => listen(unbound, callback),
         RegisterForControllerInputMessages: callback => listen(digital, callback),
         RegisterForControllerAnalogInputMessages: callback => listen(analog, callback),

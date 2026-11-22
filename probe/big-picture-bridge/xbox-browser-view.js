@@ -141,4 +141,5 @@ function installXboxBrowserView(client) {
             for (const record of records.values()) if (record.view === view) destroy(record);
         }
     };
+    return ownerWindow;
 }
