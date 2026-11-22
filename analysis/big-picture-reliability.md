@@ -178,6 +178,17 @@ The in-place update retained the signed-in production account. Signed APPX SHA-2
 
 The next session had a new SteamPrimary PID and run ID. The cause of the transition was unobserved. A player photo of Home showed the original What’s New, Friends and Recommended tabs and the exception `SteamClient.Apps.ReportLibraryAssetCacheMiss is not a function`. The player then returned to All Games with the controller. In run `b5e6180e-8a60-4dae-a16e-2e79a9ac5073`, the official 1920×1080 TV image showed 134 games, 8 installed, the selected Age of Wonders III tile and the connected Wi-Fi glyph. Its SHA-256 was `ae23a7ce18bacaf1432015d9b759ee77a1fa3b0945aea2b42e5a32a84ac9ab90`. This verifies a controller return to the populated Library in that session. Neither activation had a controlled cold-start preflight.
 
+### Build 1.0.230.36
+
+Signed production APPX SHA-256 `93d816a83769f58653238a95c201073eb7b9b06bdb14a55e2c41cf3997fa9ec1`. In run `3dece732-ea2e-4173-bcd9-073869e3fa0e`, SteamPrimary PID `10100`, two 1920×1080 whole-output TV captures establish the following results. WDP keyboard events were authorized for this test. Windows reported the preferred connection as `internet wifi`.
+
+| Screen | Visible content | Original file and SHA-256 |
+|---|---|---|
+| Library | All Games 134, Installed 8, Non-Steam 0, two rows of game covers, Wi-Fi glyph and both footer corners. | `library-before-store-1795313201536989000.png`, `8a0260c43e1aef3d04467cc3cc9f55192eea2eb621104ae4f3dfe43a59a94d95` |
+| Home | Dwarf Fortress, Factorio, Hades, Slay the Spire and Stardew Valley artwork above What's New, Friends and Recommended. The previous cache-miss exception is absent. No news stories are visible below the tabs. | `internet-settings-1795313323095873000.png`, `98fc92a0207014c22647a8755b31137d6ec0c0c6206d04c8977873d4f6eeda7e` |
+
+The Home capture's operator label says Internet Settings. A different capture labeled Home shows the Storage settings spinner. The unedited Library and Home PNGs are also retained as `steam-big-picture-library-on-xbox-1920x1080.png` and `steam-big-picture-home-on-xbox-1920x1080.png` under `big-picture-signed/console-check/production-230-36/`. Public Store content and the Internet settings screen require their own captures.
+
 ## Direct native game display
 
 For a build that presents game frames through the primary XAML panel, retain the following original whole-output captures from the same run. Index each with its source, capture time, dimensions and SHA-256. Open the originals to identify the actual content.
