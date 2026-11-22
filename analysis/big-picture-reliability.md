@@ -91,6 +91,15 @@ Production APPX SHA-256 `a9547c288caebee7f1a245f675ecd0cf654665e2127384b922ed3c1
 |---|---|---|
 | tour-23-185454 | ae592bff-8715-485a-9b69-9d85628d634d | Passed from an empty package-process baseline. Raw TV output showed All Games 134, Installed 8, original artwork and controller footer. |
 
+### Build 1.0.230.24
+
+Production APPX SHA-256 `8f8ad0a6128af4fff4ddbc9fc4c391e2fbee7340b0913ba4593a3bc7abe6aaa8`. All 1,175 original Valve assets match build `.23` byte for byte.
+
+| Attempt | Native run ID | Whole-output evidence |
+|---|---|---|
+| tour-24-190010 | 2f7f218e-58eb-4d4b-bae6-1c6ee9d87242 | Passed from an empty package-process baseline. All Games 134, Installed 8 and artwork are visible on the TV output. |
+| tour-24-190411 | 68e4337b-fd77-4ad5-a56a-02049569179a | Passed from an empty package-process baseline. Fresh whole-output frame shows the original game grid and controller footer. |
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
@@ -104,6 +113,8 @@ Production APPX SHA-256 `a9547c288caebee7f1a245f675ecd0cf654665e2127384b922ed3c1
 | 1.0.230.22 · tour-22-183719 | Slay the Spire | The original green Play control launched the matching JVM. | No recognizable title frame was established by the foreground sample. F10 brought up Valve's running-game overlay, including Resume game and Exit game. | The primary media presenter advanced by two frames over 30.031600 s (0.067 FPS), reaching three total. The producer sequence remained at three across four later reads. The game and host disappeared before the operator selected Exit. |
 | 1.0.230.22 · tour-22-184656 | Dwarf Fortress | The original Play control launched the matching game process. | The media presenter reported two initial frames. The producer sequence stayed fixed in the observation window and a visible title was unverified. | Valve's original running overlay and Exit game confirmation appeared on TV. Keyboard and pointer attempts left the confirmation visible and the process running. The operator closed the matched process. No normal return was established. |
 | 1.0.230.23 · tour-23-185454 | Slay the Spire | The operator activated stock Play and the matching JVM started. | The TV capture request returned HTTP 500. No game title image or player observation was recorded. | The primary video element counted 2,098 frames in 30.066800 s (69.78 FPS). The operator explicitly closed the matching process and stopped the host for the separate new-install test. The internal return event has no corresponding visual Library observation. |
+| 1.0.230.24 · tour-24-190010 | Slay the Spire | Stock Play launched the matching JVM. | A 1920×1080 capture of the foreground HTML video element showed the game's main menu at 20.409 s. A separate raw TV screenshot showed the stock Steam running-game overlay. | 2,165 foreground video frames in 30.078600 s (71.98 FPS). The game and WWA host disappeared before interaction with the stock Exit confirmation. The title on TV and normal return remain unverified. |
+| 1.0.230.24 · tour-24-190411 | Dwarf Fortress | The stock Play control launched the matching process. | The foreground HTML video frame showed the title menu, Settings and About DF. The TV showed the stock overlay and exit confirmation. | 1,794 foreground video frames in 30.041200 s (59.72 FPS). Confirm dismissed the dialog, the broker received the request and the native input mapping recorded SDL Quit. The process was still running after 60 s and the operator closed it. No normal Library return. |
 
 Completed circuits through `.18` are Dwarf Fortress 0/2 attempts, Slay the Spire 0 observed attempts and Stardew Valley 0 observed attempts. Earlier title screenshots and FHD measurements from the regular presenter and direct-launch QA do not enter the stock-UI count.
 
@@ -135,6 +146,10 @@ The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a9
 | `valve-841.png`, .22 second cold start whole-output Library | 1920×1080 | `f53a689ce589acbb6670ed4e31a8c239a2902cad23d09950f925fff0949f4284` |
 | `valve-841.png`, .22 third application start whole-output Library | 1920×1080 | `ac3dfbb634a5d23c3642a51e59a349e8257387dfd6c6183ec8bd71a9ef74f428` |
 | `valve-695.png`, .23 first cold start whole-output Library | 1920×1080 | `71c81b43f92502fc14bb652411dfd50167409cc03755210539f48ffcfc9eb397` |
+| `valve-802.png`, .24 first cold start whole-output Library | 1920×1080 | `27bfca573d7e181e3c3f1de574aa8c9ddfc5b38c37bf5d48c66f2f818213c0a3` |
+| `media-element-646570-1795305737421209000.png`, .24 Slay the Spire title in the foreground video element | 1920×1080 | `1e870cb1e2deff3827919caf90d982249d0e7451e225bd6f64c0dbd73182bd56` |
+| `valve-869.png`, .24 second cold start whole-output Library | 1920×1080 | `3965583f9216220d7ae1d34cae0e0aaba104a4807744d75c86a46ce4761868a0` |
+| `media-element-975370-1795305986985688000.png`, .24 Dwarf Fortress title in the foreground video element | 1920×1080 | `6c7de2e41d127bebc0e4396be4d5b901ec4569074a93d1aca987342e5c5ef73f` |
 
 The first `.17` source file was absent before the request. The saved native receipt matched its dimensions, view and live browser process. The second request replaced the first, changed the screen contents and produced a new digest. The renderer frames contain the top tabs and both bottom corners. They do not establish final TV scaling. In the earlier `.12` whole-output image, the Welcome heading was centered at x≈1440 on a 1920-pixel-wide output whose center was x=960.
 
