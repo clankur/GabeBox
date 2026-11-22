@@ -69,6 +69,25 @@ python3 xbox-deploy.py report --steam-core-webview --version 1.0.230.24
 
 The integrated package uses the existing Steam Core identity and its installed games. Open Steam Core in Xbox Dev Home, then run the report command. Each cold start produces a new `run_id`. Save the original Xbox Device Portal screenshot at the Library and retain the run ID with it. During a game, `game_frame_sample` and `game_frame_latest_sample` record the first and latest complete foreground intervals. The Xbox media sink can deliver frame notifications faster than the TV refreshes on this build. For a picture of the decoded game video, place an empty `big-picture-capture-game.request` in the package’s `LocalState` folder while the game is in front. Match the new `big-picture-game-video.png` to the same run, AppID and `game_frame_media_capture` receipt. The TV and video-element captures measure different stages. [Verification criteria and results](big-picture-reliability.md)
 
+### Reproduce the Series X build with the Dwarf Fortress runtime
+
+For `1.0.230.28`, use the compatibility source at `d8a12a5`. The signed regular FHD base and Valve archive cache are the same inputs as the earlier build. The two SDL hashes on the command line pin the DLL bytes. The session, renderer and presenter directories include their workflow-generated checksums. [Renderer](https://github.com/clankur/steam-xbox-devmode/actions/runs/44965443477) · [Session](https://github.com/clankur/steam-xbox-devmode/actions/runs/44966111814) · [Presenter](https://github.com/clankur/steam-xbox-devmode/actions/runs/44965540727) · [SDL 2.26.2 and 2.30.9](https://github.com/clankur/steam-xbox-devmode/actions/runs/44965540680)
+
+```sh
+python3 probe/prepare-big-picture-library.py /path/to/regular/PackagedProcessProbe-x64.appx \
+  /path/to/xbox-big-picture-webview-x64 ./integrated-28 --version 1.0.230.28 \
+  --session-artifact /path/to/xbox-steam-core-template \
+  --session-checksum 54adf1c2ed382c45e4d28249ddbf022b33c3afacc65cafc217a19cf12f12c17a \
+  --presenter-artifact /path/to/xbox-fhd-present-x64 \
+  --presenter-checksum 0f62193625b8ac827815874170674353d9d064441599505fd8402f2eebe991a2 \
+  --dwarf-sdl /path/to/xbox-sdl2-2.26.2-x64 04c7e69642a09ed9943fa3fd0ed3ad6c0310e8ef41cc45e5459844b21b988354 \
+  --shared-sdl /path/to/xbox-sdl2-2.30.9-x64 34f8b05b1468e595f7c5a8c6c15ac0a413f9981f0f627be57c82408b5a6acffc \
+  --archive-cache /path/to/valve-archives
+bash probe/package.sh --layout ./integrated-28 ./signed-28
+```
+
+On the first entitled launch of a complete Dwarf Fortress installation, the host verifies its version of SDL, backs it up under the package’s `LocalState/SteamRuntimeBackups`, and installs the matching signed adapter. A custom or unknown DLL is preserved. Slay the Spire and Stardew Valley use the shared packaged SDL. [Native launch](../probe/ProbeNative.cpp) · [Package builder](../probe/prepare-big-picture-library.py)
+
 ### Test the Windows Steam bootstrap
 
 After configuring Device Portal, deploy and launch the signed package. [Device Portal setup](../README.md#setup)
@@ -132,6 +151,11 @@ Build `.21` reached the original Library on three consecutive application launch
 The existing Xbox QR flow authenticates the account. The host passes its validated SteamID to the renderer and opens a separate WebView2 profile for that account. Valve records its own guided-tour preference. Startup waits for the player to finish the original tour before switching to All Games. Valve’s Sign Out confirmation returns to the existing sign-in screen. The native client can retain a valid remembered sign-in when Steam temporarily fails to return the catalog. [QR host](../probe/signin/steam-signin.js) · [WebView2 profiles](../probe/big-picture-webview/renderer.cpp) · [Account tests](../tests/steam-big-picture-shell.cjs)
 
 ### Background Steam and the running game
+
+While a game is running, press **View + Menu** together to open Valve’s in-game controls. Release the buttons, then press the chord again to open the Steam menu and choose **Library**. Select the running game’s tile and choose **Resume** to return to the same session. **Exit game** opens Valve’s separate confirmation. On a keyboard, **F10** opens the game controls and **F1** opens the Steam menu there. [Controller mapping](../probe/big-picture-bridge/xbox-input.js) · [Game host](../probe/signin/steam-sdl-host.js)
+
+On Series X build `1.0.230.28`, the keyboard path took Dwarf Fortress from its title screen to the Installed Library and back through the stock Resume button with PID 11680 throughout. The physical chord and the same hardware round trip for Slay the Spire and Stardew Valley still need confirmation. The verification ledger records each game and build separately. [Hardware results](big-picture-reliability.md)
+
 
 Build `.22` adds a presentation path that draws real 1920×1080 SDL frames onto Direct3D surfaces and supplies them to a live video element in the primary Xbox window. The existing FHD receiver handles GPU and CPU frames. The verifier checks the media pipeline’s rendered-frame counter and a separate TV capture of the game. [Primary-window playback](../probe/signin/steam-sdl-native-view.js) · [Native media source](../probe/fhd/media-source.cpp) · [Microsoft MediaStreamSource](https://learn.microsoft.com/en-us/uwp/api/windows.media.core.mediastreamsource)
 
