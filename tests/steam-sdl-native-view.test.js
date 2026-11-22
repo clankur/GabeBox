@@ -5,6 +5,49 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
 
+test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
+    const calls = [], samples = [], first = [];
+    let now = 0, swaps = 0, tick, visible = true, finishClose;
+    const drain = () => new Promise(resolve => setImmediate(resolve));
+    const host = {
+        async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
+        async setPanelVisible(value) { visible = value; calls.push(["visible", value]); },
+        closePanel() { calls.push(["close"]); return new Promise(resolve => { finishClose = resolve; }); },
+        panelStatus() { return "width=1920\r\nheight=1080\r\nprimary_panel=1\r\nvisible=" +
+            Number(visible) + "\r\npresented=" + swaps + "\r\n"; },
+        openMedia() { assert.fail("The XAML panel should own playback"); }
+    };
+    const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
+        presented: stats => first.push(stats), measured: (frames, us) => samples.push([frames, us])};
+    const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
+        steamBigPictureHost: {switchView: async (to, from) => { assert.equal(to, from); }}};
+    const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
+    const Windows = {UI: {ViewManagement: {ApplicationView: {getForCurrentView: () => ({id: 1})}}},
+        Storage: {ApplicationData: {current: {localFolder: {path: "local"}}}}};
+    vm.runInNewContext(source, {window, document, Windows, performance: {now: () => now},
+        setInterval: callback => { tick = callback; return 1; }, clearInterval() {}});
+    const open = id => window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-" + id + "-2.bin\n", events, false, {hidden:false});
+    const game = open(1);
+    await drain();
+    tick(); assert.equal(first.length, 0);
+    swaps = 1; tick(); assert.match(first[0], /primary_panel=1/);
+    now += 10000; swaps += 600; tick();
+    game.cover(); await drain();
+    now += 50000; swaps += 1200; tick();
+    assert.deepEqual(samples, []);
+    await game.resume(1); tick();
+    now += 30000; swaps += 1780; tick();
+    assert.deepEqual(samples, [[1780, 30000000]]);
+    const stopped = game.close(); assert.equal(game.close(), stopped);
+    const next = open(3);
+    await drain();
+    assert.deepEqual(calls, [["open", "local\\sdl-host-1-2.bin", false], ["visible", false], ["visible", true], ["close"]]);
+    finishClose(); await stopped; await drain();
+    assert.deepEqual(calls.at(-1), ["open", "local\\sdl-host-3-2.bin", false]);
+    assert.equal(await game.resume(1), false);
+    const closed = next.close(); await drain(); finishClose(); await closed;
+});
+
 async function checkPrimaryMedia(sameWindow) {
     let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
     const measurements = [], switches = [], released = [], captures = [], listeners = new Map();

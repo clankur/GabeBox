@@ -2,6 +2,108 @@
     "use strict";
 
     var activeSession = 0;
+    var panelQueue = Promise.resolve();
+
+    function queuePanel(action) {
+        var operation = panelQueue.then(action);
+        panelQueue = operation.catch(function () {});
+        return operation;
+    }
+
+    // The native panel is a sibling of the QR WebView and Valve's Steam surface.
+    // Count unique successful swaps only during one continuous foreground interval.
+    function openPanel(host, path, events, nativePad, screen, mainId) {
+        var owner = ++activeSession, closed = false, opened = false, covered = false, shown = false;
+        var timer, stopped, sampleStart, sampleWindow = 0, started = performance.now(), nextReport = 0;
+        function resetSample() { sampleStart = null; }
+        function reportError(error) {
+            if (events.mediaError) events.mediaError("panel", (error && (error.number || error.code) || 0) >>> 0);
+        }
+        function close() {
+            if (closed) return stopped;
+            closed = true;
+            clearInterval(timer);
+            document.removeEventListener("visibilitychange", resetSample);
+            window.removeEventListener("blur", resetSample);
+            window.removeEventListener("focus", resetSample);
+            window.removeEventListener("steam-game-foreground", resetSample);
+            stopped = queuePanel(function () {
+                if (opened) return host.closePanel();
+            }).catch(reportError);
+            return stopped;
+        }
+        function fail(error) {
+            if (closed) return;
+            reportError(error);
+            close().then(function () { if (owner === activeSession) events.fallback(); });
+        }
+        function poll() {
+            if (closed) return;
+            try {
+                if (!events.running()) { close(); events.exited(); return; }
+                var stats = host.panelStatus(), now = performance.now();
+                var error = /^error=([0-9]+)\r?$/m.exec(stats);
+                if (error && +error[1]) { fail({code: Number(error[1])}); return; }
+                if (events.mediaProgress && now >= nextReport) {
+                    nextReport = now + 5000;
+                    events.mediaProgress(stats);
+                }
+                var count = /^presented=([0-9]+)\r?$/m.exec(stats);
+                if (covered || document.hidden || screen.hidden || (events.foreground && !events.foreground()) ||
+                    !/^visible=1\r?$/m.test(stats) || !count || +count[1] === 0) {
+                    resetSample();
+                    if (!shown && !covered && now - started > 30000) fail();
+                    return;
+                }
+                var swaps = +count[1];
+                if (!shown) { shown = true; events.presented(stats); }
+                if (!sampleStart) sampleStart = {time: now, swaps: swaps};
+                var elapsed = Math.round((now - sampleStart.time) * 1000);
+                if (events.measured && elapsed >= 30000000) {
+                    var unique = swaps - sampleStart.swaps;
+                    sampleStart = {time: now, swaps: swaps};
+                    events.measured(unique, elapsed, stats + "\r\nsample_window=" + (++sampleWindow) +
+                        "\r\nsample_us=" + elapsed + "\r\nsample_frames=" + unique + "\r\n");
+                }
+            } catch (error) { fail(error); }
+        }
+        queuePanel(function () {
+            if (!closed) return Promise.resolve(host.openPanel(path, nativePad !== false)).then(function () {
+                opened = true;
+            });
+        }).then(function () {
+            if (closed) return;
+            document.addEventListener("visibilitychange", resetSample);
+            window.addEventListener("blur", resetSample);
+            window.addEventListener("focus", resetSample);
+            window.addEventListener("steam-game-foreground", resetSample);
+            timer = setInterval(poll, 100);
+            if (window.steamBigPictureHost.samplePresenter) {
+                window.steamBigPictureHost.samplePresenter("presenter_created");
+                window.steamBigPictureHost.samplePresenter("presenter_foreground");
+            }
+        }).catch(fail);
+        return {primary: true, close: close, cover: function () {
+            if (closed || covered) return;
+            covered = true;
+            resetSample();
+            queuePanel(function () { if (!closed) return host.setPanelVisible(false); }).catch(fail);
+        }, resume: function (fromView) {
+            if (closed || owner !== activeSession) return Promise.resolve(false);
+            return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)
+                .then(function () {
+                    if (closed || owner !== activeSession) return false;
+                    return queuePanel(function () {
+                        if (!closed) return host.setPanelVisible(true);
+                    }).then(function () {
+                        if (closed) return false;
+                        covered = false;
+                        resetSample();
+                        return true;
+                    });
+                }).catch(function (error) { fail(error); return false; });
+        }};
+    }
 
     function openMedia(host, path, events, nativePad, screen, mainId) {
         var video = document.createElement("video");
@@ -194,8 +296,11 @@
 
         var manager = Windows.UI.ViewManagement, switcher = manager.ApplicationViewSwitcher;
         var mainId = manager.ApplicationView.getForCurrentView().id;
-        if (primaryScreen && typeof host.openMedia === "function") {
+        if (primaryScreen && (typeof host.openPanel === "function" || typeof host.openMedia === "function")) {
             var mediaPath = Windows.Storage.ApplicationData.current.localFolder.path + "\\" + mailbox[1];
+            if (typeof host.openPanel === "function" &&
+                document.documentElement.getAttribute("data-steam-primary-xaml") === "true")
+                return openPanel(host, mediaPath, events, nativePad, primaryScreen, mainId);
             return openMedia(host, mediaPath, events, nativePad, primaryScreen, mainId);
         }
         var id = 0, timer, closed = false, switching = false, pendingShow, restored;
