@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <winrt/Windows.Data.Json.h>
 #include "display-layout.h"
@@ -33,6 +34,7 @@ class Browser : public std::enable_shared_from_this<Browser> {
     unsigned id;
     CoreWebView2 owner;
     std::shared_ptr<steam_document::Owner> document;
+    std::function<void(bool, int, bool)> reportNavigation;
     ContainerVisual parent, surface;
     CoreWebView2CompositionController controller{nullptr};
     Windows::Foundation::Rect bounds{};
@@ -105,7 +107,8 @@ class Browser : public std::enable_shared_from_this<Browser> {
     }
 public:
     Browser(unsigned clientId, CoreWebView2 const& host, std::shared_ptr<steam_document::Owner> doc,
-            ContainerVisual const& root) : id(clientId), owner(host), document(std::move(doc)), parent(root),
+            ContainerVisual const& root, std::function<void(bool, int, bool)> report) : id(clientId), owner(host),
+            document(std::move(doc)), reportNavigation(std::move(report)), parent(root),
             surface(root.Compositor().CreateContainerVisual()) { parent.Children().InsertAtTop(surface); }
     void layout(steam_display::Placement value, double scale, bool visible) {
         placement = value; dpi = scale; shell = visible; apply();
@@ -150,6 +153,7 @@ public:
                 auto s = weak.lock();
                 if (!s || s->stopped || (e.Uri() != L"about:blank" && !allowed(e.Uri()))) { e.Cancel(true); return; }
                 s->navigationId = e.NavigationId(); s->navigating = e.Uri();
+                if (allowed(e.Uri())) s->reportNavigation(false, 0, false);
                 JsonObject data; data.SetNamedValue(L"url",JsonValue::CreateStringValue(e.Uri())); s->emit(L"start",data);
             });
             page.NavigationCompleted([weak](auto const& sender, auto const& e) {
@@ -158,8 +162,11 @@ public:
                 JsonObject data;
                 data.SetNamedValue(L"url",JsonValue::CreateStringValue(s->navigating));
                 auto http = e.HttpStatusCode();
-                data.SetNamedValue(L"success",JsonValue::CreateBooleanValue(e.IsSuccess() && http < 400));
-                data.SetNamedValue(L"code",JsonValue::CreateNumberValue(http >= 400 ? http : static_cast<int>(e.WebErrorStatus())));
+                const bool blank = s->navigating == L"about:blank";
+                const bool ok = e.IsSuccess() && (blank || (allowed(sender.Source()) && http >= 200 && http < 300));
+                data.SetNamedValue(L"success",JsonValue::CreateBooleanValue(ok));
+                data.SetNamedValue(L"code",JsonValue::CreateNumberValue(http > 0 ? http : static_cast<int>(e.WebErrorStatus())));
+                if (!blank) s->reportNavigation(true, http, ok);
                 s->emit(L"complete",data);
                 if (!s->booted && s->navigating == L"about:blank" && e.IsSuccess()) {
                     s->booted = true;

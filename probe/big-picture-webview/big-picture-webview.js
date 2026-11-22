@@ -24,7 +24,7 @@
         var primaryXaml = !!(window.document &&
             window.document.documentElement.getAttribute("data-steam-primary-xaml") === "true");
         var run = Windows.Foundation.GuidHelper.createNewGuid();
-        var network, networkDiagnostic = "";
+        var network, networkDiagnostic = "", storeNavigation = "";
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
         var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
@@ -72,6 +72,7 @@
                 (memoryRequest ? "shell_memory_request=" + memoryRequest + "\r\n" : "") +
                 (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
                 (networkDiagnostic ? "xbox_network=" + networkDiagnostic + "\r\n" : "") +
+                (storeNavigation ? "public_store_navigation=" + storeNavigation + "\r\n" : "") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
@@ -225,6 +226,14 @@
             var request;
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
+            if (request.method === "store-navigation") {
+                if (typeof request.complete !== "boolean" || typeof request.success !== "boolean" ||
+                    !Number.isInteger(request.http) || request.http < 0 || request.http > 599) return;
+                storeNavigation = request.complete ? (request.success ? "loaded" : "failed") +
+                    " http=" + request.http : "pending";
+                record(last, true);
+                return;
+            }
             if (request.method === "capture-library-result" || request.method === "capture-surface-result") {
                 var kind = request.method === "capture-library-result" ? "library" : "surface";
                 if (captures[kind] !== "requested") return;

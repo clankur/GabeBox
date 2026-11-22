@@ -165,7 +165,17 @@ struct View : implements<View, IFrameworkView> {
             auto action = message.GetNamedString(L"action");
             if (action == L"create") {
                 if (store) return;
-                store = std::make_shared<steam_store::Browser>(id, web, document, root);
+                auto report = [](bool complete, int http, bool success) {
+                    Windows::Data::Json::JsonObject event;
+                    using Windows::Data::Json::JsonValue;
+                    event.SetNamedValue(L"method", JsonValue::CreateStringValue(L"store-navigation"));
+                    event.SetNamedValue(L"complete", JsonValue::CreateBooleanValue(complete));
+                    event.SetNamedValue(L"http", JsonValue::CreateNumberValue(http));
+                    event.SetNamedValue(L"success", JsonValue::CreateBooleanValue(success));
+                    slim_lock_guard lock(gate);
+                    if (requests.size() < maxPending) requests.push_back(event.Stringify());
+                };
+                store = std::make_shared<steam_store::Browser>(id, web, document, root, report);
                 layoutStore();
                 store->start(environment, window);
             } else if (store && store->identifier() == id) {
@@ -852,7 +862,8 @@ struct View : implements<View, IFrameworkView> {
                 if (!Windows::Data::Json::JsonObject::TryParse(message, parsed)) return;
                 const auto method = parsed.GetNamedString(L"method", L"");
                 if (method == L"store-browser") { storeCommand(parsed); return; }
-                if (method == L"capture-library-result" || method == L"capture-surface-result" || method == L"surface-sizing") return;
+                if (method == L"capture-library-result" || method == L"capture-surface-result" ||
+                    method == L"surface-sizing" || method == L"store-navigation") return;
                 message = parsed.Stringify(); // WWA receives exactly the object validated above.
                 slim_lock_guard lock(gate);
                 if (requests.size() < maxPending) requests.push_back(message);
