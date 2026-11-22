@@ -27,7 +27,8 @@ struct FhdFrameTrace {
         file=CreateFile2(path,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,CREATE_ALWAYS,nullptr);
         if(file==INVALID_HANDLE_VALUE)return;
         LARGE_INTEGER start;FILETIME utc;QueryPerformanceFrequency(&frequency);QueryPerformanceCounter(&start);GetSystemTimeAsFileTime(&utc);
-        Header h={0x31444846u,1u,(UINT64)frequency.QuadPart,((UINT64)utc.dwHighDateTime<<32)|utc.dwLowDateTime,(UINT64)start.QuadPart};
+        // Version 2 shared-texture records require a verified hardware adapter.
+        Header h={0x31444846u,2u,(UINT64)frequency.QuadPart,((UINT64)utc.dwHighDateTime<<32)|utc.dwLowDateTime,(UINT64)start.QuadPart};
         DWORD written=0;
         if(!WriteFile(file,&h,sizeof(h),&written,nullptr)||written!=sizeof(h)){CloseHandle(file);file=INVALID_HANDLE_VALUE;}
     }
@@ -40,7 +41,9 @@ struct FhdFrameTrace {
     void record(UINT64 counter,UINT64 sequence,UINT presented,bool gpu) {
         if(file==INVALID_HANDLE_VALUE)return;
         rows[count++]={counter,sequence,presented,gpu?2u:1u};
-        if(count==ARRAYSIZE(rows))flush();
+        // Persist the first presentation even if the host exits before a batch fills.
+        if(presented==1 || count==ARRAYSIZE(rows))flush();
     }
+    bool enabled() const { return file != INVALID_HANDLE_VALUE; }
     void close(){flush();if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);file=INVALID_HANDLE_VALUE;}
 };

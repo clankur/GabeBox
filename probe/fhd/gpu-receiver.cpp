@@ -258,7 +258,13 @@ HRESULT HostedGpuReceiver::Connect(ID3D11Device *device, ID3D11DeviceContext *co
     stage_="match-adapter";
     ComPtr<IDXGIDevice> dxgi; hr=device->QueryInterface(IID_PPV_ARGS(&dxgi)); if (FAILED(hr)) return hr;
     ComPtr<IDXGIAdapter> adapter; hr=dxgi->GetAdapter(&adapter); if (FAILED(hr)) return hr;
-    DXGI_ADAPTER_DESC desc{}; hr=adapter->GetDesc(&desc); if (FAILED(hr)) return hr;
+    ComPtr<IDXGIAdapter1> adapterInfo;
+    hr=adapter->QueryInterface(IID_PPV_ARGS(&adapterInfo)); if (FAILED(hr)) return hr;
+    DXGI_ADAPTER_DESC1 desc{}; hr=adapterInfo->GetDesc1(&desc); if (FAILED(hr)) return hr;
+    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+        stage_="software-adapter";
+        return DXGI_ERROR_UNSUPPORTED;
+    }
     if (std::memcmp(&desc.AdapterLuid,&luid,sizeof(luid))) return DXGI_ERROR_UNSUPPORTED;
     stage_="d3d12-shared-handle-lookup";
     ComPtr<ID3D12Device> lookup;

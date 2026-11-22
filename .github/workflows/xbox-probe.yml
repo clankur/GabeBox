@@ -168,6 +168,31 @@ jobs:
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
             }
+            foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'xinput') },
+                                    @{ Module = 'desktop'; Name = 'XboxWin32Desktop'; Sources = @('desktop') },
+                                    @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
+                                    @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
+                                    @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
+              $objects = foreach ($source in $adapter.Sources) {
+                $object = "$work/win32-$source.obj"
+                & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
+                  -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "probe/win32-runtime/$source.c" -o $object
+                $object
+              }
+              & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+                "/def:probe/win32-runtime/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects $lib
+            }
+            $dxgiObjects = foreach ($source in @('dxgi', 'dxgi-frame')) {
+              $object = "$work/win32-$source.obj"
+              & "$llvm\clang++.exe" --target=x86_64-pc-windows-msvc -std=c++20 -O2 -ffreestanding `
+                -fno-rtti -fno-exceptions -Wall -Wextra -Werror -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 `
+                -c "probe/win32-runtime/$source.cpp" -o $object
+              $object
+            }
+            & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+              /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+              /def:probe/win32-runtime/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
             Copy-Item probe/signin/* $steamLayout
             $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
             Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive

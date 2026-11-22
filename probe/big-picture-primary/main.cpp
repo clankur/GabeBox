@@ -79,6 +79,14 @@ void configureXboxInput(Window const& window, WebView const& account) {
     update(core);
 }
 
+void configureXboxBackNavigation() {
+    if (Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() != L"Windows.Xbox") return;
+    // Steam and the running game already receive B from the gamepad reader.
+    // Consume the duplicate system request for the lifetime of this view.
+    Windows::UI::Core::SystemNavigationManager::GetForCurrentView().BackRequested(
+        [](auto const&, Windows::UI::Core::BackRequestedEventArgs const& request) { request.Handled(true); });
+}
+
 struct SteamApplication : ApplicationT<SteamApplication>
 {
     SteamApplication()
@@ -98,6 +106,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
             if (!window.Content()) {
                 Grid root;
                 window.Content(root);
+                configureXboxBackNavigation();
                 window.Activate();
                 checkpoint("xaml-window-active");
                 WebView account{WebViewExecutionMode::SameThread};

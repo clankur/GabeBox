@@ -5,6 +5,7 @@
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Gaming.Input.h>
 #include <winrt/Windows.Security.Cryptography.Core.h>
 #include <winrt/Windows.Security.Cryptography.DataProtection.h>
 #include <winrt/Windows.Security.Cryptography.h>
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -30,8 +32,10 @@
 
 #include "child-process.h"
 #include "pipe-protocol.h"
+#include "SteamChildExitTrace.h"
 #include "SteamSdlSurface.h"
 #include "SteamCloudRestore.h"
+#include "steam-launch-detail.h"
 #include "steam-session-cache-policy.h"
 
 static std::wstring Hex(DWORD value) {
@@ -1017,6 +1021,40 @@ static bool IsLocalSteamInstall(std::wstring const& directory, std::wstring cons
         directory.find(L"\\..\\") == std::wstring::npos && !directory.ends_with(L"\\..");
 }
 
+static std::vector<wchar_t> SteamChildEnvironment(std::span<const std::pair<std::wstring, std::wstring>> replacements) {
+    auto inherited = GetEnvironmentStringsW();
+    if (!inherited) return {};
+    struct ReleaseEnvironment {
+        wchar_t *block;
+        ~ReleaseEnvironment() { FreeEnvironmentStringsW(block); }
+    } release{inherited};
+    std::vector<std::wstring> variables;
+    for (auto variable = inherited; *variable;) {
+        std::wstring_view entry(variable);
+        variable += entry.size() + 1;
+        auto separator = entry.find(L'=', 1);
+        if (separator == entry.npos) continue;
+        if (std::any_of(std::begin(replacements), std::end(replacements), [&](auto const& replacement) {
+                return CompareStringOrdinal(entry.data(), static_cast<int>(separator), replacement.first.c_str(),
+                    static_cast<int>(replacement.first.size()), TRUE) == CSTR_EQUAL;
+            })) continue;
+        variables.emplace_back(entry);
+    }
+    for (auto const& [name, value] : replacements) {
+        if (!value.empty()) variables.emplace_back(name + L"=" + value);
+    }
+    std::sort(variables.begin(), variables.end(), [](std::wstring const& a, std::wstring const& b) {
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
+    std::vector<wchar_t> block;
+    for (auto const& variable : variables) {
+        block.insert(block.end(), variable.begin(), variable.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SdlFileDigest(
         winrt::Windows::Storage::StorageFile file) {
     using namespace winrt::Windows::Security::Cryptography;
@@ -1256,7 +1294,7 @@ static winrt::hstring ReadSteamDownload() {
 }
 
 static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManifest(
-        winrt::Windows::Storage::StorageFolder library, std::uint32_t app) {
+        winrt::Windows::Storage::StorageFolder library, std::uint32_t app, std::wstring expectedBuild = {}) {
     using namespace winrt::Windows::Storage;
     auto appsItem = co_await library.TryGetItemAsync(L"steamapps");
     auto appsFolder = appsItem.try_as<StorageFolder>();
@@ -1270,7 +1308,13 @@ static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManife
     auto field = view.find(key);
     if (field == view.npos) co_return false;
     auto value = view.find_first_not_of(L" \t", field + key.size());
-    co_return value != view.npos && view.substr(value, 3) == L"\"4\"";
+    if (value == view.npos || view.substr(value, 3) != L"\"4\"") co_return false;
+    if (expectedBuild.empty()) co_return true;
+    constexpr std::wstring_view buildKey = L"\"buildid\"";
+    field = view.find(buildKey);
+    if (field == view.npos) co_return false;
+    value = view.find_first_not_of(L" \t", field + buildKey.size());
+    co_return value != view.npos && view.substr(value, expectedBuild.size() + 2) == L"\"" + expectedBuild + L"\"";
 }
 
 // Observe the Java process we actually launched. The SDL surface can take
@@ -1575,9 +1619,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const bool hostedSdl = backend == GameBackend::SdlHost;
     const bool hostedStardew = hostedSdl && app == stardewValleyAppId;
     const bool hostedSlay = hostedSdl && app == slayTheSpireAppId;
-    if (hostedSdl && app != dwarfFortressAppId && !hostedStardew && !hostedSlay) {
-        co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
-    }
+    const bool hostedSurfaceless = hostedSdl && app != dwarfFortressAppId && !hostedStardew && !hostedSlay;
     if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"steam_launch=busy\r\n");
     struct ResetLaunch {
         ~ResetLaunch() { steamLaunchActive.clear(); }
@@ -1619,14 +1661,126 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool sdlLateFrame = false;
     std::wstring sdlPreferencesPath;
     std::wstring diagnosticRenderer;
+    std::wstring surfacelessBuild;
+    std::wstring shadowBuild;
+    std::wstring shadowExecutable;
+    std::wstring shadowRenderer;
+    std::wstring shadowRuntime;
+    std::wstring shadowImage;
+    std::wstring shadowSource;
+    std::wstring shadowArguments;
+    bool shadowTrace = false;
+    bool shadowLocalCrashReports = false;
+    bool shadowDxgi = false;
+    bool shadowWorkingDirectory = false;
+    bool shadowOriginalExecutable = false;
+    StorageFile shadowRecipe{nullptr};
+    StorageFile shadowFiles{nullptr};
     if (backend != GameBackend::DosBox) {
         auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
-        if (hostedSdl && !co_await packageFolder.TryGetItemAsync(winrt::hstring(
+        if (!hostedSdl || hostedSurfaceless) {
+            auto trial = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-win32-shadow-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+            if (trial) {
+                std::wstring trace;
+                std::wistringstream config{std::wstring(co_await FileIO::ReadTextAsync(trial))};
+                std::getline(config, shadowBuild);
+                std::getline(config, shadowExecutable);
+                std::getline(config, shadowRenderer);
+                std::getline(config, shadowRuntime);
+                std::getline(config, shadowImage);
+                std::getline(config, shadowSource);
+                std::getline(config, trace);
+                if (shadowBuild.ends_with(L'\r')) shadowBuild.pop_back();
+                if (shadowExecutable.ends_with(L'\r')) shadowExecutable.pop_back();
+                if (shadowRenderer.ends_with(L'\r')) shadowRenderer.pop_back();
+                if (shadowRuntime.ends_with(L'\r')) shadowRuntime.pop_back();
+                if (shadowImage.ends_with(L'\r')) shadowImage.pop_back();
+                if (shadowSource.ends_with(L'\r')) shadowSource.pop_back();
+                if (trace.ends_with(L'\r')) trace.pop_back();
+                shadowTrace = trace == L"loader-trace";
+                shadowRecipe = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-shadow-" + std::to_wstring(app) + L".xwp"))).try_as<StorageFile>();
+                auto arguments = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-arguments-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                if (arguments) {
+                    if (!shadowRecipe || (co_await arguments.GetBasicPropertiesAsync()).Size() > 2050)
+                        co_return winrt::hstring(L"steam_launch=invalid-shadow-arguments\r\n");
+                    shadowArguments = co_await FileIO::ReadTextAsync(arguments);
+                    while (shadowArguments.ends_with(L'\r') || shadowArguments.ends_with(L'\n')) shadowArguments.pop_back();
+                    if (shadowArguments.empty() || shadowArguments.size() > 2048 ||
+                            std::any_of(shadowArguments.begin(), shadowArguments.end(),
+                                [](wchar_t c) { return c < L' ' || c > L'~'; })) {
+                        co_return winrt::hstring(L"steam_launch=invalid-shadow-arguments\r\n");
+                    }
+                }
+                shadowFiles = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-files-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                shadowLocalCrashReports = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-crash-report-" + std::to_wstring(app) + L".txt")));
+                shadowDxgi = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-dxgi-" + std::to_wstring(app) + L".txt")));
+                shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
+                shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-original-executable-" + std::to_wstring(app) + L".txt")));
+                if (!shadowRecipe && shadowRuntime.empty()) shadowRuntime = L"godot";
+                if (shadowBuild.empty() || shadowBuild.size() > 20 ||
+                        shadowBuild.find_first_not_of(L"0123456789") != std::wstring::npos ||
+                        !steam_win32_stage::IsImageName(shadowExecutable, L".exe") ||
+                        (!shadowRuntime.empty() && shadowRuntime != L"godot") ||
+                        (shadowRuntime.empty() && !shadowRenderer.empty()) ||
+                        ((shadowFiles || !shadowImage.empty() || !shadowSource.empty()) && !shadowRecipe) ||
+                        (!trace.empty() && (!shadowTrace || !shadowRecipe)) ||
+                        (shadowLocalCrashReports && (!shadowRecipe ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32CrashReport.dll"))) ||
+                        (shadowDxgi && (!shadowRecipe || !shadowRuntime.empty() || !shadowRenderer.empty() ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
+                        ((shadowWorkingDirectory || shadowOriginalExecutable) && (!shadowRecipe ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
+                        (!shadowImage.empty() && !steam_win32_stage::IsImageName(shadowImage, L".dll") &&
+                            !steam_win32_stage::IsImageName(shadowImage, L".exe")) ||
+                        shadowSource.size() > 260 ||
+                        (!shadowRenderer.empty() && shadowRenderer != L"d3d12" && shadowRenderer != L"opengl3") ||
+                        !co_await HasCompletedSteamManifest(folder, app, shadowBuild)) {
+                    co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                }
+            }
+        }
+        if (hostedSdl && !hostedSurfaceless && !co_await packageFolder.TryGetItemAsync(winrt::hstring(
                 L"steam-sdl-host-" + std::to_wstring(app) + L".txt"))) {
             co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
         }
+        if (hostedSurfaceless) {
+            auto profile = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                L"steam-sdl-surfaceless-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+            if (!profile) co_return winrt::hstring(L"steam_launch=unsupported-runtime\r\n");
+            surfacelessBuild = (co_await FileIO::ReadTextAsync(profile)).c_str();
+            const auto end = surfacelessBuild.find_last_not_of(L"\r\n");
+            surfacelessBuild.resize(end == std::wstring::npos ? 0 : end + 1);
+            if (surfacelessBuild.empty() || surfacelessBuild.size() > 20 ||
+                    surfacelessBuild.find_first_not_of(L"0123456789") != std::wstring::npos) {
+                co_return winrt::hstring(L"steam_sdl_host=profile-error\r\n");
+            }
+            if (!shadowDxgi) {
+                for (auto name : {L"SDL2.dll", L"opengl32.dll", L"libEGL.dll", L"dxil.dll"}) {
+                    if (!co_await packageFolder.TryGetItemAsync(name))
+                        co_return winrt::hstring(L"steam_sdl_host=profile-error\r\n");
+                }
+            }
+            if (!co_await HasCompletedSteamManifest(folder, app, surfacelessBuild))
+                co_return winrt::hstring(L"steam_sdl_host=profile-build-mismatch\r\n");
+            if (!shadowBuild.empty() && (surfacelessBuild != shadowBuild || !shadowRecipe ||
+                    (!shadowDxgi && shadowRenderer != L"opengl3") ||
+                    !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) {
+                co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+            }
+            report += (shadowDxgi ? L"steam_sdl_host_profile=d3d11\r\n" : L"steam_sdl_host_profile=surfaceless\r\n") +
+                std::wstring(L"steam_sdl_host_build=") + surfacelessBuild + L"\r\n";
+        }
         if (hostedSdl) {
             nativeSdlView = static_cast<bool>(co_await packageFolder.TryGetItemAsync(L"Fhd.Native.winmd"));
+            if (shadowDxgi && !nativeSdlView) co_return winrt::hstring(L"steam_sdl_host=profile-error\r\n");
         }
         snapshotRequested = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
             L"steam-startup-snapshot-" + std::to_wstring(app) + L".txt")));
@@ -1755,6 +1909,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const std::wstring libraryRoot(path);
     const std::wstring dataRoot(root.Path());
     const std::wstring packageRoot(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
+    std::wstring gameDirectory;
     bool waitForSharedInstall = false;
     co_await checkpoint(L"checking-prerequisites");
     {
@@ -1768,8 +1923,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 methods[82] != base + 0x781040) {
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
-        auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-        if (!IsLocalSteamInstall(directory, std::wstring(path))) {
+        gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
             co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
         }
 
@@ -1842,7 +1997,6 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     }
 
     FILETIME launchTime{};
-    std::wstring gameDirectory;
     bool traceStardew = false;
     bool diagnoseManagedStardew = false;
     if (app == 413150) {
@@ -1871,6 +2025,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     } traceFile{L"COREHOST_TRACEFILE"}, traceEnabled{L"COREHOST_TRACE"},
       rendererHint{L"SDL_RENDER_DRIVER"}, videoHint{L"SDL_VIDEODRIVER"}, sdlTrace{L"XBOX_SDL_TRACE_FILE"},
+      sdlGlDriver{L"SDL_VIDEO_GL_DRIVER"}, sdlEglDriver{L"SDL_VIDEO_EGL_DRIVER"},
+      sdlCompiler{L"SDL_VIDEO_WIN_D3DCOMPILER"}, sdlSurfaceless{L"XBOX_SDL_SURFACELESS"},
       gameDirectoryHint{L"XBOX_SDL_WORKING_DIRECTORY"}, preferencesHint{L"XBOX_SDL_PREFERENCES_ROOT"},
       frameDelayHint{L"XBOX_SDL_SOFTWARE_FRAME_DELAY_MS"}, sdlHostHint{L"XBOX_SDL_HOST_MAILBOX"},
       sdlGamepadHint{L"XBOX_SDL_HOST_GAMEPAD"},
@@ -1878,10 +2034,58 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
       managedHook{L"DOTNET_STARTUP_HOOKS"}, managedLog{L"XBOX_STEAM_MANAGED_LOG"}, managedHeap{L"DOTNET_GCHeapHardLimit"};
     std::shared_ptr<SteamSdlSurface> pendingSdlSurface;
     winrt::handle slayProcess;
+    winrt::handle shadowProcess;
+    steam_win32_stage::StageFolder shadowStage;
+    std::wstring shadowRoaming;
+    std::wstring shadowCache;
+    std::wstring shadowOriginalExecutablePath;
+    std::uint64_t shadowOwner = 0;
     std::wstring slayTempDirectory;
     if (hostedSlay) {
         auto temp = co_await root.CreateFolderAsync(L"slay-native-temp", CreationCollisionOption::OpenIfExists);
         slayTempDirectory = temp.Path().c_str();
+    }
+    if (!shadowBuild.empty()) {
+        {
+            std::lock_guard lock(steamSessionMutex);
+            auto session = liveSteamSession;
+            if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
+            shadowOwner = session->accountId;
+        }
+        auto profiles = co_await root.CreateFolderAsync(L"SteamWin32TrialProfiles", CreationCollisionOption::OpenIfExists);
+        auto account = co_await profiles.CreateFolderAsync(winrt::to_hstring(shadowOwner), CreationCollisionOption::OpenIfExists);
+        auto profile = co_await account.CreateFolderAsync(winrt::to_hstring(app), CreationCollisionOption::OpenIfExists);
+        auto roaming = co_await profile.CreateFolderAsync(L"Roaming", CreationCollisionOption::OpenIfExists);
+        auto cache = co_await profile.CreateFolderAsync(L"Local", CreationCollisionOption::OpenIfExists);
+        shadowRoaming = roaming.Path().c_str();
+        shadowCache = cache.Path().c_str();
+    }
+    if (shadowRecipe) {
+        co_await checkpoint(L"staging-compatibility");
+        try {
+            auto relative = gameDirectory.substr(libraryRoot.size() + 1);
+            std::replace(relative.begin(), relative.end(), L'\\', L'/');
+            if (!shadowSource.empty()) relative += L'/' + shadowSource;
+            auto source = co_await steam_win32_stage::OpenInstall(folder, std::move(relative));
+            auto original = co_await source.GetFileAsync(shadowImage.empty() ? shadowExecutable : shadowImage);
+            if (shadowOriginalExecutable) {
+                auto executable = co_await source.GetFileAsync(shadowExecutable);
+                shadowOriginalExecutablePath = executable.Path().c_str();
+            }
+            auto temporary = ApplicationData::Current().TemporaryFolder();
+            shadowStage.folder = co_await temporary.CreateFolderAsync(L"SteamWin32Trial", CreationCollisionOption::GenerateUniqueName);
+            co_await steam_win32_stage::ApplyRecipe(shadowRecipe, original, shadowStage.folder);
+            if (shadowFiles) {
+                auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+                co_await steam_win32_stage::CopyCompanions(source, shadowStage.folder, shadowFiles, package,
+                    L"steam-win32-shadow-" + std::to_wstring(app));
+            }
+            co_await shadowStage.folder.GetFileAsync(shadowExecutable);
+            report += L"steam_shadow_stage=verified-local-copy\r\n";
+        } catch (winrt::hresult_error const& error) {
+            co_return winrt::hstring(report + L"steam_launch=shadow-stage-error\r\nsteam_shadow_stage_hresult=" +
+                Hex(error.code()) + L"\r\n");
+        }
     }
     if (snapshotRequested) {
         co_await winrt::resume_background();
@@ -1891,7 +2095,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     }
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
-    if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay) && !co_await HasCompletedSteamManifest(folder, app)) {
+    if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay || hostedSurfaceless || !shadowBuild.empty()) &&
+            !co_await HasCompletedSteamManifest(folder, app, shadowBuild.empty() ? surfacelessBuild : shadowBuild)) {
         co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
     if (hostedSdl && app == dwarfFortressAppId) {
@@ -1907,6 +2112,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
         if (!session || !session->OwnsSession()) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
+        if (shadowOwner && shadowOwner != session->accountId) co_return winrt::hstring(report + L"steam_launch=session-lost\r\n");
         if (session->downloadApp || session->launchCall) co_return winrt::hstring(report + L"steam_launch=busy\r\n");
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
         auto methods = FindSteamAppManager(*session);
@@ -1924,7 +2130,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
                 std::to_wstring(state) + L"\r\n");
         }
-        gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        const auto currentDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+        if (shadowStage.folder && CompareStringOrdinal(gameDirectory.c_str(), -1, currentDirectory.c_str(), -1, TRUE) != CSTR_EQUAL)
+            co_return winrt::hstring(report + L"steam_launch=shadow-install-changed\r\n");
+        gameDirectory = currentDirectory;
         if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
@@ -1990,7 +2199,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             const auto id = std::to_wstring((static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
                 launchTime.dwLowDateTime);
             const auto file = dataRoot + L"\\sdl-startup-" + id + L".txt";
-            if (sdlTrace.Set(file.c_str())) report += L"steam_launch_sdl_run=" + id + L"\r\n";
+            if (sdlTrace.Set(file.c_str())) {
+                report += L"steam_launch_sdl_run=" + id + L"\r\n";
+            }
         }
         if (!diagnosticRenderer.empty()) {
             const auto applied = rendererHint.Set(diagnosticRenderer.c_str());
@@ -2010,15 +2221,32 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (sdlLateFrame && frameDelayHint.Set(L"12000")) {
             report += L"steam_launch_sdl_frame_delay_ms=12000\r\n";
         }
+        if (hostedSurfaceless && !shadowDxgi && (!videoHint.Set(L"offscreen") ||
+                !sdlGlDriver.Set((packageRoot + L"\\opengl32.dll").c_str()) ||
+                !sdlEglDriver.Set((packageRoot + L"\\libEGL.dll").c_str()) ||
+                !sdlCompiler.Set(L"none") || !sdlSurfaceless.Set(L"1"))) {
+            co_return winrt::hstring(report + L"steam_sdl_host=display-environment-error\r\n");
+        }
         if (hostedSdl) {
+            const bool hostedGamepad = hostedStardew || hostedSlay || hostedSurfaceless;
             const auto mailbox = dataRoot + L"\\sdl-host-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                 std::to_wstring(GetTickCount64()) + L".bin";
             try {
                 pendingSdlSurface = std::make_shared<SteamSdlSurface>();
-                pendingSdlSurface->Open(mailbox);
+                pendingSdlSurface->Open(mailbox, shadowDxgi);
             } catch (winrt::hresult_error const& error) {
                 co_return winrt::hstring(report + L"steam_sdl_host=mailbox-error\r\nsteam_sdl_host_hresult=" +
                     Hex(error.code()) + L"\r\n");
+            }
+            if (hostedGamepad) {
+                try {
+                    if (winrt::Windows::Gaming::Input::Gamepad::Gamepads().Size()) {
+                        pendingSdlSurface->PrimeGamepadConnection();
+                        report += L"steam_host_gamepad_at_launch=connected\r\n";
+                    } else report += L"steam_host_gamepad_at_launch=absent\r\n";
+                } catch (winrt::hresult_error const&) {
+                    report += L"steam_host_gamepad_at_launch=unavailable\r\n";
+                }
             }
             if (nativeSdlView) {
                 if (!renderWidth.Set(L"1920") || !renderHeight.Set(L"1080")) {
@@ -2027,7 +2255,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 const auto separator = mailbox.find_last_of(L"\\");
                 report += L"steam_sdl_mailbox=" + mailbox.substr(separator + 1) + L"\r\n";
             }
-            if (!sdlHostHint.Set(mailbox.c_str()) || ((hostedStardew || hostedSlay) && !sdlGamepadHint.Set(L"1"))) {
+            if (!sdlHostHint.Set(mailbox.c_str()) || (hostedGamepad && !sdlGamepadHint.Set(L"1"))) {
                 co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
             }
         }
@@ -2056,6 +2284,51 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             ObserveSlayChild(slayProcess.get(), dataRoot,
                 (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) | launchTime.dwLowDateTime);
             report += L"steam_slay_console_run=" + id + L"\r\n";
+        } else if (!shadowExecutable.empty()) {
+            const auto trialRoot = shadowStage.folder ? std::wstring(shadowStage.folder.Path()) :
+                packageRoot + L"\\Win32Trial\\" + std::to_wstring(app);
+            const auto image = trialRoot + L"\\" + shadowExecutable;
+            const bool godot = shadowRuntime == L"godot";
+            const bool headless = godot && shadowRenderer.empty();
+            const auto mode = headless ? std::wstring(L"headless") : shadowRenderer;
+            auto command = L"\"" + image + L"\"";
+            if (godot) {
+                const auto pack = gameDirectory + L"\\" + shadowExecutable.substr(0, shadowExecutable.size() - 4) + L".pck";
+                const auto log = dataRoot + L"\\steam-win32-shadow-" + std::to_wstring(app) + L"-" + mode + L".log";
+                command += headless ? L" --headless --quit-after 2" : L" --rendering-driver " + shadowRenderer;
+                if (!headless && !hostedSurfaceless) command += L" --quit-after 180";
+                command += L" --main-pack \"" + pack + L"\" --log-file \"" + log + L"\"";
+            }
+            if (!shadowArguments.empty()) command += L" " + shadowArguments;
+            const auto trace = shadowTrace ? trialRoot + L"\\loader-trace.txt" : std::wstring{};
+            const auto crashReport = shadowLocalCrashReports ? shadowRoaming + L"\\xbox-crash-receipts.bin" : std::wstring{};
+            const auto appId = std::to_wstring(app);
+            const std::pair<std::wstring, std::wstring> variables[] = {
+                {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
+                {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
+                {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
+                {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
+                {L"XBOX_WIN32_ORIGINAL_EXECUTABLE", shadowOriginalExecutablePath},
+            };
+            auto environment = SteamChildEnvironment(variables);
+            if (environment.empty()) {
+                co_return winrt::hstring(report + L"steam_launch=shadow-environment-error\r\n");
+            }
+            STARTUPINFOW startup{};
+            startup.cb = sizeof(startup);
+            PROCESS_INFORMATION child{};
+            const DWORD flags = CREATE_UNICODE_ENVIRONMENT | (headless ? CREATE_NO_WINDOW : 0);
+            if (!CreateProcessW(image.c_str(), command.data(), nullptr, nullptr, FALSE, flags,
+                                environment.data(), gameDirectory.c_str(), &startup, &child)) {
+                co_return winrt::hstring(report + L"steam_launch=shadow-create-error\r\nsteam_shadow_win32=" +
+                    Hex(GetLastError()) + L"\r\n");
+            }
+            shadowProcess.attach(child.hProcess);
+            CloseHandle(child.hThread);
+            report += L"steam_shadow_build=" + shadowBuild + L"\r\nsteam_shadow_renderer=" + (mode.empty() ? L"default" : mode) +
+                L"\r\nsteam_shadow_child=created\r\n";
+            if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
+            if (shadowLocalCrashReports) report += L"steam_shadow_crash_reporting=local\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
             if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");
@@ -2063,12 +2336,40 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
     }
 
-    if (hostedSlay) {
+    if (shadowProcess && !hostedSurfaceless) {
+        co_await checkpoint(L"waiting-for-shadow");
+        co_await winrt::resume_background();
+        const auto state = WaitForSingleObject(shadowProcess.get(), 35000);
+        DWORD exitCode = 0;
+        if (state == WAIT_OBJECT_0 && GetExitCodeProcess(shadowProcess.get(), &exitCode)) {
+            if (shadowTrace) report += (co_await steam_win32_stage::ReadLoaderTrace(shadowStage.folder)).c_str();
+            co_return winrt::hstring(report + L"steam_launch=shadow-process-exited\r\nsteam_shadow_exit=" + Hex(exitCode) + L"\r\n");
+        }
+        if (state == WAIT_TIMEOUT && TerminateProcess(shadowProcess.get(), ERROR_TIMEOUT))
+            WaitForSingleObject(shadowProcess.get(), 2000);
+        co_return winrt::hstring(report + L"steam_launch=shadow-wait-incomplete\r\nsteam_shadow_wait=" + Hex(state) + L"\r\n");
+    }
+
+    if (hostedSlay || shadowProcess) {
+        auto& child = shadowProcess ? shadowProcess : slayProcess;
         co_await checkpoint(L"waiting-for-sdl-host");
         const auto deadline = GetTickCount64() + 35000;
-        while (WaitForSingleObject(slayProcess.get(), 0) == WAIT_TIMEOUT && GetTickCount64() < deadline) {
+        while (WaitForSingleObject(child.get(), 0) == WAIT_TIMEOUT && GetTickCount64() < deadline) {
             if (pendingSdlSurface->HasFrame()) {
-                pendingSdlSurface->Attach(std::move(slayProcess));
+                if (shadowTrace) {
+                    report += (co_await steam_win32_stage::ReadLoaderTrace(shadowStage.folder)).c_str();
+                    const auto launch = (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                        launchTime.dwLowDateTime;
+                    const auto exitReport = L"steam-win32-shadow-" + std::to_wstring(app) + L"-exit-" +
+                        std::to_wstring(launch) + L".txt";
+                    if (steam_child_exit_trace::Start(child.get(), shadowStage.folder, root, exitReport)) {
+                        shadowStage.folder = nullptr;
+                        report += L"steam_shadow_exit_report=" + exitReport + L"\r\n";
+                    } else {
+                        report += L"steam_shadow_exit_observer=unavailable\r\n";
+                    }
+                }
+                pendingSdlSurface->Attach(std::move(child), std::move(shadowStage.folder));
                 std::lock_guard lock(steamSdlMutex);
                 steamSdlSurface = std::move(pendingSdlSurface);
                 co_return winrt::hstring(report + L"steam_sdl_host=ready\r\n");
@@ -2077,12 +2378,17 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_await caller;
         }
         DWORD exitCode = 0;
-        if (GetExitCodeProcess(slayProcess.get(), &exitCode) && exitCode != STILL_ACTIVE) {
+        if (GetExitCodeProcess(child.get(), &exitCode) && exitCode != STILL_ACTIVE) {
+            if (shadowTrace) report += (co_await steam_win32_stage::ReadLoaderTrace(shadowStage.folder)).c_str();
             co_return winrt::hstring(report + L"steam_sdl_host=exited\r\nsteam_launch_process_exit=" + Hex(exitCode) + L"\r\n");
         }
         pendingSdlSurface->Quit();
         co_await winrt::resume_background();
-        if (WaitForSingleObject(slayProcess.get(), 2000) == WAIT_TIMEOUT) TerminateProcess(slayProcess.get(), ERROR_TIMEOUT);
+        if (WaitForSingleObject(child.get(), 2000) == WAIT_TIMEOUT) TerminateProcess(child.get(), ERROR_TIMEOUT);
+        if (shadowTrace) report += (co_await steam_win32_stage::ReadLoaderTrace(shadowStage.folder)).c_str();
+        if (shadowStage.folder) {
+            steam_win32_stage::RemoveStageAfterExit(std::move(shadowStage.folder), std::move(child));
+        }
         co_return winrt::hstring(report + L"steam_sdl_host=timeout\r\n");
     }
 
@@ -2135,6 +2441,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                                 report += L"steam_launch_client_result=" + std::to_wstring(code) + L"\r\n";
                                 if (code == 17) report += L"steam_launch_client_reason=dependency-not-ready\r\n";
                                 if (code == 29) report += L"steam_launch_client_reason=invalid-platform\r\n";
+                                if (code == 46) {
+                                    report += L"steam_launch_client_reason=process-create-failed\r\n";
+                                    constexpr auto detailOffset = sizeof(reportedGame) + sizeof(code);
+                                    const std::string_view detail(
+                                        reinterpret_cast<char const*>(payload.data() + detailOffset), payload.size() - detailOffset);
+                                    if (const auto win32 = SteamProcessCreateError(detail))
+                                        report += L"steam_launch_client_win32_error=" + Hex(*win32) + L"\r\n";
+                                }
                                 accepted = code == 0;
                                 verdict = accepted ? L"start-unconfirmed" : L"client-rejected";
                             }

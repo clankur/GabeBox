@@ -1,0 +1,4 @@
+LIBRARY XboxWin32CrashReport.dll
+EXPORTS
+    ?ReportBug@BasecampBugReporterNative@@YAXPEAUBugReportInfo@sgg@@@Z=XboxReportBug
+    ?WaitReportComplete@BasecampBugReporterNative@@YA_NXZ=XboxWaitReportComplete

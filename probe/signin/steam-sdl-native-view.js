@@ -10,6 +10,13 @@
         return operation;
     }
 
+    function panelCounters(stats) {
+        var counters = {};
+        stats.replace(/^(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=([0-9]{1,16})\r?$/gm,
+            function (_, name, value) { counters[name] = Number(value); });
+        return counters;
+    }
+
     // The native panel is a sibling of the QR WebView and Valve's Steam surface.
     // Count unique successful swaps only during one continuous foreground interval.
     function openPanel(host, path, events, nativePad, screen, mainId) {
@@ -57,13 +64,18 @@
                 }
                 var swaps = +count[1];
                 if (!shown) { shown = true; events.presented(stats); }
-                if (!sampleStart) sampleStart = {time: now, swaps: swaps};
+                if (!sampleStart) sampleStart = {time: now, swaps: swaps, counters: panelCounters(stats)};
                 var elapsed = Math.round((now - sampleStart.time) * 1000);
                 if (events.measured && elapsed >= 30000000) {
                     var unique = swaps - sampleStart.swaps;
-                    sampleStart = {time: now, swaps: swaps};
+                    var counters = panelCounters(stats);
+                    var deltas = Object.keys(counters).map(function (name) {
+                        var delta = counters[name] - sampleStart.counters[name];
+                        return Number.isSafeInteger(delta) && delta >= 0 ? "sample_" + name + "=" + delta + "\r\n" : "";
+                    }).join("");
+                    sampleStart = {time: now, swaps: swaps, counters: counters};
                     events.measured(unique, elapsed, stats + "\r\nsample_window=" + (++sampleWindow) +
-                        "\r\nsample_us=" + elapsed + "\r\nsample_frames=" + unique + "\r\n");
+                        "\r\nsample_us=" + elapsed + "\r\nsample_frames=" + unique + "\r\n" + deltas);
                 }
             } catch (error) { fail(error); }
         }

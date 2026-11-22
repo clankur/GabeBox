@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 builder = runpy.run_path(str(ROOT / "probe" / "prepare-big-picture.py"))
 prepare = builder["prepare_layout"]
 stage = builder["stage_client"]
-release_layout = runpy.run_path(str(ROOT / "probe" / "prepare-big-picture-library.py"))["release_layout"]
+library_builder = runpy.run_path(str(ROOT / "probe" / "prepare-big-picture-library.py"))
+release_layout = library_builder["release_layout"]
 MANIFEST = b"""<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
 <Identity Name="XboxPortabilityProbe.BigPicture" ProcessorArchitecture="x64" Publisher="CN=Xbox Portability Probe"/>
 <Applications><Application Id="App" StartPage="big-picture.html"/></Applications>
@@ -69,6 +71,84 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "ValveClient" / "steam.exe").read_bytes(), b"original")
         with self.assertRaises(FileExistsError):
             prepare(self.template, self.layout, self.cache)
+
+    def test_surfaceless_profile_preserves_existing_presenters_and_pins_steam_build(self):
+        self.layout.mkdir()
+        for dll in ("SDL2.dll", "opengl32.dll", "libEGL.dll", "dxil.dll"):
+            (self.layout / dll).touch()
+        page = self.layout / "steam-signin.html"
+        page.write_text('<script id="steam-sdl-profiles" data-apps="975370 413150 646570" src="steam-sdl-host.js"></script>')
+        stage_profiles = library_builder["stage_surfaceless_profiles"]
+        stage_profiles(self.layout, ["1145360=10929685"])
+        self.assertIn('data-apps="975370 413150 646570 1145360"', page.read_text())
+        self.assertEqual((self.layout / "steam-sdl-surfaceless-1145360.txt").read_text(), "10929685")
+        with self.assertRaisesRegex(ValueError, "cannot replace"):
+            stage_profiles(self.layout, ["413150=123"])
+
+    def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
+        self.layout.mkdir()
+        (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
+        profile = self.work / "profile"
+        profile.mkdir()
+        marker = "steam-win32-shadow-1145360.txt"
+        recipe = "steam-win32-shadow-1145360.xwp"
+        companions = "steam-win32-files-1145360.txt"
+        (profile / marker).write_text("10929685\nHades.exe\n\n\nEngineWin64s.dll\nx64\nloader-trace\n")
+        (profile / recipe).write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        extra = "steam-win32-shadow-1145360-launcher.xwp"
+        (profile / extra).write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / companions).write_text("Hades.exe\tlauncher\n")
+        (profile / "Hades.exe").write_bytes(b"fixture game payload that must not be packaged")
+        template = self.work / "runtime.appx"
+        with ZipFile(template, "w") as archive:
+            archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+            archive.writestr("XboxProbe.Native.winmd", b"metadata")
+            for name in ("ProbeNative.dll", "XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll",
+                         "XboxWin32Window.dll", "XboxWin32CrashReport.dll", "XboxWin32Dxgi.dll"):
+                archive.writestr(name, b"runtime fixture")
+        stage_trials = library_builder["stage_win32_trial_profiles"]
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual({path.name for path in self.layout.iterdir()},
+                         {"XboxProbe.Native.winmd", "ProbeNative.dll", "XboxWin32Input.dll",
+                          "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll", marker, recipe, extra, companions})
+        self.assertEqual((self.layout / recipe).read_bytes(), (profile / recipe).read_bytes())
+        self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(), b"metadata")
+        with self.assertRaisesRegex(ValueError, "one APPID"):
+            stage_trials(self.layout, [f"1145360={profile}"] * 2, template)
+        with self.assertRaisesRegex(ValueError, "x64 Steam Core"):
+            stage_trials(self.layout, [f"1145360={profile}"], self.template)
+
+        (profile / marker).write_text("10929685\nGame.exe\nopengl3\ngodot\n")
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / "XboxWin32Window.dll").read_bytes(), b"runtime fixture")
+        crash_marker = "steam-win32-crash-report-1145360.txt"
+        (profile / crash_marker).touch()
+        dxgi_marker = "steam-win32-dxgi-1145360.txt"
+        (profile / dxgi_marker).touch()
+        with self.assertRaisesRegex(ValueError, "default native renderer"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / marker).write_text("10929685\nHades.exe\n\n\nEngineWin64s.dll\nx64\n")
+        original_executable_marker = "steam-win32-original-executable-1145360.txt"
+        arguments_marker = "steam-win32-arguments-1145360.txt"
+        (profile / arguments_marker).write_bytes(b"/Option=true\n/Other=false")
+        with self.assertRaisesRegex(ValueError, "single printable launch argument line"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / arguments_marker).write_bytes(b"/Option=true /Other=false\r\n")
+        (profile / original_executable_marker).write_text("unexpected path")
+        with self.assertRaisesRegex(ValueError, "empty original-executable marker"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / original_executable_marker).write_bytes(b"")
+        (self.layout / "XboxWin32LoaderTrace.dll").unlink()
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / dxgi_marker).read_bytes(), b"")
+        self.assertEqual((self.layout / crash_marker).read_bytes(), b"")
+        self.assertEqual((self.layout / original_executable_marker).read_bytes(), b"")
+        self.assertEqual((self.layout / arguments_marker).read_bytes(), b"/Option=true /Other=false")
+        self.assertEqual((self.layout / "XboxWin32LoaderTrace.dll").read_bytes(), b"runtime fixture")
+        self.assertEqual((self.layout / "XboxWin32Dxgi.dll").read_bytes(), b"runtime fixture")
 
     def test_changed_cached_archive_and_manifest_leave_no_partial_layout(self):
         self.archive.write_bytes(b"x" * self.archive.stat().st_size)
@@ -127,9 +207,10 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("SlayConsoleDiagnostic%241.class", b"class bytes")
             package.writestr("AppxBlockMap.xml", b"old footprint")
         self.layout.mkdir()
-        with self.assertRaisesRegex(ValueError, "signed Steam Core"):
+        with self.assertRaisesRegex(ValueError, "verified Steam Core"):
             release_layout(base, self.layout, "1.0.230.1")
-        with patch.dict(release_layout.__globals__, BASE_SHA256=hashlib.sha256(base.read_bytes()).hexdigest()):
+        pinned = {hashlib.sha256(base.read_bytes()).hexdigest(): "1.0.230.0"}
+        with patch.dict(release_layout.__globals__, VERIFIED_BASES=pinned):
             release_layout(base, self.layout, "1.0.230.1")
         self.assertEqual((self.layout / "AppxManifest.xml").read_bytes(),
                          manifest.replace(b'Version="1.0.230.0"', b'Version="1.0.230.1"'))

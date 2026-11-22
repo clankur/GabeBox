@@ -144,7 +144,7 @@ test("the SDL player decodes bulk RGB while retaining keyboard input", () => exe
 
 test("the primary video polls the controller independently and a quick mouse click reaches SDL in order", async () => {
     const elements = new Map(), listeners = {}, edges = [], overlays = [], samples = [];
-    let now = 100, pump, ack = 0, buttons = 0, serial = 0;
+    let now = 100, pump, ack = 0, buttons = 0, serial = 0, padSerial = 0, rejectPad = false;
     function element(id) {
         if (!elements.has(id)) elements.set(id, {
             hidden: true, handlers: {}, getAttribute: () => "646570", getContext: () => ({}), focus() {},
@@ -166,7 +166,11 @@ test("the primary video polls the controller independently and a quick mouse cli
     };
     const runner = {
         launchSteamSdlGame: () => "steam_sdl_host=ready\r\n", steamSdlRunning: () => true,
-        sendSteamSdlGamepad(mask) { samples.push(mask); }, steamSdlInputAck: () => ack,
+        sendSteamSdlGamepad(mask) {
+            samples.push(mask);
+            if (rejectPad) { rejectPad = false; return 0; }
+            return ++padSerial;
+        }, steamSdlInputAck: () => ack,
         sendSteamSdlInput(pointer) { edges.push(pointer); return ++serial; }
     };
     const Windows = {UI: {ViewManagement: {
@@ -189,6 +193,16 @@ test("the primary video polls the controller independently and a quick mouse cli
     assert.deepEqual(edges, [1024 | 2048 << 12 | 1 << 24, 1024 | 2048 << 12]);
 
     function sample(mask) { buttons = mask; now += 16; pump(); }
+    const connected = gamepad.connected, back = connected | gamepad.buttons.b;
+    sample(connected);
+    const beforeBack = samples.length;
+    sample(back); sample(connected); sample(back); sample(connected);
+    assert.deepEqual(samples.slice(beforeBack), [back, connected, back, connected]);
+    assert.deepEqual(overlays, [], "two B taps remain game input");
+    rejectPad = true;
+    const right = gamepad.connected | gamepad.buttons.right;
+    sample(right); sample(right); sample(right);
+    assert.deepEqual(samples.slice(-2), [right, right], "retry the rejected state, then coalesce duplicates");
     const both = gamepad.connected | gamepad.buttons.start | gamepad.buttons.back;
     sample(both); sample(both);
     sample(gamepad.connected | gamepad.buttons.back);
