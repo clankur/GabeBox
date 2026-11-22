@@ -9,6 +9,10 @@
 extern "C" HRESULT FhdOpenMedia(HSTRING, BYTE, void**);
 extern "C" HRESULT FhdMediaStatus(HSTRING*);
 extern "C" HRESULT FhdCloseMedia();
+extern "C" HRESULT FhdOpenPanel(HSTRING, BYTE, void**);
+extern "C" HRESULT FhdSetPanelVisible(BYTE, void**);
+extern "C" HRESULT FhdPanelStatus(HSTRING*);
+extern "C" HRESULT FhdClosePanel(void**);
 #endif
 extern "C" HRESULT FhdAttach(HSTRING);
 extern "C" HRESULT FhdPrepareStart(LONG*);
@@ -57,6 +61,10 @@ struct Statics : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE OpenMedia(HSTRING, BYTE, void**)=0;
     virtual HRESULT STDMETHODCALLTYPE MediaStatus(HSTRING*)=0;
     virtual HRESULT STDMETHODCALLTYPE CloseMedia()=0;
+    virtual HRESULT STDMETHODCALLTYPE OpenPanel(HSTRING, BYTE, void**)=0;
+    virtual HRESULT STDMETHODCALLTYPE SetPanelVisible(BYTE, void**)=0;
+    virtual HRESULT STDMETHODCALLTYPE PanelStatus(HSTRING*)=0;
+    virtual HRESULT STDMETHODCALLTYPE ClosePanel(void**)=0;
 #endif
 };
 volatile LONG secondaryId=0,primaryId=0,windowError=0;
@@ -118,6 +126,10 @@ public:
     HRESULT STDMETHODCALLTYPE OpenMedia(HSTRING path, BYTE nativePad, void **out) override {return FhdOpenMedia(path,nativePad,out);}
     HRESULT STDMETHODCALLTYPE MediaStatus(HSTRING *out) override {return FhdMediaStatus(out);}
     HRESULT STDMETHODCALLTYPE CloseMedia() override {return FhdCloseMedia();}
+    HRESULT STDMETHODCALLTYPE OpenPanel(HSTRING path, BYTE pad, void** out) override {return FhdOpenPanel(path,pad,out);}
+    HRESULT STDMETHODCALLTYPE SetPanelVisible(BYTE visible, void** out) override {return FhdSetPanelVisible(visible,out);}
+    HRESULT STDMETHODCALLTYPE PanelStatus(HSTRING* out) override {return FhdPanelStatus(out);}
+    HRESULT STDMETHODCALLTYPE ClosePanel(void** out) override {return FhdClosePanel(out);}
 #endif
 };
 }
