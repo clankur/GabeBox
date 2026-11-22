@@ -964,7 +964,7 @@ struct Factory : implements<Factory, IActivationFactory, BigPictureView::Native:
             step = L"primary-account-document";
             auto documentUri = account.Tag().try_as<Uri>();
             Uri local{L"ms-appx-web:///steam-signin.html"};
-            if (!documentUri || !documentUri.Equals(local)) throw hresult_access_denied();
+            if (!documentUri || documentUri.RawUri() != local.RawUri()) throw hresult_access_denied();
             step = L"primary-renderer";
             auto view = make_self<View>(true, owner);
             {

@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Primary renderer control</title>
+<style>body{margin:10vh 8vw;background:#163c48;color:white;font:36px sans-serif}</style></head>
+<body><h1>Primary renderer control</h1><p>Chromium is displaying this local document.</p>
+<script>
+window.chrome.webview.addEventListener("message", ({data}) => {
+    if (data.event !== "xbox-window") return;
+    const state = data.state;
+    if (state.warming || !state.visible || !state.focused) return;
+    requestAnimationFrame(() => {
+        if (!document.hidden) window.chrome.webview.postMessage({
+            method:"integration-control", phase:"paint", view:state.viewId
+        });
+    });
+});
+</script></body></html>
