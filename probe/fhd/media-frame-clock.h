@@ -17,6 +17,12 @@ public:
         return remaining > Tick::zero() ? remaining : Tick::zero();
     }
 
+    Tick position(Tick now) const {
+        if (!origin) return Tick::zero();
+        const auto current = std::chrono::duration_cast<Slot>(now - *origin);
+        return std::chrono::ceil<Tick>(current > next ? current : next);
+    }
+
     Sample advance(Tick now) {
         if (!origin) origin = now;
         const auto slot = std::chrono::duration_cast<Slot>(now - *origin);

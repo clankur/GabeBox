@@ -24,11 +24,13 @@ int main() {
     MediaFrameClock clock;
     using Tick = MediaFrameClock::Tick;
     const Tick origin = 731ms;
+    assert(clock.position(origin) == 0s);
     assert(clock.wait(origin) == 0s);
     auto initial = clock.advance(origin);
     assert(initial.timestamp == 0s && initial.duration == Tick{166667});
     // A fast producer cannot fit two samples in one display interval.
     assert(clock.wait(origin + 10ms) == initial.duration - 10ms);
+    assert(clock.position(origin + 10ms) == initial.duration);
     auto end = initial.duration;
     for (int i = 1; i < 60 * 3600; ++i) {
         assert(clock.wait(origin + end - Tick{1}) == Tick{1});
@@ -41,6 +43,7 @@ int main() {
     assert(end == 1h);
     const auto late = origin + 1h + 10s + 2ms;
     assert(clock.wait(late) == 0s);
+    assert(clock.position(late) == 1h + 10s);
     const auto resumed = clock.advance(late);
     assert(resumed.timestamp == 1h + 10s);
     assert(clock.wait(late) == resumed.duration - 2ms);

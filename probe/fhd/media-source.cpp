@@ -77,6 +77,11 @@ struct Stream : std::enable_shared_from_this<Stream> {
     MediaFrameCount frames;
     MediaFrameClock clock;
     winrt::handle stopEvent;
+    uint64_t playbackGeneration = 0;
+
+    static TimeSpan now() {
+        return std::chrono::duration_cast<TimeSpan>(Clock::now().time_since_epoch());
+    }
 
     ~Stream() { FhdReleaseMedia(token); }
 
@@ -96,8 +101,18 @@ struct Stream : std::enable_shared_from_this<Stream> {
         props.PixelAspectRatio().Numerator(1); props.PixelAspectRatio().Denominator(1);
         source = MediaStreamSource(VideoStreamDescriptor(props));
         source.IsLive(true); source.CanSeek(false); source.BufferTime(0ms);
-        source.Starting([](auto const&, auto const& args) { args.Request().SetActualStartPosition(TimeSpan{}); });
         auto weak = weak_from_this();
+        source.Starting([weak](auto const&, auto const& args) {
+            if (auto self = weak.lock()) {
+                TimeSpan position;
+                {
+                    std::lock_guard guard(self->lock);
+                    ++self->playbackGeneration;
+                    position = self->clock.position(now());
+                }
+                args.Request().SetActualStartPosition(position);
+            }
+        });
         source.SampleRequested([weak](auto const&, auto const& args) {
             if (auto self = weak.lock()) {
                 auto request = args.Request();
@@ -152,10 +167,10 @@ struct Stream : std::enable_shared_from_this<Stream> {
 
     // Each SDL mailbox acquisition represents a distinct producer frame. MF
     // may drop one; only SampleRendered contributes to the presentation count.
-    MediaStreamSample next(TimeSpan& delay) {
+    MediaStreamSample next(uint64_t generation, TimeSpan& delay) {
         std::lock_guard guard(lock);
-        if (closed) throw hresult_error(RO_E_CLOSED);
-        delay = clock.wait(std::chrono::duration_cast<TimeSpan>(Clock::now().time_since_epoch()));
+        if (closed || generation != playbackGeneration) throw hresult_error(RO_E_CLOSED);
+        delay = clock.wait(now());
         if (delay > TimeSpan::zero()) return nullptr;
         delay = 4ms;
         size_t index = 0;
@@ -173,7 +188,7 @@ struct Stream : std::enable_shared_from_this<Stream> {
         lastSequence = sequence;
         check_hresult(hr);
         context->Flush();
-        const auto timing = clock.advance(std::chrono::duration_cast<TimeSpan>(Clock::now().time_since_epoch()));
+        const auto timing = clock.advance(now());
         auto sample = MediaStreamSample::CreateFromDirect3D11Surface(slot.surface, timing.timestamp);
         sample.Duration(timing.duration);
         sample.KeyFrame(true);
@@ -192,22 +207,24 @@ struct Stream : std::enable_shared_from_this<Stream> {
 
     static fire_and_forget provide(std::shared_ptr<Stream> self, MediaStreamSourceSampleRequest request,
                                    MediaStreamSourceSampleRequestDeferral deferral) {
+        uint64_t generation = 0;
         try {
             {
                 std::lock_guard guard(self->lock);
+                generation = self->playbackGeneration;
                 ++self->requests; ++self->pending;
             }
             co_await resume_background();
             for (;;) {
                 TimeSpan delay;
-                if (auto frame = self->next(delay)) { request.Sample(frame); break; }
+                if (auto frame = self->next(generation, delay)) { request.Sample(frame); break; }
                 co_await resume_on_signal(self->stopEvent.get(), delay);
             }
         } catch (...) {
             auto hr = to_hresult();
             if (hr != RO_E_CLOSED) {
                 std::lock_guard guard(self->lock);
-                if (!self->closed) self->error = hr;
+                if (!self->closed && generation == self->playbackGeneration) self->error = hr;
             }
         }
         { std::lock_guard guard(self->lock); --self->pending; }

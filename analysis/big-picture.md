@@ -52,19 +52,22 @@ The Xbox package supplies the Steam client calls that Valve's JavaScript makes a
 | System | Reads the host's retail-demo and assigned-access settings for restricted presentation. If neither setting can be read, the adapter requests restricted presentation. |
 | URL and Storage | Resolves Valve's pinned URL definitions and public CDN roots, dispatches supported local screen-navigation routes, and stores supported UI preferences under the current account. |
 
-The integrated builder accepts the signed regular FHD `1.0.230.0` APPX, a Windows-built WebView2 renderer and a Steam Core native artifact with the session accessor. The checksum below identifies the native session artifact from the linked build. A new native build requires its own checksum. Offline staging also needs the pinned `public_all` archive for Valve's URL catalog. [Native session build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44945918130)
+The following command reproduces the application layout for build `1.0.230.24` from source revision `30745ea`. It takes the signed regular FHD `1.0.230.0` APPX, the locally cached Valve archives and the three extracted Windows artifacts listed below. The hashes passed to the builder identify the artifacts’ `SHA256SUMS` files. The packager signs the assembled layout locally. [WebView2 renderer](https://github.com/clankur/steam-xbox-devmode/actions/runs/44962090368) · [Native Steam session](https://github.com/clankur/steam-xbox-devmode/actions/runs/44961774442) · [Primary-window FHD presenter](https://github.com/clankur/steam-xbox-devmode/actions/runs/44963224024)
 
 ```sh
 python3 probe/prepare-big-picture-library.py /path/to/regular/PackagedProcessProbe-x64.appx \
-  /path/to/xbox-big-picture-webview-x64 ./integrated-layout --version 1.0.230.3 \
+  /path/to/xbox-big-picture-webview-x64 ./integrated-layout --version 1.0.230.24 \
   --session-artifact /path/to/xbox-steam-core-template \
-  --session-checksum 569d1fe08b5c4182394f3c15f05a6f9ec8632f167ba1b5af0517a7aff73466a7 \
+  --session-checksum edcad827351329e9b775a0b8ffd825850d3dc78ddecac962060f0de881f11d04 \
+  --presenter-artifact /path/to/xbox-fhd-present-x64 \
+  --presenter-checksum ddaea77306d6ff8bece0c7af6067bdc4aeaae5b856b89c735194f3a820a4d1f4 \
   --archive-cache /path/to/valve-archives
 bash probe/package.sh --layout ./integrated-layout ./integrated-signed
-python3 xbox-deploy.py report --steam-core-webview --version 1.0.230.3
+python3 xbox-deploy.py deploy ./integrated-signed/PackagedProcessProbe-x64.appx --certificate ./integrated-signed/PackagedProcessProbe.cer
+python3 xbox-deploy.py report --steam-core-webview --version 1.0.230.24
 ```
 
-The integrated package uses the existing Steam Core identity and its installed games. The report records `gamepad-ready` when visible content appears in Valve's gamepad window. A loaded document or a broker launch test alone does not establish this.
+The integrated package uses the existing Steam Core identity and its installed games. Open Steam Core in Xbox Dev Home, then run the report command. Each cold start produces a new `run_id`. Save the original Xbox Device Portal screenshot at the Library and retain the run ID with it. During a game, `game_frame_sample` and `game_frame_latest_sample` record the first and latest complete foreground intervals. The Xbox media sink can deliver frame notifications faster than the TV refreshes on this build. For a picture of the decoded game video, place an empty `big-picture-capture-game.request` in the package’s `LocalState` folder while the game is in front. Match the new `big-picture-game-video.png` to the same run, AppID and `game_frame_media_capture` receipt. The TV and video-element captures measure different stages. [Verification criteria and results](big-picture-reliability.md)
 
 ### Test the Windows Steam bootstrap
 
