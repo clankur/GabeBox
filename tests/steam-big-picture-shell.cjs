@@ -97,7 +97,7 @@ function setupHost(steamId, windowState, catalogs) {
 }
 
 // Exercise Valve's own menu, gateway and history router. The test browser stays
-// offline. Its separate page provides a real blank-document navigation, and
+// offline. Its separate page provides a live, empty initial document, and
 // intercepts the public Store request before any response bytes are returned.
 async function checkStore(browser, page, popup) {
     await pressNative(page, 3);
@@ -135,11 +135,13 @@ async function checkStore(browser, page, popup) {
     const isolated = await browser.newContext();
     try {
         const remote = await isolated.newPage();
-        await remote.goto('about:blank');
-        await page.evaluate(({id, url}) => {
-            hostEvent({event:'store-browser', id, kind:'start', url});
-            hostEvent({event:'store-browser', id, kind:'complete', url, success:true, code:0});
-        }, {id, url: remote.url()});
+        const initial = await remote.evaluate(() => ({
+            url:location.href, ready:document.readyState === 'complete', empty:document.body?.childElementCount === 0,
+            opener:!!window.opener, children:window.frames.length
+        }));
+        assert.deepEqual(initial,{url:'about:blank',ready:true,empty:true,opener:false,children:0});
+        await page.evaluate(({id, url}) => hostEvent({event:'store-browser', id, kind:'initial-document', url}),
+            {id, url: initial.url});
         const nav = await (await request('navigate')).jsonValue();
         assert.equal(nav.id, id);
         assert.equal(nav.url, 'https://store.steampowered.com/');

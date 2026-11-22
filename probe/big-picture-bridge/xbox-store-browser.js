@@ -55,6 +55,14 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
         if (!record || data?.event !== 'store-browser' || data.id !== record.id) return;
         const url = data.url === 'about:blank' || data.url === initialPage ? 'about:blank' : publicURL(data.url);
         switch (data.kind) {
+        case 'initial-document':
+            // The native controller inspected its own existing, ready empty
+            // document. Valve only needs that initial history before LoadURL.
+            if (data.url === 'about:blank' && record.index < 0 && !record.requested) {
+                trace(record, 'initial-ready');
+                committed(record, 'about:blank');
+            }
+            break;
         case 'start':
             if (!url) return;
             if (url !== 'about:blank') trace(record, 'remote-start');

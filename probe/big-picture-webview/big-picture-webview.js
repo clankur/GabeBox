@@ -241,7 +241,7 @@
             }
             if (request.method === "store-js-stage") {
                 var stage = request.stage;
-                if (["create", "visible", "geometry", "blank-complete", "navigate", "remote-start",
+                if (["create", "visible", "geometry", "blank-complete", "initial-ready", "navigate", "remote-start",
                         "remote-complete", "failed", "closed"].indexOf(stage) < 0) return;
                 if (stage === "create") storeJsStages = [];
                 if (storeJsStages.indexOf(stage) < 0) { storeJsStages.push(stage); record(last, true); }
