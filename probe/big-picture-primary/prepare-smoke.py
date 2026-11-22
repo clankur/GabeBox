@@ -44,6 +44,6 @@ if __name__ == "__main__":
     parser.add_argument("layout", type=Path)
     parser.add_argument("artifact", type=Path)
     parser.add_argument("checksum")
-    parser.add_argument("--version", default="1.0.0.1")
+    parser.add_argument("--version", default="1.0.0.2")
     args = parser.parse_args()
     prepare(args.layout, args.artifact, args.checksum, args.version)

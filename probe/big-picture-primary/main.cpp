@@ -52,18 +52,34 @@ struct SteamApplication : ApplicationT<SteamApplication>
                 checkpoint("xaml-window-active");
                 WebView account{WebViewExecutionMode::SameThread};
                 checkpoint("edge-created");
-                account.NavigationCompleted([](auto const&, auto const& event) {
-                    checkpoint(event.IsSuccess() ? "account-loaded" : "account-navigation-error",
-                               static_cast<HRESULT>(event.WebErrorStatus()));
-                });
                 account.Name(L"SteamAccountHost");
                 // Windows accepts either an empty authority or the current package identity.
                 Uri local{accountPage};
                 Uri qualified{L"ms-appx-web://" + Windows::ApplicationModel::Package::Current().Id().Name() +
                               L"/steam-signin.html"};
-                account.NavigationStarting([local, qualified](auto const&, auto const& event) {
-                    auto uri = event.Uri();
-                    event.Cancel(!uri || (!uri.Equals(local) && !uri.Equals(qualified)));
+                auto matchesAccountPage = [local, qualified](Uri const& uri) {
+                    return uri && (uri.Equals(local) || uri.Equals(qualified));
+                };
+                account.NavigationStarting([matchesAccountPage](WebView const& sender, auto const& event) {
+                    sender.Tag(nullptr);
+                    bool approved = matchesAccountPage(event.Uri());
+                    event.Cancel(!approved);
+                    if (!approved) checkpoint("account-navigation-denied", E_ACCESSDENIED);
+                });
+                account.NavigationCompleted([local, matchesAccountPage](WebView const& sender, auto const& event) {
+                    sender.Tag(nullptr);
+                    if (!event.IsSuccess()) {
+                        checkpoint("account-navigation-error", static_cast<HRESULT>(event.WebErrorStatus()));
+                        return;
+                    }
+                    if (!matchesAccountPage(event.Uri())) {
+                        checkpoint("account-document-unrecognized", E_ACCESSDENIED);
+                        return;
+                    }
+                    // Only native code installs this receipt. The renderer reads the
+                    // successfully committed document without accessing WebView.Source.
+                    sender.Tag(local);
+                    checkpoint("account-document-verified");
                 });
                 account.FrameNavigationStarting([](auto const&, auto const& event) { event.Cancel(true); });
                 account.NewWindowRequested([](auto const&, auto const& event) { event.Handled(true); });

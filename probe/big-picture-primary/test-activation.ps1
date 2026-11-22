@@ -34,11 +34,16 @@ public static class PrimaryActivation {
     $processId = [PrimaryActivation]::Launch("$family!App")
     $state = "$env:LOCALAPPDATA/Packages/$family/LocalState"
     foreach ($i in 1..30) {
-        if (Test-Path "$state/big-picture-primary-proof.txt") { break }
+        if ((Test-Path "$state/big-picture-primary-proof.txt") -and
+            (Test-Path "$state/big-picture-primary-startup.txt") -and
+            (Select-String -Quiet -Path "$state/big-picture-primary-startup.txt" -SimpleMatch 'stage=account-document-verified hresult=0x00000000')) { break }
         Start-Sleep -Seconds 1
     }
     if (Test-Path "$state/big-picture-primary-startup.txt") {
         Get-Content "$state/big-picture-primary-startup.txt"
+        if (!(Select-String -Quiet -Path "$state/big-picture-primary-startup.txt" -SimpleMatch 'stage=account-document-verified hresult=0x00000000')) {
+            throw 'The native XAML host did not verify the committed account document.'
+        }
     }
     $proof = Get-Content "$state/big-picture-primary-proof.txt"
     if ($proof -notcontains 'account_script=ready') { throw 'Local JavaScript did not prove WinRT access.' }
