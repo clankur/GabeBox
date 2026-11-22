@@ -6,7 +6,6 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -28,29 +27,12 @@ using namespace Windows::UI::Core;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Controls;
 using Windows::UI::Xaml::Media::CompositionTarget;
-using Windows::System::VirtualKey;
 constexpr UINT width = 1920, height = 1080;
-
-// A key may reach the dispatcher and the frame poll in either order.
-struct MenuKey {
-    bool held = false, sampled = false;
-    void synchronize(bool down) { held = sampled = down; }
-    bool event(bool down, bool repeat) {
-        bool pressed = down && !repeat && !held;
-        held = down;
-        return pressed;
-    }
-    bool poll(bool down) {
-        if (down == sampled) return false;
-        sampled = down;
-        return event(down, false);
-    }
-};
 
 struct Status {
     LONG token = 0;
-    bool visible = false, keyboard = false;
-    UINT64 gpu = 0, cpu = 0, sequence = 0, menuSerial = 0;
+    bool visible = false;
+    UINT64 gpu = 0, cpu = 0, sequence = 0;
     HRESULT error = S_OK;
 };
 Status published;
@@ -73,10 +55,6 @@ struct Presenter {
     bool nativePad = false, attached = false, inserted = false;
     bool watchingFrames = false, watchingVisibility = false, watchingActivation = false;
     event_token frames{}, visibility{}, activation{};
-    CoreDispatcher keyboardDispatcher{nullptr};
-    event_token accelerator{};
-    MenuKey menuKey;
-    bool keyboardForeground = false, pollAvailable = true;
     bool queuedGpu = false;
     UINT64 queuedSequence = 0;
     float fittedWidth = 0, fittedHeight = 0;
@@ -87,36 +65,8 @@ struct Presenter {
             steam.Visibility() == Visibility::Collapsed && panel.Visibility() == Visibility::Visible &&
             panel.ActualWidth() > 0 && panel.ActualHeight() > 0;
     }
-    bool ownsKeyboard() const { return status.token && (status.gpu || status.cpu) && visible(); }
-    void pollKeyboard(bool foreground) {
-        if (foreground && pollAvailable) {
-            try {
-                const auto state = window.GetKeyState(VirtualKey::F10);
-                const bool down = (state & CoreVirtualKeyStates::Down) == CoreVirtualKeyStates::Down;
-                if (!keyboardForeground) menuKey.synchronize(down);
-                else if (menuKey.poll(down)) ++status.menuSerial;
-            } catch (hresult_error const&) {
-                pollAvailable = false;
-                status.keyboard = keyboardDispatcher != nullptr;
-            }
-        }
-        if (!foreground) menuKey.synchronize(false);
-        keyboardForeground = foreground;
-    }
-    void onAccelerator(AcceleratorKeyEventArgs const& args) {
-        if (args.VirtualKey() != VirtualKey::F10 || !ownsKeyboard()) return;
-        const auto type = args.EventType();
-        const bool down = type == CoreAcceleratorKeyEventType::KeyDown || type == CoreAcceleratorKeyEventType::SystemKeyDown;
-        if (!down && type != CoreAcceleratorKeyEventType::KeyUp && type != CoreAcceleratorKeyEventType::SystemKeyUp) return;
-        if (menuKey.event(down, args.KeyStatus().WasKeyDown)) {
-            ++status.menuSerial;
-            publish(status);
-        }
-        args.Handled(true);
-    }
     void updateVisibility() {
         status.visible = visible();
-        pollKeyboard(status.visible && (status.gpu || status.cpu));
         if (!status.visible) queuedSequence = 0;
         publish(status);
     }
@@ -161,7 +111,6 @@ struct Presenter {
                     }
                 }
             }
-            pollKeyboard(status.visible && (status.gpu || status.cpu));
         } catch (...) {
             status.error = to_hresult();
             status.visible = false;
@@ -217,22 +166,11 @@ struct Presenter {
         watchingVisibility = true;
         activation = window.Activated([this](auto const&, auto const&) { updateVisibility(); });
         watchingActivation = true;
-        try {
-            auto dispatcher = window.Dispatcher();
-            accelerator = dispatcher.AcceleratorKeyActivated(
-                [this](auto const&, AcceleratorKeyEventArgs const& args) { onAccelerator(args); });
-            keyboardDispatcher = dispatcher;
-        } catch (hresult_error const&) {
-            // Some input hosts expose only the core window's current key state.
-        }
-        status.keyboard = true;
         frames = CompositionTarget::Rendering([this](auto const&, auto const&) { render(); });
         watchingFrames = true;
         updateVisibility();
     }
     void close() noexcept {
-        if (keyboardDispatcher) keyboardDispatcher.AcceleratorKeyActivated(accelerator);
-        status.keyboard = false;
         if (watchingFrames) CompositionTarget::Rendering(frames);
         if (watchingVisibility) window.VisibilityChanged(visibility);
         if (watchingActivation) window.Activated(activation);
@@ -319,7 +257,6 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
             text += name; text += L"="; text += std::to_wstring(value); text += L"\r\n";
         };
         field(L"running", s.token != 0); field(L"visible", s.visible);
-        field(L"panel_keyboard", s.keyboard); field(L"menu_serial", s.menuSerial);
         field(L"width", width); field(L"height", height);
         field(L"presented", s.gpu + s.cpu); field(L"gpu_presented", s.gpu); field(L"cpu_presented", s.cpu);
         field(L"source_sequence", s.sequence); field(L"gpu_sequence", gpuSeq); field(L"cpu_sequence", cpuSeq);
