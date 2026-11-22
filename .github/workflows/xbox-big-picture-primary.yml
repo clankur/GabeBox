@@ -37,10 +37,10 @@ jobs:
           Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           & msbuild.exe "$src/SteamPrimary.vcxproj" /nologo /m /t:Build /p:Configuration=Release /p:Platform=x64 `
-            "/p:WindowsTargetPlatformVersion=$kit" "/p:OutDir=$out/" "/p:IntDir=$work/obj/"
+            "/p:WindowsTargetPlatformVersion=$kit" "/p:OutDir=$work/build/" "/p:IntDir=$work/obj/"
+          Copy-Item "$work/build/SteamPrimary/SteamPrimary.exe" "$out/SteamPrimary.exe"
           $imports = & dumpbin.exe /imports "$out/SteamPrimary.exe"
           if (!($imports -match 'VCRUNTIME140_APP.dll')) { throw 'Missing UWP VCLibs app CRT import' }
-          Remove-Item "$out/*.pdb" -ErrorAction SilentlyContinue
           $control = "$work/control"
           New-Item -ItemType Directory -Path $control | Out-Null
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
