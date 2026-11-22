@@ -319,6 +319,7 @@
     installXboxInput(client, gamepads);
     installXboxLifecycle(client, () => runtime);
     installXboxSettings(client, () => runtime);
+    installXboxNetwork(client, () => runtime, send, host);
     installXboxMessaging(client);
     installXboxCoreStartup(client, send);
     installXboxServices(client, send);

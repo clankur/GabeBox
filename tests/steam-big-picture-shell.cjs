@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,10 +8,11 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
-const framedGamepad = accounts || emptyOnly || process.argv.includes('--single-webview');
+const networkOnly = process.argv.includes('--network');
+const framedGamepad = networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -45,6 +46,7 @@ function setupHost(steamId, windowState, catalogs) {
     };
     (window.chrome ||= {}).webview = {
         addEventListener: events.addEventListener.bind(events),
+        removeEventListener: events.removeEventListener.bind(events),
         postMessage(request) {
             if (state.framedGamepad && typeof request === 'string' &&
                 ['xbox-window-frame-open', 'xbox-window-frame-closed', 'xbox-window-show', 'xbox-window-hide'].includes(request)) {
@@ -69,6 +71,7 @@ function setupHost(steamId, windowState, catalogs) {
             let reply;
             const games = catalogs[window.fixtureSteamId];
             switch (request.method) {
+                case 'network-state': reply = {result: window.fixtureNetwork || {level: 'offline'}}; break;
                 case 'library': reply = games ? {result: games} : {error: 'signed-out'}; break;
                 case 'session': reply = {result: {steamId: window.fixtureSteamId}}; break;
                 case 'sign-out':
@@ -88,6 +91,62 @@ function setupHost(steamId, windowState, catalogs) {
             queueMicrotask(() => window.hostEvent({id: request.id, ...reply}));
         }
     };
+}
+
+async function checkNetwork(page, popup) {
+    await page.waitForFunction(() => window.SystemNetworkStore && !SystemNetworkStore.isAwaitingInitialNetworkState);
+    async function update(snapshot) {
+        await page.evaluate(snapshot => {
+            window.fixtureNetwork = snapshot;
+            hostEvent({event: 'xbox-network-changed'});
+        }, snapshot);
+        await page.waitForFunction(snapshot => {
+            const store = SystemNetworkStore;
+            const active = store.presentAccessPoints.find(ap => ap.isDefaultRoute);
+            return store.hasInternetConnection === (snapshot.level === 'internet') &&
+                (snapshot.kind ? active?.type === (snapshot.kind === 'wifi' ? 2 : 1) : !active);
+        }, snapshot);
+    }
+    const ethernet = {level: 'internet', kind: 'ethernet', device: 1};
+    const wifi = {level: 'internet', kind: 'wifi', device: 2, accessPoint: 3, ssid: 'Fixture Wi-Fi', bars: 5};
+    const headerSelector = await page.evaluate(() => {
+        let r; webpackChunksteamui.push([['fixture-network-css'], {}, require => { r = require; }]);
+        return '.' + CSS.escape(r(30557).WirelessIcon);
+    });
+    const header = popup.locator(headerSelector).first();
+    const shape = () => header.locator('svg').evaluate(svg => svg.innerHTML);
+    await header.waitFor({state:'visible'});
+    const offline = await shape();
+    await update(ethernet);
+    await popup.waitForFunction(([selector, original]) => {
+        const svg = document.querySelector(selector + ' svg');
+        return !svg || svg.innerHTML !== original;
+    }, [headerSelector, offline]);
+    const wired = await header.isVisible() ? await shape() : null;
+    await update(wifi);
+    await header.waitFor({state:'visible'});
+    const wireless = await shape();
+    assert.notEqual(wireless, offline);
+    assert.notEqual(wireless, wired);
+    assert.equal(await page.evaluate(() => SystemNetworkStore.hasSteamConnection), false);
+    await pressNative(page, 3);
+    const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+    await menu.getByText('Settings', {exact: true}).click();
+    await popup.getByText('Internet', {exact: true}).first().click({timeout: 8000});
+    const wirelessRow = popup.getByText('Fixture Wi-Fi', {exact:true});
+    const wiredRow = popup.getByText('Wired Network', {exact:true});
+    await wirelessRow.waitFor({state:'visible'});
+    await update(ethernet);
+    await wiredRow.waitFor({state:'visible'});
+    await wirelessRow.waitFor({state:'hidden'});
+    await update({...ethernet, level:'local'});
+    assert.equal(await page.evaluate(() => SystemNetworkStore.hasNetworkConnection && !SystemNetworkStore.hasInternetConnection), true);
+    await update({level:'offline'});
+    await wiredRow.waitFor({state:'hidden'});
+    await update(wifi);
+    await wirelessRow.waitFor({state:'visible'});
+    assert.equal(await page.evaluate(() => SystemNetworkStore.hasSteamConnection), false);
+    console.log('Valve header SVG changed between offline, wired and Wi-Fi. Settings updated live from Wi-Fi to wired, local-only, offline and back to Wi-Fi. CM stayed disconnected.');
 }
 
 async function checkAppAdapter(page) {
@@ -719,6 +778,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 });
                 const hasTour = await welcome.isVisible();
                 if (hasTour) await completeTour(page, popup);
+                if (networkOnly) { await checkNetwork(page, popup); return; }
                 if (accounts) {
                     const predicates = await nativeLibraryPredicates();
                     await popup.waitForFunction(predicates.library);

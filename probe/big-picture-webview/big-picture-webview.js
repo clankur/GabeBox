@@ -24,6 +24,7 @@
         var primaryXaml = !!(window.document &&
             window.document.documentElement.getAttribute("data-steam-primary-xaml") === "true");
         var run = Windows.Foundation.GuidHelper.createNewGuid();
+        var network, networkDiagnostic = "";
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
         var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
@@ -70,6 +71,7 @@
                 (warmReport ? "warmup=" + warmReport + "\r\n" : "") +
                 (memoryRequest ? "shell_memory_request=" + memoryRequest + "\r\n" : "") +
                 (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
+                (networkDiagnostic ? "xbox_network=" + networkDiagnostic + "\r\n" : "") +
                 (surfaceState ? "valve_surface=" + surfaceState + "\r\n" : "") +
                 (popupPhase ? "valve_popup=" + popupPhase + "\r\n" : "") +
                 (startupRoute ? "valve_startup=" + startupRoute + "\r\n" : "") +
@@ -290,6 +292,15 @@
                     return settled && visible && !playing && !failed ? "restart" : "busy";
                 });
             };
+            else if (request.method === "network-state") action = function () {
+                if (!network) network = window.steamXboxNetwork(Windows, function () {
+                    if (!failed && host) host.reply(JSON.stringify({event: "xbox-network-changed"}));
+                });
+                var state = network.read();
+                var diagnostic = state.level + (state.kind ? " " + state.kind : "");
+                if (diagnostic !== networkDiagnostic) { networkDiagnostic = diagnostic; record(last, true); }
+                return state;
+            };
             else if (request.method === "system-mode") action = function () { return window.steamXboxSystemMode(Windows); };
             else if ((request.method === "play" || request.method === "install" || request.method === "resume-game" || request.method === "quit-game") &&
                      typeof appId === "number" && appId > 0 && appId <= 0xffffffff && appId % 1 === 0) {
@@ -360,6 +371,7 @@
         function finish(stage, intentional) {
             if (failed) return session && session.cleanup || Promise.resolve();
             failed = true;
+            if (network) network.close();
             clearInterval(timer);
             clearTimeout(readinessTimer);
             record(stage);
