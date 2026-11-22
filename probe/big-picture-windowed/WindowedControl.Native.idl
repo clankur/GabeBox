@@ -1,0 +1,8 @@
+namespace WindowedControl.Native
+{
+    [static_name("WindowedControl.Native.IControlStatics", 49762b21-c4e8-422a-a675-fca383d18a0b)]
+    runtimeclass Control
+    {
+        static void Start();
+    };
+}
