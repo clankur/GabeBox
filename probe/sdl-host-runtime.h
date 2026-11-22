@@ -3,6 +3,7 @@
 #include "../events/SDL_keyboard_c.h"
 #include "../events/SDL_mouse_c.h"
 #include "../events/SDL_events_c.h"
+#include "../events/SDL_windowevents_c.h"
 #include "SDL_timer.h"
 #include "SDL.h"
 #include "SDL_gamecontroller.h"
@@ -187,7 +188,6 @@ void XboxSdlPollHostInput(void)
     static LONG last_serial;
     static LONG last_pointer = -1;
     static LONG last_keys;
-    static SDL_bool requested_quit;
     static const SDL_Scancode keys[] = {
         SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
         SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_SPACE
@@ -196,12 +196,14 @@ void XboxSdlPollHostInput(void)
     SDL_Window *window;
     LONG serial, pointer, pressed, events = 0;
     if (!mailbox) return;
-    if (!requested_quit && SdlHostLoad(&mailbox->quit)) {
-        requested_quit = SDL_TRUE;
-        if (xbox_host_has_gamepad && SDL_WasInit(SDL_INIT_JOYSTICK)) XboxSdlDetachGamepad();
-        SDL_SendQuit();
+    if (InterlockedCompareExchange(&mailbox->quit, 0, 1) == 1) {
+        // Give the game the same window-close event it receives on desktop.
+        // SDL also posts SDL_QUIT for the last window when its normal hint permits.
+        window = SDL_GetWindowFromID(xbox_host_window);
+        if (window) SDL_SendWindowEvent(window, SDL_WINDOWEVENT_CLOSE, 0, 0);
+        else SDL_SendQuit();
+        XboxSdlTrace("sdl_host_close=delivered\n");
     }
-    if (requested_quit) return;
     if (xbox_host_has_gamepad) XboxSdlPollHostGamepad(&mailbox->gamepad);
     window = SDL_GetWindowFromID(xbox_host_window);
     if (!window) return;

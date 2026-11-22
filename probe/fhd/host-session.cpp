@@ -161,7 +161,7 @@ extern "C" void FhdMediaSequences(LONG token, UINT64& cpu, UINT64& gpu) {
 extern "C" HRESULT FhdDrawMedia(LONG token, ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
                                 bool nativePad, UINT64 &sequence, bool &gpu) {
     AcquireSRWLockShared(&stateLock);
-    HRESULT hr = (mediaToken == token && box && !SdlHostLoad(&box->quit)) ?
+    HRESULT hr = (mediaToken == token && box) ?
         drawMailbox(dev,ctx,target,nativePad,sequence,gpu) : RO_E_CLOSED;
     ReleaseSRWLockShared(&stateLock);
     return hr;

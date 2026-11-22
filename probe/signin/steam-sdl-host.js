@@ -154,6 +154,9 @@
                     if (nativeView && nativeView.primary) nativeView.pause();
                     steam.showForGame(appId, gameViewId, function (steamViewId) {
                         if (!runner.steamSdlRunning()) return false;
+                        // A title that deferred its close may still need input
+                        // in its own save or exit dialog after Valve Resume.
+                        closing = false;
                         return nativeView ? nativeView.resume(steamViewId) :
                             steam.switchView(gameViewId, steamViewId).then(function () { return !stopped; });
                     }, function () {
