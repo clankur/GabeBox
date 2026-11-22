@@ -160,6 +160,22 @@ The signed native XAML APPX has SHA-256 `c095fc30012ffd4ba983485d8a8fb77aa4a468c
 |---|---|---|
 | tour-31-195449 | 63c85157-2858-499a-bbf2-a59d006f073d | Passed from an empty package-process baseline. The original Library appeared through the production native XAML host with 134 games, the Installed tab and the controller footer on raw 1920×1080 Xbox output. |
 
+### Build 1.0.230.32
+
+The signed native XAML APPX has SHA-256 `4276875f0a52ac4dd715b53e9837b16ce974765e094beb40987f1ef4cf21ee8c`. A comparison of all 1,266 signed members against the verified, reconstructed `.31` package found changes to `steam-sdl-native-view.js`, `steam-sdl-host.js`, the manifest, block map, content types and signature. All Valve assets and native binaries match `.31`. No controlled hardware result has been recorded for this package yet.
+
+## Direct native game display
+
+For a build that presents game frames through the primary XAML panel, retain the following original whole-output captures from the same run. Index each with its source, capture time, dimensions and SHA-256. Open the originals to identify the actual content.
+
+1. Capture the original Valve Library and the selected game's stock Play control. Record the package pin, native run ID, AppID, matched executable and new process ID after Play.
+2. Capture a recognizable game title on the TV. Correlate the timestamp with the foreground primary panel and its actual presented-frame counter. Retain the 30-second panel sample and report its frame count and elapsed time.
+3. Open the stock Steam overlay and capture its game-specific controls on the TV. Navigate through the original menu to the full Library and capture that screen while the same game process is still alive.
+4. Activate stock Resume. Capture the visible game again on the TV, bracketed by samples showing the same executable, PID and run ID. Record both the pre-overlay and post-Resume panel counters. Report any intervening black screen, process loss or operator recovery.
+5. Record stock Exit and confirmation as a separate test. Verify the matched game PID disappears naturally, the host persists and a fresh whole-output capture shows the foreground Library. Document how the controls were operated.
+
+If the console screenshot endpoint fails, identify the missing TV frame and retain any direct physical observation with its time and source. A WebView image, decoded-video frame, source framebuffer or successful native Present call alone cannot prove that the game appeared on the TV.
+
 ## Game launches and returns
 
 | Build and attempt | Title | Stock Steam action | Game on TV | Return and FHD measurement |
