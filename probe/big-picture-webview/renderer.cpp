@@ -24,6 +24,7 @@
 #include "display-layout.h"
 #include "library-capture.h"
 #include "process-failure.h"
+#include "store-browser.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -68,6 +69,7 @@ struct View : implements<View, IFrameworkView> {
     ContainerVisual root{nullptr};
     ContainerVisual mainSurface{nullptr};
     ContainerVisual popupSurface{nullptr};
+    std::shared_ptr<steam_store::Browser> store;
     CoreWebView2Environment environment{nullptr};
     CoreWebView2CompositionController controller{nullptr};
     CoreWebView2CompositionController popup{nullptr};
@@ -146,6 +148,31 @@ struct View : implements<View, IFrameworkView> {
         };
         place(controller, mainSurface);
         if (popup) place(popup, popupSurface);
+        layoutStore();
+    }
+
+    void layoutStore() {
+        if (store && controller) store->layout(placement, controller.RasterizationScale(),
+            !warming && !gameForeground && window.Visible() && gamepadVisible());
+    }
+
+    void storeCommand(Windows::Data::Json::JsonObject const& message) {
+        if (!document->signedMode || !document->accepts(web.Source())) return;
+        try {
+            auto numeric = message.GetNamedNumber(L"id");
+            if (!(numeric >= 1 && numeric <= 0x7fffffff && std::floor(numeric) == numeric)) return;
+            auto id = static_cast<unsigned>(numeric);
+            auto action = message.GetNamedString(L"action");
+            if (action == L"create") {
+                if (store) return;
+                store = std::make_shared<steam_store::Browser>(id, web, document, root);
+                layoutStore();
+                store->start(environment, window);
+            } else if (store && store->identifier() == id) {
+                if (action == L"close") { store->close(); store.reset(); }
+                else store->command(id,action,message);
+            }
+        } catch (hresult_error const&) {}
     }
 
     fire_and_forget suspendHidden(CoreWebView2 browser) {
@@ -205,6 +232,7 @@ struct View : implements<View, IFrameworkView> {
         // document active when just its drawing surface is obscured.
         controller.IsVisible(runBrowser);
         if (popup) popup.IsVisible(showPopup);
+        layoutStore();
         for (auto const& view : {controller, popup}) {
             if (view) {
                 auto browser = view.CoreWebView2();
@@ -797,7 +825,10 @@ struct View : implements<View, IFrameworkView> {
             cloudCache->install(web);
             web.NavigationStarting([this](auto const&, auto const& args) {
                 if (!document->start(args.Uri(), args.NavigationId())) args.Cancel(true);
-                else cloudCache->cancel();
+                else {
+                    cloudCache->cancel();
+                    if (store) { store->close(); store.reset(); }
+                }
             });
             web.ContentLoading([this](auto const&, auto const& args) {
                 document->content(args.NavigationId(), args.IsErrorPage());
@@ -825,6 +856,7 @@ struct View : implements<View, IFrameworkView> {
                 Windows::Data::Json::JsonObject parsed{nullptr};
                 if (!Windows::Data::Json::JsonObject::TryParse(message, parsed)) return;
                 const auto method = parsed.GetNamedString(L"method", L"");
+                if (method == L"store-browser") { storeCommand(parsed); return; }
                 if (method == L"capture-library-result" || method == L"capture-surface-result" || method == L"surface-sizing") return;
                 message = parsed.Stringify(); // WWA receives exactly the object validated above.
                 slim_lock_guard lock(gate);
@@ -910,6 +942,7 @@ struct View : implements<View, IFrameworkView> {
         closed = true;
         updateShellCursor(false);
         if (cloudCache) cloudCache->cancel();
+        if (store) { store->close(); store.reset(); }
         closePopup();
         if (controller) controller.Close();
         web = nullptr;
