@@ -145,11 +145,27 @@ async function checkRunningControls(page, popup) {
         });
     });
     await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 42, overlay: true}));
-    const resume = popup.getByText('Resume game', {exact: true});
+    let resume = popup.getByText('Resume game', {exact: true});
     await resume.waitFor({state: 'visible'});
     assert(await popup.getByText('Exit game', {exact: true}).isVisible());
+    if (accounts) {
+        const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+        await pressNative(page, 3);
+        await menu.getByText('Library', {exact: true}).click({timeout: 7000});
+        const predicates = await nativeLibraryPredicates();
+        await popup.waitForFunction(predicates.library, undefined, {timeout: 12000});
+        const running = await page.evaluate(() => ({
+            app: fixtureRunningApp, quit: fixtureCalls.filter(c => c.method === 'quit-game').length,
+            resume: fixtureCalls.filter(c => c.method === 'resume-game').length
+        }));
+        assert.deepEqual(running, {app: 42, quit: 0, resume: 0});
+        console.log('Original All Games is in the foreground with the same game still running.');
+        await stockTile(popup, 'Fixture A').click();
+        resume = popup.getByText('Resume', {exact: true});
+        await resume.waitFor({state: 'visible', timeout: 6500});
+    }
     const before = await page.evaluate(() => fixtureCalls.filter(c => c.method === 'resume-game').length);
-    await resume.evaluate(button => button.click());
+    await resume.click();
     await page.waitForFunction(count => fixtureCalls.filter(c => c.method === 'resume-game' && c.appId === 42).length > count, before);
     if (accounts) {
         await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 42, overlay: true}));
@@ -163,7 +179,7 @@ async function checkRunningControls(page, popup) {
         assert.equal(await page.evaluate(() => {
             fixtureStopObservingHistory();
             return fixtureOverlayPushes;
-        }), 1, 'Reopening the running controls after Resume must preserve the original Back destination');
+        }), 2, 'Returning from the Library opens the controls once, and resuming preserves their Back destination');
         await cancel.click();
         await confirm.waitFor({state: 'hidden'});
         assert.equal(await page.evaluate(() => fixtureCalls.filter(c => c.method === 'quit-game').length), 0);
