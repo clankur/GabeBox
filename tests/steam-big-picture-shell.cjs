@@ -112,7 +112,18 @@ async function checkStore(browser, page, popup) {
             }
         };
     });
-    await menu.getByText('Store', {exact: true}).click();
+    const store = menu.getByText('Store', {exact: true});
+    await store.waitFor({state:'visible'});
+    const focus = () => store.evaluate(element => {
+        const doc = element.ownerDocument;
+        const selected = [...doc.querySelectorAll('.gpfocus')].findLast(row =>
+            row instanceof doc.defaultView.HTMLElement && row.getBoundingClientRect().width > 0);
+        return [doc.activeElement, selected].some(row => row && row !== doc.body &&
+            (element.contains(row) || row.contains(element)) && row.innerText.trim() === 'Store');
+    });
+    for (let step = 0; step < 10 && !(await focus()); step++) await pressNative(page,128);
+    assert(await focus(), 'Stock Store row did not gain Valve controller focus');
+    await pressNative(page,4);
     const request = action => page.waitForFunction(action =>
         window.fixtureCalls.find(call => call?.method === 'store-browser' && call.action === action), action);
     const create = await request('create').catch(async error => { throw new Error(error.message + ' ' +
