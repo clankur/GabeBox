@@ -50,6 +50,7 @@ The Xbox package supplies the Steam client calls that Valve's JavaScript makes a
 | UI, Browser and Window | Gamepad window request, WebView2 popup attachment, foreground focus, primary display bounds and scaling. |
 | Input and System.UI | Standard Gamepad API buttons and axes, direction changes, and releases on disconnect. Guide input depends on whether Xbox exposes that button to the app. |
 | System | Reads the host's retail-demo and assigned-access settings for restricted presentation. If neither setting can be read, the adapter requests restricted presentation. |
+| System.Network | Valve's top-bar icon and Settings → Internet show the Xbox's preferred connection. Windows supplies the interface type, Wi-Fi signal when available, and whether the connection has Internet or local access. Steam's connection manager reports its own status independently. |
 | URL and Storage | Resolves Valve's pinned URL definitions and public CDN roots, dispatches supported local screen-navigation routes, and stores supported UI preferences under the current account. |
 
 The following command reproduces the application layout for build `1.0.230.24` from source revision `30745ea`. It takes the signed regular FHD `1.0.230.0` APPX, the locally cached Valve archives and the three extracted Windows artifacts listed below. The hashes passed to the builder identify the artifacts’ `SHA256SUMS` files. The packager signs the assembled layout locally. [WebView2 renderer](https://github.com/clankur/steam-xbox-devmode/actions/runs/44962090368) · [Native Steam session](https://github.com/clankur/steam-xbox-devmode/actions/runs/44961774442) · [Primary-window FHD presenter](https://github.com/clankur/steam-xbox-devmode/actions/runs/44963224024)
@@ -174,6 +175,12 @@ Xbox Dev Home showed **App type → Game** for the installed Steam Core package.
 Keeping the primary Xbox window in front during startup on build `.20` preserved a measured 5 GiB limit while Steam opened its secondary window and received the signed-in library. In two cold starts, the host then brought that window forward by timeout, at 2,447,257,600 and 2,481,258,496 bytes of total app usage. The limit immediately after the switch was 1,073,741,824 bytes. Both sessions ended before an unobscured Library capture. Build `.21` samples memory before switching windows and lets WebView2 release unused data while it prepares the Library. The release ledger tracks the result of hardware trials on that package.
 
 Build `.21` reached the original Library on three consecutive application launches on Series X. The third preflight contained a runtime broker. All three started with the previous game's process, browser and application host absent. [Per-run observations](big-picture-reliability.md)
+
+### Internet status
+
+The Xbox host reads the preferred Windows network profile again when connectivity changes. Valve’s original Settings page can display the active Wi-Fi network name. The diagnostic report records only the connectivity level and interface type, for example `xbox_network=internet ethernet`. It excludes network names, adapter identifiers and credentials. [Windows connection profiles](https://learn.microsoft.com/uwp/api/windows.networking.connectivity.networkinformation) · [Xbox network adapter](../probe/signin/xbox-network.js)
+
+The offline `--network` fixture exercised the pinned Valve UI with simulated Windows profile changes. Its top bar rendered distinct icons for Ethernet, Wi-Fi and offline. With Settings → Internet open, the active Wi-Fi row changed to a wired row, disappeared on disconnect and returned on reconnection. The same test reported local-only access without Internet and kept the Steam connection manager disconnected throughout. [Original UI integration test](../tests/steam-big-picture-shell.cjs) · [Network profile tests](../tests/xbox-network.test.js)
 
 ### First sign-in and subsequent sessions
 
