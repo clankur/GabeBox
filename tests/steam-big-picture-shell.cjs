@@ -184,6 +184,31 @@ async function checkHome(page, popup) {
     });
     assert.deepEqual(cache, {missing:false, notice:[{assetType:1}], repeated:false, present:true, newNotices:0});
     console.log('Valve Home opened with offline artwork. The original AppStore retained its cache miss, deduplicated its report and recognized a genuine cache bitmap hit.');
+    const search = popup.locator('#header input[type=search]');
+    await search.waitFor({state:'visible'});
+    const searchFocused = () => search.evaluate(e => e.matches(':focus,.gpfocus'));
+    for (let move = 0; move < 6 && !await searchFocused(); move++) await pressNative(page, 64);
+    assert(await searchFocused(), 'Controller did not reach the original header Search field');
+    await pressNative(page, 4);
+    const keys = popup.locator('[data-key][data-key-row]');
+    await keys.first().waitFor({state:'visible', timeout:8000}).catch(async error => {
+        throw new Error(error.message + ' ' + (await target.innerText()).slice(0,900));
+    });
+    const focusedKey = popup.locator('[data-key].gpfocus');
+    await focusedKey.waitFor({state:'visible'});
+    const firstKey = await focusedKey.getAttribute('data-key');
+    await pressNative(page, 512);
+    const letter = await focusedKey.getAttribute('data-key');
+    assert.match(letter, /^[a-z]$/i);
+    assert.notEqual(letter, firstKey);
+    await pressNative(page, 4);
+    assert.equal((await search.inputValue()).toLowerCase(), letter.toLowerCase());
+    await pressNative(page, 8);
+    await focusedKey.waitFor({state:'hidden',timeout:5000});
+    await pressNative(page, 3);
+    await menu.getByText('Library', {exact:true}).waitFor({state:'visible'});
+    assert(!/Something went wrong while displaying this content/i.test(await target.innerText()));
+    console.log('Xbox controller opened Valve search, typed with the original on-screen keyboard, dismissed it and reopened the Steam menu.');
 }
 
 async function checkNetwork(page, popup) {

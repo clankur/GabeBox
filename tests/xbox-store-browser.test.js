@@ -114,5 +114,22 @@ test('a controller release follows its press across Store focus changes and disc
         connected = true; tick();
         pressed = false; tick();
         assert.deepEqual(valve.slice(2), [[1, code, true], [1, code, false]]);
+
+        view.SetVisible(true);
+        pressed = true; tick();
+        client.Input.SetKeyboardActionset(true, false);
+        client.Input.SetKeyboardActionset(true, false); // Steam's watchdog reasserts the same set.
+        pressed = false; tick();
+        assert.deepEqual(sent.filter(x => x.action === 'input').map(x => x.down), [true, false, true, false]);
+        assert.equal(valve.length, 4);
+        pressed = true; tick();
+        client.Input.SetKeyboardActionset(false, false);
+        client.Input.ModalKeyboardDismissed();
+        pressed = false; tick();
+        assert.deepEqual(valve.slice(4), [[1, code, true], [1, code, false]]);
+        pressed = true; tick();
+        pressed = false; tick();
+        assert.deepEqual(sent.filter(x => x.action === 'input').map(x => x.down),
+            [true, false, true, false, true, false]);
     }
 });

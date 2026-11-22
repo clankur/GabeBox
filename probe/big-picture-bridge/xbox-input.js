@@ -3,6 +3,7 @@
 function installXboxInput(client, gamepads, storeBrowser) {
     const digital = new Set(), analog = new Set(), system = new Set(), unbound = new Set(), keyboards = new Set();
     const states = new Map();
+    let keyboardActive = false;
     // W3C standard buttons A, B, X, Y, bumpers, triggers, View, Menu and stick clicks.
     const buttonCodes = [0, 1, 2, 3, 30, 31, 28, 29, 35, 36, 25, 41];
     let analogEnabled = false, unboundSignature, deviceSignature, timer, timerWindow, stopped = false;
@@ -18,7 +19,7 @@ function installXboxInput(client, gamepads, storeBrowser) {
             !!pad.buttons[12 + i]?.pressed || value >= (last.has(20 + i) ? 0.45 : 0.6));
     }
     function button(index, state, code, down) {
-        if (down && storeBrowser?.button(index, code, true)) {
+        if (down && !keyboardActive && storeBrowser?.button(index, code, true)) {
             state.storeButtons.add(code);
             return;
         }
@@ -33,6 +34,36 @@ function installXboxInput(client, gamepads, storeBrowser) {
     function release(index, state) {
         for (const code of state.down) button(index, state, code, false);
         if (analogEnabled && (state.x || state.y)) dispatch(analog, index, 24, false, 0, 0);
+    }
+    function keyboardActionset(enabled) {
+        if (typeof enabled !== 'boolean' || keyboardActive === enabled) return;
+        keyboardActive = enabled;
+        // Steam's on-screen keyboard consumes Valve's normal logical buttons.
+        // Stop any Store navigation repeat immediately while leaving the real
+        // up edge owned by the original press until the controller releases it.
+        if (enabled) for (const [index, state] of states)
+            for (const code of state.storeButtons) storeBrowser.button(index, code, false);
+    }
+    function insertKeyboardText(text) {
+        if (!keyboardActive || typeof text !== 'string' || !text) return;
+        const view = getXboxGamepadWindow();
+        if (view === window) return;
+        const doc = view.document, field = doc.activeElement;
+        if (!field || !field.matches('input[type="search"],input[type="text"],input:not([type]),textarea') ||
+            field.disabled || field.readOnly) return;
+        // Module 8844 encodes Enter, Backspace and arrow keys as 1 through 6.
+        // Use Blink's editing transaction for text/deletion, so Valve receives
+        // its normal input events and undo history. The active field must be
+        // in the actual local gamepad document; never traverse another frame.
+        if (text === '\x02') doc.execCommand('delete');
+        else if (text === '\x01' && field.tagName === 'TEXTAREA') doc.execCommand('insertLineBreak');
+        else if (text === '\x03' || text === '\x04') {
+            const selection = view.getSelection();
+            selection?.modify('move', text === '\x03' ? 'backward' : 'forward', 'character');
+        } else if (text === '\x05' || text === '\x06') {
+            const selection = view.getSelection();
+            selection?.modify('move', text === '\x05' ? 'backward' : 'forward', 'line');
+        } else if (!/[\x00-\x1f\x7f]/.test(text)) doc.execCommand('insertText', false, text);
     }
     function samplePad(pad) {
         let state = states.get(pad.index);
@@ -149,6 +180,9 @@ function installXboxInput(client, gamepads, storeBrowser) {
         dispatch(keyboards, keyboardPresent);
     });
     client.Input = {
+        ControllerKeyboardSendText: insertKeyboardText,
+        SetKeyboardActionset: keyboardActionset,
+        ModalKeyboardDismissed() { keyboardActionset(false); },
         SetWebBrowserActionset(value) { storeBrowser?.setActionset(value); },
         RegisterForUnboundControllerListChanges: callback => listen(unbound, callback),
         RegisterForControllerInputMessages: callback => listen(digital, callback),
