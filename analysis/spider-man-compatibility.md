@@ -174,6 +174,8 @@ Build `1.0.230.282`, run `1795446655417`, measured those requests in the normal 
 
 Build `1.0.230.283`, run `1795446848863`, raised only the trial `AssetHeap` cap from 256 to 272 MiB. The same allocation returned null again, with 19,316 KiB of available commit. The zone remained at flags `0x400` with no scene parts. A later observer confirmed that the process exited. These two trials leave the arena's occupancy and fragmentation open. The second run recorded less available commit at the failed allocation and still left the menu blocked.
 
+A local mip-preparation control used bounded reads from the installed `g00s000` archive. It matched the reference input and output hashes for the first two entries in `mip256-full.tsv` and reduced their logical payloads from 349,632 to 87,488 bytes and from 174,880 to 43,808 bytes. The control verifies the texture transformation on owned build `23986256`. The effect of prepared archives on Xbox `AssetHeap` usage remains open. [Reference owned-file preparation](https://github.com/BBCPrince/UWP-Spider-Launcher/tree/main/asset-preparation)
+
 ## Reproduce the launch trial
 
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
