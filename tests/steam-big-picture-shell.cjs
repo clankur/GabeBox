@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--store] [--home] [--startup-history] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--startup-history] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,14 +8,15 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--store', '--home', '--startup-history'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--startup-history'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
+const storageOnly = process.argv.includes('--storage');
 const storeOnly = process.argv.includes('--store');
 const homeOnly = process.argv.includes('--home');
 const startupHistory = process.argv.includes('--startup-history');
-const framedGamepad = startupHistory || homeOnly || storeOnly || networkOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const framedGamepad = startupHistory || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -38,6 +39,15 @@ const catalogs = {
 // bundle installs SteamClient inside Valve's unmodified document.
 function setupHost(steamId, windowState, catalogs) {
     const state = {...windowState};
+    const gb = 1024 ** 3;
+    window.fixtureStorage = {defaultId: 'D', folders: [
+        {id: 'D', name: 'Xbox Development Storage', path: 'D:\\DevelopmentFiles\\SteamLibrary', mounted: true,
+            totalBytes: 100 * gb, freeBytes: 90 * gb, apps: []},
+        {id: 'E', name: 'External Storage', path: 'E:\\SteamLibrary', mounted: true,
+            totalBytes: 500 * gb, freeBytes: 400 * gb, apps: []},
+        {id: 'local', name: 'App Storage', path: 'LocalState\\SteamLibrary', mounted: true,
+            totalBytes: 30 * gb, freeBytes: 24 * gb, apps: [{appId: 42, sizeBytes: 2 * gb}]}
+    ]};
     const events = new EventTarget();
     window.fixtureCalls = [];
     window.fixtureNativePad = {slot: 0, bits: 0, lt: 0, rt: 0, lx: 0, ly: 0, rx: 0, ry: 0};
@@ -76,6 +86,25 @@ function setupHost(steamId, windowState, catalogs) {
             switch (request.method) {
                 case 'store-browser': return; // The Store test drives isolated browser receipts explicitly.
                 case 'network-state': reply = {result: window.fixtureNetwork || {level: 'offline'}}; break;
+                case 'storage-list':
+                    reply = window.fixtureStorage && games ? {result: {...window.fixtureStorage,
+                        folders: window.fixtureStorage.folders.map(folder => ({...folder,
+                            apps: folder.apps.filter(app => games.some(game => game.id === app.appId))}))}} :
+                        {error: 'storage-unavailable'};
+                    break;
+                case 'storage-select':
+                    window.fixtureStorage.defaultId = request.argument;
+                    reply = {result: {ok: true}};
+                    break;
+                case 'storage-move': {
+                    const {appIds, destination} = request.argument;
+                    const target = window.fixtureStorage.folders.find(folder => folder.id === destination && folder.mounted);
+                    const from = window.fixtureStorage.folders.find(folder => folder !== target &&
+                        folder.apps.some(app => app.appId === appIds[0]));
+                    if (target && from) target.apps.push(...from.apps.splice(from.apps.findIndex(app => app.appId === appIds[0]), 1));
+                    reply = {result: {ok: Boolean(target && from)}};
+                    break;
+                }
                 case 'library': reply = games ? {result: games} : {error: 'signed-out'}; break;
                 case 'session': reply = {result: {steamId: window.fixtureSteamId}}; break;
                 case 'sign-out':
@@ -298,6 +327,45 @@ async function checkNetwork(page, popup) {
     await wirelessRow.waitFor({state:'visible'});
     assert.equal(await page.evaluate(() => SystemNetworkStore.hasSteamConnection), false);
     console.log('Valve header SVG changed between offline, wired and Wi-Fi. Settings updated live from Wi-Fi to wired, local-only, offline and back to Wi-Fi. CM stayed disconnected.');
+}
+
+async function checkStorage(page, popup) {
+    await pressNative(page, 3);
+    const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');
+    await menu.getByText('Settings', {exact: true}).click();
+    await popup.getByText('Storage', {exact: true}).first().click({timeout: 8000});
+    const pane = popup.getByRole('tabpanel', {name: 'Storage', exact: true});
+    const developer = pane.getByRole('tabpanel', {name: 'Xbox Development Storage (D:)', exact: true});
+    await developer.getByText('D:\\DevelopmentFiles\\SteamLibrary', {exact: true}).waitFor({state: 'visible'})
+        .catch(async error => { throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 1200)); });
+    await page.waitForFunction(() => installFolderStore.MountedInstallFolders.length === 3);
+    assert.equal(await page.evaluate(() => installFolderStore.GetInstallFolder(0).bIsDefaultFolder), true);
+    await pane.getByRole('tab', {name: /External Storage/}).press('F3'); // Valve's secondary action sets the default.
+    await page.waitForFunction(() => installFolderStore.GetInstallFolder(1).bIsDefaultFolder);
+    await pane.getByRole('tab', {name: /Xbox Development Storage/}).press('F3');
+    await page.waitForFunction(() => installFolderStore.GetInstallFolder(0).bIsDefaultFolder);
+
+    await pane.getByRole('tab', {name: /App Storage/}).click();
+    const game = pane.getByRole('tabpanel', {name: 'App Storage', exact: true}).locator('[data-appid="42"]');
+    await game.press('F4').catch(async error => { throw new Error(error.message + '\n' + await pane.innerText()); });
+    const moved = popup.getByText('All content moved successfully', {exact: true});
+    await popup.getByRole('button', {name: 'Move', exact: true}).click();
+    await moved.waitFor({state: 'visible'});
+    await page.waitForFunction(() => installFolderStore.GetInstallFolder(0).vecApps.some(app => app.nAppID === 42));
+    await popup.getByRole('button', {name: 'Close', exact: true}).click();
+    await pane.getByRole('tab', {name: /Xbox Development Storage/}).click();
+    await developer.locator('[data-appid="42"]').waitFor({state: 'visible'});
+    await page.evaluate(() => {
+        window.fixtureStorage.folders.find(folder => folder.id === 'E').mounted = false;
+        SteamClient.InstallFolder.RefreshFolders();
+    });
+    await page.waitForFunction(() => !installFolderStore.GetInstallFolder(1).bIsMounted);
+    await page.evaluate(() => {
+        window.fixtureStorage = null;
+        SteamClient.InstallFolder.RefreshFolders();
+    });
+    await popup.getByText('Storage unavailable', {exact: true}).first().waitFor({state: 'visible'});
+    console.log('Opened Valve Storage and checked the D default, E selection, move completion, and unavailable view.');
 }
 
 async function checkAppAdapter(page) {
@@ -936,6 +1004,10 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 if (homeOnly) { await checkHome(page, popup); return; }
                 if (storeOnly) { await checkStore(browser, page, popup); return; }
                 if (networkOnly) { await checkNetwork(page, popup); return; }
+                if (storageOnly) {
+                    await checkStorage(page, popup).catch(error => { throw new Error(error.message + '\n' + [...errors].slice(-8).join('\n')); });
+                    return;
+                }
                 if (accounts) {
                     const predicates = await nativeLibraryPredicates();
                     await popup.waitForFunction(predicates.library);

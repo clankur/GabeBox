@@ -34,6 +34,7 @@
 #include "pipe-protocol.h"
 #include "SteamChildExitTrace.h"
 #include "SteamSdlSurface.h"
+#include "SteamLibraryStorage.h"
 #include "SteamCloudRestore.h"
 #include "steam-launch-detail.h"
 #include "steam-session-cache-policy.h"
@@ -1055,38 +1056,37 @@ static std::vector<wchar_t> SteamChildEnvironment(std::span<const std::pair<std:
     return block;
 }
 
-static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SdlFileDigest(
-        winrt::Windows::Storage::StorageFile file) {
+static winrt::hstring SdlFileDigest(std::wstring const& path) {
     using namespace winrt::Windows::Security::Cryptography;
-    WIN32_FILE_ATTRIBUTE_DATA info{};
-    if (!GetFileAttributesExFromAppW(file.Path().c_str(), GetFileExInfoStandard, &info) ||
-            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw winrt::hresult_access_denied();
-    auto properties = co_await file.GetBasicPropertiesAsync();
-    if (!properties.Size() || properties.Size() > 8 * 1024 * 1024) co_return winrt::hstring{};
-    auto bytes = co_await winrt::Windows::Storage::FileIO::ReadBufferAsync(file);
-    auto digest = Core::HashAlgorithmProvider::OpenAlgorithm(L"SHA256").HashData(bytes);
-    co_return CryptographicBuffer::EncodeToHexString(digest);
+    auto file = steam_win32_stage::OpenNativeFile(path);
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.get(), &size)) winrt::throw_last_error();
+    if (size.QuadPart < 1 || size.QuadPart > 8 * 1024 * 1024) return {};
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size.QuadPart));
+    DWORD read{};
+    if (!ReadFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr))
+        winrt::throw_last_error();
+    if (read != bytes.size()) throw winrt::hresult_error(E_FAIL);
+    auto digest = Core::HashAlgorithmProvider::OpenAlgorithm(L"SHA256").HashData(
+        CryptographicBuffer::CreateFromByteArray(bytes));
+    return CryptographicBuffer::EncodeToHexString(digest);
 }
 
 // The native Dwarf executable loads its adjacent SDL, unlike the managed and
 // Java hosts which select the signed package's shared SDL explicitly.
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> PrepareDwarfRuntime(
-        winrt::Windows::Storage::StorageFolder library, bool completedManifest) {
+        std::wstring library, bool completedManifest) {
     using namespace winrt::Windows::Storage;
     auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
     auto runtime = (co_await package.TryGetItemAsync(L"DwarfRuntime")).try_as<StorageFolder>();
     if (!runtime) co_return winrt::hstring(L"existing-install");
     if (!completedManifest) co_return winrt::hstring(L"not-installed");
-    auto replacement = co_await runtime.GetFileAsync(L"SDL2.dll");
-    auto desired = co_await SdlFileDigest(replacement);
+    const auto replacement = std::wstring((co_await runtime.GetFileAsync(L"SDL2.dll")).Path());
+    const auto desired = SdlFileDigest(replacement);
     if (desired.empty()) throw winrt::hresult_invalid_argument();
-    auto directory = library;
-    for (const auto component : {L"steamapps", L"common", L"Dwarf Fortress"}) {
-        directory = co_await directory.GetFolderAsync(component);
-        if (!SlayCloudDirectoryExists(std::wstring(directory.Path()))) throw winrt::hresult_access_denied();
-    }
-    auto installed = co_await directory.GetFileAsync(L"SDL2.dll");
-    auto original = co_await SdlFileDigest(installed);
+    const auto directory = steam_win32_stage::OpenInstall(library, L"steamapps/common/Dwarf Fortress");
+    const auto installed = steam_win32_stage::SourceFile(directory, L"SDL2.dll");
+    const auto original = SdlFileDigest(installed);
     auto data = ApplicationData::Current();
     auto settings = data.LocalSettings().Values();
     const winrt::hstring setting = L"DwarfRuntimeDigest";
@@ -1102,22 +1102,27 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> PrepareDwarfR
         (previous.empty() || original != previous))
         co_return winrt::hstring(L"existing-custom-version");
     auto backups = co_await data.LocalFolder().CreateFolderAsync(L"SteamRuntimeBackups", CreationCollisionOption::OpenIfExists);
-    if (!SlayCloudDirectoryExists(std::wstring(backups.Path()))) throw winrt::hresult_access_denied();
+    steam_win32_stage::CheckNativeType(std::wstring(backups.Path()), true);
     auto name = L"975370-SDL2-" + original + L".dll";
     auto backup = (co_await backups.TryGetItemAsync(name)).try_as<StorageFile>();
-    // Publish a verified copy under its final name only after the copy is complete.
     if (!backup) {
-        backup = co_await installed.CopyAsync(data.TemporaryFolder(), L"Dwarf-backup.tmp", NameCollisionOption::GenerateUniqueName);
-        if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
-        co_await backup.MoveAsync(backups, name, NameCollisionOption::FailIfExists);
+        backup = co_await backups.CreateFileAsync(L"Dwarf-backup.tmp", CreationCollisionOption::GenerateUniqueName);
+        if (!CopyFileW(installed.c_str(), backup.Path().c_str(), FALSE)) winrt::throw_last_error();
+        if (SdlFileDigest(std::wstring(backup.Path())) != original) throw winrt::hresult_error(E_FAIL);
+        co_await backup.RenameAsync(name, NameCollisionOption::FailIfExists);
     }
-    if (co_await SdlFileDigest(backup) != original) throw winrt::hresult_error(E_FAIL);
-    auto pending = co_await replacement.CopyAsync(data.TemporaryFolder(), L"Dwarf-SDL2.tmp", NameCollisionOption::GenerateUniqueName);
-    if (co_await SdlFileDigest(pending) != desired || co_await SdlFileDigest(installed) != original)
+    if (SdlFileDigest(std::wstring(backup.Path())) != original) throw winrt::hresult_error(E_FAIL);
+    const auto pending = SlayCloudChild(directory, SlayCloudArchiveName(L"SDL2-pending-") + L".tmp");
+    if (!CopyFileW(replacement.c_str(), pending.c_str(), TRUE)) winrt::throw_last_error();
+    struct RemovePending {
+        std::wstring const& path;
+        ~RemovePending() { DeleteFileW(path.c_str()); }
+    } removePending{pending};
+    if (SdlFileDigest(pending) != desired || SdlFileDigest(installed) != original)
         throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
-    co_await pending.MoveAndReplaceAsync(installed);
-    if (co_await SdlFileDigest(co_await directory.GetFileAsync(L"SDL2.dll")) != desired)
-        throw winrt::hresult_error(E_FAIL);
+    if (!MoveFileExW(pending.c_str(), installed.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        winrt::throw_last_error();
+    if (SdlFileDigest(installed) != desired) throw winrt::hresult_error(E_FAIL);
     settings.Insert(setting, winrt::box_value(desired));
     co_return winrt::hstring(L"updated");
 }
@@ -1170,12 +1175,230 @@ static bool RequestSteamDownloadNow(void *manager, std::uintptr_t const *methods
     return reinterpret_cast<SetQueuePlacement>(methods[56])(manager, app, firstInQueue);
 }
 
+static constexpr std::uint32_t xcomDosAppId = 7760;
+static constexpr std::uint32_t slayTheSpireAppId = 646570;
+
+namespace steam_storage = steam_library_storage;
+using LibraryDrive = steam_storage::Drive;
+
+static const wchar_t* LibraryId(LibraryDrive drive) {
+    if (drive == LibraryDrive::Developer) return L"D";
+    if (drive == LibraryDrive::External) return L"E";
+    return L"local";
+}
+
+static std::optional<LibraryDrive> ParseLibraryId(std::wstring_view value) {
+    if (value == L"D") return LibraryDrive::Developer;
+    if (value == L"E") return LibraryDrive::External;
+    return std::nullopt;
+}
+
+static LibraryDrive DefaultSteamDrive(std::wstring_view localState) {
+    auto settings = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+    auto value = winrt::unbox_value_or<winrt::hstring>(settings.TryLookup(L"SteamLibraryDrive"), L"D");
+    auto preferred = ParseLibraryId(value).value_or(LibraryDrive::Developer);
+    if (steam_storage::IsAvailable(preferred, localState)) return preferred;
+    if (steam_storage::IsAvailable(LibraryDrive::Developer, localState)) return LibraryDrive::Developer;
+    return LibraryDrive::Local;
+}
+
+struct SteamLibraryLocation {
+    LibraryDrive drive;
+    steam_storage::App app;
+};
+
+static std::optional<SteamLibraryLocation> LocateSteamApp(std::wstring_view localState,
+        std::uint32_t app, bool completedOnly = true) {
+    for (const auto drive : steam_storage::FixedDrives()) {
+        if (!steam_storage::IsAvailable(drive, localState)) continue;
+        auto entry = steam_storage::FindApp(drive, localState, app);
+        if (entry && (!completedOnly || entry->installed)) return SteamLibraryLocation{drive, std::move(*entry)};
+    }
+    return std::nullopt;
+}
+
+static winrt::hstring SteamLibraries(std::wstring_view localState) {
+    using namespace winrt::Windows::Data::Json;
+    const auto defaultDrive = DefaultSteamDrive(localState);
+    JsonArray folders;
+    for (const auto drive : steam_storage::FixedDrives()) {
+        if (!steam_storage::IsAvailable(drive, localState)) continue;
+        try {
+            auto space = steam_storage::GetSpace(drive, localState);
+            JsonArray apps;
+            for (const auto& entry : steam_storage::ListApps(drive, localState)) {
+                if (!entry.installed) continue;
+                JsonObject row;
+                row.SetNamedValue(L"appId", JsonValue::CreateNumberValue(entry.id));
+                row.SetNamedValue(L"name", JsonValue::CreateStringValue(entry.name));
+                row.SetNamedValue(L"sizeBytes", JsonValue::CreateNumberValue(static_cast<double>(entry.sizeOnDisk)));
+                apps.Append(row);
+            }
+            if (drive == LibraryDrive::Local && drive != defaultDrive && !apps.Size()) continue;
+            JsonObject folder;
+            folder.SetNamedValue(L"id", JsonValue::CreateStringValue(LibraryId(drive)));
+            folder.SetNamedValue(L"path", JsonValue::CreateStringValue(steam_storage::LibraryPath(drive, localState)));
+            const wchar_t* name = drive == LibraryDrive::Developer ? L"Xbox internal storage" :
+                drive == LibraryDrive::External ? L"USB storage" : L"Steam app storage";
+            folder.SetNamedValue(L"name", JsonValue::CreateStringValue(name));
+            folder.SetNamedValue(L"mounted", JsonValue::CreateBooleanValue(true));
+            folder.SetNamedValue(L"totalBytes", JsonValue::CreateNumberValue(static_cast<double>(space.capacity)));
+            folder.SetNamedValue(L"freeBytes", JsonValue::CreateNumberValue(static_cast<double>(space.available)));
+            folder.SetNamedValue(L"apps", apps);
+            folders.Append(folder);
+        } catch (std::runtime_error const&) {
+            // The USB drive can be removed between enumeration and measurement.
+        }
+    }
+    JsonObject result;
+    result.SetNamedValue(L"folders", folders);
+    result.SetNamedValue(L"defaultId", JsonValue::CreateStringValue(LibraryId(defaultDrive)));
+    return result.Stringify();
+}
+
+static winrt::hstring StorageResult(winrt::hstring const& error = {}, std::uint32_t moved = 0) {
+    using namespace winrt::Windows::Data::Json;
+    JsonObject result;
+    result.SetNamedValue(L"ok", JsonValue::CreateBooleanValue(error.empty()));
+    if (!error.empty()) result.SetNamedValue(L"error", JsonValue::CreateStringValue(error));
+    result.SetNamedValue(L"moved", JsonValue::CreateNumberValue(moved));
+    return result.Stringify();
+}
+
+static bool CanMoveSteamGames(std::vector<std::uint32_t> const& apps) {
+    std::lock_guard lock(steamSessionMutex);
+    auto session = liveSteamSession;
+    if (!session || !session->OwnsSession() || session->downloadApp || session->launchCall) return false;
+    const auto base = reinterpret_cast<std::uintptr_t>(session->module);
+    if (!session->userMethods || session->userMethods[67] != base + 0x75a320) return false;
+    using GameQuery = bool (__cdecl *)(void *, const std::uint64_t *);
+    const auto running = reinterpret_cast<GameQuery>(session->userMethods[67]);
+    session->PumpCallbacks();
+    return std::none_of(apps.begin(), apps.end(), [&](const auto app) {
+        const std::uint64_t gameId = app;
+        return running(session->clientUser, &gameId);
+    });
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamStorageCommand(
+        winrt::hstring operation, winrt::hstring argument) {
+    using namespace winrt::Windows::Data::Json;
+    using winrt::Windows::Storage::ApplicationData;
+    const std::wstring localState(ApplicationData::Current().LocalFolder().Path());
+    co_await winrt::resume_background();
+    std::uint32_t moved = 0;
+    try {
+        if (operation == L"list") co_return SteamLibraries(localState);
+        if (operation == L"select") {
+            auto drive = ParseLibraryId(argument);
+            if (!drive || !steam_storage::IsAvailable(*drive, localState))
+                co_return StorageResult(L"This drive is unavailable.");
+            steam_storage::OpenLibrary(*drive, localState);
+            ApplicationData::Current().LocalSettings().Values().Insert(L"SteamLibraryDrive",
+                winrt::box_value(winrt::hstring(LibraryId(*drive))));
+            co_return StorageResult();
+        }
+        if (operation != L"move" && operation != L"migrate" && operation != L"stage-dos")
+            co_return StorageResult(L"Unknown storage operation.");
+        if (steamLaunchActive.test_and_set()) co_return StorageResult(L"Close the running game before moving files.");
+        struct ResetOperation {
+            ~ResetOperation() { steamLaunchActive.clear(); }
+        } resetOperation;
+        {
+            std::lock_guard lock(steamSdlMutex);
+            if (steamSdlSurface && steamSdlSurface->Alive())
+                co_return StorageResult(L"Close the running game before moving files.");
+        }
+        std::vector<std::uint32_t> owned;
+        {
+            std::lock_guard lock(steamSessionMutex);
+            if (!liveSteamSession || !liveSteamSession->OwnsSession()) co_return StorageResult(L"Sign in to Steam.");
+            if (liveSteamSession->downloadApp) co_return StorageResult(L"Wait for Steam to finish the active download.");
+            owned = liveSteamSession->games;
+        }
+        if (operation == L"stage-dos") {
+            if (argument != L"7760" || std::find(owned.begin(), owned.end(), xcomDosAppId) == owned.end())
+                co_return StorageResult(L"An installed Steam copy of X-COM is required.");
+            const auto location = LocateSteamApp(localState, xcomDosAppId);
+            if (!location) co_return StorageResult(L"Steam could not find the installed game.");
+            JsonObject result;
+            result.SetNamedValue(L"ok", JsonValue::CreateBooleanValue(true));
+            if (location->drive != LibraryDrive::Local) {
+                const auto folder = steam_storage::StageDosApp(location->drive, localState,
+                    ApplicationData::Current().TemporaryFolder().Path(), xcomDosAppId);
+                result.SetNamedValue(L"folder", JsonValue::CreateStringValue(folder));
+            }
+            co_return result.Stringify();
+        }
+        if (operation == L"migrate") {
+            std::vector<std::uint32_t> legacy;
+            for (const auto& app : steam_storage::ListApps(LibraryDrive::Local, localState))
+                if (app.installed) legacy.push_back(app.id);
+            for (const auto& move : steam_storage::PendingMoves(LibraryDrive::Local, localState))
+                legacy.push_back(move.id);
+            if (!CanMoveSteamGames(legacy)) co_return StorageResult(L"Close running games before moving files.");
+            RecoverLegacySlayCloudForMigration(localState);
+            steam_storage::MigrateLocalLibrary(localState, moved);
+        } else {
+            JsonObject request;
+            if (!JsonObject::TryParse(argument, request)) co_return StorageResult(L"Invalid move request.");
+            auto destination = ParseLibraryId(request.GetNamedString(L"destination", L""));
+            if (!destination || !steam_storage::IsAvailable(*destination, localState))
+                co_return StorageResult(L"The destination drive is unavailable.");
+            const auto apps = request.GetNamedArray(L"appIds");
+            if (!apps.Size() || apps.Size() > 512) co_return StorageResult(L"Select games to move.");
+            std::vector<std::uint32_t> selected;
+            for (const auto& value : apps) {
+                if (value.ValueType() != JsonValueType::Number) co_return StorageResult(L"Invalid Steam AppID.");
+                const auto input = value.GetNumber();
+                if (input < 1 || input > 0xffffff) co_return StorageResult(L"Invalid Steam AppID.");
+                const auto app = static_cast<std::uint32_t>(input);
+                if (input != app || std::find(owned.begin(), owned.end(), app) == owned.end())
+                    co_return StorageResult(L"Select games owned by the signed-in Steam account.");
+                if (std::find(selected.begin(), selected.end(), app) == selected.end()) selected.push_back(app);
+            }
+            if (!CanMoveSteamGames(selected)) co_return StorageResult(L"Close running games before moving files.");
+            for (const auto app : selected) {
+                // An interrupted move may leave two visible manifests or hide the source manifest.
+                bool resumed = false;
+                for (const auto source : steam_storage::FixedDrives()) {
+                    if (source == *destination || !steam_storage::IsAvailable(source, localState)) continue;
+                    const auto pending = steam_storage::PendingMoves(source, localState);
+                    const auto interrupted = std::find_if(pending.begin(), pending.end(), [app](const auto& move) {
+                        return move.id == app;
+                    });
+                    if (interrupted != pending.end() && interrupted->destination != *destination)
+                        co_return StorageResult(L"Finish the previous move to its original destination first.", moved);
+                    if (interrupted == pending.end() && !steam_storage::HasMoveTransaction(localState, source, *destination, app))
+                        continue;
+                    if (app == slayTheSpireAppId && source == LibraryDrive::Local)
+                        RecoverLegacySlayCloudForMigration(localState);
+                    steam_storage::MoveApp(localState, source, *destination, app);
+                    resumed = true;
+                    ++moved;
+                    break;
+                }
+                if (resumed) continue;
+                auto source = LocateSteamApp(localState, app);
+                if (!source) co_return StorageResult(L"Steam could not find the installed game.", moved);
+                if (source->drive == *destination) continue;
+                if (app == slayTheSpireAppId && source->drive == LibraryDrive::Local)
+                    RecoverLegacySlayCloudForMigration(localState);
+                steam_storage::MoveApp(localState, source->drive, *destination, app);
+                ++moved;
+            }
+        }
+        co_return StorageResult({}, moved);
+    } catch (std::runtime_error const& error) {
+        co_return StorageResult(winrt::to_hstring(error.what()), moved);
+    } catch (winrt::hresult_error const& error) {
+        co_return StorageResult(error.message(), moved);
+    }
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDownload(std::uint32_t app) {
     using namespace winrt::Windows::Storage;
-    auto root = ApplicationData::Current().LocalFolder();
-    auto folder = co_await root.CreateFolderAsync(L"SteamLibrary", CreationCollisionOption::OpenIfExists);
-    auto path = folder.Path();
-
+    const std::wstring localState(ApplicationData::Current().LocalFolder().Path());
     std::lock_guard lock(steamSessionMutex);
     auto session = liveSteamSession;
     if (!session || !session->OwnsSession()) co_return winrt::hstring(L"session-lost");
@@ -1186,6 +1409,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
     if (std::find(session->games.begin(), session->games.end(), app) == session->games.end() ||
             !reinterpret_cast<IsSubscribed>(session->userMethods[182])(session->clientUser, app)) {
         co_return winrt::hstring(L"no-license");
+    }
+
+    winrt::hstring path;
+    try {
+        const auto previous = LocateSteamApp(localState, app, false);
+        const auto drive = previous ? previous->drive : DefaultSteamDrive(localState);
+        path = winrt::hstring(steam_storage::OpenLibrary(drive, localState));
+    } catch (std::runtime_error const&) {
+        co_return winrt::hstring(L"library-folder-error");
     }
 
     auto methods = FindSteamAppManager(*session);
@@ -1291,30 +1523,6 @@ static winrt::hstring ReadSteamDownload() {
             (retry == Retry::Accepted ? L"accepted" : retry == Retry::Declined ? L"declined" : L"not-attempted") + L"\r\n";
     }
     return winrt::hstring(report);
-}
-
-static winrt::Windows::Foundation::IAsyncOperation<bool> HasCompletedSteamManifest(
-        winrt::Windows::Storage::StorageFolder library, std::uint32_t app, std::wstring expectedBuild = {}) {
-    using namespace winrt::Windows::Storage;
-    auto appsItem = co_await library.TryGetItemAsync(L"steamapps");
-    auto appsFolder = appsItem.try_as<StorageFolder>();
-    if (!appsFolder) co_return false;
-    auto item = co_await appsFolder.TryGetItemAsync(winrt::hstring(L"appmanifest_" + std::to_wstring(app) + L".acf"));
-    auto manifest = item.try_as<StorageFile>();
-    if (!manifest) co_return false;
-    auto text = co_await FileIO::ReadTextAsync(manifest);
-    std::wstring_view view(text);
-    constexpr std::wstring_view key = L"\"StateFlags\"";
-    auto field = view.find(key);
-    if (field == view.npos) co_return false;
-    auto value = view.find_first_not_of(L" \t", field + key.size());
-    if (value == view.npos || view.substr(value, 3) != L"\"4\"") co_return false;
-    if (expectedBuild.empty()) co_return true;
-    constexpr std::wstring_view buildKey = L"\"buildid\"";
-    field = view.find(buildKey);
-    if (field == view.npos) co_return false;
-    value = view.find_first_not_of(L" \t", field + buildKey.size());
-    co_return value != view.npos && view.substr(value, expectedBuild.size() + 2) == L"\"" + expectedBuild + L"\"";
 }
 
 // Observe the Java process we actually launched. The SDL surface can take
@@ -1477,11 +1685,17 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ProbeJavaVers
 }
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RunSlayConsoleDiagnostic(
-        winrt::Windows::Storage::StorageFolder library, std::wstring packageRoot, std::wstring log) {
+        std::wstring localState, LibraryDrive drive, std::wstring packageRoot, std::wstring log) {
     constexpr std::uint32_t app = 646570;
     const std::uint64_t gameId = app;
-    if (!co_await HasCompletedSteamManifest(library, app)) co_return winrt::hstring(L"steam_slay_console=not-installed\r\n");
-    const auto game = std::wstring(library.Path()) + L"\\steamapps\\common\\SlayTheSpire";
+    std::optional<steam_storage::App> installedApp;
+    try {
+        installedApp = steam_storage::FindApp(drive, localState, app);
+    } catch (std::runtime_error const&) {
+        co_return winrt::hstring(L"steam_slay_console=storage-error\r\n");
+    }
+    if (!installedApp || !installedApp->installed) co_return winrt::hstring(L"steam_slay_console=not-installed\r\n");
+    const auto game = SlayCloudGamePath(steam_storage::LibraryPath(drive, localState), installedApp->installDir);
     const auto java = game + L"\\jre\\bin\\java.exe";
     auto command = L"\"" + java + L"\" -Xmx32m -cp \"" + packageRoot +
         L"\" SlayConsoleDiagnostic \"" + log + L"\" \"" + game + L"\"";
@@ -1528,10 +1742,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RunSlayConsol
 }
 
 enum class GameBackend { SteamPlay, DosBox, SdlHost };
-static constexpr std::uint32_t xcomDosAppId = 7760;
 static constexpr std::uint32_t dwarfFortressAppId = 975370;
 static constexpr std::uint32_t stardewValleyAppId = 413150;
-static constexpr std::uint32_t slayTheSpireAppId = 646570;
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySteamCloud(
         std::uint32_t app, bool preview) {
@@ -1548,12 +1760,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
     }
     try {
         auto root = ApplicationData::Current().LocalFolder();
-        auto library = co_await root.GetFolderAsync(L"SteamLibrary");
-        if (!co_await HasCompletedSteamManifest(library, app)) co_return winrt::hstring(L"not-installed");
-        auto apps = co_await library.GetFolderAsync(L"steamapps");
-        auto common = co_await apps.GetFolderAsync(L"common");
-        auto game = co_await common.GetFolderAsync(L"SlayTheSpire");
-        if (!SlayCloudDirectoryExists(std::wstring(game.Path()))) co_return winrt::hstring(L"not-installed");
+        const auto installed = LocateSteamApp(root.Path(), app);
+        if (!installed) co_return winrt::hstring(L"not-installed");
+        const auto library = steam_storage::LibraryPath(installed->drive, root.Path());
+        const auto game = SlayCloudGamePath(library, installed->app.installDir);
         std::uint64_t account = 0;
         {
             std::lock_guard lock(steamSessionMutex);
@@ -1581,8 +1791,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
                     result = winrt::hstring(L"verified:" + std::to_wstring(files.Size()) +
                         L":preview-installed:" + std::to_wstring(restored));
                 } else {
-                    RollBackSlayCloud(std::wstring(title.Path()), std::wstring(game.Path()));
-                    auto restored = co_await RestoreSlayCloudFiles(title, stage, game, files);
+                    auto journal = SlayCloudJournalPath(root.Path(), game, installed->drive == LibraryDrive::Local);
+                    auto restored = co_await RestoreSlayCloudFiles(std::move(journal), std::wstring(stage.Path()), game, files);
                     result = restored ? winrt::hstring(L"restored:" + std::to_wstring(restored)) : winrt::hstring(L"no-compatible-saves");
                 }
             } else {
@@ -1592,6 +1802,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
             }
         } catch (winrt::hresult_error const&) {
             result = L"storage-error";
+        } catch (std::runtime_error const&) {
+            result = L"storage-error";
         }
         try {
             co_await stage.DeleteAsync(StorageDeleteOption::PermanentDelete);
@@ -1600,6 +1812,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
         }
         co_return result;
     } catch (winrt::hresult_error const&) {
+        co_return winrt::hstring(L"storage-error");
+    } catch (std::runtime_error const&) {
         co_return winrt::hstring(L"storage-error");
     }
 }
@@ -1636,15 +1850,21 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     };
     co_await checkpoint(L"checking-library");
     auto root = ApplicationData::Current().LocalFolder();
-    auto item = co_await root.TryGetItemAsync(L"SteamLibrary");
-    auto folder = item.try_as<StorageFolder>();
-    if (!folder) co_return winrt::hstring(L"steam_launch=no-local-library\r\n");
-    auto path = folder.Path();
-    if (hostedSlay) {
+    std::optional<SteamLibraryLocation> location;
+    try {
+        location = LocateSteamApp(root.Path(), app);
+    } catch (std::runtime_error const&) {
+        co_return winrt::hstring(L"steam_launch=library-folder-error\r\n");
+    }
+    if (!location) co_return winrt::hstring(L"steam_launch=not-installed\r\n");
+    const winrt::hstring path(steam_storage::LibraryPath(location->drive, root.Path()));
+    const auto expectedDirectory = std::wstring(path) + L"\\steamapps\\common\\" + location->app.installDir;
+    const std::wstring installRoot(path);
+    if (app == slayTheSpireAppId) {
         try {
-            const auto cloudPath = SlayCloudChild(SlayCloudChild(root.Path(), L"SteamCloud"), L"646570");
-            const auto slayPath = SlayCloudChild(path, L"steamapps\\common\\SlayTheSpire");
-            RollBackSlayCloud(cloudPath, slayPath);
+            const auto slayPath = SlayCloudGamePath(path, location->app.installDir);
+            const auto journal = SlayCloudJournalPath(root.Path(), slayPath, location->drive == LibraryDrive::Local);
+            RollBackSlayCloud(journal, slayPath);
         } catch (winrt::hresult_error const&) {
             co_return winrt::hstring(L"steam_launch=save-recovery-error\r\n");
         }
@@ -1742,7 +1962,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !steam_win32_stage::IsImageName(shadowImage, L".exe")) ||
                         shadowSource.size() > 260 ||
                         (!shadowRenderer.empty() && shadowRenderer != L"d3d12" && shadowRenderer != L"opengl3") ||
-                        !co_await HasCompletedSteamManifest(folder, app, shadowBuild)) {
+                        location->app.buildId != shadowBuild) {
                     co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 }
             }
@@ -1768,7 +1988,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_sdl_host=profile-error\r\n");
                 }
             }
-            if (!co_await HasCompletedSteamManifest(folder, app, surfacelessBuild))
+            if (location->app.buildId != surfacelessBuild)
                 co_return winrt::hstring(L"steam_sdl_host=profile-build-mismatch\r\n");
             if (!shadowBuild.empty() && (surfacelessBuild != shadowBuild || !shadowRecipe ||
                     (!shadowDxgi && shadowRenderer != L"opengl3") ||
@@ -1843,7 +2063,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         }
         report += L"steam_launch_option_index=" + std::to_wstring(launchOption) + L"\r\n";
     }
-    const bool installedManifest = co_await HasCompletedSteamManifest(folder, app);
+    const bool installedManifest = location->app.installed;
     std::uint64_t call = 0;
     CallResult result = nullptr;
     std::int32_t libraryIndex = -1;
@@ -1886,8 +2106,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto manager = session->appManager;
             auto methods = SteamMethods(manager);
             auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, app);
-            if ((state & installMask) == fullyInstalled) break;
+            const bool installed = (state & installMask) == fullyInstalled;
+            if (installed) {
+                const auto directory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+                if (CompareStringOrdinal(directory.c_str(), -1, expectedDirectory.c_str(), -1, TRUE) == CSTR_EQUAL)
+                    break;
+            }
             if (GetTickCount64() >= installDeadline) {
+                if (installed)
+                    co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
                 if (attemptedRegistration || !installedManifest || state != 1) {
                     co_return winrt::hstring(report + L"steam_launch=not-installed\r\nsteam_launch_install_state=" +
                         std::to_wstring(state) + L"\r\n");
@@ -1903,6 +2130,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await winrt::resume_after(std::chrono::milliseconds(500));
         co_await caller;
     } while (true);
+    report += std::wstring(L"steam_launch_library_drive=") + LibraryId(location->drive) + L"\r\n";
 
     constexpr std::uint32_t commonRedistributables = 228980;
     constexpr std::uint32_t updatePaused = 0x200;
@@ -1924,7 +2152,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
         }
         gameDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
-        if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
+        if (CompareStringOrdinal(gameDirectory.c_str(), -1, expectedDirectory.c_str(), -1, TRUE) != CSTR_EQUAL) {
             co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
         }
 
@@ -2066,11 +2294,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto relative = gameDirectory.substr(libraryRoot.size() + 1);
             std::replace(relative.begin(), relative.end(), L'\\', L'/');
             if (!shadowSource.empty()) relative += L'/' + shadowSource;
-            auto source = co_await steam_win32_stage::OpenInstall(folder, std::move(relative));
-            auto original = co_await source.GetFileAsync(shadowImage.empty() ? shadowExecutable : shadowImage);
+            auto source = steam_win32_stage::OpenInstall(installRoot, relative);
+            auto original = steam_win32_stage::SourceFile(source, shadowImage.empty() ? shadowExecutable : shadowImage);
             if (shadowOriginalExecutable) {
-                auto executable = co_await source.GetFileAsync(shadowExecutable);
-                shadowOriginalExecutablePath = executable.Path().c_str();
+                shadowOriginalExecutablePath = steam_win32_stage::SourceFile(source, shadowExecutable);
             }
             auto temporary = ApplicationData::Current().TemporaryFolder();
             shadowStage.folder = co_await temporary.CreateFolderAsync(L"SteamWin32Trial", CreationCollisionOption::GenerateUniqueName);
@@ -2095,13 +2322,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         co_await caller;
     }
     co_await checkpoint(backend == GameBackend::DosBox ? L"checking-dos-runtime" : L"submitting-play");
-    if ((backend == GameBackend::DosBox || hostedStardew || hostedSlay || hostedSurfaceless || !shadowBuild.empty()) &&
-            !co_await HasCompletedSteamManifest(folder, app, shadowBuild.empty() ? surfacelessBuild : shadowBuild)) {
-        co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+    if (backend == GameBackend::DosBox || hostedStardew || hostedSlay || hostedSurfaceless || !shadowBuild.empty()) {
+        const auto fresh = steam_storage::FindApp(location->drive, root.Path(), app);
+        const auto& expectedBuild = shadowBuild.empty() ? surfacelessBuild : shadowBuild;
+        if (!fresh || !fresh->installed || (!expectedBuild.empty() && fresh->buildId != expectedBuild))
+            co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
     }
     if (hostedSdl && app == dwarfFortressAppId) {
         try {
-            auto state = co_await PrepareDwarfRuntime(folder, installedManifest);
+            auto state = co_await PrepareDwarfRuntime(installRoot, installedManifest);
             if (state == L"not-installed") co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
             report += std::wstring(L"steam_dwarf_runtime=") + state.c_str() + L"\r\n";
         } catch (winrt::hresult_error const& error) {
@@ -2134,7 +2363,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (shadowStage.folder && CompareStringOrdinal(gameDirectory.c_str(), -1, currentDirectory.c_str(), -1, TRUE) != CSTR_EQUAL)
             co_return winrt::hstring(report + L"steam_launch=shadow-install-changed\r\n");
         gameDirectory = currentDirectory;
-        if (!IsLocalSteamInstall(gameDirectory, libraryRoot)) {
+        if (CompareStringOrdinal(gameDirectory.c_str(), -1, expectedDirectory.c_str(), -1, TRUE) != CSTR_EQUAL) {
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
         }
@@ -2553,7 +2782,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     launchTime.dwLowDateTime);
                 report += L"steam_slay_console_run=" + id + L"\r\n";
                 co_await checkpoint(L"collecting-slay-console");
-                report += (co_await RunSlayConsoleDiagnostic(folder, packageRoot,
+                report += (co_await RunSlayConsoleDiagnostic(std::wstring(root.Path()), location->drive, packageRoot,
                     dataRoot + L"\\slay-console-" + id + L".log")).c_str();
             }
             if (co_await package.TryGetItemAsync(L"steam-java-probe.txt")) {
@@ -2620,11 +2849,23 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return ReadSteamDownload();
     }
 
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamLibraryCommand(
+            winrt::hstring const& operation, winrt::hstring const& argument) {
+        return SteamStorageCommand(operation, argument);
+    }
+
     winrt::hstring SteamStorageInfo() {
-        auto path = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path();
+        auto localState = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path();
+        auto path = steam_storage::LibraryPath(DefaultSteamDrive(localState), localState);
         ULARGE_INTEGER callerAvailable{}, total{}, volumeAvailable{};
         if (!GetDiskFreeSpaceExW(path.c_str(), &callerAvailable, &total, &volumeAvailable)) {
-            return winrt::hstring(L"error=" + Hex(GetLastError()) + L"\r\n");
+            try {
+                auto space = steam_storage::GetSpace(DefaultSteamDrive(localState), localState);
+                callerAvailable.QuadPart = volumeAvailable.QuadPart = space.available;
+                total.QuadPart = space.capacity;
+            } catch (std::runtime_error const&) {
+                return winrt::hstring(L"error=" + Hex(GetLastError()) + L"\r\n");
+            }
         }
         return winrt::hstring(L"caller_available=" + std::to_wstring(callerAvailable.QuadPart) +
             L"\r\nvolume_size=" + std::to_wstring(total.QuadPart) +

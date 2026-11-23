@@ -36,12 +36,35 @@ static void CheckType(IStorageItem const& item, bool directory) {
         throw winrt::hresult_access_denied();
 }
 
+static void CheckNativeType(std::wstring const& path, bool directory) {
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) winrt::throw_last_error();
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            bool(attributes & FILE_ATTRIBUTE_DIRECTORY) != directory)
+        throw winrt::hresult_access_denied();
+}
+
+static winrt::handle OpenNativeFile(std::wstring const& path) {
+    CheckNativeType(path, false);
+    CREATEFILE2_EXTENDED_PARAMETERS options{};
+    options.dwSize = sizeof(options);
+    options.dwFileFlags = FILE_FLAG_OPEN_REPARSE_POINT;
+    const auto handle = CreateFile2(path.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, &options);
+    if (handle == INVALID_HANDLE_VALUE) winrt::throw_last_error();
+    winrt::handle file(handle);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file.get(), &info)) winrt::throw_last_error();
+    if (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+        throw winrt::hresult_access_denied();
+    return file;
+}
+
 static IAsyncAction Write(IRandomAccessStream destination, IBuffer bytes) {
     if (co_await destination.WriteAsync(bytes) != bytes.Length())
         winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_WRITE_FAULT));
 }
 
-static IAsyncAction ApplyRecipe(StorageFile recipe, StorageFile source, StorageFolder stage) {
+static IAsyncAction ApplyRecipe(StorageFile recipe, std::wstring source, StorageFolder stage) {
     constexpr std::array<std::uint8_t, 8> magic{'X', 'W', 'P', 'E', 'V', '1', '\r', '\n'};
     constexpr std::uint32_t metadataSize = 56;
     auto length = (co_await recipe.GetBasicPropertiesAsync()).Size();
@@ -58,17 +81,20 @@ static IAsyncAction ApplyRecipe(StorageFile recipe, StorageFile source, StorageF
             headerLength + tailLength != bytes.size() - metadataSize)
         throw winrt::hresult_invalid_argument();
 
-    CheckType(source, false);
-    auto from = co_await source.OpenAsync(FileAccessMode::Read);
-    if (from.Size() != sourceLength) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
+    auto from = OpenNativeFile(source);
+    LARGE_INTEGER actualSize{};
+    if (!GetFileSizeEx(from.get(), &actualSize)) winrt::throw_last_error();
+    if (static_cast<std::uint64_t>(actualSize.QuadPart) != sourceLength)
+        winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
     ULARGE_INTEGER callerAvailable{};
     if (GetDiskFreeSpaceExW(stage.Path().c_str(), &callerAvailable, nullptr, nullptr) &&
             callerAvailable.QuadPart < sourceLength + tailLength)
         winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_DISK_FULL));
-    auto target = co_await stage.CreateFileAsync(source.Name(), CreationCollisionOption::FailIfExists);
+    auto name = source.substr(source.find_last_of(L'\\') + 1);
+    auto target = co_await stage.CreateFileAsync(name, CreationCollisionOption::FailIfExists);
     auto to = co_await target.OpenAsync(FileAccessMode::ReadWrite);
     auto digest = Core::HashAlgorithmProvider::OpenAlgorithm(L"SHA256").CreateHash();
-    auto buffer = Buffer(chunkSize);
+    std::vector<std::uint8_t> buffer(chunkSize);
     auto createBuffer = [](std::span<const std::uint8_t> data) {
         return CryptographicBuffer::CreateFromByteArray({data.data(), data.data() + data.size()});
     };
@@ -77,8 +103,10 @@ static IAsyncAction ApplyRecipe(StorageFile recipe, StorageFile source, StorageF
     while (offset < sourceLength) {
         const auto boundary = offset < headerLength ? headerLength : sourceLength;
         const auto count = static_cast<std::uint32_t>(std::min<std::uint64_t>(chunkSize, boundary - offset));
-        auto block = co_await from.ReadAsync(buffer, count, InputStreamOptions::None);
-        if (block.Length() != count) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_READ_FAULT));
+        DWORD read = 0;
+        if (!ReadFile(from.get(), buffer.data(), count, &read, nullptr)) winrt::throw_last_error();
+        if (read != count) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_READ_FAULT));
+        auto block = createBuffer(std::span(buffer.data(), static_cast<size_t>(read)));
         digest.Append(block);
         if (offset >= headerLength) co_await Write(to, block);
         offset += count;
@@ -88,7 +116,6 @@ static IAsyncAction ApplyRecipe(StorageFile recipe, StorageFile source, StorageF
     co_await Write(to, createBuffer(bytes.last(static_cast<size_t>(tailLength))));
     if (!co_await to.FlushAsync()) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_WRITE_FAULT));
     to.Close();
-    from.Close();
 }
 
 static std::vector<std::wstring> RelativeComponents(std::wstring_view path) {
@@ -107,13 +134,20 @@ static std::vector<std::wstring> RelativeComponents(std::wstring_view path) {
     throw winrt::hresult_invalid_argument();
 }
 
-static IAsyncOperation<StorageFolder> OpenInstall(StorageFolder root, std::wstring relative) {
-    CheckType(root, true);
-    for (const auto &part : RelativeComponents(relative)) {
-        root = co_await root.GetFolderAsync(part);
-        CheckType(root, true);
+static std::wstring OpenInstall(std::wstring root, std::wstring_view relative) {
+    CheckNativeType(root, true);
+    for (const auto& part : RelativeComponents(relative)) {
+        root += L'\\' + part;
+        CheckNativeType(root, true);
     }
-    co_return root;
+    return root;
+}
+
+static std::wstring SourceFile(std::wstring const& root, std::wstring_view name) {
+    if (RelativeComponents(name).size() != 1) throw winrt::hresult_invalid_argument();
+    const auto path = root + L"\\" + std::wstring(name);
+    CheckNativeType(path, false);
+    return path;
 }
 
 static bool IsImageName(std::wstring_view name, std::wstring_view extension) {
@@ -122,11 +156,11 @@ static bool IsImageName(std::wstring_view name, std::wstring_view extension) {
             L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-") == name.npos;
 }
 
-static IAsyncAction CopyCompanions(StorageFolder source, StorageFolder stage, StorageFile list,
+static IAsyncAction CopyCompanions(std::wstring source, StorageFolder stage, StorageFile list,
         StorageFolder package, std::wstring recipePrefix) {
     if ((co_await list.GetBasicPropertiesAsync()).Size() > 64 * 1024)
         throw winrt::hresult_invalid_argument();
-    std::map<std::wstring, std::pair<StorageFolder, StorageFolder>> directories;
+    std::map<std::wstring, StorageFolder> directories;
     std::wistringstream entries(std::wstring(co_await FileIO::ReadTextAsync(list)));
     unsigned count = 0;
     for (std::wstring relative; std::getline(entries, relative);) {
@@ -148,20 +182,19 @@ static IAsyncAction CopyCompanions(StorageFolder source, StorageFolder stage, St
         std::wstring parent;
         for (size_t i = 0; i + 1 < parts.size(); ++i) {
             parent += parts[i] + L'/';
+            from += L'\\' + parts[i];
+            CheckNativeType(from, true);
             auto found = directories.find(parent);
             if (found == directories.end()) {
-                auto nested = co_await from.GetFolderAsync(parts[i]);
-                CheckType(nested, true);
                 auto destination = co_await to.CreateFolderAsync(parts[i], CreationCollisionOption::OpenIfExists);
-                found = directories.emplace(parent, std::pair{nested, destination}).first;
+                found = directories.emplace(parent, destination).first;
             }
-            from = found->second.first;
-            to = found->second.second;
+            to = found->second;
         }
-        auto companion = co_await from.GetFileAsync(parts.back());
-        CheckType(companion, false);
+        auto companion = SourceFile(from, parts.back());
         if (recipeKey.empty()) {
-            co_await companion.CopyAsync(to, companion.Name(), NameCollisionOption::FailIfExists);
+            const auto target = std::wstring(to.Path()) + L"\\" + parts.back();
+            if (!CopyFileW(companion.c_str(), target.c_str(), TRUE)) winrt::throw_last_error();
         } else {
             if (!IsImageName(parts.back(), L".exe") && !IsImageName(parts.back(), L".dll"))
                 throw winrt::hresult_invalid_argument();

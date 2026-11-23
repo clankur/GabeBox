@@ -28,12 +28,27 @@
     };
 
     function installedRoot(profile) {
+        var native = window.XboxProbe && window.XboxProbe.Native.ProbeRunner;
+        if (!native || typeof native.steamLibraryCommand !== "function") return localInstall(profile);
+        return Promise.resolve(native.steamLibraryCommand("stage-dos", String(profile.appId))).then(function (raw) {
+            var result = JSON.parse(raw);
+            if (!result.ok) throw new Error(result.error || "stage-dos-failed");
+            if (!result.folder) return localInstall(profile);
+            return storage.ApplicationData.current.temporaryFolder.getFolderAsync(result.folder).then(function (folder) {
+                return { folder: folder, temporary: true };
+            });
+        });
+    }
+
+    function localInstall(profile) {
         return storage.ApplicationData.current.localFolder.getFolderAsync("SteamLibrary").then(function (library) {
             return library.getFolderAsync("steamapps");
         }).then(function (apps) {
             return apps.getFolderAsync("common");
         }).then(function (common) {
             return common.getFolderAsync(profile.installDirectory);
+        }).then(function (folder) {
+            return { folder: folder, temporary: false };
         });
     }
 
@@ -164,14 +179,23 @@
         }
         back.addEventListener("click", function () { close(true, "steam_dos=returned-to-library\r\n"); });
         var root;
+        var installed;
+        function removeTemporaryInstall() {
+            if (!installed || !installed.temporary) return Promise.resolve();
+            installed.temporary = false;
+            return Promise.resolve(installed.folder.deleteAsync(storage.StorageDeleteOption.permanentDelete))
+                .catch(function () {});
+        }
         var config;
         var files;
         var phase = "reading-config";
         var launch = record(phase).then(function () {
             return installedRoot(profile);
-        }).then(function (folder) {
-            root = folder;
-            return folder.getFileAsync(profile.configFile);
+        }).then(function (source) {
+            installed = source;
+            requireOpen();
+            root = source.folder;
+            return root.getFileAsync(profile.configFile);
         }).then(function (file) {
             return storage.FileIO.readTextAsync(file);
         }).then(function (text) {
@@ -208,7 +232,7 @@
                 files = count;
                 runtime.fs.createFile("/" + profile.guestConfigFile, config);
                 phase = "starting-guest";
-                return record(phase);
+                return removeTemporaryInstall().then(function () { return record(phase); });
             }).then(function () {
                 if (closed) throw new Error("closed");
                 // js-dos pre-mounts MEMFS at C:. Mount the publisher's data directory in its place.
@@ -233,7 +257,7 @@
         }).catch(function () {
             var result = "steam_dos=failed\r\nsteam_dos_phase=" + phase + "\r\n";
             close(true, result);
-            return termination;
+            return removeTemporaryInstall().then(function () { return termination; });
         });
         return Promise.race([launch, termination]);
     }

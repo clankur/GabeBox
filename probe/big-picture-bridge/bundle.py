@@ -11,7 +11,7 @@ URL_LIST_SHA256 = "3958c79099dc94ee99c3a5dc841cb70530013c68656649e5c96fc931c5c71
 MODULES = (
     "xbox-gamepads.js", "xbox-controller-service.js", "xbox-notifications.js", "xbox-game-actions.js", "xbox-user.js", "xbox-gamepad-surface.js", "xbox-window.js", "xbox-browser-view.js", "xbox-store-browser.js", "xbox-input.js",
     "xbox-lifecycle.js", "xbox-network.js", "xbox-messaging.js", "xbox-core-startup.js", "xbox-services.js",
-    "xbox-cloud-cache.js", "xbox-settings.js", "xbox-url-roots.js", "xbox-url.js", "bridge.js",
+    "xbox-cloud-cache.js", "xbox-settings.js", "xbox-storage.js", "xbox-url-roots.js", "xbox-url.js", "bridge.js",
 )
 
 

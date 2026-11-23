@@ -30,21 +30,34 @@ static std::wstring SlayCloudChild(std::wstring_view parent, std::wstring_view n
     return std::wstring(parent) + L"\\" + std::wstring(name);
 }
 
+static std::wstring SlayCloudGamePath(std::wstring_view library, std::wstring_view installDir) {
+    return SlayCloudChild(SlayCloudChild(library, L"steamapps\\common"), installDir);
+}
+
+static std::wstring SlayCloudJournalPath(std::wstring_view localState, std::wstring_view game,
+        bool legacyVolume) {
+    // A journal travels with a game moved between development and USB storage.
+    if (!legacyVolume) return SlayCloudChild(game, L".steam-xbox-cloud-restore");
+    return SlayCloudChild(localState, L"SteamCloud\\646570");
+}
+
 // Reject junctions and type mismatches before renaming or copying a save tree.
 static bool SlayCloudDirectoryExists(std::wstring const& path) {
-    WIN32_FILE_ATTRIBUTE_DATA info{};
-    if (!GetFileAttributesExFromAppW(path.c_str(), GetFileExInfoStandard, &info)) {
+    using steam_library_storage::storage_detail::ApiPath;
+    const auto attributes = GetFileAttributesW(ApiPath(path).c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
         const auto error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return false;
         winrt::throw_hresult(HRESULT_FROM_WIN32(error));
     }
-    if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
-            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw winrt::hresult_invalid_argument();
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw winrt::hresult_invalid_argument();
     return true;
 }
 
 static void SlayCloudMove(std::wstring const& from, std::wstring const& to) {
-    if (!MoveFileFromAppW(from.c_str(), to.c_str())) winrt::throw_last_error();
+    using steam_library_storage::storage_detail::ApiPath;
+    if (!MoveFileExW(ApiPath(from).c_str(), ApiPath(to).c_str(), 0)) winrt::throw_last_error();
 }
 
 static std::wstring SlayCloudArchiveName(std::wstring_view prefix) {
@@ -54,11 +67,14 @@ static std::wstring SlayCloudArchiveName(std::wstring_view prefix) {
 }
 
 static void RollBackSlayCloud(std::wstring const& cloudRoot, std::wstring const& game) {
+    if (!SlayCloudDirectoryExists(cloudRoot)) return;
     const auto pending = SlayCloudChild(cloudRoot, slayCloudPending);
     if (!SlayCloudDirectoryExists(pending)) return;
     const auto planned = SlayCloudChild(pending, L"planned");
     const auto next = SlayCloudChild(pending, L"next");
     const auto backup = SlayCloudChild(pending, L"backup");
+    if (!SlayCloudDirectoryExists(planned) || !SlayCloudDirectoryExists(next) || !SlayCloudDirectoryExists(backup))
+        throw winrt::hresult_invalid_argument();
     for (auto root : slayCloudRoots) {
         if (!SlayCloudDirectoryExists(SlayCloudChild(planned, root))) continue;
         const auto installed = SlayCloudChild(game, root);
@@ -70,13 +86,25 @@ static void RollBackSlayCloud(std::wstring const& cloudRoot, std::wstring const&
     SlayCloudMove(pending, SlayCloudChild(cloudRoot, SlayCloudArchiveName(L"interrupted-")));
 }
 
+static void RecoverLegacySlayCloudForMigration(std::wstring_view localState) {
+    using namespace steam_library_storage;
+    const auto entry = FindApp(Drive::Local, localState, 646570);
+    if (!entry || !entry->installed) return;
+    const auto game = SlayCloudGamePath(LibraryPath(Drive::Local, localState), entry->installDir);
+    RollBackSlayCloud(SlayCloudJournalPath(localState, game, true), game);
+}
+
+static void CopySlayCloudFile(std::wstring const& from, std::wstring const& to, bool replace) {
+    using namespace steam_library_storage::storage_detail;
+    if (!Exists(from, false)) throw winrt::hresult_invalid_argument();
+    const bool replaceExisting = replace && Exists(to, false);
+    if (!CopyFileW(ApiPath(from).c_str(), ApiPath(to).c_str(), !replaceExisting)) winrt::throw_last_error();
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<std::uint32_t> RestoreSlayCloudFiles(
-        winrt::Windows::Storage::StorageFolder cloudRoot,
-        winrt::Windows::Storage::StorageFolder stage,
-        winrt::Windows::Storage::StorageFolder game,
+        std::wstring cloudPath, std::wstring stagePath, std::wstring gamePath,
         winrt::Windows::Data::Json::JsonArray manifest) {
-    using namespace winrt::Windows::Data::Json;
-    using namespace winrt::Windows::Storage;
+    using namespace steam_library_storage::storage_detail;
     struct File {
         std::wstring name;
         winrt::hstring staged;
@@ -109,42 +137,42 @@ static winrt::Windows::Foundation::IAsyncOperation<std::uint32_t> RestoreSlayClo
             ++count;
         }
     }
+    co_await winrt::resume_background();
+    if (!SlayCloudDirectoryExists(gamePath)) throw winrt::hresult_invalid_argument();
+    RollBackSlayCloud(cloudPath, gamePath);
     if (!count) co_return 0;
-
-    auto transaction = co_await cloudRoot.CreateFolderAsync(L"restore-stage", CreationCollisionOption::GenerateUniqueName);
-    auto planned = co_await transaction.CreateFolderAsync(L"planned");
-    auto next = co_await transaction.CreateFolderAsync(L"next");
-    co_await transaction.CreateFolderAsync(L"backup");
-    std::wstring gamePath(game.Path());
-    std::wstring cloudPath(cloudRoot.Path());
+    EnsureDirectory(cloudPath);
+    const auto transaction = SlayCloudChild(cloudPath, SlayCloudArchiveName(L"restore-stage-"));
+    if (!CreateDirectoryW(ApiPath(transaction).c_str(), nullptr)) winrt::throw_last_error();
+    const auto planned = SlayCloudChild(transaction, L"planned");
+    const auto next = SlayCloudChild(transaction, L"next");
+    EnsureDirectory(planned);
+    EnsureDirectory(next);
+    EnsureDirectory(SlayCloudChild(transaction, L"backup"));
 
     for (size_t i = 0; i < mapped.size(); ++i) {
         if (mapped[i].empty()) continue;
-        auto root = winrt::hstring(slayCloudRoots[i]);
-        co_await planned.CreateFolderAsync(root);
-        auto destination = co_await next.CreateFolderAsync(root);
-        if (SlayCloudDirectoryExists(SlayCloudChild(gamePath, root))) {
-            auto existing = co_await game.GetFolderAsync(root);
-            auto items = co_await existing.GetItemsAsync();
-            for (const auto &item : items) {
-                auto file = item.try_as<StorageFile>();
-                WIN32_FILE_ATTRIBUTE_DATA info{};
-                if (!file || !GetFileAttributesExFromAppW(file.Path().c_str(), GetFileExInfoStandard, &info) ||
-                        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        const auto root = slayCloudRoots[i];
+        EnsureDirectory(SlayCloudChild(planned, root));
+        const auto destination = SlayCloudChild(next, root);
+        EnsureDirectory(destination);
+        const auto existing = SlayCloudChild(gamePath, root);
+        if (SlayCloudDirectoryExists(existing)) {
+            Visit(existing, L"*", [&](std::wstring_view name, WIN32_FIND_DATAW const& entry) {
+                if (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
                     throw winrt::hresult_invalid_argument();
-                co_await file.CopyAsync(destination);
-            }
+                CopySlayCloudFile(SlayCloudChild(existing, name), SlayCloudChild(destination, name), false);
+            });
         }
         for (const auto &file : mapped[i]) {
-            auto downloaded = co_await stage.GetFileAsync(file.staged);
-            co_await downloaded.MoveAsync(destination, winrt::hstring(file.name), NameCollisionOption::ReplaceExisting);
+            CopySlayCloudFile(SlayCloudChild(stagePath, file.staged), SlayCloudChild(destination, file.name), true);
         }
     }
 
     // The folder rename publishes a prepared journal. Play checks for this
     // journal so it cannot start with half a restore after a crash.
     const auto pending = SlayCloudChild(cloudPath, slayCloudPending);
-    SlayCloudMove(std::wstring(transaction.Path()), pending);
+    SlayCloudMove(transaction, pending);
     try {
         for (size_t i = 0; i < mapped.size(); ++i) {
             if (mapped[i].empty()) continue;
@@ -172,7 +200,8 @@ static winrt::Windows::Foundation::IAsyncOperation<std::uint32_t> PreviewSlayClo
     constexpr auto control = L"XboxCloudLocalControl.txt";
     auto local = co_await preferences.CreateFileAsync(control);
     co_await FileIO::WriteTextAsync(local, L"Preserve an unrelated local file.");
-    auto count = co_await RestoreSlayCloudFiles(journal, stage, sandbox, manifest);
+    auto count = co_await RestoreSlayCloudFiles(std::wstring(journal.Path()), std::wstring(stage.Path()),
+        std::wstring(sandbox.Path()), manifest);
     if (!count) co_return 0;
     auto archives = co_await journal.GetFoldersAsync();
     if (archives.Size() != 1 || !std::wstring_view(archives.GetAt(0).Name()).starts_with(L"backup-"))

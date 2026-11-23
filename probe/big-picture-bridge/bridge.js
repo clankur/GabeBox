@@ -54,17 +54,20 @@
         else request.resolve(data.result);
     });
 
-    function send(method, appId) {
+    function send(method, appId, argument) {
         if (pending.size >= 16) return Promise.reject(new Error('Steam broker is busy'));
         const id = requestId = requestId % 0x7fffffff + 1;
         return new Promise((resolve, reject) => {
-            const timeout = method !== 'play' && method !== 'install' ? setTimeout(() => {
+            const timeout = method !== 'play' && method !== 'install' && method !== 'storage-move' ? setTimeout(() => {
                 pending.delete(id);
                 reject(new Error('Steam broker timed out'));
             }, 60000) : undefined;
             pending.set(id, {resolve, reject, timeout});
             try {
-                host.postMessage(appId === undefined ? {id, method} : {id, method, appId});
+                const request = {id, method};
+                if (appId !== undefined) request.appId = appId;
+                if (argument !== undefined) request.argument = argument;
+                host.postMessage(request);
             } catch (error) {
                 pending.delete(id);
                 clearTimeout(timeout);
@@ -233,6 +236,9 @@
     }};
     const client = window.SteamClient;
     const runAction = installXboxGameActions(client);
+    const refreshLibrary = () => refresh().catch(error => console.error('Steam library unavailable', error.message));
+    const storage = installXboxStorage(client, (operation, argument) => send(`storage-${operation}`, undefined, argument),
+        appId => runtime?.(90544).tw.GetAppOverviewByAppID(appId)?.display_name, () => runtime(94601), refreshLibrary);
     const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {
         installXboxNotifications(runtime);
@@ -337,6 +343,9 @@
     installXboxCloudCache(client, send);
     const showGameOverlay = installXboxUrls(client, () => activeApp);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) refresh().catch(error => console.error('Steam library unavailable', error.message));
+        if (!document.hidden) {
+            refreshLibrary();
+            storage.refresh();
+        }
     });
 })();
