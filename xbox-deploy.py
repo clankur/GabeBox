@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import runpy
 import ssl
-from struct import unpack_from
+from struct import Struct, unpack_from
 import sys
 from tempfile import TemporaryDirectory
 import time
@@ -257,6 +257,98 @@ def read_game_file(portal, package, folder, filename, limit, *, knownfolder='Loc
             return None
         raise
     return data
+
+
+# SdlHostMailbox contains two input headers separated by the CPU frame pixels.
+SDL_INPUT_MAGIC = 0x53444C31
+SDL_INPUT_HEADER = Struct('<9I')
+SDL_INPUT_GAMEPAD = Struct('<II6iII')
+SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
+SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
+
+
+def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
+    from probe.xbox_diagnostics import (GPU_MAILBOX_NAME, LOCAL, diagnostic_reader, matching_probe,
+                                        save_observation)
+
+    blob, launch_report = diagnostic_reader(portal, app, read_game_file, decode_report, PortalError)
+    first = launch_report()
+    if not matching_probe(first, args.run_id, args.app_id):
+        raise ValueError('The current Steam launch does not match the requested AppID and run ID.')
+    mailbox = first.get('steam_sdl_mailbox', '')
+    if not GPU_MAILBOX_NAME.fullmatch(mailbox):
+        raise ValueError('The current launch does not have a valid hosted SDL mailbox.')
+    url = game_file_url(app, LOCAL, mailbox, 'LocalAppData')
+
+    def read_range(offset, length):
+        status, raw = portal.request('GET', url, headers={'Range': f'bytes={offset}-{offset + length - 1}'},
+                                     read_limit=length + 1)
+        if status != 206 or len(raw) != length:
+            raise ValueError('Xbox Device Portal did not return the exact requested SDL mailbox range.')
+        return raw
+
+    def channel(serial, ack, confirmed):
+        if serial & 1 or serial != confirmed:
+            return {'state': 'updating', 'serial': serial, 'ack': ack}
+        state = 'host-idle' if not serial and not ack else 'acknowledged' if serial == ack else 'unacknowledged'
+        return {'state': state, 'serial': serial, 'ack': ack}
+
+    def panel_trace():
+        raw = blob('fhd-panel-input.txt', 4096)
+        if raw is None or len(raw) > 4096:
+            return None
+        complete, _, _ = raw.rpartition(b'\n')
+        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_MARKERS)
+
+    panel_before = panel_trace() if args.panel_menu else None
+    samples = []
+    if args.seconds and progress:
+        progress('sampling-host-input')
+    start = clock()
+    while True:
+        head = SDL_INPUT_HEADER.unpack(read_range(0, SDL_INPUT_HEADER.size))
+        pad = SDL_INPUT_GAMEPAD.unpack(read_range(SDL_INPUT_GAMEPAD_OFFSET, SDL_INPUT_GAMEPAD.size))
+        pointer_confirmed, = unpack_from('<I', read_range(5 * 4, 4))
+        pad_confirmed, = unpack_from('<I', read_range(SDL_INPUT_GAMEPAD_OFFSET, 4))
+        if head[0] != SDL_INPUT_MAGIC or head[8] not in (0, 1) or pad[9] not in (0, 1):
+            raise ValueError('The hosted SDL input mailbox does not match the expected protocol.')
+        pointer = channel(head[5], head[6], pointer_confirmed)
+        gamepad = channel(pad[0], pad[8], pad_confirmed)
+        if gamepad['state'] != 'updating':
+            if pad[1] & ~0x17FFF or any(not -32768 <= axis <= 32767 for axis in pad[2:8]):
+                raise ValueError('The hosted SDL gamepad state does not match the expected protocol.')
+            gamepad.update(connected=bool(pad[1] & 0x10000), buttons=f'0x{pad[1]:08x}', axes=pad[2:8])
+        elapsed = clock() - start
+        samples.append({'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
+                        'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])})
+        if elapsed >= args.seconds or head[8]:
+            break
+        pause(min(0.5, args.seconds - elapsed))
+
+    panel_after = panel_trace() if args.panel_menu else None
+    last = launch_report()
+    if (not matching_probe(last, args.run_id, args.app_id)
+            or any(first.get(key) != last.get(key) for key in ('run_id', 'steam_sdl_mailbox'))):
+        raise ValueError('The Steam launch changed during input sampling. No samples were saved.')
+
+    result = {'version': args.version, 'mode': 'input', 'app_id': args.app_id, 'run_id': args.run_id,
+              'activity': {}, 'samples': samples}
+    for name in ('gamepad', 'pointer'):
+        stable = [sample[name]['serial'] for sample in samples if sample[name]['state'] != 'updating']
+        result['activity'][name] = ('insufficient-samples' if len(stable) < 2 else
+                                    'host-activity' if len(set(stable)) > 1 else 'host-idle')
+    if args.panel_menu:
+        menu = {'scope': 'package', 'state': 'unavailable'}
+        if panel_after is not None:
+            names = ('panel_ready', 'chord_held', 'menu_request')
+            menu.update(state='observed', counts=dict(zip(names, map(panel_after.count, SDL_INPUT_PANEL_MARKERS))))
+            if panel_before is not None and args.seconds and panel_after[:len(panel_before)] == panel_before:
+                added = panel_after[len(panel_before):]
+                menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
+        result['panel_menu'] = menu
+    if args.output:
+        save_observation(args.output, result, {})
+    return result
 
 
 def stardew_host_summary(raw):
@@ -973,12 +1065,17 @@ def main():
     inspections = {
         'inspect-render': commands.add_parser('inspect-render', help='read GPU mailbox state and optional screenshots for an existing launch'),
         'inspect-loader': commands.add_parser('inspect-loader', help='read the filtered live loader trace for an existing launch'),
+        'inspect-input': commands.add_parser('inspect-input', help='sample hosted game input without controlling the Xbox'),
     }
     for inspection in inspections.values():
         inspection.add_argument('--version', required=True, help='installed Steam package version')
         inspection.add_argument('--app-id', type=int, required=True, help='Steam AppID of the existing launch')
         inspection.add_argument('--run-id', type=int, required=True, help='exact steam_launch_run_id of the existing launch')
         inspection.add_argument('--output', type=Path, help='save inspection metadata and available artifacts to a new directory')
+    inspections['inspect-input'].add_argument('--seconds', type=int, default=0,
+                                             help='sample duration, 0 for one snapshot (default 0, maximum 30)')
+    inspections['inspect-input'].add_argument('--panel-menu', action='store_true',
+                                             help='read optional package-level panel and menu checkpoints')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
@@ -1026,6 +1123,8 @@ def main():
             diagnostic_command.error('--run-id requires --app-id and a positive launch ID')
         if args.output and (args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir()):
             diagnostic_command.error('--output must name a new directory under an existing parent')
+    if args.command == 'inspect-input' and not 0 <= args.seconds <= 30:
+        inspections[args.command].error('--seconds must be between 0 and 30')
     if args.command == 'observe':
         if args.image_name and not (args.app_id and re.fullmatch(r'[a-z0-9_. -]{1,100}\.exe', args.image_name, re.I)):
             observe_command.error('--image-name requires --app-id and an executable basename')
@@ -1133,11 +1232,16 @@ def main():
     if args.command in inspections:
         from probe.xbox_diagnostics import collect_live_loader, collect_render_state
 
-        collector, target = ((collect_render_state, 'render state') if args.command == 'inspect-render'
-                             else (collect_live_loader, 'the live loader trace'))
+        target = {'inspect-render': 'render state', 'inspect-loader': 'the live loader trace',
+                  'inspect-input': 'hosted input'}[args.command]
         try:
             app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-            result = collector(args, portal, app, read_game_file, decode_report, PortalError)
+            if args.command == 'inspect-input':
+                result = inspect_host_input(args, portal, app,
+                                            progress=lambda stage: print(stage, file=sys.stderr, flush=True))
+            else:
+                collector = collect_render_state if args.command == 'inspect-render' else collect_live_loader
+                result = collector(args, portal, app, read_game_file, decode_report, PortalError)
         except PortalError as error:
             raise ValueError(f'Xbox Device Portal returned HTTP {error.status} while inspecting {target}.') from None
         except (json.JSONDecodeError, TypeError, KeyError, AttributeError):

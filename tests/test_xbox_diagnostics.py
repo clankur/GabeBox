@@ -733,6 +733,16 @@ class ObserverTests(unittest.TestCase):
                 assert query['path'] == [diagnostics.LOCAL]
                 if name == diagnostics.PROBE_REPORT:
                     return 200, probe(launch, extra=RENDER_FIELDS + VERIFIED_STAGE)
+                if name == MAILBOX:
+                    ranges = {
+                        'bytes=0-35': struct.pack('<9I', 0x53444C31, 2, 99, 0, 0, 2, 2, 1, 0),
+                        'bytes=8294456-8294495': struct.pack('<II6iII', 4, 0x10001, 1, -2, 3, -4, -32768, 32767, 2, 1),
+                        'bytes=20-23': struct.pack('<I', 2),
+                        'bytes=8294456-8294459': struct.pack('<I', 4),
+                    }
+                    raw = ranges[kwargs['headers']['Range']]
+                    assert kwargs['read_limit'] == len(raw) + 1
+                    return 206, raw
                 if name == MAILBOX + '.gpu':
                     assert kwargs['read_limit'] == diagnostics.GPU_MAILBOX_SIZE + 1
                     return 200, gpu_mailbox()
@@ -754,6 +764,25 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(errors.getvalue().strip(), 'attaching-to-launch')
         self.assertEqual(requests[0], None)
         self.assertTrue(all(method == 'GET' for method in requests[1:]))
+        self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
+
+        requests.clear()
+        output, errors = io.StringIO(), io.StringIO()
+        command = ['xbox-deploy.py', 'inspect-input', '--version', '1.2.3.4', '--app-id', str(APP_ID),
+                   '--run-id', str(launch)]
+        with (patch.object(module, 'DevicePortal', Portal),
+              patch.object(module, 'load_settings', return_value=settings),
+              patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
+            module.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(requests, [None] + ['GET'] * 7)
+        self.assertEqual(result['activity']['gamepad'], 'insufficient-samples')
+        self.assertEqual(result['samples'][0]['gamepad'], {
+            'state': 'unacknowledged', 'serial': 4, 'ack': 2, 'connected': True,
+            'buttons': '0x00010001', 'axes': [1, -2, 3, -4, -32768, 32767],
+        })
+        self.assertEqual(result['samples'][0]['pointer']['state'], 'acknowledged')
+        self.assertTrue(result['samples'][0]['keyboard_ready'])
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
 
         requests.clear()
@@ -786,3 +815,63 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(requests[0], None)
         self.assertTrue(all(method == 'GET' for method in requests[1:]))
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
+
+    def test_host_input_sampling_distinguishes_activity_pending_ack_and_menu(self):
+        spec = importlib.util.spec_from_file_location('xbox_deploy_cli', ROOT / 'xbox-deploy.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        launch = EPOCH_MS + 1
+
+        class Portal:
+            now = 0
+            bad_range = False
+            changes_launch = False
+
+            def pause(self, seconds):
+                self.now += seconds
+
+            def request(self, method, path, **kwargs):
+                assert method == 'GET'
+                query = parse_qs(urlsplit(path).query)
+                assert query['packagefullname'] == [APP['PackageFullName']]
+                name = query['filename'][0]
+                if name == diagnostics.PROBE_REPORT:
+                    run = launch + 1 if self.changes_launch and self.now else launch
+                    return 200, probe(run, extra=RENDER_FIELDS)
+                if name == 'fhd-panel-input.txt':
+                    markers = b'menu_chord=held\r\nmenu_request=ready\r\nmenu_request=rea' if self.now else b''
+                    return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
+                assert name == MAILBOX
+                step = round(self.now * 2)
+                serial, ack, confirmed = ((2, 2, 2), (4, 2, 4), (6, 6, 6), (8, 6, 9))[step]
+                data = {
+                    'bytes=0-35': struct.pack('<9I', 0x53444C31, 0, 0, 0, 0, 0, 0, 0, 0),
+                    'bytes=8294456-8294495': struct.pack('<II6iII', serial, 0x10000, 0, 0, 0, 0, -32768, -32768, ack, 1),
+                    'bytes=20-23': bytes(4),
+                    'bytes=8294456-8294459': struct.pack('<I', confirmed),
+                }[kwargs['headers']['Range']]
+                assert kwargs['read_limit'] == len(data) + 1
+                return (200 if self.bad_range else 206), data
+
+        args = options(run_id=launch, seconds=1.5, panel_menu=True)
+        fake = Portal()
+        result = module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        self.assertEqual(result['activity'], {'gamepad': 'host-activity', 'pointer': 'host-idle'})
+        self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
+                         ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
+        self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
+        self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'menu_request': 1})
+        self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'menu_request': 1})
+        self.assertNotIn('do-not-save', json.dumps(result))
+        self.assertNotIn(MAILBOX, json.dumps(result))
+        fake = Portal()
+        fake.bad_range = True
+        with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
+            module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        fake = Portal()
+        fake.changes_launch = True
+        with tempfile.TemporaryDirectory() as directory:
+            args.output = Path(directory) / 'input'
+            with self.assertRaisesRegex(ValueError, 'changed during input sampling'):
+                module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+            self.assertFalse(args.output.exists())

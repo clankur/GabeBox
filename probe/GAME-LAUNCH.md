@@ -75,7 +75,7 @@ node --test tests/*.test.js
 python3 -m unittest discover -s tests
 ```
 
-The tests cover native Play and two synthetic hosted profiles, authorization refusal, launch-option layout, DOS files and empty save slots, and stale callbacks after a game is closed. On Xbox, verify each backend with a real installed title. For hosted games, capture a recognizable frame from the automatic trial and exercise input and return to the library before marking those behaviors verified. For Windows titles, keep the actual Steam result and process exit in the compatibility record.
+The tests cover native Play and two synthetic hosted profiles, authorization refusal, launch-option layout, DOS files and empty save slots, and stale callbacks after a game is closed. On Xbox, verify each backend with a real installed title. For hosted games, capture a recognizable frame and sample input across the host and child with `inspect-input`. Use a physical controller to confirm a visible game response, then open Steam with View + Menu, resume and exit to the library. Run overlay checks through Big Picture Play or a signed `steam-launch-via-big-picture.txt` trial so the running game has a Steam session to return to. For Windows titles, keep the actual Steam result and process exit in the compatibility record. [Input observer](XBOX-DIAGNOSTICS.md#inspect-the-current-games-input)
 
 ### Native process startup snapshot
 

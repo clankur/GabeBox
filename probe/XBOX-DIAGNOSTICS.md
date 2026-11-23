@@ -50,6 +50,26 @@ Each checkpoint matches a complete filtered loader record or its opening tokens.
 
 The result reports the checkpoints reached, the trace source, and the next expected record with its time budget. `--watch-checkpoint` includes the last matching record and its source, or `null` if the run produced no match. Watched records leave the deadline in effect. `checkpoint-stalled` means the expected record failed to appear in time. `checkpoint-failed` identifies an explicitly selected failure record. An in-flight Device Portal read or final artifact collection can delay the command's return. The CLI returns a nonzero status if the required sequence is incomplete and saves the available artifacts. An attached `--run-id` reads the current launch's existing trace and gives its unresolved checkpoint a fresh budget. The observer leaves the Xbox session running.
 
+## Inspect the current game's input
+
+Use the AppID and `steam_launch_run_id` from the current hosted launch. Take one snapshot to inspect the connection bit, button mask, six SDL gamepad axes, pointer and gamepad serials and acknowledgments, and keyboard readiness.
+
+```sh
+python3 xbox-deploy.py inspect-input --version "$version" --app-id "$steam_app_id" \
+    --run-id "$launch_run_id"
+```
+
+When `sampling-host-input` appears, hold a controller button or move a stick, then release before the sample ends. Hold each input long enough to span a poll.
+
+```sh
+python3 xbox-deploy.py inspect-input --version "$version" --app-id "$steam_app_id" \
+    --run-id "$launch_run_id" --seconds 10 --panel-menu --output input-check
+```
+
+`host-idle` in `activity` means the sampled serial did not change. `host-activity` means the host published a change. In an individual sample, `unacknowledged` means the game has yet to acknowledge that serial, and `acknowledged` means the game-side adapter read it. Compare several samples to distinguish a transient delay from a repeated gap. `updating` means the serial changed during the read or publication was in progress. Keyboard readiness records whether the game enabled the queue.
+
+`--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
+
 ## Inspect the current game's render state
 
 Use the AppID and `run_id` from the game observation while that launch is current.
