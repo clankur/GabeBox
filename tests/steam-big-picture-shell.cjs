@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--startup-history] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--install] [--startup-history] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,15 +8,16 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--startup-history'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--install', '--startup-history'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
 const storageOnly = process.argv.includes('--storage');
 const storeOnly = process.argv.includes('--store');
 const homeOnly = process.argv.includes('--home');
+const installOnly = process.argv.includes('--install');
 const startupHistory = process.argv.includes('--startup-history');
-const framedGamepad = startupHistory || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const framedGamepad = startupHistory || installOnly || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -114,6 +115,15 @@ function setupHost(steamId, windowState, catalogs) {
                 case 'restart-client': reply = {result: window.fixtureSteamId ? 'restart' : 'signed-out'}; break;
                 case 'system-mode': reply = {result: false}; break;
                 case 'play': reply = games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: games ? 'not-installed' : 'signed-out'}; break;
+                case 'install': {
+                    const game = games?.find(entry => entry.id === request.appId);
+                    if (!game) { reply = {result: games ? 'not-owned' : 'signed-out'}; break; }
+                    window.fixtureFinishInstall = result => {
+                        if (result === 'installed') game.installed = game.canPlay = true;
+                        hostEvent({id: request.id, result});
+                    };
+                    return;
+                }
                 case 'quit-game':
                     reply = request.appId === window.fixtureRunningApp && games?.some(g => g.id === request.appId)
                         ? {result: 'quit-requested'} : {error: 'unavailable'};
@@ -709,6 +719,35 @@ async function checkInstalledTab(popup, installed, other) {
     assert.equal(await panel.getByRole('link', {name:other, exact:true}).count(), 0);
     return tile;
 }
+
+async function checkInstall(page, popup) {
+    const tile = stockTile(popup, 'Fixture B');
+    await tile.waitFor({state: 'visible'});
+    await tile.click();
+    const requests = () => page.evaluate(() => fixtureCalls.filter(request =>
+        request.method === 'install').map(request => request.appId));
+    const button = popup.getByText(/^install$/i).first();
+    await button.click();
+    await page.waitForFunction(() => typeof fixtureFinishInstall === 'function');
+    assert.deepEqual(await requests(), [73]);
+    await page.evaluate(() => hostEvent({event: 'xbox-install', appId: 73, stage: 'downloading'}));
+    await button.waitFor({state:'hidden'});
+    await page.evaluate(() => fixtureFinishInstall('stalled'));
+    const failureMessage = /An unexpected error occurred while installing Fixture B|Steam is unable to install content when in Offline Mode/i;
+    const failure = popup.getByText(failureMessage);
+    await failure.waitFor({state:'visible'}).catch(async error => {
+        throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700));
+    });
+    await popup.getByRole('dialog').filter({hasText: failureMessage}).getByText(/^close$/i).click();
+    await failure.waitFor({state:'hidden'});
+    await button.click();
+    await page.waitForFunction(() => fixtureCalls.filter(request => request.method === 'install').length === 2);
+    await page.evaluate(() => fixtureFinishInstall('installed'));
+    await popup.getByText(/^play$/i).first().waitFor({state:'visible'});
+    assert.deepEqual(await requests(), [73, 73]);
+    assert.equal(await page.evaluate(() => fixtureCalls.filter(request => request.method === 'play').length), 0);
+    console.log('Valve installed an owned title through the Xbox broker, displayed a Steam error, and offered Play after retry without reopening.');
+}
 async function readSeen(page) {
     return page.evaluate(async () => {
         let r; webpackChunksteamui.push([['fixture-tour-read-' + crypto.randomUUID()], {}, value => { r = value; }]);
@@ -1002,6 +1041,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                     return;
                 }
                 if (homeOnly) { await checkHome(page, popup); return; }
+                if (installOnly) { await checkInstall(page, popup); return; }
                 if (storeOnly) { await checkStore(browser, page, popup); return; }
                 if (networkOnly) { await checkNetwork(page, popup); return; }
                 if (storageOnly) {

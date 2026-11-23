@@ -62,6 +62,52 @@ function installXboxCloudCache(client, send) {
         tail = work.then(() => { --pending; }, () => { --pending; });
         return work;
     }
+    const reportedReads = new Set();
+    let readAdapterInstalled = false;
+    function reportRead(key, status) {
+        if (reportedReads.has(key)) return;
+        reportedReads.add(key);
+        const label = key === index ? 'index' : key.slice('cloud-storage-'.length);
+        try { host.postMessage({method: 'startup-cloud-cache-read', label, status}); } catch (_) {}
+    }
+    function installLocalReads(axios) {
+        if (readAdapterInstalled || typeof axios?.interceptors?.request?.use !== 'function' ||
+            typeof axios.AxiosError !== 'function') return;
+        readAdapterInstalled = true;
+        axios.interceptors.request.use(config => {
+            if (config.method !== 'get' || config.withCredentials !== false || config.params || config.baseURL ||
+                config.auth || config.headers?.has?.('Authorization') || typeof config.url !== 'string') return config;
+            const path = /^\/cloudstorage\/([a-z0-9.-]+)\.json$/.exec(config.url);
+            if (!path || !validKey(path[1])) return config;
+            const key = path[1];
+            config.adapter = async request => {
+                let timer, data, status;
+                try {
+                    const body = await Promise.race([access(key), new Promise((_, reject) => {
+                        timer = setTimeout(() => reject(new Error('Steam UI cache read timed out')), 5000);
+                    })]);
+                    if (body === undefined) status = 404;
+                    else {
+                        data = JSON.parse(body);
+                        status = 200;
+                    }
+                } catch (error) {
+                    status = error?.message === 'Steam UI cache session ended' ? 403 : 503;
+                } finally {
+                    clearTimeout(timer);
+                }
+                reportRead(key, status);
+                const response = {data, status, statusText: {200: 'OK', 403: 'Forbidden', 404: 'Not Found', 503: 'Service Unavailable'}[status],
+                    headers: {'content-type': 'application/json'}, config: request};
+                if (status !== 200)
+                    throw new axios.AxiosError('Steam UI cache read returned HTTP ' + status,
+                        status < 500 ? axios.AxiosError.ERR_BAD_REQUEST : axios.AxiosError.ERR_BAD_RESPONSE,
+                        request, undefined, response);
+                return response;
+            };
+            return config;
+        });
+    }
     client.CloudStorage = {async WriteKey(key, json) {
         if (typeof json !== 'string') throw new TypeError('Expected Steam UI cache data');
         await access(key, json);
@@ -73,4 +119,5 @@ function installXboxCloudCache(client, send) {
         access(data.key).then(body => reply(body === undefined ? 404 : 200, body),
             error => reply(error.message === 'Steam UI cache session ended' ? 403 : 503));
     });
+    return installLocalReads;
 }

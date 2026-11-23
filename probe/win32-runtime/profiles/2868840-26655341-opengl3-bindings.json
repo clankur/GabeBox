@@ -1,0 +1,48 @@
+{
+  "gdi32.dll": {
+    "ChoosePixelFormat": "XboxWin32Window.dll",
+    "SetPixelFormat": "XboxWin32Window.dll",
+    "SwapBuffers": "XboxWin32Window.dll"
+  },
+  "kernel32.dll": {
+    "CreateDirectoryW": "XboxWin32StorageTrace.dll",
+    "ExitProcess": "XboxWin32StorageTrace.dll",
+    "GetFileAttributesW": "XboxWin32StorageTrace.dll",
+    "GetProcAddress": "XboxWin32Window.dll",
+    "SetCurrentDirectoryW": "XboxWin32StorageTrace.dll",
+    "TerminateProcess": "XboxWin32StorageTrace.dll"
+  },
+  "ole32.dll": {
+    "GetErrorInfo": "oleaut32.dll",
+    "SetErrorInfo": "oleaut32.dll"
+  },
+  "user32.dll": {
+    "CreateWindowExW": "XboxWin32Window.dll",
+    "DefWindowProcW": "XboxWin32Window.dll",
+    "DestroyWindow": "XboxWin32Window.dll",
+    "DispatchMessageW": "XboxWin32Window.dll",
+    "EnumDisplayMonitors": "XboxWin32Window.dll",
+    "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "GetClientRect": "XboxWin32Window.dll",
+    "GetDC": "XboxWin32Window.dll",
+    "GetForegroundWindow": "XboxWin32Window.dll",
+    "GetMonitorInfoA": "XboxWin32Window.dll",
+    "GetMonitorInfoW": "XboxWin32Window.dll",
+    "GetPointerPenInfo": "XboxWin32Input.dll",
+    "GetWindowLongPtrW": "XboxWin32Window.dll",
+    "GetWindowRect": "XboxWin32Window.dll",
+    "IsWindowVisible": "XboxWin32Window.dll",
+    "MapVirtualKeyExA": "XboxWin32Input.dll",
+    "MonitorFromWindow": "XboxWin32Window.dll",
+    "PeekMessageW": "XboxWin32Window.dll",
+    "RegisterClassExW": "XboxWin32Window.dll",
+    "RegisterClassW": "XboxWin32Window.dll",
+    "ReleaseDC": "XboxWin32Window.dll",
+    "SetFocus": "XboxWin32Window.dll",
+    "SetForegroundWindow": "XboxWin32Window.dll",
+    "SetWindowLongPtrW": "XboxWin32Window.dll",
+    "SetWindowPos": "XboxWin32Window.dll",
+    "ShowWindow": "XboxWin32Window.dll",
+    "UnregisterClassW": "XboxWin32Window.dll"
+  }
+}

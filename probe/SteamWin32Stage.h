@@ -65,19 +65,27 @@ static IAsyncAction Write(IRandomAccessStream destination, IBuffer bytes) {
 }
 
 static IAsyncAction ApplyRecipe(StorageFile recipe, std::wstring source, StorageFolder stage) {
-    constexpr std::array<std::uint8_t, 8> magic{'X', 'W', 'P', 'E', 'V', '1', '\r', '\n'};
-    constexpr std::uint32_t metadataSize = 56;
+    constexpr std::array<std::uint8_t, 8> originalMagic{'X', 'W', 'P', 'E', 'V', '1', '\r', '\n'};
+    constexpr std::array<std::uint8_t, 8> compactMagic{'X', 'W', 'P', 'E', 'V', '2', '\r', '\n'};
+    constexpr std::uint32_t originalMetadataSize = 56;
+    constexpr std::uint32_t compactMetadataSize = 64;
     auto length = (co_await recipe.GetBasicPropertiesAsync()).Size();
-    if (length <= metadataSize || length > chunkSize) throw winrt::hresult_invalid_argument();
+    if (length <= originalMetadataSize || length > chunkSize) throw winrt::hresult_invalid_argument();
     const auto patch = co_await FileIO::ReadBufferAsync(recipe);
     const std::span<const std::uint8_t> bytes(patch.data(), patch.Length());
-    if (bytes.size() != length || !std::equal(magic.begin(), magic.end(), bytes.begin()))
+    if (bytes.size() != length) throw winrt::hresult_invalid_argument();
+    const bool compact = std::equal(compactMagic.begin(), compactMagic.end(), bytes.begin());
+    if (!compact && !std::equal(originalMagic.begin(), originalMagic.end(), bytes.begin()))
         throw winrt::hresult_invalid_argument();
+    const auto metadataSize = compact ? compactMetadataSize : originalMetadataSize;
+    if (bytes.size() <= metadataSize) throw winrt::hresult_invalid_argument();
     const auto sourceLength = ReadLittleEndian(bytes.subspan(8, 8));
-    const auto headerLength = ReadLittleEndian(bytes.subspan(16, 4));
-    const auto tailLength = ReadLittleEndian(bytes.subspan(20, 4));
-    if (headerLength < 64 || headerLength > sourceLength ||
-            !tailLength || sourceLength > (std::numeric_limits<std::uint64_t>::max)() - tailLength ||
+    const auto retainedLength = compact ? ReadLittleEndian(bytes.subspan(16, 8)) : sourceLength;
+    const auto lengthsOffset = compact ? 24u : 16u;
+    const auto headerLength = ReadLittleEndian(bytes.subspan(lengthsOffset, 4));
+    const auto tailLength = ReadLittleEndian(bytes.subspan(lengthsOffset + 4, 4));
+    if (headerLength < 64 || headerLength > retainedLength || (compact && retainedLength >= sourceLength) ||
+            !tailLength || retainedLength > (std::numeric_limits<std::uint64_t>::max)() - tailLength ||
             headerLength + tailLength != bytes.size() - metadataSize)
         throw winrt::hresult_invalid_argument();
 
@@ -88,7 +96,7 @@ static IAsyncAction ApplyRecipe(StorageFile recipe, std::wstring source, Storage
         winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
     ULARGE_INTEGER callerAvailable{};
     if (GetDiskFreeSpaceExW(stage.Path().c_str(), &callerAvailable, nullptr, nullptr) &&
-            callerAvailable.QuadPart < sourceLength + tailLength)
+            callerAvailable.QuadPart < retainedLength + tailLength)
         winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_DISK_FULL));
     auto name = source.substr(source.find_last_of(L'\\') + 1);
     auto target = co_await stage.CreateFileAsync(name, CreationCollisionOption::FailIfExists);
@@ -101,14 +109,17 @@ static IAsyncAction ApplyRecipe(StorageFile recipe, std::wstring source, Storage
     co_await Write(to, createBuffer(bytes.subspan(metadataSize, static_cast<size_t>(headerLength))));
     std::uint64_t offset = 0;
     while (offset < sourceLength) {
-        const auto boundary = offset < headerLength ? headerLength : sourceLength;
+        auto boundary = sourceLength;
+        if (offset < headerLength) boundary = headerLength;
+        else if (offset < retainedLength) boundary = retainedLength;
         const auto count = static_cast<std::uint32_t>(std::min<std::uint64_t>(chunkSize, boundary - offset));
         DWORD read = 0;
         if (!ReadFile(from.get(), buffer.data(), count, &read, nullptr)) winrt::throw_last_error();
         if (read != count) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_READ_FAULT));
         auto block = createBuffer(std::span(buffer.data(), static_cast<size_t>(read)));
+        // Hash the complete original, including any suffix excluded from staging.
         digest.Append(block);
-        if (offset >= headerLength) co_await Write(to, block);
+        if (offset >= headerLength && offset < retainedLength) co_await Write(to, block);
         offset += count;
     }
     if (!CryptographicBuffer::Compare(digest.GetValueAndReset(), createBuffer(bytes.subspan(metadataSize - 32, 32))))

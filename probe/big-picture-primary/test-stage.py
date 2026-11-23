@@ -41,7 +41,14 @@ class Primary(unittest.TestCase):
         self.assertIn(b'script-src \'self\'', html)
         self.assertLess(html.index(b"Content-Security-Policy"), html.index(b"<script"))
         self.assertIn(b'<script src="steam-signin.js"></script>', html)
+        self.assertNotIn(b"data-steam-early-library-reveal", html)
         self.assertEqual((self.layout / "SteamPrimary.exe").read_bytes(), (self.artifact / "SteamPrimary.exe").read_bytes())
+
+    def test_early_library_reveal_is_explicit_in_the_primary_package(self):
+        stage(self.layout, self.artifact, self.pin, early_library_reveal=True)
+        root_tag = self.html.read_bytes().partition(b">")[0]
+        self.assertIn(b'data-steam-primary-xaml="true"', root_tag)
+        self.assertIn(b'data-steam-early-library-reveal="true"', root_tag)
 
     def test_tampered_payload_is_rejected_before_staging(self):
         (self.artifact / "SteamPrimary.exe").write_bytes(b"changed")

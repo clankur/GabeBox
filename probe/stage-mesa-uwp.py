@@ -33,7 +33,7 @@ DXIL_FILES = {
 
 
 def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, slay_mesa_jni=None,
-               dxil_archive=None, indexed_control=False):
+               dxil_archive=None, indexed_control=False, desktop_gl_runtime=False):
     release = RELEASES.get(hashlib.sha256(archive.read_bytes()).hexdigest())
     if release is None:
         raise ValueError('Use a pinned, unchanged Mesa UWP release archive.')
@@ -51,13 +51,17 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
     target = []
     hosted_stardew = (layout / 'steam-sdl-host-413150.txt').is_file()
     hosted_slay = (layout / 'steam-sdl-host-646570.txt').is_file()
-    if (layout / 'steamclient64.dll').exists():
+    steam_core = (layout / 'steamclient64.dll').is_file()
+    if desktop_gl_runtime and (not steam_core or not (layout / 'steam-signin.html').is_file() or dxil_archive is None):
+        raise ValueError('The shared desktop OpenGL runtime requires a Steam sign-in layout and the pinned DXIL validator.')
+    if steam_core:
         launch_marker = layout / 'steam-launch-app.txt'
         if launch_marker.is_file():
             target = launch_marker.read_text(encoding='ascii').splitlines()
-        if (not target and not hosted_stardew and not hosted_slay) or (target and target[0] not in ('413150', '646570')):
+        if not desktop_gl_runtime and ((not target and not hosted_stardew and not hosted_slay)
+                                       or (target and target[0] not in ('413150', '646570'))):
             raise ValueError('Scope this Mesa game trial to Stardew Valley or Slay the Spire.')
-    if indexed_control and (target or hosted_stardew or hosted_slay):
+    if indexed_control and (desktop_gl_runtime or target or hosted_stardew or hosted_slay):
         raise ValueError('Run the indexed Mesa control without Steam or game files.')
     if hosted_stardew and (not sdl_surfaceless or dxil_archive is None):
         raise ValueError('The hosted Stardew profile requires SDL surfaceless GL and the pinned DXIL validator.')
@@ -129,9 +133,11 @@ def main():
     parser.add_argument('--slay-mesa-jni', type=Path, help='verified Mesa JNI control workflow artifact')
     parser.add_argument('--dxil-archive', type=Path, help='pinned Microsoft DXC validator archive for indexed rendering')
     parser.add_argument('--indexed-control', action='store_true', help='verify a completed indexed draw and pixel readback without Steam')
+    parser.add_argument('--desktop-gl-runtime', action='store_true',
+                        help='stage the shared desktop OpenGL runtime for a Steam sign-in package')
     args = parser.parse_args()
     stage_mesa(args.layout, args.archive, args.license, args.framework, args.sdl_surfaceless, args.slay_mesa_jni,
-               args.dxil_archive, args.indexed_control)
+               args.dxil_archive, args.indexed_control, args.desktop_gl_runtime)
     print('Staged the pinned Mesa UWP runtime and framework dependency.')
 
 

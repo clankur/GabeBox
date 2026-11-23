@@ -1,0 +1,15 @@
+{
+  "ole32.dll": {
+    "GetErrorInfo": "oleaut32.dll",
+    "SetErrorInfo": "oleaut32.dll"
+  },
+  "user32.dll": {
+    "GetRawInputBuffer": "XboxWin32Input.dll",
+    "GetPointerPenInfo": "XboxWin32Input.dll",
+    "MapVirtualKeyExA": "XboxWin32Input.dll"
+  },
+  "winmm.dll": {
+    "timeKillEvent": "XboxWin32Timer.dll",
+    "timeSetEvent": "XboxWin32Timer.dll"
+  }
+}

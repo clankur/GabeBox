@@ -1,5 +1,9 @@
 #include "child-process.h"
 
+#ifndef PROBE_CHILD_WAIT_MS
+#define PROBE_CHILD_WAIT_MS 3000u
+#endif
+
 typedef unsigned short WORD;
 typedef unsigned long DWORD;
 typedef void *HANDLE;
@@ -53,7 +57,7 @@ __declspec(dllexport) void __stdcall RunPackagedChild(PCWSTR path, ChildProcessR
         return;
     }
 
-    result->waitResult = WaitForSingleObject(process.hProcess, 3000);
+    result->waitResult = WaitForSingleObject(process.hProcess, PROBE_CHILD_WAIT_MS);
     if (result->waitResult == 0 && !GetExitCodeProcess(process.hProcess, &result->exitCode)) {
         result->error = GetLastError();
     } else if (result->waitResult == 0xffffffffu) {

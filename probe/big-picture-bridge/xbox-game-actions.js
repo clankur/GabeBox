@@ -28,9 +28,6 @@ function installXboxGameActions(client) {
     const unavailable = () => undefined;
     for (const event of ['TaskChange', 'UserRequest', 'ShowError', 'ShowUI'])
         apps['RegisterForGameAction' + event] = unavailable;
-    client.Installs = {RegisterForShowInstallWizard: unavailable,
-        RegisterForShowConfirmUninstall: unavailable, RegisterForShowFailedUninstall: unavailable};
-
     return async function run(gameId, source, submit) {
         if (active) throw new Error('Steam game launch already in progress');
         const id = sequence = sequence % 0x7fffffff + 1;

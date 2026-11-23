@@ -3,6 +3,7 @@
 #define CLASS_COUNT 32
 #define WINDOW_COUNT 32
 #define MESSAGE_COUNT 256
+#define WINDOW_HANDLE_BASE 0x584257000000ULL
 
 DECLSPEC_IMPORT HANDLE WINAPI CreateFile2FromAppW(LPCWSTR, DWORD, DWORD, DWORD,
     LPCREATEFILE2_EXTENDED_PARAMETERS);
@@ -16,10 +17,14 @@ typedef struct WindowClass {
 static volatile LONG windowThread;
 static WindowClass classes[CLASS_COUNT];
 static XboxWindow windows[WINDOW_COUNT];
-static ULONG_PTR nextHandle = 0x584257000001ULL;
+static ULONG_PTR nextHandle = WINDOW_HANDLE_BASE + 1;
 static MSG messages[MESSAGE_COUNT];
 static UINT messageCount;
 static void* volatile hostClose;
+static volatile LONG hostExitChecked;
+static void* volatile foregroundWindow;
+static HWND focusWindow;
+static UINT activationChange;
 
 void XboxWindowTrace(const char *line) {
     const DWORD error = GetLastError();
@@ -37,6 +42,99 @@ void XboxWindowTrace(const char *line) {
             CloseHandle(file);
         }
     }
+    SetLastError(error);
+}
+
+static BOOL ParseHostNumber(const WCHAR *text, DWORD length, ULONG64 *result) {
+    if (!length || length > 20) return FALSE;
+    ULONG64 value = 0;
+    for (DWORD index = 0; index < length; ++index) {
+        if (text[index] < L'0' || text[index] > L'9') return FALSE;
+        const UINT digit = text[index] - L'0';
+        if (value > (~(ULONG64)0 - digit) / 10) return FALSE;
+        value = value * 10 + digit;
+    }
+    *result = value;
+    return TRUE;
+}
+
+static void TraceHostValue(const char *prefix, DWORD value) {
+    static const char digits[] = "0123456789ABCDEF";
+    char line[48];
+    UINT index = 0;
+    while (*prefix) line[index++] = *prefix++;
+    for (int shift = 28; shift >= 0; shift -= 4) line[index++] = digits[(value >> shift) & 15];
+    line[index++] = '\n';
+    line[index] = 0;
+    XboxWindowTrace(line);
+}
+
+static void TraceHostError(const char *reason, DWORD error) {
+    XboxWindowTrace(reason);
+    TraceHostValue("win32_host_exit_error=0x", error);
+}
+
+static VOID CALLBACK RecordHostExit(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_WAIT wait,
+                                    TP_WAIT_RESULT result) {
+    (void)instance;
+    const DWORD lastError = GetLastError();
+    HANDLE host = context;
+    DWORD code;
+    if (result != WAIT_OBJECT_0) {
+        TraceHostError("win32_host_exit=wait-unexpected\n", result);
+    } else if (GetExitCodeProcess(host, &code)) {
+        XboxWindowTrace("win32_host_exit=exited\n");
+        TraceHostValue("win32_host_exit_code=0x", code);
+    } else {
+        TraceHostError("win32_host_exit=exit-code-unavailable\n", GetLastError());
+    }
+    SetThreadpoolWait(wait, NULL, NULL);
+    CloseHandle(host);
+    CloseThreadpoolWait(wait);
+    SetLastError(lastError);
+}
+
+static void StartHostExitWatch(void) {
+    WCHAR text[21];
+    DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_HOST_START_TIME", text, ARRAYSIZE(text));
+    if (!length) return;
+    ULONG64 startTime, pid;
+    if (!ParseHostNumber(text, length, &startTime) || !startTime) {
+        XboxWindowTrace("win32_host_exit=invalid-start-time\n");
+        return;
+    }
+    length = GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_PID", text, ARRAYSIZE(text));
+    if (!ParseHostNumber(text, length, &pid) || !pid || pid > MAXDWORD || pid == GetCurrentProcessId()) {
+        XboxWindowTrace("win32_host_exit=invalid-host-pid\n");
+        return;
+    }
+    HANDLE host = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!host) {
+        TraceHostError("win32_host_exit=open-failed\n", GetLastError());
+        return;
+    }
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(host, &created, &exited, &kernel, &user)) {
+        TraceHostError("win32_host_exit=identity-query-failed\n", GetLastError());
+    } else if ((((ULONG64)created.dwHighDateTime << 32) | created.dwLowDateTime) != startTime) {
+        XboxWindowTrace("win32_host_exit=identity-mismatch\n");
+    } else {
+        PTP_WAIT wait = CreateThreadpoolWait(RecordHostExit, host, NULL);
+        if (wait) {
+            XboxWindowTrace("win32_host_exit=watching\n");
+            // The one-shot callback owns the wait and process handles from here.
+            SetThreadpoolWait(wait, host, NULL);
+            return;
+        }
+        TraceHostError("win32_host_exit=wait-create-failed\n", GetLastError());
+    }
+    CloseHandle(host);
+}
+
+void XboxWatchHostExit(void) {
+    if (InterlockedExchange(&hostExitChecked, 1)) return;
+    const DWORD error = GetLastError();
+    StartHostExitWatch();
     SetLastError(error);
 }
 
@@ -99,6 +197,123 @@ XboxWindow *XboxFindWindow(HWND handle) {
     }
     SetLastError(ERROR_INVALID_WINDOW_HANDLE);
     return NULL;
+}
+
+static BOOL IsVirtualWindowHandle(HWND handle) {
+    return ((ULONG_PTR)handle & ~(ULONG_PTR)0xffffff) == WINDOW_HANDLE_BASE;
+}
+
+static HWND VirtualForegroundWindow(void) {
+    return InterlockedCompareExchangePointer(&foregroundWindow, NULL, NULL);
+}
+
+static BOOL OwnsVirtualActivation(void) {
+    return (LONG)GetCurrentThreadId() == windowThread && VirtualForegroundWindow();
+}
+
+static void NotifyWindow(HWND handle, UINT message, WPARAM wparam, HWND related) {
+    XboxWindow *window = handle ? XboxFindWindow(handle) : NULL;
+    if (window) window->procedure(handle, message, wparam, (LPARAM)related);
+}
+
+static void UpdateWindowActivation(HWND foreground, HWND focus) {
+    const HWND previousForeground = VirtualForegroundWindow();
+    const HWND previousFocus = focusWindow;
+    if (previousForeground == foreground && previousFocus == focus) return;
+    const DWORD error = GetLastError();
+    const UINT change = ++activationChange;
+    focusWindow = focus;
+    InterlockedExchangePointer(&foregroundWindow, foreground);
+    // The window procedure may synchronously change activation or destroy a window.
+    if (previousForeground != foreground) {
+        NotifyWindow(previousForeground, WM_ACTIVATE, WA_INACTIVE, foreground);
+        if (activationChange == change) NotifyWindow(foreground, WM_ACTIVATE, WA_ACTIVE, previousForeground);
+    }
+    if (activationChange == change && previousFocus != focus) {
+        NotifyWindow(previousFocus, WM_KILLFOCUS, (WPARAM)focus, NULL);
+        if (activationChange == change) NotifyWindow(focus, WM_SETFOCUS, (WPARAM)previousFocus, NULL);
+    }
+    SetLastError(error);
+}
+
+static void ClearWindowActivation(HWND handle) {
+    const HWND foreground = VirtualForegroundWindow();
+    UpdateWindowActivation(foreground == handle ? NULL : foreground, focusWindow == handle ? NULL : focusWindow);
+}
+
+static FARPROC NativeWindowProcedure(LPCSTR name) {
+    const DWORD error = GetLastError();
+    HMODULE module = GetModuleHandleW(L"user32.dll");
+    FARPROC procedure = module ? GetProcAddress(module, name) : NULL;
+    if (procedure) SetLastError(error);
+    return procedure;
+}
+
+HWND WINAPI XboxGetForegroundWindow(void) {
+    const HWND foreground = VirtualForegroundWindow();
+    if (foreground) return foreground;
+    typedef HWND (WINAPI *Native)(void);
+    Native native = (Native)(void *)NativeWindowProcedure("GetForegroundWindow");
+    return native ? native() : NULL;
+}
+
+BOOL WINAPI XboxSetForegroundWindow(HWND handle) {
+    if (!IsVirtualWindowHandle(handle)) {
+        const BOOL reconcile = OwnsVirtualActivation();
+        const UINT change = reconcile ? activationChange : 0;
+        typedef BOOL (WINAPI *Native)(HWND);
+        Native native = (Native)(void *)NativeWindowProcedure("SetForegroundWindow");
+        const BOOL result = native ? native(handle) : FALSE;
+        if (result && reconcile && activationChange == change) UpdateWindowActivation(NULL, NULL);
+        return result;
+    }
+    XboxWindow *window = XboxFindWindow(handle);
+    if (!window) return FALSE;
+    if (window->destroying) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return FALSE; }
+    UpdateWindowActivation(handle, handle);
+    return TRUE;
+}
+
+HWND WINAPI XboxGetFocus(void) {
+    if (OwnsVirtualActivation()) return focusWindow;
+    typedef HWND (WINAPI *Native)(void);
+    Native native = (Native)(void *)NativeWindowProcedure("GetFocus");
+    return native ? native() : NULL;
+}
+
+HWND WINAPI XboxSetFocus(HWND handle) {
+    const BOOL reconcile = OwnsVirtualActivation();
+    if (!handle && reconcile) {
+        const HWND previous = focusWindow;
+        UpdateWindowActivation(VirtualForegroundWindow(), NULL);
+        return previous;
+    }
+    if (!IsVirtualWindowHandle(handle)) {
+        const UINT change = reconcile ? activationChange : 0;
+        typedef HWND (WINAPI *Native)(HWND);
+        Native native = (Native)(void *)NativeWindowProcedure("SetFocus");
+        if (!native) return NULL;
+        const HWND previous = native(handle);
+        if (reconcile && activationChange == change) {
+            const DWORD error = GetLastError();
+            BOOL selected = previous != NULL;
+            if (!selected) {
+                // SetFocus can succeed on a queue that had no previously focused window.
+                typedef HWND (WINAPI *Query)(void);
+                Query getFocus = (Query)(void *)NativeWindowProcedure("GetFocus");
+                selected = getFocus && getFocus() == handle;
+            }
+            SetLastError(error);
+            if (selected && activationChange == change) UpdateWindowActivation(NULL, NULL);
+        }
+        return previous;
+    }
+    XboxWindow *window = XboxFindWindow(handle);
+    if (!window) return NULL;
+    if (window->destroying) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return NULL; }
+    const HWND previous = focusWindow;
+    UpdateWindowActivation(handle, handle);
+    return previous;
 }
 
 ATOM WINAPI XboxRegisterClassExW(const WNDCLASSEXW *parameters) {
@@ -186,7 +401,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     for (UINT i = 0; i < WINDOW_COUNT; ++i) {
         if (!windows[i].handle) { window = &windows[i]; break; }
     }
-    if (!window) {
+    if (!window || !IsVirtualWindowHandle((HWND)nextHandle)) {
         XboxWindowTrace("win32_window_create=limit-reached\n");
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
@@ -213,6 +428,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
         XboxWindowTrace("win32_window_create=nccreate-refused\n");
         if (window->handle == handle) {
             window->destroying = TRUE;
+            ClearWindowActivation(handle);
             window->procedure(handle, WM_NCDESTROY, 0, 0);
             window->handle = NULL;
         }
@@ -238,6 +454,7 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
         return FALSE;
     }
     window->destroying = TRUE;
+    ClearWindowActivation(handle);
     window->procedure(handle, WM_DESTROY, 0, 0);
     window->procedure(handle, WM_NCDESTROY, 0, 0);
     window->handle = NULL;
@@ -290,6 +507,7 @@ BOOL WINAPI XboxShowWindow(HWND handle, int command) {
         if (showing) window->style |= WS_VISIBLE;
         else window->style &= ~WS_VISIBLE;
         window->procedure(handle, WM_SHOWWINDOW, showing, 0);
+        if (!showing && window->handle == handle && !(window->style & WS_VISIBLE)) ClearWindowActivation(handle);
     }
     return previous;
 }

@@ -1,11 +1,13 @@
 LIBRARY XboxWin32LoaderTrace.dll
 EXPORTS
-    LoadLibraryA=XboxLoadLibraryA
-    GetProcAddress=XboxGetProcAddress
-    GetModuleFileNameW=XboxOriginalGetModuleFileNameW
-    CreateFileW=XboxTraceCreateFileW
-    CreateFileA=XboxTraceCreateFileA
-    GetFileAttributesW=XboxTraceGetFileAttributesW
-    GetFileAttributesA=XboxTraceGetFileAttributesA
-    fopen=XboxTraceFopen
-    _wfsopen=XboxTraceWfsopen
+    CreateFileA=XboxTraceCreateFileA @1
+    CreateFileW=XboxTraceCreateFileW @2
+    GetFileAttributesA=XboxTraceGetFileAttributesA @3
+    GetFileAttributesW=XboxTraceGetFileAttributesW @4
+    GetModuleFileNameW=XboxOriginalGetModuleFileNameW @5
+    GetProcAddress=XboxGetProcAddress @6
+    LoadLibraryA=XboxLoadLibraryA @7
+    _wfsopen=XboxTraceWfsopen @8
+    fopen=XboxTraceFopen @9
+    LoadLibraryExW=XboxLoadLibraryExW @10
+    LoadLibraryW=XboxLoadLibraryW @11

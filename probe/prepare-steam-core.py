@@ -20,26 +20,32 @@ APPX_FOOTPRINT = {'appxblockmap.xml', 'appxsignature.p7x', '[content_types].xml'
 ANALYSIS = Path(__file__).resolve().parents[1] / 'analysis'
 
 
-def system_imports(objdump, binary):
-    output = subprocess.run([objdump, '--private-headers', str(binary)], check=True,
-                            capture_output=True, text=True).stdout
+def parse_import_table(output):
     _, start, remainder = output.partition('The Import Tables:')
     table = remainder.partition('Export Table:')[0]
-    if not start:
-        raise ValueError(f'Could not read the PE import table of {binary.name}.')
     parsed = {}
     library = None
     for line in table.splitlines():
         module = re.fullmatch(r'\s*DLL Name: ([a-zA-Z0-9_.-]+)', line)
         if module:
             library = module[1].lower()
-        elif library and library not in VALVE_FILES:
+        elif library:
             entry = re.fullmatch(r'\s+(\d+)(?:\s+(\S+))?\s*', line)
             if entry:
                 parsed.setdefault(library, set()).add(entry[2] or '#' + entry[1])
-    if not parsed:
+    return parsed if start else None
+
+
+def system_imports(objdump, binary):
+    output = subprocess.run([objdump, '--private-headers', str(binary)], check=True,
+                            capture_output=True, text=True).stdout
+    parsed = parse_import_table(output)
+    if parsed is None:
+        raise ValueError(f'Could not read the PE import table of {binary.name}.')
+    imports = {module: symbols for module, symbols in parsed.items() if module not in VALVE_FILES}
+    if not imports:
         raise ValueError(f'No system imports in {binary.name}.')
-    return parsed
+    return imports
 
 
 def adapt_pinned_keyboard(binary, objdump):

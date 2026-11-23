@@ -33,11 +33,32 @@ def fixture():
     return image
 
 
+def dwarf_fixture():
+    base = fixture()
+    image = base[:0x200] + bytearray(0x200) + base[0x200:] + bytearray(0x400)
+    optional = 0x98
+    sections = optional + 240
+    struct.pack_into("<H", image, 0x86, 3)
+    struct.pack_into("<II", image, 0x8c, len(image), 0)
+    struct.pack_into("<I", image, optional + 16, 0x1000)
+    struct.pack_into("<II", image, optional + 56, 0x4000, 0x400)
+    struct.pack_into("<II", image, optional + 112 + 8 * 12, 0x1060, 32)
+    struct.pack_into("<8sIIIIIIHHI", image, sections, b".text", 0x400, 0x1000,
+                     0x400, 0x400, 0, 0, 0, 0, 0x60000020)
+    struct.pack_into("<8sIIIIIIHHI", image, sections + 40, b"/4", 0x180, 0x2000,
+                     0x200, 0x800, 0, 0, 0, 0, 0x42000040)
+    struct.pack_into("<8sIIIIIIHHI", image, sections + 80, b"/16", 0x130, 0x3000,
+                     0x200, 0xa00, 0, 0, 0, 0, 0x42000040)
+    names = b".debug_info\0.debug_line\0"
+    image += struct.pack("<I", len(names) + 4) + names
+    return image
+
+
 class PeImportRedirectTests(unittest.TestCase):
     def test_split_lookup_tables_keep_every_original_iat_slot(self):
         image = bytes(fixture())
         bindings = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
-        header, padding, added_section = tool["PeImage"](image).redirect(bindings)
+        header, padding, added_section, _ = tool["PeImage"](image).redirect(bindings)
         result = bytes(header) + image[len(header):] + padding + added_section
         patched = tool["PeImage"](result)
         bindings = []
@@ -58,6 +79,46 @@ class PeImportRedirectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsigned"):
             tool["PeImage"](image)
 
+    def test_hash_pinned_signed_source_keeps_payload_and_covers_certificate_bytes(self):
+        image = fixture()
+        prefix = len(image)
+        certificate = struct.pack("<IHH", 24, 0x0200, 2) + b"certificate-data"
+        struct.pack_into("<II", image, 0x98 + 112 + 8 * 4, prefix, len(certificate))
+        image.extend(certificate)
+        pin = hashlib.sha256(image).hexdigest()
+        source = tool["PeImage"](image, allow_signed_source=True)
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        parts = source.redirect(rules)
+        header, padding, added_section, retained = parts
+        self.assertEqual(retained, prefix)
+        self.assertEqual(struct.unpack_from("<II", header, source.directory(4)), (0, 0))
+        staged = bytes(header) + image[len(header):retained] + padding + added_section
+        self.assertEqual(staged[len(header):retained], image[len(header):retained])
+        self.assertNotIn(certificate, staged)
+        tool["PeImage"](staged)
+        recipe = tool["patch_recipe"](image, *parts, signed_source_sha256=pin)
+        metadata = tool["TRIMMED_PATCH_HEADER"].unpack_from(recipe)
+        self.assertEqual(metadata[:3], (b"XWPEV2\r\n", len(image), prefix))
+        self.assertEqual(metadata[-1].hex(), pin)
+        image[-1] ^= 1
+        with self.assertRaisesRegex(ValueError, "requested SHA-256"):
+            tool["patch_recipe"](image, *parts, signed_source_sha256=pin)
+
+    def test_signed_source_requires_a_valid_suffix_and_honors_image_integrity(self):
+        image = fixture()
+        prefix = len(image)
+        struct.pack_into("<II", image, 0x98 + 112 + 8 * 4, prefix, 24)
+        image.extend(struct.pack("<IHH", 24, 0x0200, 2) + bytes(16))
+        with self.assertRaisesRegex(ValueError, "separate trailing region"):
+            tool["PeImage"](image + bytes(8), allow_signed_source=True)
+        malformed = bytearray(image)
+        struct.pack_into("<I", malformed, prefix, 32)
+        with self.assertRaisesRegex(ValueError, "certificate record"):
+            tool["PeImage"](malformed, allow_signed_source=True)
+        struct.pack_into("<H", image, 0x98 + 70, 0x0080)
+        with self.assertRaisesRegex(ValueError, "publisher requires image integrity"):
+            tool["PeImage"](image, allow_signed_source=True)
+
     def test_hosted_window_creation_keeps_class_lifecycle_in_one_adapter(self):
         image = fixture()
         image[0x280:0x28b] = b"user32.dll\0"
@@ -71,7 +132,7 @@ class PeImportRedirectTests(unittest.TestCase):
             struct.pack_into("<5Q", image, offset, *addresses, 0)
         target = "XboxWin32Window.dll"
         rules = tool["parse_rules"]({"user32.dll": {"CreateWindowExW": target}})
-        header, padding, added_section = tool["PeImage"](image).redirect(rules)
+        header, padding, added_section, _ = tool["PeImage"](image).redirect(rules)
         patched = tool["PeImage"](bytes(header) + image[len(header):] + padding + added_section)
         bindings = [(iat + index * 8, symbol, patched.string(name))
                     for lookup, name, iat, _ in patched.import_descriptors()
@@ -87,7 +148,7 @@ class PeImportRedirectTests(unittest.TestCase):
         image = bytes(fixture())
         rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
         parts = tool["PeImage"](image).redirect(rules)
-        header, padding, section = parts
+        header, padding, section, _ = parts
         recipe = tool["patch_recipe"](image, *parts)
         metadata = tool["PATCH_HEADER"]
         magic, original_size, header_size, trailer_size, digest = metadata.unpack_from(recipe)
@@ -95,3 +156,89 @@ class PeImportRedirectTests(unittest.TestCase):
         self.assertEqual(metadata.size + header_size + trailer_size, len(recipe))
         self.assertEqual(recipe[metadata.size:metadata.size + header_size] + image[header_size:]
                          + recipe[metadata.size + header_size:], header + image[len(header):] + padding + section)
+
+    def test_dwarf_omission_compacts_only_the_opt_in_mapped_section_table(self):
+        image = bytes(dwarf_fixture())
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        source = tool["PeImage"](image)
+        default_header, _, _, _ = source.redirect(rules)
+        self.assertEqual(struct.unpack_from("<I", default_header, 0x98 + 56)[0], 0x5000)
+
+        parts = source.redirect(rules, omit_dwarf_mapping=True)
+        header, padding, section, _ = parts
+        recipe = tool["patch_recipe"](image, *parts)
+        magic, original_size, header_size, _, digest = tool["PATCH_HEADER"].unpack_from(recipe)
+        self.assertEqual((magic, original_size, digest), (b"XWPEV1\r\n", len(image), hashlib.sha256(image).digest()))
+        result = bytes(header) + image[header_size:] + padding + section
+        patched = tool["PeImage"](result)
+        self.assertEqual(patched.word(0x98 + 56), 0x3000)
+        self.assertEqual(patched.sections[:-1], source.sections[:1])
+        self.assertEqual(patched.sections[-1][1:], (0x2000, len(section), len(image) + len(padding)))
+        self.assertEqual(patched.word(patched.directory(12)), source.word(source.directory(12)))
+        self.assertEqual(patched.locate(0x1060, 32), source.locate(0x1060, 32))
+        self.assertEqual(result[header_size:len(image)], image[header_size:])
+        self.assertEqual(result[source.section_table + 80:source.section_table + 120], bytes(40))
+        imports = [(iat + index * 8, symbol, patched.string(name))
+                   for lookup, name, iat, _ in patched.import_descriptors()
+                   for index, _, symbol in patched.imported_symbols(lookup, iat)]
+        self.assertEqual(imports, [(0x1060, "Init", "ole32.dll"), (0x1068, "GetErrorInfo", "oleaut32.dll"),
+                                   (0x1070, "Quit", "ole32.dll")])
+
+    def test_trimmed_recipe_keeps_the_complete_original_hash_and_only_copies_retained_bytes(self):
+        image = bytes(dwarf_fixture())
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        source = tool["PeImage"](image)
+        parts = source.redirect(rules, trim_dwarf=True)
+        header, padding, section, retained = parts
+        recipe = tool["patch_recipe"](image, *parts)
+        tool["validate_patch_recipe"](recipe)
+        metadata = tool["TRIMMED_PATCH_HEADER"]
+        magic, source_size, prefix, header_size, tail_size, digest = metadata.unpack_from(recipe)
+        self.assertEqual((magic, source_size, prefix, digest),
+                         (b"XWPEV2\r\n", len(image), 0x800, hashlib.sha256(image).digest()))
+        self.assertEqual(retained, prefix)
+        self.assertEqual(tail_size, len(padding) + len(section))
+        self.assertNotEqual(digest, hashlib.sha256(image[:prefix]).digest())
+        patched = tool["PeImage"](header + image[header_size:prefix] + padding + section)
+        self.assertEqual(patched.word(source.optional - 12), 0)
+        self.assertEqual(patched.image[header_size:prefix], image[header_size:prefix])
+        self.assertEqual(patched.sections[-1][3], prefix)
+        self.assertEqual(patched.sections[:-1], source.sections[:1])
+
+        malformed = bytearray(recipe)
+        for bogus_prefix in (header_size - 1, source_size):
+            struct.pack_into("<Q", malformed, 16, bogus_prefix)
+            with self.assertRaisesRegex(ValueError, "compatibility recipe"):
+                tool["validate_patch_recipe"](malformed)
+
+    def test_trimmed_recipe_rejects_an_overlay_but_mapping_only_compaction_keeps_it(self):
+        image = bytes(dwarf_fixture()) + b"game data"
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        source = tool["PeImage"](image)
+        self.assertEqual(source.redirect(rules, omit_dwarf_mapping=True)[-1], len(image))
+        with self.assertRaisesRegex(ValueError, "overlay"):
+            source.redirect(rules, trim_dwarf=True)
+
+    def test_dwarf_omission_rejects_ambiguous_and_referenced_sections(self):
+        optional = 0x98
+        sections = optional + 240
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        changes = [
+            (sections + 80 + 36, 0x40000040, "discardable"),
+            (sections + 40 + 20, 0x600, "non-overlapping"),
+            (optional + 16, 0x2000, "runtime reference"),
+            (optional + 112 + 8 * 3, 0x3000, "runtime reference"),
+            (0x410, 0x2000, "runtime reference"),
+        ]
+        for offset, value, message in changes:
+            with self.subTest(offset=offset):
+                image = dwarf_fixture()
+                struct.pack_into("<I", image, offset, value)
+                if offset == optional + 112 + 8 * 3:
+                    struct.pack_into("<I", image, offset + 4, 12)
+                with self.assertRaisesRegex(ValueError, message):
+                    tool["PeImage"](image).redirect(rules, omit_dwarf_mapping=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

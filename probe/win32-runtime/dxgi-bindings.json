@@ -1,0 +1,9 @@
+{
+  "dxgi.dll": {
+    "CreateDXGIFactory1": "XboxWin32Dxgi.dll"
+  },
+  "d3dcompiler_47.dll": {
+    "D3DReflect": "XboxWin32Dxgi.dll",
+    "D3DGetInputSignatureBlob": "XboxWin32Dxgi.dll"
+  }
+}

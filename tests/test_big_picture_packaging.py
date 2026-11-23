@@ -5,7 +5,7 @@ import runpy
 import struct
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 
@@ -72,6 +72,22 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             prepare(self.template, self.layout, self.cache)
 
+    def test_default_library_bridge_preserves_partial_layouts_and_enables_cache_reads(self):
+        stage_bridge = library_builder["stage_bridge"]
+        for has_movie in (False, True):
+            with self.subTest(has_movie=has_movie):
+                layout = self.work / f"library-{has_movie}"
+                steamui = layout / "ValveClient/steamui"
+                (steamui / "movies").mkdir(parents=True)
+                if has_movie:
+                    (steamui / "movies/bigpicture_startup.webm").touch()
+                bundle = Mock(return_value="signed bridge")
+                with patch.object(library_builder["runpy"], "run_path", return_value={"bundle": bundle}):
+                    stage_bridge(layout)
+                bundle.assert_called_once_with(layout / "ValveClient/public/url_list.txt",
+                    movie_probe_assets=steamui if has_movie else None, local_cloud_cache_reads=True)
+                self.assertEqual((steamui / "xbox/bridge.js").read_text(), "signed bridge")
+
     def test_surfaceless_profile_preserves_existing_presenters_and_pins_steam_build(self):
         self.layout.mkdir()
         for dll in ("SDL2.dll", "opengl32.dll", "libEGL.dll", "dxil.dll"):
@@ -95,7 +111,7 @@ class BigPicturePackageTests(unittest.TestCase):
         companions = "steam-win32-files-1145360.txt"
         (profile / marker).write_text("10929685\nHades.exe\n\n\nEngineWin64s.dll\nx64\nloader-trace\n")
         (profile / recipe).write_bytes(
-            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
         extra = "steam-win32-shadow-1145360-launcher.xwp"
         (profile / extra).write_bytes(
             struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
@@ -107,13 +123,16 @@ class BigPicturePackageTests(unittest.TestCase):
                 b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
             archive.writestr("XboxProbe.Native.winmd", b"metadata")
             for name in ("ProbeNative.dll", "XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll",
-                         "XboxWin32Window.dll", "XboxWin32CrashReport.dll", "XboxWin32Dxgi.dll"):
+                         "XboxWin32Window.dll", "XboxWin32SteamDiscovery.dll", "XboxWin32CrashReport.dll",
+                         "XboxWin32Dxgi.dll", "XboxWin32StorageTrace.dll", "XboxWin32Unity.dll", "XboxWin32Timer.dll",
+                         "XboxWin32DisplayConfig.dll"):
                 archive.writestr(name, b"runtime fixture")
         stage_trials = library_builder["stage_win32_trial_profiles"]
         stage_trials(self.layout, [f"1145360={profile}"], template)
         self.assertEqual({path.name for path in self.layout.iterdir()},
                          {"XboxProbe.Native.winmd", "ProbeNative.dll", "XboxWin32Input.dll",
-                          "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll", marker, recipe, extra, companions})
+                          "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll", "XboxWin32Timer.dll",
+                          marker, recipe, extra, companions})
         self.assertEqual((self.layout / recipe).read_bytes(), (profile / recipe).read_bytes())
         self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(), b"metadata")
         with self.assertRaisesRegex(ValueError, "one APPID"):
@@ -124,12 +143,50 @@ class BigPicturePackageTests(unittest.TestCase):
         (profile / marker).write_text("10929685\nGame.exe\nopengl3\ngodot\n")
         stage_trials(self.layout, [f"1145360={profile}"], template)
         self.assertEqual((self.layout / "XboxWin32Window.dll").read_bytes(), b"runtime fixture")
+        adapted = "10929685\nGame.exe\nopengl3\ngodot\n\n\n\naccessibility=disabled\n"
+        (profile / marker).write_text(adapted)
+        with self.assertRaisesRegex(ValueError, "matching hosted OpenGL profile"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (self.layout / "steam-sdl-surfaceless-1145360.txt").write_text("10929685")
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / marker).read_text(), adapted)
+        storage_marker = "steam-win32-storage-trace-1145360.txt"
+        (profile / storage_marker).touch()
+        with self.assertRaisesRegex(ValueError, "requires an empty file and a loader trace"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        with_storage = adapted.replace("\n\n\naccessibility=", "\n\nloader-trace\naccessibility=")
+        (profile / marker).write_text(with_storage)
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / marker).read_text(), with_storage)
+        self.assertEqual((self.layout / storage_marker).read_bytes(), b"")
+        self.assertEqual((self.layout / "XboxWin32StorageTrace.dll").read_bytes(), b"runtime fixture")
+        (profile / storage_marker).unlink()
+        shader_cache = "steam-win32-godot-shader-cache-1145360.txt"
+        for option in ("control", "disabled"):
+            (profile / shader_cache).write_text(option + "\n")
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+            self.assertEqual((self.layout / shader_cache).read_text(), option)
+        (profile / shader_cache).write_text("disabled\nother-setting")
+        with self.assertRaisesRegex(ValueError, "shader cache trial"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / shader_cache).unlink()
+        (profile / marker).write_text(adapted)
+        sdk_marker = "steam-win32-steam-sdk-1145360.txt"
+        (profile / sdk_marker).write_text("data/steam_api64.dll\n")
+        with self.assertRaisesRegex(ValueError, "unchanged companion"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / companions).write_text("Hades.exe\tlauncher\ndata/steam_api64.dll\n")
         crash_marker = "steam-win32-crash-report-1145360.txt"
         (profile / crash_marker).touch()
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / sdk_marker).read_text(), "data/steam_api64.dll")
+        self.assertEqual((self.layout / "XboxWin32SteamDiscovery.dll").read_bytes(), b"runtime fixture")
+        self.assertEqual((self.layout / "XboxWin32CrashReport.dll").read_bytes(), b"runtime fixture")
         dxgi_marker = "steam-win32-dxgi-1145360.txt"
         (profile / dxgi_marker).touch()
         with self.assertRaisesRegex(ValueError, "default native renderer"):
             stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / sdk_marker).unlink()
         (profile / marker).write_text("10929685\nHades.exe\n\n\nEngineWin64s.dll\nx64\n")
         original_executable_marker = "steam-win32-original-executable-1145360.txt"
         arguments_marker = "steam-win32-arguments-1145360.txt"
@@ -149,6 +206,37 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / arguments_marker).read_bytes(), b"/Option=true /Other=false")
         self.assertEqual((self.layout / "XboxWin32LoaderTrace.dll").read_bytes(), b"runtime fixture")
         self.assertEqual((self.layout / "XboxWin32Dxgi.dll").read_bytes(), b"runtime fixture")
+
+        (profile / dxgi_marker).unlink()
+        (profile / marker).write_text("10929685\nGame.exe\nopengl3\nunity\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "UnityPlayer.dll must appear once as a companion"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / companions).write_text("UnityPlayer.dll\n")
+        (profile / "UnityPlayer.dll").write_bytes(b"signed engine fixture")
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / "XboxWin32Unity.dll").read_bytes(), b"runtime fixture")
+        self.assertEqual((self.layout / "XboxWin32DisplayConfig.dll").read_bytes(), b"runtime fixture")
+        self.assertFalse((self.layout / "UnityPlayer.dll").exists())
+        engine_recipe = "steam-win32-shadow-1145360-engine.xwp"
+        (profile / companions).write_text("UnityPlayer.dll\tengine\n")
+        (profile / engine_recipe).write_bytes((profile / recipe).read_bytes())
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / engine_recipe).read_bytes(), (profile / engine_recipe).read_bytes())
+        self.assertFalse((self.layout / "UnityPlayer.dll").exists())
+        dynamic_companions = "steam-win32-dynamic-companions-1145360.txt"
+        (profile / dynamic_companions).touch()
+        (profile / original_executable_marker).unlink()
+        with self.assertRaisesRegex(ValueError, "Dynamic companions require the original executable path"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / original_executable_marker).touch()
+        nested_runtime = "MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll"
+        nested_recipe = "steam-win32-shadow-1145360-mono.xwp"
+        (profile / companions).write_text(f"UnityPlayer.dll\tengine\n{nested_runtime}\tmono\n")
+        (profile / nested_recipe).write_bytes((profile / recipe).read_bytes())
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertEqual((self.layout / dynamic_companions).read_bytes(), b"")
+        self.assertEqual((self.layout / nested_recipe).read_bytes(), (profile / nested_recipe).read_bytes())
+        self.assertFalse((self.layout / nested_runtime).exists())
 
     def test_changed_cached_archive_and_manifest_leave_no_partial_layout(self):
         self.archive.write_bytes(b"x" * self.archive.stat().st_size)

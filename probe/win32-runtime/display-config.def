@@ -1,0 +1,3 @@
+LIBRARY XboxWin32DisplayConfig.dll
+EXPORTS
+    GetDisplayConfigBufferSizes=XboxGetDisplayConfigBufferSizes

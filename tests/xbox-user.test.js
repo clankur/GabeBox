@@ -44,6 +44,26 @@ test("verified session drives both Valve observers; only public identity leaves 
     assert.equal(active(), false);
 });
 
+test("Valve can start login before the verified Xbox session reaches its listeners", async () => {
+    let completeSession, reads = 0;
+    const { user } = setup(method => {
+        assert.equal(method, "session");
+        reads++;
+        return new Promise(resolve => { completeSession = resolve; });
+    });
+    assert.equal(user.StartLogin(), undefined);
+    assert.equal(user.StartLogin(), undefined);
+    const states = [];
+    const sub = user.RegisterForLoginStateChange((...args) => states.push(args));
+    await settle();
+    assert.equal(reads, 1);
+    assert.deepEqual(states, []);
+    completeSession({ steamId });
+    await settle();
+    assert.deepEqual(states, [["", 5, 1, 0, 100, ""]]);
+    sub.unregister();
+});
+
 test("failed or invalid native reads never produce a login or a logout event", async () => {
     let result = () => { throw Error("unavailable"); };
     const { user, poll } = setup(() => result());
