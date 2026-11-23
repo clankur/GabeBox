@@ -172,6 +172,8 @@ Build `1.0.230.281`, run `1795445884357`, captured the exact zone's async comple
 
 Build `1.0.230.282`, run `1795446655417`, measured those requests in the normal reader. The 3,247,528-byte `AssetHeap` request returned null while the `Physics` and `ZoneAssetHeap` requests succeeded. The process reported 53,884 KiB of available commit during all three calls. The launch reported a trial `AssetHeap` cap of 256 MiB against the game's original 828 MiB setting. The reader again returned detail 2, and the zone still had zero scene parts. This isolates the failed allocation to the title's asset heap under the tested budget.
 
+Build `1.0.230.283`, run `1795446848863`, raised only the trial `AssetHeap` cap from 256 to 272 MiB. The same allocation returned null again, with 19,316 KiB of available commit. The zone remained at flags `0x400` with no scene parts. A later observer confirmed that the process exited. These two trials leave the arena's occupancy and fragmentation open. The second run recorded less available commit at the failed allocation and still left the menu blocked.
+
 ## Reproduce the launch trial
 
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
