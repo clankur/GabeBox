@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy a signed app package through Xbox Device Portal."""
+"""Deploy and observe signed app packages through Xbox Device Portal."""
 
 import argparse
 import base64
@@ -885,6 +885,17 @@ def main():
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
     report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
+    observe_command = commands.add_parser('observe', help='watch Steam startup or a game launch without controlling the Xbox')
+    observe_command.add_argument('--version', required=True, help='installed Steam package version')
+    observation = observe_command.add_mutually_exclusive_group(required=True)
+    observation.add_argument('--startup', action='store_true', help='wait for a new Big Picture startup')
+    observation.add_argument('--app-id', type=int, help='wait for a new launch of this Steam AppID')
+    observe_command.add_argument('--run-id', type=int, help='collect an existing game launch with this steam_launch_run_id')
+    observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
+    observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
+    observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
+    observe_command.add_argument('--output', type=Path, help='save filtered observations and available run artifacts to a new directory')
+    observe_command.add_argument('--bootstrap-frame', action='store_true', help='save the startup BMP when available; requires --output')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
@@ -919,6 +930,22 @@ def main():
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
     if args.command == 'report' and args.report_file in BIG_PICTURE_REPORTS and args.sdl_frame:
         report_command.error('--sdl-frame applies to a Steam Core game trial')
+    if args.command == 'observe':
+        if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', args.version) or any(
+                int(part) > 65535 for part in args.version.split('.')):
+            observe_command.error('--version must be a four-part package version')
+        if args.app_id is not None and not 1 <= args.app_id <= 0xFFFFFFFF:
+            observe_command.error('--app-id must be a positive Steam AppID')
+        if args.run_id is not None and not (args.app_id and 1 <= args.run_id < 10 ** 20):
+            observe_command.error('--run-id requires --app-id and a positive launch ID')
+        if args.image_name and not (args.app_id and re.fullmatch(r'[a-z0-9_. -]{1,100}\.exe', args.image_name, re.I)):
+            observe_command.error('--image-name requires --app-id and an executable basename')
+        if args.bootstrap_frame and not (args.output and args.app_id):
+            observe_command.error('--bootstrap-frame requires --output and --app-id')
+        if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
+            observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
+        if args.output and (args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir()):
+            observe_command.error('--output must name a new directory under an existing parent')
     if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
         game.error('--app-id must be a positive Steam AppID')
 
@@ -973,6 +1000,21 @@ def main():
     if args.command == 'probe':
         wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout,
                        args.require_ipc, restart=args.restart)
+        return
+    if args.command == 'observe':
+        from probe.xbox_diagnostics import observe
+
+        try:
+            app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+            result = observe(args, portal, app, read_game_file, decode_report, PortalError,
+                             progress=lambda stage: print(stage, file=sys.stderr, flush=True))
+        except PortalError as error:
+            raise ValueError(f'Xbox Device Portal returned HTTP {error.status} while observing.') from None
+        except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+            raise ValueError('Xbox Device Portal returned an invalid observation response.') from None
+        print(json.dumps(result, indent=2))
+        if result['outcome'] == 'observation-timeout':
+            raise SystemExit(1)
         return
     if args.command == 'report':
         name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
