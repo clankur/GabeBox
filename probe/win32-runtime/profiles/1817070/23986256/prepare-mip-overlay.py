@@ -3,7 +3,7 @@
 # The mip and routing logic follows BBCPrince/UWP-Spider-Launcher asset preparation.
 # https://github.com/BBCPrince/UWP-Spider-Launcher/tree/1865c248825f617b24ee75b258f10e634338ff0b/asset-preparation
 # See LICENSE-mip-preparation.txt for the standalone tool's license.
-"""Rebuild a separate, build-verified texture archive and TOC for an owned Spider-Man install."""
+"""Prepare build-verified texture and model overlays from an owned Spider-Man install."""
 
 import argparse
 from contextlib import ExitStack
@@ -24,6 +24,7 @@ TOC_MAGIC = 0x77af12af
 DSAR_HEADER = struct.Struct('<4sIIIQ8x')
 DSAR_BLOCK = struct.Struct('<QQIIB7x')
 ARCHIVE_NAME = 'local_mip256_hdclosed.dsar'
+MODEL_ARCHIVE = 'local_model1356_lod3_20260916.dsar'
 CHUNK_BYTES = 256 * 1024
 MAX_ASSET_BYTES = 64 * 1024 * 1024
 SOURCE_NAME = re.compile(r'[a-z0-9][a-z0-9_.-]{0,62}', re.ASCII)
@@ -180,19 +181,26 @@ class Index:
         require(archive < len(self.archives) and count == 1 and identity == index, 'Unexpected source asset route.')
         return self.archives[archive], offset, size
 
-    def encode(self, changed):
+    def encode(self, changed, model_changes=()):
         data = self.data.copy()
-        data.extend(self.archive_row_prefix + ARCHIVE_NAME.encode('ascii').ljust(64, b'\0'))
-        struct.pack_into('<I', data, self.archive_section_size, self.untouched_archive_bytes + 72)
+        overlays = [(ARCHIVE_NAME, changed)]
+        if model_changes:
+            overlays.append((MODEL_ARCHIVE, model_changes))
+        seen = set()
+        for archive, (name, routes) in enumerate(overlays, start=len(self.archives)):
+            data.extend(self.archive_row_prefix + name.encode('ascii').ljust(64, b'\0'))
+            for index, position, size in routes:
+                require(0 <= index < self.count and index not in seen, 'Duplicate or invalid overlay asset route.')
+                seen.add(index)
+                struct.pack_into('<II', data, self.offsets + index * 8, archive, position)
+                struct.pack_into('<I', data, self.sizes + index * 12 + 4, size)
+        struct.pack_into('<I', data, self.archive_section_size, self.untouched_archive_bytes + 72 * len(overlays))
         struct.pack_into('<I', data, 8, len(data))
-        for index, position, size in changed:
-            struct.pack_into('<II', data, self.offsets + index * 8, len(self.archives), position)
-            struct.pack_into('<I', data, self.sizes + index * 12 + 4, size)
         return struct.pack('<II', TOC_MAGIC, len(data)) + zlib.compress(data)
 
 
 @dataclass(frozen=True)
-class Texture:
+class Asset:
     index: int
     archive: str
     offset: int
@@ -202,12 +210,15 @@ class Texture:
     output_hash: str
 
 
-def load_plan(directory, index, selected=(), limit=None):
+def load_plan(directory, index, selected=(), limit=None, *, models=False):
     require(set(selected) <= set(index.archives), 'Unknown source archive in --archive.')
+    archive = MODEL_ARCHIVE if models else ARCHIVE_NAME
+    recipe = f'{MODEL_ARCHIVE}.tsv' if models else 'mip256-full.tsv'
+    recipe_type = 'ASSETGEN_MODELLOD3_V1' if models else 'ASSETGEN_MIP256_V1'
     with (directory / 'asset-index.tsv').open(encoding='ascii') as source:
         tag, original_hash, target_hash = source.readline().rstrip('\n').split('\t')
         require(tag == 'ASSETGEN_TOC_V1' and original_hash == TOC_SHA256 and SHA256.fullmatch(target_hash),
-                'Texture route recipe has a different source.')
+                'Overlay route recipe has a different source.')
         added, routes, assets = [], {}, set()
         for line in source:
             fields = line.rstrip('\n').split('\t')
@@ -219,13 +230,13 @@ def load_plan(directory, index, selected=(), limit=None):
             item, target, offset, size = map(int, fields[1:])
             require(item not in assets, 'Duplicate asset route.')
             assets.add(item)
-            if len(index.archives) <= target < len(index.archives) + len(added) and added[target - len(index.archives)] == ARCHIVE_NAME:
+            if len(index.archives) <= target < len(index.archives) + len(added) and added[target - len(index.archives)] == archive:
                 require((offset, size) not in routes, 'Duplicate destination route.')
                 routes[offset, size] = item
     plan = []
-    with (directory / 'mip256-full.tsv').open(encoding='ascii') as source:
+    with (directory / recipe).open(encoding='ascii') as source:
         tag, row_count, _, original_hash = source.readline().rstrip('\n').split('\t')
-        require(tag == 'ASSETGEN_MIP256_V1' and original_hash == TOC_SHA256, 'Mip recipe has a different source.')
+        require(tag == recipe_type and original_hash == TOC_SHA256, 'Asset recipe has a different source.')
         count, seen = 0, set()
         for line in source:
             count += 1
@@ -234,13 +245,13 @@ def load_plan(directory, index, selected=(), limit=None):
             route = int(dest), size
             require(route not in seen and SOURCE_NAME.fullmatch(name) and SHA256.fullmatch(input_hash)
                     and SHA256.fullmatch(output_hash) and 0 < size <= length <= MAX_ASSET_BYTES and offset >= 0,
-                    'Invalid mip recipe entry.')
+                    'Invalid asset recipe entry.')
             seen.add(route)
             if route in routes and (not selected or name in selected):
                 item = routes[route]
                 require(index.route(item) == (name, offset, length), 'Recipe source route differs from TOC.')
-                plan.append(Texture(item, name, offset, length, input_hash, size, output_hash))
-        require(count == int(row_count) and routes.keys() <= seen and plan, 'Incomplete or empty mip plan.')
+                plan.append(Asset(item, name, offset, length, input_hash, size, output_hash))
+        require(count == int(row_count) and routes.keys() <= seen and plan, 'Incomplete or empty asset plan.')
     return plan[:limit]
 
 
@@ -286,35 +297,42 @@ def trim_texture(source):
     return result + pixels
 
 
-def build(index, plan, output, codec, read_asset):
+def write_archive(path, plan, codec, read_asset, transform):
+    offset, routes = 0, []
+    with path.open('xb') as destination:
+        writer = ArchiveWriter(destination, codec, sum(item.output_size for item in plan))
+        for item in plan:
+            source = read_asset(item)
+            require(len(source) == item.original_size and digest(source) == item.original_hash,
+                    f'Installed asset {item.index} differs from its fingerprint.')
+            changed = transform(source)
+            require(len(changed) == item.output_size and digest(changed) == item.output_hash,
+                    f'Generated asset {item.index} differs from its fingerprint.')
+            writer.write(changed)
+            routes.append((item.index, offset, item.output_size))
+            offset += item.output_size
+        writer.finish()
+    with path.open('rb') as file:
+        archive = Archive(lambda at, count: read_at(file, at, count), codec, path.stat().st_size)
+        for item, (_, start, size) in zip(plan, routes):
+            require(digest(archive.read(start, size)) == item.output_hash,
+                    f'Generated archive failed reread validation at asset {item.index}.')
+    return routes
+
+
+def build(index, plan, output, codec, read_asset, *, models=(), model_transform=None):
     output = output.resolve()
     require(not output.exists(), 'Use a new output directory.')
     with tempfile.TemporaryDirectory(dir=output.parent, prefix='.mips-') as temporary:
         staged = Path(temporary) / 'assets'
         staged.mkdir()
-        offset, routes = 0, []
-        with (staged / ARCHIVE_NAME).open('xb') as destination:
-            writer = ArchiveWriter(destination, codec, sum(item.output_size for item in plan))
-            for item in plan:
-                source = read_asset(item)
-                require(len(source) == item.original_size and digest(source) == item.original_hash,
-                        f'Installed asset {item.index} differs from its fingerprint.')
-                resized = trim_texture(source)
-                require(len(resized) == item.output_size and digest(resized) == item.output_hash,
-                        f'Generated asset {item.index} differs from its fingerprint.')
-                writer.write(resized)
-                routes.append((item.index, offset, item.output_size))
-                offset += item.output_size
-            writer.finish()
-        (staged / 'toc').write_bytes(index.encode(routes))
-        archive_path = staged / ARCHIVE_NAME
-        with archive_path.open('rb') as file:
-            archive = Archive(lambda at, count: read_at(file, at, count), codec, archive_path.stat().st_size)
-            for item, (_, start, size) in zip(plan, routes):
-                require(digest(archive.read(start, size)) == item.output_hash,
-                        f'Generated archive failed reread validation at asset {item.index}.')
+        routes = write_archive(staged / ARCHIVE_NAME, plan, codec, read_asset, trim_texture)
+        model_routes = write_archive(staged / MODEL_ARCHIVE, models, codec, read_asset, model_transform) if models else ()
+        (staged / 'toc').write_bytes(index.encode(routes, model_routes))
         staged.rename(output)
-    print(f'Prepared {len(plan):,} textures and {offset:,} logical bytes.')
+    print(f'Prepared {len(plan):,} textures and {sum(item.output_size for item in plan):,} logical bytes.')
+    if models:
+        print(f'Prepared {len(models):,} models and {sum(item.output_size for item in models):,} logical bytes.')
 
 
 def main():
@@ -325,12 +343,19 @@ def main():
     parser.add_argument('--lz4', type=Path, help='liblz4 path when it is outside the library search path')
     parser.add_argument('--archive', action='append', default=[], help='limit preparation to this source archive (repeatable)')
     parser.add_argument('--limit', type=int, help='prepare only the first N matching routes for a control')
+    parser.add_argument('--with-model-lod', action='store_true', help='include the reference’s authored model LODs')
     args = parser.parse_args()
     try:
         require(args.limit is None or args.limit > 0, 'Limit must be positive.')
         require(not args.output.resolve().is_relative_to(args.original.resolve()), 'Keep generated assets outside the original directory.')
         index = Index((args.original / 'toc').read_bytes())
         plan = load_plan(args.recipes, index, args.archive, args.limit)
+        models, model_transform = (), None
+        if args.with_model_lod:
+            from model_lod import trim_model
+
+            models = load_plan(args.recipes, index, args.archive, args.limit, models=True)
+            model_transform = trim_model
         codec = Lz4(args.lz4)
         archives = {}
         with ExitStack() as stack:
@@ -341,7 +366,7 @@ def main():
                     archives[item.archive] = Archive(lambda at, count: read_at(file, at, count), codec, path.stat().st_size)
                 return archives[item.archive].read(item.offset, item.original_size)
 
-            build(index, plan, args.output, codec, read_asset)
+            build(index, plan, args.output, codec, read_asset, models=models, model_transform=model_transform)
     except (OSError, ValueError, KeyError, struct.error, zlib.error) as error:
         parser.exit(1, f'{error}\n')
 
