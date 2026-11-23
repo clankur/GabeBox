@@ -70,7 +70,8 @@ def gpu_mailbox(generation=2, width=1920, sequence=25, format_code=28):
 
 def options(**overrides):
     args = dict(version='1.2.3.4', startup=False, app_id=APP_ID, run_id=None, image_name=None, timeout=8,
-                frame_seconds=0, output=None, bootstrap_frame=False)
+                frame_seconds=0, output=None, bootstrap_frame=False, require_checkpoint=[],
+                fail_on_checkpoint=[], checkpoint_timeout=2)
     args.update(overrides)
     return SimpleNamespace(**args)
 
@@ -211,6 +212,101 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(saved[-1], fault.decode().strip())
             self.assertFalse(any('incomplete' in line for line in saved))
             self.assertIn((*LIVE_TRACE, diagnostics.LIVE_LOADER_LIMIT + 1), fixture.reads)
+
+    def test_under_checkpoint_contract_repeating_frames_do_not_extend_the_deadline(self):
+        launch = EPOCH_MS + 1
+        boot, ready = 'asset startup-phase=boot', 'asset startup-phase=menu'
+        report = probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS)
+        first = boot.encode() + b' detail=0x1\r\n'
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: probe()},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: first},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: first + first},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: first + first + ready.encode()},
+        ], stages=[[], [stage(LIVE_STAGE, launch)]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(output=output, require_checkpoint=[boot, ready]))
+            self.assertEqual(fixture.now, 3)
+            self.assertEqual(result['outcome'], 'checkpoint-stalled')
+            self.assertEqual(result['checkpoints'], {'reached': [boot], 'waiting_for': ready,
+                                                    'records': [boot + ' detail=0x1'], 'source': 'live-loader'})
+            self.assertIn('loader-trace.txt', result['artifacts'])
+
+    def test_attached_checkpoint_contract_requires_order_and_resets_budget_on_progress(self):
+        launch = EPOCH_MS + 1
+        boot, gpu, menu = 'asset startup-phase=boot', 'asset startup-phase=gpu', 'asset startup-phase=menu'
+        report = probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS)
+        records = [line.encode() + b'\r\n' for line in (boot, gpu, menu)]
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: records[2] + records[0]},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: records[2] + records[0] + records[1]},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: records[2] + b''.join(records)},
+        ], stages=[[stage(LIVE_STAGE, launch)]])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[boot, gpu, menu]))
+        self.assertEqual(fixture.now, 2)
+        self.assertEqual(result['outcome'], 'checkpoints-observed')
+        self.assertEqual(result['checkpoints']['reached'], [boot, gpu, menu])
+
+    def test_checkpoint_failure_captures_the_record_before_the_process_exits(self):
+        launch = EPOCH_MS + 1
+        gpu = 'dxgi gpu-frame-submitted'
+        removed = 'dxgi gpu-frame-error result=0x887A0005'
+        running = VERIFIED_STAGE + 'steam_shadow_child=created\r\n'
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: probe()},
+            {diagnostics.PROBE_REPORT: probe(launch, extra=running),
+             LIVE_TRACE: (removed + '\r\n').encode()},
+        ], stages=[[], [stage(LIVE_STAGE, launch)]])
+        result = fixture.observe(options(require_checkpoint=[gpu], fail_on_checkpoint=[removed]))
+        self.assertEqual(fixture.now, 1)
+        self.assertEqual(result['outcome'], 'checkpoint-failed')
+        self.assertEqual(result['checkpoints']['failure'], removed)
+
+    def test_checkpoint_failure_is_reported_when_it_first_appears_in_the_child_exit_report(self):
+        launch = EPOCH_MS + 1
+        gpu = 'dxgi gpu-frame-submitted'
+        removed = 'dxgi gpu-frame-error result=0x887A0005'
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        running = probe(launch, extra=f'steam_shadow_exit_report={exit_file}\r\n')
+        exited = f'steam_shadow_child_status=exited\r\nsteam_shadow_loader={removed}\r\n'.encode()
+        fixture = Fixture([{diagnostics.PROBE_REPORT: running, exit_file: exited}])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[gpu], fail_on_checkpoint=[removed]))
+        self.assertEqual(result['outcome'], 'checkpoint-failed')
+        self.assertEqual(result['checkpoints']['failure'], removed)
+        self.assertEqual(result['checkpoints']['failure_source'], 'exit-report')
+
+    def test_checkpoint_contract_does_not_read_an_ambiguous_staging_folder(self):
+        launch = EPOCH_MS + 1
+        gpu = 'dxgi gpu-frame-submitted'
+        fixture = Fixture([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+            LIVE_TRACE: (gpu + '\r\n').encode(),
+        }], stages=[[stage(LIVE_STAGE, launch), stage('SteamWin32Trial (39)', launch + 1)]])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[gpu]))
+        self.assertEqual(result['outcome'], 'checkpoint-stalled')
+        self.assertEqual(result['checkpoints']['source'], 'unavailable')
+        self.assertNotIn((*LIVE_TRACE, diagnostics.LIVE_LOADER_LIMIT + 1), fixture.reads)
+
+    def test_checkpoint_contract_rechecks_the_unique_staging_folder_after_read(self):
+        launch = EPOCH_MS + 1
+        gpu = 'dxgi gpu-frame-submitted'
+
+        class StageRace(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                raw = super().read(portal, app, folder, name, limit)
+                if (folder, name) == LIVE_TRACE and len(self.stages[0]) == 1:
+                    self.stages[0].append(stage('SteamWin32Trial (39)', launch + 1))
+                return raw
+
+        fixture = StageRace([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+            LIVE_TRACE: (gpu + '\r\n').encode(),
+        }], stages=[[stage(LIVE_STAGE, launch)]])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[gpu]))
+        self.assertEqual(result['outcome'], 'checkpoint-stalled')
+        self.assertEqual(result['checkpoints']['records'], [])
+        self.assertIn((*LIVE_TRACE, diagnostics.LIVE_LOADER_LIMIT + 1), fixture.reads)
 
     def test_game_observation_waits_for_the_named_exit_report_to_append_its_trace(self):
         launch = EPOCH_MS + 1

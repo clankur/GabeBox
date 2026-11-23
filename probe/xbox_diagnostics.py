@@ -134,10 +134,27 @@ def unique_loader_lines(lines):
     return list(latest)[-128:]
 
 
-def embedded_loader_lines(report):
+def embedded_loader_lines(report, *, ordered=False):
     prefix = 'steam_shadow_loader='
     lines = (line[len(prefix):] for line in (report or '').splitlines() if line.startswith(prefix))
+    if ordered:
+        return [line for line in lines if LOADER_TRACE.fullmatch(line)]
     return unique_loader_lines(lines)
+
+
+def checkpoint_matches(record, prefix):
+    return record == prefix or record.startswith(prefix + ' ')
+
+
+def checkpoint_progress(records, required, failures):
+    reached = []
+    for record in records:
+        failure = next((prefix for prefix in failures if checkpoint_matches(record, prefix)), None)
+        if failure:
+            return reached, record
+        if len(reached) < len(required) and checkpoint_matches(record, required[len(reached)]):
+            reached.append(record)
+    return reached, None
 
 
 def named_exit_report(probe, app_id):
@@ -276,6 +293,12 @@ def temporary_stages(portal, app):
             and type(item.get('DateCreated')) is int}
 
 
+def stages_for_launch(stages, launch_id):
+    created = FILETIME_EPOCH + launch_id * 10_000
+    latest = created + TRIAL_CREATION_WINDOW_MS * 10_000
+    return {stage for stage in stages if created <= stage[1] <= latest}
+
+
 def complete_loader_lines(data):
     # The writer can be appending. Keep complete ASCII records in order, including repeated events.
     complete, _, _ = data.rpartition(b'\n')
@@ -321,9 +344,6 @@ def live_loader_snapshot(raw):
 
 def collect_live_loader(args, portal, app, read_file, decode_report, portal_error):
     blob, launch_report = diagnostic_reader(portal, app, read_file, decode_report, portal_error)
-    launch_filetime = FILETIME_EPOCH + args.run_id * 10_000
-    latest_creation = launch_filetime + TRIAL_CREATION_WINDOW_MS * 10_000
-
     def candidates():
         try:
             stages = temporary_stages(portal, app)
@@ -331,7 +351,7 @@ def collect_live_loader(args, portal, app, read_file, decode_report, portal_erro
             if error.status not in (404, 409):
                 raise
             raise ValueError('Xbox Device Portal could not list the staging directories.') from None
-        return {(name, created) for name, created in stages if launch_filetime <= created <= latest_creation}
+        return stages_for_launch(stages, args.run_id)
 
     before = launch_report()
     if not matching_probe(before, args.run_id, args.app_id) or not numeric(before, 'run_id'):
@@ -455,11 +475,11 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
 
     deadline = clock() + args.timeout
 
-    def terminal_loader_lines(filename, text):
+    def terminal_loader_lines(filename, text, *, ordered=False):
         # The child exit watcher publishes process status before appending its trace.
         cutoff = min(deadline, clock() + EXIT_TRACE_WAIT_SECONDS)
         while True:
-            lines = embedded_loader_lines(text)
+            lines = embedded_loader_lines(text, ordered=ordered)
             if lines or fields(text or '').get('steam_shadow_loader_trace'):
                 return lines
             remaining = cutoff - clock()
@@ -482,6 +502,13 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
     prior_run = numeric(initial_probe, 'run_id' if args.startup else 'steam_launch_run_id')
     baseline_primary = report(PRIMARY_REPORT) if args.output else ''
     baseline_stages = stages() if args.output and args.app_id and not args.run_id else None
+
+    def stage_candidates(run=None):
+        candidates = stages() or set()
+        if run is not None:
+            candidates = stages_for_launch(candidates, run)
+        return candidates - baseline_stages if baseline_stages is not None else candidates
+
     game_run = args.run_id
     last_probe = {}
     last_snapshot = None
@@ -495,6 +522,14 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
     process_missing = None
     outcome = 'observation-timeout'
     last_state = None
+    required = args.require_checkpoint
+    failures = args.fail_on_checkpoint
+    checkpoint_deadline = None
+    checkpoint_records = []
+    failed_checkpoint = None
+    failed_checkpoint_source = None
+    checkpoint_source = 'unavailable'
+    checkpoint_trace_truncated = False
     if progress and clock() < deadline:
         progress('waiting-for-startup' if args.startup else 'attaching-to-launch' if args.run_id else 'waiting-for-launch')
 
@@ -537,42 +572,87 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
                     process_seen |= active
                     process_missing = None if active or not process_seen else (
                         process_missing if process_missing is not None else clock())
-                if args.output and baseline_stages is not None and probe.get('steam_shadow_stage') == 'verified-local-copy':
-                    current = stages()
-                    new_stages = current - baseline_stages if current is not None else set()
+                live_records = []
+                if (required or baseline_stages is not None) and probe.get('steam_shadow_stage') == 'verified-local-copy':
+                    new_stages = stage_candidates(game_run if required else None)
                     if trial_stage is None and len(new_stages) == 1:
                         trial_stage = next(iter(new_stages))
-                    if trial_stage in new_stages:
+                    if trial_stage in new_stages and (not required or len(new_stages) == 1):
                         folder = TEMP + '\\' + trial_stage[0]
                         raw = blob('loader-trace.txt', LIVE_LOADER_LIMIT, folder, allow_prefix=True)
-                        lines = unique_loader_lines(complete_loader_lines(raw or b''))
-                        loader_lines = lines or loader_lines
+                        unchanged = True
+                        if required:
+                            current_stages = stage_candidates(game_run)
+                            after = fields(report(PROBE_REPORT) or '')
+                            unchanged = (current_stages == new_stages and matching_probe(after, game_run, args.app_id)
+                                         and after.get('run_id') == probe.get('run_id')
+                                         and after.get('steam_shadow_stage') == probe.get('steam_shadow_stage'))
+                        if unchanged:
+                            live_records = complete_loader_lines(raw or b'')
+                        loader_lines = unique_loader_lines(live_records) or loader_lines
                 if args.output:
                     primary_loader_lines = embedded_loader_lines(probe_text) or primary_loader_lines
-                    if exit_report.get('steam_shadow_child_status') == 'exited':
-                        exit_loader_lines = terminal_loader_lines(exit_name, exit_text)
+                if (args.output or required) and exit_report.get('steam_shadow_child_status') == 'exited':
+                    exit_loader_lines = terminal_loader_lines(exit_name, exit_text, ordered=bool(required))
                 last_snapshot = snapshot
                 finished = finish_reason(probe, exit_report)
-                if finished:
-                    outcome = finished
-                    break
                 if process_missing is not None and clock() - process_missing >= 3:
-                    outcome = 'game-process-gone'
-                    break
+                    finished = finished or 'game-process-gone'
                 if probe.get('steam_sdl_host_frame') == 'presented' and first_frame is None:
                     first_frame = clock()
-                if first_frame is not None and clock() - first_frame >= args.frame_seconds:
+                if required:
+                    if live_records:
+                        checkpoint_trace_truncated = len(raw) == LIVE_LOADER_LIMIT
+                    sources = (('live-loader', live_records), ('exit-report', exit_loader_lines),
+                               ('launch-report', embedded_loader_lines(probe_text, ordered=True)))
+                    for source, records in sources:
+                        if not records:
+                            continue
+                        if checkpoint_source == 'unavailable':
+                            checkpoint_source = source
+                        reached, failure = checkpoint_progress(records, required, failures)
+                        if len(reached) > len(checkpoint_records):
+                            checkpoint_records = reached
+                            checkpoint_source = source
+                            checkpoint_deadline = clock() + args.checkpoint_timeout
+                            if progress:
+                                progress(f'checkpoint-reached {len(reached)}/{len(required)}')
+                        if failure:
+                            failed_checkpoint = failure
+                            failed_checkpoint_source = source
+                            outcome = 'checkpoint-failed'
+                            break
+                    if failed_checkpoint is not None:
+                        break
+                    if finished and finished != 'window-ready':
+                        outcome = finished
+                        break
+                    if len(checkpoint_records) == len(required):
+                        outcome = 'checkpoints-observed'
+                        break
+                    game_started = (probe.get('steam_shadow_child') == 'created' or first_frame is not None
+                                    or process_seen or finished == 'window-ready')
+                    if checkpoint_deadline is None and game_started:
+                        checkpoint_deadline = clock() + args.checkpoint_timeout
+                elif finished:
+                    outcome = finished
+                    break
+                elif first_frame is not None and clock() - first_frame >= args.frame_seconds:
                     outcome = 'frame-observed'
                     break
             elif game_run and seen_run is not None and seen_run > game_run:
                 outcome = 'launch-superseded'
                 break
+        if checkpoint_deadline is not None and clock() >= checkpoint_deadline:
+            outcome = 'checkpoint-stalled'
+            break
         if last_snapshot is not None and progress:
             state = last_snapshot['webview'].get('status') or last_snapshot['probe'].get('steam_launch_phase')
             if state and state != last_state:
                 progress(state)
                 last_state = state
-        pause(min(1, max(0, deadline - clock())))
+        cutoff = min(deadline, checkpoint_deadline) if checkpoint_deadline is not None else deadline
+        pause(min(1, max(0, cutoff - clock())))
 
     result = {'version': args.version, 'mode': 'startup' if args.startup else 'game', 'outcome': outcome}
     if last_snapshot is not None:
@@ -583,6 +663,17 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
         result['app_id'] = args.app_id
     if args.run_id:
         result['requested_run_id'] = args.run_id
+    if required:
+        completed = len(checkpoint_records)
+        result['checkpoints'] = {'reached': required[:completed], 'records': checkpoint_records,
+                                 'source': checkpoint_source}
+        if checkpoint_trace_truncated:
+            result['checkpoints']['trace_at_read_limit'] = True
+        if completed < len(required):
+            result['checkpoints']['waiting_for'] = required[completed]
+        if failed_checkpoint is not None:
+            result['checkpoints']['failure'] = failed_checkpoint
+            result['checkpoints']['failure_source'] = failed_checkpoint_source
     if args.output:
         if outcome == 'game-exited' and ('steam_launch_process_exit' in last_probe or 'steam_shadow_exit' in last_probe):
             # Before the exit watcher starts, the primary launch report carries the terminal trace.

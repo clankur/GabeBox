@@ -144,6 +144,10 @@ A 30-second sample of that loading screen recorded 1,767 GPU presents at 58.9 FP
 
 Builds `1.0.230.271` and `1.0.230.272`, runs `1795439174760` and `1795439452937`, both initialized the audio output and reported `DXGI_ERROR_DEVICE_REMOVED` from the GPU frame publisher during startup. The faster samples in `.272` captured the transition from `ModeBoot` to `ModeLobby`, then lobby phase 6 with its menu transition still at 0. One save record reached the engine's ready-state threshold for all four channels. The second still reported zeroes. This leaves the remaining menu transition and the reason for device removal unresolved.
 
+Build `1.0.230.273`, run `1795439727749`, kept the native host and restored the loader adapter's Windows AppContainer imports. It progressed through lobby phase 6 to its internal transition state 2. A 1920 × 1080 Device Portal screenshot still showed the spinner, and a subsequent remote Menu-button press left the spinner on screen. The run continued presenting while the live loader recorded 132,424 KiB of available commit. The loader recorded one ready save entry and one entry with zeroes. The evidence establishes a sustained loading screen and leaves visible main-menu rendering and controller input open.
+
+The checkpoint observer attached to that same run. It reported the observed lobby and frontend records in sequence. A separate five-second trial required a different mode and exited with `checkpoint-stalled`, saved the loader trace and frame timestamps, and left the Xbox session running. [Startup checkpoint observer](../probe/XBOX-DIAGNOSTICS.md#require-game-startup-checkpoints)
+
 ## Reproduce the launch trial
 
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.

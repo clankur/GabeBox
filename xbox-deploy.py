@@ -960,6 +960,12 @@ def main():
     observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
     observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
     observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
+    observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='TRACE',
+                                 help='require this loader record or prefix in sequence instead of the first frame')
+    observe_command.add_argument('--fail-on-checkpoint', action='append', default=[], metavar='TRACE',
+                                 help='fail immediately when this loader record or prefix appears')
+    observe_command.add_argument('--checkpoint-timeout', type=int, metavar='SECONDS',
+                                 help='seconds to wait per required checkpoint after the game starts (default 20)')
     observe_command.add_argument('--output', type=Path, help='save filtered observations and available run artifacts to a new directory')
     observe_command.add_argument('--bootstrap-frame', action='store_true', help='save the startup BMP when available; requires --output')
     inspections = {
@@ -1025,6 +1031,21 @@ def main():
             observe_command.error('--bootstrap-frame requires --output and --app-id')
         if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
             observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
+        if (args.fail_on_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
+            observe_command.error('--fail-on-checkpoint and --checkpoint-timeout require --require-checkpoint')
+        if args.require_checkpoint:
+            from probe.xbox_diagnostics import LOADER_TRACE
+
+            if not args.app_id:
+                observe_command.error('--require-checkpoint requires --app-id')
+            for checkpoints in (args.require_checkpoint, args.fail_on_checkpoint):
+                if len(checkpoints) > 8 or len(set(checkpoints)) != len(checkpoints) or any(
+                        not LOADER_TRACE.fullmatch(checkpoint) or checkpoint.endswith(' ') for checkpoint in checkpoints):
+                    observe_command.error('Use up to eight distinct, complete loader record prefixes per checkpoint option')
+            if args.checkpoint_timeout is None:
+                args.checkpoint_timeout = 20
+            if not 1 <= args.checkpoint_timeout <= 900:
+                observe_command.error('--checkpoint-timeout must be between 1 and 900 seconds')
     if args.command == 'inspect-game':
         if not 0 < args.app_id <= 0xFFFFFFFF:
             game.error('--app-id must be a positive Steam AppID')
@@ -1095,7 +1116,8 @@ def main():
         except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
             raise ValueError('Xbox Device Portal returned an invalid observation response.') from None
         print(json.dumps(result, indent=2))
-        if result['outcome'] == 'observation-timeout':
+        if (result['outcome'] == 'observation-timeout'
+                or (args.require_checkpoint and result['outcome'] != 'checkpoints-observed')):
             raise SystemExit(1)
         return
     if args.command in inspections:

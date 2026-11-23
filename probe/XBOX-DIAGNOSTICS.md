@@ -32,6 +32,23 @@ Use `--image-name "$game_exe_basename"` to also follow the game's Device Portal 
 
 The deadline covers observation of the selected run. The JSON `outcome` distinguishes a first hosted frame, a process exit, a launch failure, or a timeout. The CLI exits with a nonzero status for an observation timeout or an argument, connection, or portal error. Terminal game outcomes are carried in JSON. `frame-observed` records a presentation milestone, which can include a black startup frame. Use the game on the console to verify input, audio, save behavior and return to the Library.
 
+### Require game startup checkpoints
+
+Use a short sequence of loader records from the diagnostic build under test. Keep the initial GPU submission as one checkpoint and use a later engine event for the transition you want to verify.
+
+```sh
+python3 xbox-deploy.py observe --version "$version" --app-id "$steam_app_id" \
+    --image-name "$game_exe_basename" --timeout 180 --checkpoint-timeout 20 \
+    --require-checkpoint 'dxgi gpu-frame-submitted' \
+    --require-checkpoint "$game_ready_checkpoint" \
+    --fail-on-checkpoint 'dxgi gpu-frame-error result=0x887A0005' \
+    --output startup-checkpoints
+```
+
+Each required checkpoint matches a complete filtered loader record or the first tokens of one. The checkpoints must appear in order. The per-checkpoint clock starts when the child, its window, or its first frame is observed. A new required checkpoint restarts that clock. Repeated markers and frame presents leave its deadline in effect. The overall `--timeout` still covers staging and the full observation.
+
+The result reports the checkpoints reached and the next record it was waiting for. `checkpoint-stalled` means that record failed to appear in time. The trace source is included so a missing diagnostic can be distinguished from a trace that recorded the preceding steps. `checkpoint-failed` identifies an explicitly selected failure record. The CLI returns a nonzero status if the required sequence is incomplete and saves the available artifacts. An attached `--run-id` uses the same checks and gives the current game a fresh observation budget. The observer leaves the Xbox session running.
+
 ## Inspect the current game's render state
 
 Use the AppID and `run_id` from the game observation while that launch is current.
