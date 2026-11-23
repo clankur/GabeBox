@@ -99,6 +99,34 @@ test("storage inventory may load during startup and only approved visible writes
     for (const id of [5, 6]) assert.equal(app.replies.find(reply => reply.id === id).error, "unavailable");
 });
 
+test("the signed host forwards Install for the selected game and reports download stages", async () => {
+    const app = fixture();
+    const calls = [];
+    const start = app.start({install(appId, reportProgress) {
+        calls.push(appId);
+        reportProgress("queued");
+        reportProgress("downloading", {downloaded: 512, downloadTotal: 2048});
+        return Promise.resolve("installed");
+    }});
+    await drain();
+    const appId = 1817070;
+    app.incoming.push(JSON.stringify({id: 1, method: "install", appId}));
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(calls, []);
+    assert.deepEqual(app.replies.find(reply => reply.id === 1), {id: 1, error: "unavailable"});
+
+    await app.advance("gamepad-ready");
+    await start;
+    app.incoming.push(JSON.stringify({id: 2, method: "install", appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(calls, [appId]);
+    assert.deepEqual(app.replies.slice(-3), [
+        {event: "xbox-install", appId, stage: "queued"},
+        {event: "xbox-install", appId, stage: "downloading", progress: {downloaded: 512, downloadTotal: 2048}},
+        {id: 2, result: "installed"}
+    ]);
+});
+
 test("a signed warmup keeps QR foreground until a real layout and a fresh physical foreground check", async () => {
     const app = fixture({warm: true, expected: 5368709120});
     let ready = false, plays = 0;

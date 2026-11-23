@@ -217,7 +217,8 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 queueSteamDownload: appId => {
                     assert.equal(appId, 12);
                     firstManifest = {name: "appmanifest_12.acf"};
-                    return Operation.resolve("installed");
+                    return Operation.resolve("installed:4\r\nsteam_download_bytes_downloaded=2048\r\n" +
+                        "steam_download_bytes_to_download=2048\r\n");
                 }
             } } }
         };
@@ -299,8 +300,10 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             assert.deepEqual(inventory, [{id: 12, name: "A"}]);
             assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
             const stages = [];
-            assert.equal(await activeBroker.install(12, stage => stages.push(stage)), "installed");
-            assert.deepEqual(stages, ["starting"]);
+            assert.equal(await activeBroker.install(12, (stage, progress) => {
+                stages.push(progress ? [stage, {...progress}] : [stage]);
+            }), "installed");
+            assert.deepEqual(stages, [["starting"], ["installed", {downloaded: 2048, downloadTotal: 2048}]]);
             assert.equal((await activeBroker.library())[0].installed, true);
             assert.equal(await activeBroker.install(12), "already-installed");
             globals.navigator.gamepadInputEmulation = "mouse";

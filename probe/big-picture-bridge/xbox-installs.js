@@ -1,6 +1,6 @@
-// Valve owns the Install button and error dialog. Steam Core queues the
-// download in the default library selected through the Xbox Storage settings.
-function installXboxInstalls(client, send, refresh, getRuntime) {
+// Valve owns the Install button and error dialog. Steam Core installs to the
+// Xbox library currently selected in Storage.
+function installXboxInstalls(client, send, refresh, getRuntime, installed, publishDownload) {
     const stageKeys = {
         starting: '$g', queued: 'Bp', resuming: 'Bp', paused: 'Cy', downloading: 'cM', staging: '$g'
     };
@@ -20,12 +20,17 @@ function installXboxInstalls(client, send, refresh, getRuntime) {
         failedApp = undefined;
     }
 
-    function update(appId, stage) {
-        if (!active || active.appId !== appId || !Object.hasOwn(stageKeys, stage)) return;
-        if (stageKeys[stage] !== stageKeys[active.stage]) {
-            active.stage = stage;
-            refresh();
+    function update(appId, stage, progress) {
+        if (!active || active.appId !== appId) return;
+        if (stage === 'installed') {
+            publishDownload?.(appId, active.stage, progress);
+            return;
         }
+        if (!Object.hasOwn(stageKeys, stage)) return;
+        const changed = stageKeys[stage] !== stageKeys[active.stage];
+        active.stage = stage;
+        publishDownload?.(appId, stage, progress);
+        if (changed) refresh();
     }
 
     async function open(appIds, clientId) {
@@ -34,6 +39,7 @@ function installXboxInstalls(client, send, refresh, getRuntime) {
         dismiss();
         const appId = appIds[0];
         active = {appId, stage: 'starting'};
+        publishDownload?.(appId, 'starting');
         refresh();
         let outcome;
         try {
@@ -42,9 +48,11 @@ function installXboxInstalls(client, send, refresh, getRuntime) {
             outcome = 'failed';
         } finally {
             active = undefined;
+            publishDownload?.(appId, outcome === 'installed' ? 'installed' : 'finished');
             refresh();
         }
-        if (outcome !== 'installed' && outcome !== 'already-installed' && outcome !== 'signed-out') {
+        if (outcome === 'installed' || outcome === 'already-installed') installed?.();
+        else if (outcome !== 'signed-out') {
             failedApp = appId;
             showWizard('k_EInstallMgrStateFailed', appId);
         }

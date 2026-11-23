@@ -47,8 +47,8 @@ var steamBigPictureBroker = (function () {
             }).then(function (installed) {
                 if (!active()) return "signed-out";
                 if (session.busy()) return "busy";
-                if (install) return installed ? "already-installed" : session.install(game, function (stage) {
-                    if (typeof progress === "function" && active()) progress(stage);
+                if (install) return installed ? "already-installed" : session.install(game, function (stage, counts) {
+                    if (typeof progress === "function" && active()) progress(stage, counts);
                 });
                 if (!installed) return "not-installed";
                 return Promise.resolve(handoff && handoff()).then(function () {

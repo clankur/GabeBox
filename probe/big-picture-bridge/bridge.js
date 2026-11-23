@@ -37,7 +37,7 @@
 
     host.addEventListener('message', ({data}) => {
         if (data?.event === 'xbox-install') {
-            installer.update(data.appId, data.stage);
+            installer.update(data.appId, data.stage, data.progress);
             return;
         }
         if (data?.event === 'xbox-game') {
@@ -258,7 +258,8 @@
     const refreshLibrary = () => refresh().catch(error => console.error('Steam library unavailable', error.message));
     const storage = installXboxStorage(client, (operation, argument) => send(`storage-${operation}`, undefined, argument),
         appId => runtime?.(90544).tw.GetAppOverviewByAppID(appId)?.display_name, () => runtime(94601), refreshLibrary);
-    const installer = installXboxInstalls(client, send, refreshLibrary, () => runtime);
+    const publishDownload = installXboxDownloads(client, () => runtime);
+    const installer = installXboxInstalls(client, send, refreshLibrary, () => runtime, storage.refresh, publishDownload);
     const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {
         installXboxNotifications(runtime);

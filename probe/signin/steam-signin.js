@@ -692,6 +692,20 @@
         }
     }
 
+    function downloadProgress(checkpoint, previous) {
+        var fields = {
+            bytes_downloaded: "downloaded", bytes_to_download: "downloadTotal",
+            bytes_staged: "staged", bytes_to_stage: "stagingTotal"
+        };
+        var counts = Object.assign({}, previous);
+        var lines = /^steam_download_(bytes_downloaded|bytes_to_download|bytes_staged|bytes_to_stage)=(\d+)\r?$/gm;
+        for (var match; (match = lines.exec(checkpoint));) {
+            var value = Number(match[2]);
+            if (Number.isSafeInteger(value) && value > 0) counts[fields[match[1]]] = value;
+        }
+        return Object.keys(counts).length ? counts : undefined;
+    }
+
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
         var firstLineEnd = checkpoint.indexOf("\r\n");
@@ -703,8 +717,8 @@
             stage === "paused" || stage === "downloading" || stage === "staging";
         if (checkpoint !== job.last) {
             job.last = checkpoint;
-            if (active && job.stage !== stage && job.progress) job.progress(stage);
-            job.stage = stage;
+            job.counts = downloadProgress(checkpoint, job.counts);
+            if (job.progress && (active || stage === "installed")) job.progress(stage, job.counts);
             var message = downloadMessages[stage] || "Steam could not start or track the download";
             downloadStatus.textContent = job.entry.name + " · " + message;
             if (job.file) {

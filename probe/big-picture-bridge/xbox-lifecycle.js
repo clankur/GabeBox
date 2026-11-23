@@ -34,10 +34,6 @@ function installXboxLifecycle(client, getRuntime) {
             }
         }};
     };
-    // The two Steam-owned settings subscriptions are optional when Settings is
-    // absent. The host does not have a desktop Steam settings store.
-    client.Settings.RegisterForSettingsChanges = unavailable;
-    client.Settings.RegisterForSettingsArrayChanges = unavailable;
     client.Settings.GetWindowed = async () => {
         const {width, height, scale, screenWidth, screenHeight} = xboxNativeWindow;
         if (![width, height, scale, screenWidth, screenHeight].every(n => Number.isFinite(n) && n > 0))
