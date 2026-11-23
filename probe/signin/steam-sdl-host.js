@@ -91,6 +91,7 @@
         var result = "";
         var timing = attempt.automaticTrial && window.steamSdlTiming && window.steamSdlTiming.create();
         var trialReport, timingReport, nativeView;
+        var menuOpening = false;
         var complete;
         var finished = new Promise(function (resolve) { complete = resolve; });
 
@@ -150,26 +151,38 @@
         }
 
         function showMenu(gameViewId) {
+            if (menuOpening || stopped) return;
             releaseKeys();
             if (bigPictureMode) {
                 var steam = window.steamBigPictureHost;
                 if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
                 if (steam && gameViewId) {
-                    if (nativeView && nativeView.primary) nativeView.cover();
-                    steam.showForGame(appId, gameViewId, function (steamViewId) {
-                        if (!runner.steamSdlRunning()) return false;
-                        // A title that deferred its close may still need input
-                        // in its own save or exit dialog after Valve Resume.
-                        closing = false;
-                        return nativeView ? nativeView.resume(steamViewId) :
-                            steam.switchView(gameViewId, steamViewId).then(function () { return !stopped; });
-                    }, function () {
-                        if (closing || !ready || !runner.steamSdlRunning()) return false;
-                        quit();
-                        return true;
+                    var player = nativeView;
+                    menuOpening = true;
+                    if (steam.recordGameFrame) steam.recordGameFrame(appId, "input", "menu_switch=requested\r\n");
+                    var cover = player && player.primary ? player.cover() : undefined;
+                    Promise.resolve(cover).then(function (covered) {
+                        if (covered === false || stopped) return false;
+                        return steam.showForGame(appId, gameViewId, function (steamViewId) {
+                            if (!runner.steamSdlRunning()) return false;
+                            // A title that deferred its close may still need input
+                            // in its own save or exit dialog after Valve Resume.
+                            closing = false;
+                            return nativeView ? nativeView.resume(steamViewId) :
+                                steam.switchView(gameViewId, steamViewId).then(function () { return !stopped; });
+                        }, function () {
+                            if (closing || !ready || !runner.steamSdlRunning()) return false;
+                            quit();
+                            return true;
+                        });
                     }).then(function (shown) {
+                        menuOpening = false;
+                        if (steam.recordGameFrame) steam.recordGameFrame(appId, "input",
+                            "menu_switch=" + (shown ? "shown" : "declined") + "\r\n");
                         if (!shown && nativeView && runner.steamSdlRunning()) nativeView.resume();
                     }, function () {
+                        menuOpening = false;
+                        if (steam.recordGameFrame) steam.recordGameFrame(appId, "input", "menu_switch=failed\r\n");
                         if (nativeView && runner.steamSdlRunning()) nativeView.resume();
                     });
                 } else if (nativeView) nativeView.resume();
@@ -221,8 +234,12 @@
             else if (menu.hidden) showMenu(); else hideMenu();
         }
 
+        function nativeOwnsInput() {
+            return nativeView && nativeView.ownsInput && nativeView.ownsInput();
+        }
+
         function setKey(event) {
-            if (!gameInput) return;
+            if (!gameInput || nativeOwnsInput()) return;
             if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
@@ -262,9 +279,11 @@
             pointerHeld = false;
             mouseEdges.length = 0;
             awaitingMouse = 0;
-            if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
-            if (ready && nativePad) neutralPad();
-            if (keyboardReady) runner.resetSteamSdlKeyboard();
+            if (!nativeOwnsInput()) {
+                if (ready) runner.sendSteamSdlInput(encodePointer(false), 0);
+                if (ready && nativePad) neutralPad();
+                if (keyboardReady) runner.resetSteamSdlKeyboard();
+            }
             lastPointer = -1;
         }
 
@@ -296,7 +315,8 @@
         }
 
         function setPointer(event) {
-            if (!ready || firstFrame === undefined || !gameInput || !foreground || closing || !menu.hidden || !textForm.hidden) return;
+            if (!ready || firstFrame === undefined || !gameInput || !foreground || closing || !menu.hidden ||
+                    !textForm.hidden || nativeOwnsInput()) return;
             var bounds = (nativeView && nativeView.primary ? screen : canvas).getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
             pointerX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
@@ -560,6 +580,10 @@
                     keyboardReady = true;
                     keyboard.hidden = false;
                     releaseKeys();
+                }
+                if (nativeOwnsInput() && menu.hidden && textForm.hidden) {
+                    scheduleTick();
+                    return;
                 }
                 var pad = foreground ? gamepad.read(window.Windows, navigator, chordTracker) : gamepad.idle;
                 var chord = padButtons.start | padButtons.back;

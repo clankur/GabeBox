@@ -49,3 +49,5 @@ EXPORTS
     GetActiveWindow=XboxGetActiveWindow @47
     ClientToScreen=XboxClientToScreen @48
     ScreenToClient=XboxScreenToClient @49
+    GetCursorPos=XboxGetCursorPos @50
+    GetPhysicalCursorPos=XboxGetPhysicalCursorPos @51

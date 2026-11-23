@@ -209,6 +209,7 @@ test("the primary video polls the controller independently and a quick mouse cli
     assert.deepEqual(overlays, []);
     assert.ok(samples.every(mask => !(mask & (gamepad.buttons.start | gamepad.buttons.back))));
     sample(gamepad.connected); sample(gamepad.connected);
+    await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(overlays, [[646570, 7]]);
     sample(both);
     listeners.blur();
@@ -217,11 +218,13 @@ test("the primary video polls the controller independently and a quick mouse cli
     sample(both); sample(0); sample(both); sample(gamepad.connected);
     assert.equal(overlays.length, 1, "disconnect and reconnect must not synthesize a release");
     sample(both); sample(gamepad.connected);
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(overlays.length, 2, "a fresh complete gesture still works");
     sample(both);
     listeners.keydown({type: "keydown", keyCode: 121, preventDefault() {}});
     sample(gamepad.connected);
-    assert.equal(overlays.length, 3, "F10 opens immediately without a second overlay on pad release");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(overlays.length, 3, "F10 opens without a second overlay on pad release");
     listeners["steam-game-foreground"]({detail: false});
     const count = edges.length;
     screen.handlers.pointerdown({...p, buttons: 1, type: "pointerdown"});

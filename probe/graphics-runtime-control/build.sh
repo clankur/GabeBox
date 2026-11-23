@@ -5,6 +5,7 @@ load_only=false
 loader_order=false
 sdl_video=false
 win32_imports=false
+hosted_xinput=false
 desktop_window=false
 desktop_endpoints=false
 desktop_documents=false
@@ -22,6 +23,10 @@ case ${1:-} in
         ;;
     --win32-imports)
         win32_imports=true
+        shift
+        ;;
+    --hosted-xinput)
+        hosted_xinput=true
         shift
         ;;
     --desktop-window)
@@ -63,7 +68,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --desktop-window | --desktop-endpoints | --desktop-documents | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
@@ -202,7 +207,7 @@ EOF
     graphics_libs+=("$build/dxgi-user32.lib")
     child_output="$build/standard-dxgi.exe"
 fi
-if $win32_imports || $desktop_window; then
+if $win32_imports || $desktop_window || $hosted_xinput; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
     for source in input input-raw xinput; do
@@ -210,11 +215,26 @@ if $win32_imports || $desktop_window; then
     done
     "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/input.def" "/out:$layout/XboxWin32Input.dll" \
         "$build/win32-input.obj" "$build/win32-input-raw.obj" "$build/win32-xinput.obj" "$windows_app"
+    if $hosted_xinput; then
+        "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/xinput910.def" "/out:$layout/XboxWin32XInput910.dll" \
+            "$build/win32-xinput.obj" "$windows_app"
+    fi
 fi
 if $load_only; then
     compiler+=(-DPROBE_LOAD_MESA)
 elif $dxgi_composition; then
     child="$src/dxgi-child.cpp"
+elif $hosted_xinput; then
+    cat > "$build/xinput1_4.def" <<'EOF'
+LIBRARY xinput1_4.dll
+EXPORTS
+    XInputGetCapabilities
+    XInputGetState
+EOF
+    "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/xinput1_4.def" "/out:$build/xinput1_4.lib"
+    graphics_libs=("$build/xinput1_4.lib")
+    child="$src/xinput-child.c"
+    child_output="$build/standard-xinput.exe"
 elif $win32_opengl; then
     window_bindings="$probe/win32-runtime/window-bindings.json"
     python3 - "$build" "$window_bindings" <<'PY'
@@ -298,7 +318,7 @@ else
     done
     graphics_libs=("$build/OpenGL.lib" "$build/EGL.lib")
 fi
-if $win32_opengl; then
+if $win32_opengl || $hosted_xinput; then
     "${win32_compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
 elif $dxgi_composition; then
     if $dxgi_exchange; then
@@ -320,6 +340,12 @@ fi
     "$build/graphics-child.obj" ${graphics_libs[@]+"${graphics_libs[@]}"} "$windows_app"
 if $win32_imports; then
     python3 "$probe/redirect-pe-imports.py" "$child_output" "$probe/win32-runtime/bindings.json" "$layout/child.exe"
+fi
+if $hosted_xinput; then
+    cat > "$build/xinput-control-bindings.json" <<'EOF'
+{"xinput1_4.dll":{"XInputGetCapabilities":"XboxWin32Input.dll","XInputGetState":"XboxWin32Input.dll"}}
+EOF
+    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/xinput-control-bindings.json" "$layout/child.exe"
 fi
 if $win32_opengl; then
     python3 - "$probe/redirect-pe-imports.py" "$child_output" "$window_bindings" "$build/window-control-bindings.json" <<'PY'

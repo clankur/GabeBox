@@ -1,4 +1,6 @@
 #include "window.h"
+#include "../sdl-host-protocol.h"
+#include <stddef.h>
 
 #define CLASS_COUNT 32
 #define WINDOW_COUNT 32
@@ -27,6 +29,12 @@ static void* volatile foregroundWindow;
 static HWND focusWindow;
 static UINT activationChange;
 static BOOL applicationActive;
+static SdlHostMailbox *hostPointerMailbox;
+static BOOL hostPointerConfigured;
+static LONG hostPointerSerial;
+static HWND hostPointerWindow;
+static POINT hostPointerScreen;
+static BOOL hostPointerDown;
 
 void XboxWindowTrace(const char *line) {
     const DWORD error = GetLastError();
@@ -668,9 +676,104 @@ BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lp
     return TRUE;
 }
 
+static void OpenHostedPointer(void) {
+    hostPointerConfigured = TRUE;
+    WCHAR mode[2], path[1024];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", mode, ARRAYSIZE(mode)) != 1 || mode[0] != L'1') return;
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", path, ARRAYSIZE(path));
+    if (!length || length >= ARRAYSIZE(path)) return;
+    const HANDLE file = CreateFile2FromAppW(path, GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    const SIZE_T header = offsetof(SdlHostMailbox, frame);
+    LARGE_INTEGER size;
+    const HANDLE mapping = GetFileSizeEx(file, &size) && size.QuadPart >= (LONGLONG)header
+        ? CreateFileMappingFromApp(file, NULL, PAGE_READWRITE, 0, NULL) : NULL;
+    CloseHandle(file);
+    if (!mapping) return;
+    hostPointerMailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, header);
+    CloseHandle(mapping);
+    if (hostPointerMailbox && SdlHostLoad(&hostPointerMailbox->magic) != SDL_HOST_MAGIC) {
+        UnmapViewOfFile(hostPointerMailbox);
+        hostPointerMailbox = NULL;
+    }
+}
+
+static void PollHostedPointer(void) {
+    const HWND handle = VirtualForegroundWindow();
+    if (!handle) return;
+    if (!hostPointerConfigured) OpenHostedPointer();
+    SdlHostMailbox *mailbox = hostPointerMailbox;
+    if (!mailbox || SdlHostLoad(&mailbox->quit)) return;
+    const LONG serial = SdlHostLoad(&mailbox->input_serial);
+    const UINT pointer = (UINT)SdlHostLoad(&mailbox->input_pointer);
+    if (!serial || (serial & 1) || serial != SdlHostLoad(&mailbox->input_serial) ||
+            (handle == hostPointerWindow && serial == hostPointerSerial)) return;
+    RECT bounds;
+    if (!HostedWindowBounds(handle, &bounds)) return;
+    const LONG width = bounds.right - bounds.left;
+    const LONG height = bounds.bottom - bounds.top;
+    if (width <= 0 || height <= 0 || width > 32768 || height > 32768) return;
+    const LONG x = (LONG)(((pointer & SDL_HOST_POINTER_MAX) * (width - 1) + 2047) / SDL_HOST_POINTER_MAX);
+    const LONG y = (LONG)((((pointer >> 12) & SDL_HOST_POINTER_MAX) * (height - 1) + 2047) / SDL_HOST_POINTER_MAX);
+    const POINT screen = {bounds.left + x, bounds.top + y};
+    const BOOL down = (pointer & (1u << 24)) != 0;
+    const BOOL moved = handle != hostPointerWindow || screen.x != hostPointerScreen.x || screen.y != hostPointerScreen.y;
+    const BOOL clicked = down != (handle == hostPointerWindow && hostPointerDown);
+    const UINT count = moved + clicked;
+    if (count > MESSAGE_COUNT - messageCount) return;
+    const LPARAM position = MAKELPARAM(x, y);
+    const WPARAM buttons = down ? MK_LBUTTON : 0;
+    const DWORD time = GetTickCount();
+    if (moved) messages[messageCount++] = (MSG){handle, WM_MOUSEMOVE, buttons, position, time, screen};
+    if (clicked) messages[messageCount++] = (MSG){handle, down ? WM_LBUTTONDOWN : WM_LBUTTONUP,
+        buttons, position, time, screen};
+    AcquireSRWLockExclusive(&windowGeometryLock);
+    hostPointerScreen = screen;
+    hostPointerWindow = handle;
+    ReleaseSRWLockExclusive(&windowGeometryLock);
+    hostPointerSerial = serial;
+    hostPointerDown = down;
+    InterlockedExchangeAdd(&mailbox->input_events, count);
+    InterlockedExchange(&mailbox->input_ack, serial);
+}
+
+static BOOL ReadCursorPosition(LPPOINT position, const char *nativeName) {
+    if (!position) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    AcquireSRWLockShared(&windowGeometryLock);
+    const BOOL hosted = hostPointerWindow && hostPointerWindow == VirtualForegroundWindow();
+    if (hosted) *position = hostPointerScreen;
+    ReleaseSRWLockShared(&windowGeometryLock);
+    if (hosted) return TRUE;
+    typedef BOOL (WINAPI *ReadCursor)(LPPOINT);
+    const DWORD error = GetLastError();
+    HMODULE user = GetModuleHandleW(L"user32.dll");
+    const ReadCursor native = user ? (ReadCursor)(void *)GetProcAddress(user, nativeName) : NULL;
+    if (native) {
+        SetLastError(error);
+        return native(position);
+    }
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return FALSE;
+}
+
+BOOL WINAPI XboxGetCursorPos(LPPOINT position) {
+    return ReadCursorPosition(position, "GetCursorPos");
+}
+
+BOOL WINAPI XboxGetPhysicalCursorPos(LPPOINT position) {
+    return ReadCursorPosition(position, "GetPhysicalCursorPos");
+}
+
 BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
     if (!XboxWindowThread() || !message) return FALSE;
     XboxPollWglHostEvents();
+    const DWORD error = GetLastError();
+    PollHostedPointer();
+    SetLastError(error);
     HWND close = InterlockedExchangePointer(&hostClose, NULL);
     if (close && XboxFindWindow(close) && !XboxPostMessageW(close, WM_CLOSE, 0, 0))
         InterlockedCompareExchangePointer(&hostClose, close, NULL);

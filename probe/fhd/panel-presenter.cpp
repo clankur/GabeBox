@@ -16,11 +16,13 @@
 #include <string>
 
 #include "frame-trace.h"
+#include "hosted-input.h"
 
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
 extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
 extern "C" void FhdReleaseMedia(LONG);
+extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG);
 
 namespace {
 using namespace winrt;
@@ -36,6 +38,10 @@ struct Status {
     bool visible = false;
     UINT64 gpu = 0, cpu = 0, sequence = 0;
     UINT64 renderCallbacks = 0, sourceEmpty = 0, presentBusy = 0;
+    UINT64 menuRequests = 0;
+    UINT64 menuChords = 0;
+    bool nativeInput = false;
+    HRESULT inputError = S_OK;
     HRESULT error = S_OK;
 };
 Status published;
@@ -56,7 +62,11 @@ struct Presenter {
     com_ptr<IDXGISwapChain2> chain;
     com_ptr<ID3D11RenderTargetView> target;
     FhdFrameTrace trace;
+    HANDLE inputTrace = INVALID_HANDLE_VALUE;
+    bool menuHeld = false;
     bool nativePad = false, attached = false, inserted = false;
+    bool inputPaused = false;
+    SdlHostMailbox *inputMailbox = nullptr;
     bool watchingFrames = false, watchingVisibility = false, watchingActivation = false;
     event_token frames{}, visibility{}, activation{};
     bool queuedGpu = false;
@@ -72,7 +82,37 @@ struct Presenter {
     void updateVisibility() {
         status.visible = visible();
         if (!status.visible) queuedSequence = 0;
+        updateInputVisibility();
         publish(status);
+    }
+    void updateInputVisibility() {
+        const bool pause = !status.visible;
+        if (!status.nativeInput || inputPaused == pause) return;
+        inputPaused = pause;
+        if (inputPaused) FhdPauseHostedInput();
+        else FhdResumeHostedInput();
+    }
+    void inputCheckpoint(const char *record, DWORD length) noexcept {
+        if (inputTrace == INVALID_HANDLE_VALUE) return;
+        DWORD written = 0;
+        if (!WriteFile(inputTrace, record, length, &written, nullptr) || written != length) {
+            CloseHandle(inputTrace);
+            inputTrace = INVALID_HANDLE_VALUE;
+        }
+    }
+    void pollInput() {
+        if (!status.nativeInput) return;
+        const bool requested = FhdPollHostedInput(inputMailbox, get_abi(window));
+        const bool held = FhdHostedMenuHeld();
+        if (held && !menuHeld && status.menuChords++ < 32) {
+            constexpr char record[] = "menu_chord=held\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
+        menuHeld = held;
+        if (requested && status.menuRequests++ < 32) {
+            constexpr char record[] = "menu_request=ready\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
     }
     void fit() {
         const float scale = static_cast<float>((std::min)(root.ActualWidth() / width, root.ActualHeight() / height));
@@ -91,9 +131,11 @@ struct Presenter {
         try {
             fit();
             status.visible = visible();
+            updateInputVisibility();
             if (!status.visible) {
                 queuedSequence = 0;
             } else {
+                pollInput();
                 ++status.renderCallbacks;
                 if (!queuedSequence) {
                     UINT64 seq = 0;
@@ -177,6 +219,21 @@ struct Presenter {
         check_hresult(panel.as<ISwapChainPanelNative>()->SetSwapChain(chain.get()));
         attached = true;
         trace.open();
+        WCHAR inputPath[1024];
+        if (trace.enabled() && SUCCEEDED(FhdLocalPath(inputPath, ARRAYSIZE(inputPath))) &&
+                FhdFrameTrace::suffix(inputPath, ARRAYSIZE(inputPath), L"\\fhd-panel-input.txt")) {
+            inputTrace = CreateFile2(inputPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                CREATE_ALWAYS, nullptr);
+        }
+        inputMailbox = FhdMediaInputMailbox(status.token);
+        status.inputError = FhdBeginHostedInput(inputMailbox, get_abi(window));
+        if (SUCCEEDED(status.inputError)) {
+            FhdSetHostedInputProfile(nativePad, width, height);
+            FhdHostedMenuOnRelease(TRUE);
+            status.nativeInput = true;
+            constexpr char record[] = "panel_input=ready\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
         visibility = window.VisibilityChanged([this](auto const&, auto const&) { updateVisibility(); });
         watchingVisibility = true;
         activation = window.Activated([this](auto const&, auto const&) { updateVisibility(); });
@@ -186,7 +243,12 @@ struct Presenter {
         updateVisibility();
     }
     void close() noexcept {
+        if (inputTrace != INVALID_HANDLE_VALUE) {
+            CloseHandle(inputTrace);
+            inputTrace = INVALID_HANDLE_VALUE;
+        }
         trace.close();
+        if (status.nativeInput) FhdEndHostedInput();
         if (watchingFrames) CompositionTarget::Rendering(frames);
         if (watchingVisibility) window.VisibilityChanged(visibility);
         if (watchingActivation) window.Activated(activation);
@@ -231,6 +293,7 @@ IAsyncAction setVisible(bool show) {
     check_hresult(active->status.error);
     active->panel.Visibility(show ? Visibility::Visible : Visibility::Collapsed);
     active->updateVisibility();
+    if (show && active->status.nativeInput && active->status.visible) FhdResumeHostedInput();
 }
 IAsyncAction closePanel() {
     co_await resume_foreground(dispatcher());
@@ -278,6 +341,9 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"source_sequence", s.sequence); field(L"gpu_sequence", gpuSeq); field(L"cpu_sequence", cpuSeq);
         field(L"render_callbacks", s.renderCallbacks); field(L"source_empty_callbacks", s.sourceEmpty);
         field(L"present_busy_callbacks", s.presentBusy);
+        field(L"native_input", s.nativeInput); field(L"native_menu_requests", s.menuRequests);
+        field(L"native_menu_chords", s.menuChords);
+        if (FAILED(s.inputError)) field(L"native_input_hresult", static_cast<uint32_t>(s.inputError));
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);
     } catch (...) { return winrt::to_hresult(); }

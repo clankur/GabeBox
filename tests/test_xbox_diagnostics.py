@@ -740,9 +740,11 @@ class ObserverTests(unittest.TestCase):
                         'bytes=20-23': struct.pack('<I', 2),
                         'bytes=8294456-8294459': struct.pack('<I', 4),
                     }
-                    raw = ranges[kwargs['headers']['Range']]
-                    assert kwargs['read_limit'] == len(raw) + 1
-                    return 206, raw
+                    requested = kwargs['headers']['Range']
+                    raw = ranges[requested]
+                    header = 'bytes ' + requested.removeprefix('bytes=') + '/8303680'
+                    response = SimpleNamespace(getheader=lambda key, default: header, read=lambda limit: raw[:limit])
+                    return 206, kwargs['receive'](response)
                 if name == MAILBOX + '.gpu':
                     assert kwargs['read_limit'] == diagnostics.GPU_MAILBOX_SIZE + 1
                     return 200, gpu_mailbox()
@@ -825,6 +827,7 @@ class ObserverTests(unittest.TestCase):
         class Portal:
             now = 0
             bad_range = False
+            wrong_offset = False
             changes_launch = False
 
             def pause(self, seconds):
@@ -850,8 +853,15 @@ class ObserverTests(unittest.TestCase):
                     'bytes=20-23': bytes(4),
                     'bytes=8294456-8294459': struct.pack('<I', confirmed),
                 }[kwargs['headers']['Range']]
-                assert kwargs['read_limit'] == len(data) + 1
-                return (200 if self.bad_range else 206), data
+                offset = kwargs['headers']['Range'].removeprefix('bytes=')
+                header = ('bytes 2-37/' if self.wrong_offset else f'bytes {offset}/') + '8303680'
+
+                def read(limit):
+                    assert limit == len(data) + 1
+                    return data
+
+                response = SimpleNamespace(getheader=lambda key, default: header, read=read)
+                return (200 if self.bad_range else 206), kwargs['receive'](response)
 
         args = options(run_id=launch, seconds=1.5, panel_menu=True)
         fake = Portal()
@@ -866,6 +876,10 @@ class ObserverTests(unittest.TestCase):
         self.assertNotIn(MAILBOX, json.dumps(result))
         fake = Portal()
         fake.bad_range = True
+        with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
+            module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        fake = Portal()
+        fake.wrong_offset = True
         with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
             module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         fake = Portal()

@@ -61,11 +61,17 @@ IUnknown *window, *pads;
 enum OverlayState { Playing, Requested, Reported };
 OverlayState overlay;
 BOOL nativePad = TRUE, focused, visible, inputEnabled, blockChord;
+bool menuOnRelease, chordPending;
 LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
 DWORD lastTime;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
+constexpr UINT pointerEdgeCount = 32;
+constexpr LONG pointerPressed = 1 << 24;
+LONG wantedPointer, wantedKeys, pendingPointerSerial;
+LONG pointerEdges[pointerEdgeCount];
+UINT pointerEdgeRead, pointerEdgeSize;
 double cursorX, cursorY;
 bool physicalClick, padClick, freshPointer;
 LONG heldVirtual[256];
@@ -96,15 +102,27 @@ void setPad(Pad const &pad) {
     previousPad = pad;
     sentPad = true;
 }
-void pointer(LONG pos, LONG keys) {
+LONG pointer(LONG pos, LONG keys) {
     if (!alive() || (pos == mouse && keys == legacyKeys))
-        return;
+        return 0;
     InterlockedIncrement(&mail->input_serial);
     InterlockedExchange(&mail->input_pointer, pos);
     InterlockedExchange(&mail->input_keys, keys);
-    InterlockedIncrement(&mail->input_serial);
+    const LONG serial = InterlockedIncrement(&mail->input_serial);
     mouse = pos;
     legacyKeys = keys;
+    return serial;
+}
+void publishPanelPointer() {
+    if (!alive() || (pendingPointerSerial && SdlHostLoad(&mail->input_ack) != pendingPointerSerial)) return;
+    pendingPointerSerial = 0;
+    if (pointerEdgeSize) {
+        pendingPointerSerial = pointer(pointerEdges[pointerEdgeRead], wantedKeys);
+        pointerEdgeRead = (pointerEdgeRead + 1) % pointerEdgeCount;
+        --pointerEdgeSize;
+    } else {
+        pointer(wantedPointer, wantedKeys);
+    }
 }
 void neutral() {
     Pad idle = {0, {0, 0, 0, 0, -32768, -32768}};
@@ -119,7 +137,10 @@ void neutral() {
     if (alive()) {
         mouse = SdlHostLoad(&mail->input_pointer);
         legacyKeys = SdlHostLoad(&mail->input_keys);
-        pointer(mouse & 0xffffff, 0);
+        wantedPointer = mouse & 0xffffff;
+        wantedKeys = pendingPointerSerial = 0;
+        pointerEdgeRead = pointerEdgeSize = 0;
+        pointer(wantedPointer, 0);
     }
     // A or B used in the library must be released before the game sees it.
     blockedMenuButtons = 3;
@@ -129,6 +150,7 @@ void neutral() {
     padClick = false;
     physicalClick = false;
     blockChord = true;
+    chordPending = false;
 }
 void queueKey(UINT scan, bool down, const char *utf8 = nullptr) {
     if (!keyboard())
@@ -273,7 +295,18 @@ void sendPointer() {
     }
     if (!nativePad && (previousPad.bits & 2))
         keys |= 32;
-    pointer(pos, keys);
+    if (!menuOnRelease) {
+        pointer(pos, keys);
+        return;
+    }
+    if ((pos ^ wantedPointer) & pointerPressed) {
+        if (pointerEdgeSize == pointerEdgeCount) --pointerEdgeSize;
+        pointerEdges[(pointerEdgeRead + pointerEdgeSize) % pointerEdgeCount] = pos;
+        ++pointerEdgeSize;
+    }
+    wantedPointer = pos;
+    wantedKeys = keys;
+    publishPanelPointer();
 }
 void mouseEvent(IUnknown *args) {
     IUnknown *point = nullptr, *props = nullptr;
@@ -317,7 +350,7 @@ void event(unsigned type, IUnknown *args) {
             focused = (state == 0 || state == 2);
             if (!focused)
                 neutral();
-            else if (!wasFocused && overlay == Reported)
+            else if (!menuOnRelease && !wasFocused && overlay == Reported)
                 FhdResumeHostedInput();
         }
         return;
@@ -487,6 +520,16 @@ extern "C" void FhdResumeHostedInput() {
     overlay = Playing;
     lastTime = GetTickCount();
 }
+extern "C" void FhdPauseHostedInput() {
+    if (mail && overlay != Reported) {
+        neutral();
+        overlay = Reported;
+    }
+}
+extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
+    menuOnRelease = enabled != FALSE;
+}
+extern "C" BOOL FhdHostedMenuHeld() { return chordPending; }
 extern "C" void FhdEndHostedInput() {
     if (window) {
         for (auto &h : handlers)
@@ -504,6 +547,7 @@ extern "C" void FhdEndHostedInput() {
     }
     mail = nullptr;
     overlay = Playing;
+    menuOnRelease = false;
     sentPad = false;
 }
 extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
@@ -561,7 +605,8 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         return 0;
     Reading reading = {};
     Pad value = {0, {0, 0, 0, 0, -32768, -32768}};
-    if (readPad(&reading)) {
+    const bool connected = readPad(&reading);
+    if (connected) {
         const unsigned bits[] = {4, 8, 16, 32, 2, 0, 1, 4096, 8192, 1024, 2048, 64, 128, 256, 512};
         value.bits = SDL_HOST_PAD_CONNECTED;
         for (unsigned i = 0; i < SDL_HOST_PAD_BUTTONS; ++i)
@@ -578,15 +623,23 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
     value.bits &= ~blockedMenuButtons;
     const LONG chord = (1 << 4) | (1 << 6);
     if ((value.bits & chord) == chord) {
-        if (!blockChord) {
+        if (!blockChord && menuOnRelease) chordPending = true;
+        else if (!blockChord) {
             requestOverlay();
             overlay = Reported;
             return 1;
         }
         value.bits &= ~chord;
     } else {
-        if (!(value.bits & chord))
+        if (!connected) chordPending = false;
+        if (!(value.bits & chord)) {
+            if (chordPending) {
+                requestOverlay();
+                overlay = Reported;
+                return 1;
+            }
             blockChord = false;
+        } else if (chordPending) value.bits &= ~chord;
     }
     double dx = 0, dy = 0;
     if (!keyboard()) {
@@ -610,5 +663,6 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         cursorY = clamp(cursorY + dy * clamp(elapsed, 0, 100) / 1250., 0, 1);
         sendPointer();
     }
+    if (menuOnRelease) publishPanelPointer();
     return 0;
 }

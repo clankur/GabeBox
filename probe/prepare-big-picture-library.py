@@ -310,6 +310,8 @@ def stage_win32_trial_profiles(layout, profiles, runtime, source_profiles=()):
         if profiles:
             for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
                 files[name] = package.read(name)
+            if "XboxWin32XInput910.dll" in package.namelist():
+                files["XboxWin32XInput910.dll"] = package.read("XboxWin32XInput910.dll")
         if desktop_documents:
             variable = "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
             if any(variable not in files[name] for name in ("ProbeNative.dll", "XboxWin32Desktop.dll")):

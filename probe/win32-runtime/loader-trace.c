@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include "loader-trace-output.h"
+#include "hosted-xinput-load.h"
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
@@ -498,10 +499,18 @@ static void RecordWideLoad(LPCWSTR path, HMODULE result, DWORD error) {
 
 HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const DWORD previous = GetLastError();
+    HMODULE result = LoadHostedXInput(name);
+    if (result) {
+        const char trace[] = "input xinput-library=hosted\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        RecordWideLoad(name, result, previous);
+        SetLastError(previous);
+        return result;
+    }
     WCHAR staged[512];
     const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
-    HMODULE result = LoadLibraryW(companion ? staged : name);
+    result = LoadLibraryW(companion ? staged : name);
     const DWORD error = GetLastError();
     RecordWideLoad(name, result, error);
     SetLastError(error);
@@ -667,6 +676,15 @@ static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
 }
 
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
+    if (module && (ULONG_PTR)name <= 0xffffu) {
+        const DWORD previous = GetLastError();
+        if (module == GetModuleHandleW(L"XboxWin32XInput910.dll")) {
+            Record(name, module, 0, FALSE, ERROR_PROC_NOT_FOUND);
+            SetLastError(ERROR_PROC_NOT_FOUND);
+            return NULL;
+        }
+        SetLastError(previous);
+    }
     FARPROC result = GetProcAddress(module, name);
     DWORD error = GetLastError();
     Record(name, module, 0, result != 0, error);

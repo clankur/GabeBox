@@ -275,15 +275,22 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
     first = launch_report()
     if not matching_probe(first, args.run_id, args.app_id):
         raise ValueError('The current Steam launch does not match the requested AppID and run ID.')
+    if first.get('steam_sdl_host') == 'exited' or first.get('steam_launch_process_exit'):
+        raise ValueError('The selected game process exited and its input mailbox is no longer available.')
     mailbox = first.get('steam_sdl_mailbox', '')
     if not GPU_MAILBOX_NAME.fullmatch(mailbox):
         raise ValueError('The current launch does not have a valid hosted SDL mailbox.')
     url = game_file_url(app, LOCAL, mailbox, 'LocalAppData')
 
     def read_range(offset, length):
-        status, raw = portal.request('GET', url, headers={'Range': f'bytes={offset}-{offset + length - 1}'},
-                                     read_limit=length + 1)
-        if status != 206 or len(raw) != length:
+        end = offset + length - 1
+
+        def receive(response):
+            return response.getheader('Content-Range', ''), response.read(length + 1)
+
+        status, (returned_range, raw) = portal.request('GET', url, headers={'Range': f'bytes={offset}-{end}'},
+                                                       receive=receive)
+        if status != 206 or len(raw) != length or not re.fullmatch(rf'bytes {offset}-{end}/(?:\d+|\*)', returned_range):
             raise ValueError('Xbox Device Portal did not return the exact requested SDL mailbox range.')
         return raw
 

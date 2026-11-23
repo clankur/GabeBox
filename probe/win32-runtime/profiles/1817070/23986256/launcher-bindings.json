@@ -30,6 +30,8 @@
     "GetActiveWindow": "XboxWin32Window.dll",
     "ClientToScreen": "XboxWin32Window.dll",
     "ScreenToClient": "XboxWin32Window.dll",
+    "GetCursorPos": "XboxWin32Window.dll",
+    "GetPhysicalCursorPos": "XboxWin32Window.dll",
     "MonitorFromWindow": "XboxWin32Window.dll",
     "GetMonitorInfoW": "XboxWin32Window.dll",
     "EnumDisplayMonitors": "XboxWin32Window.dll",
