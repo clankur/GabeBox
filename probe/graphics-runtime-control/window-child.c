@@ -75,10 +75,23 @@ static unsigned int TryGraphics(void) {
             !IsWindowVisible(window) || activated || deactivated || nonclientActivated || nonclientDeactivated) return 0x6e12;
     ShowWindow(window, SW_SHOW);
     ShowWindow(window, SW_SHOW);
-    if (activated != 1 || deactivated || nonclientActivated != 1 || nonclientDeactivated) return 0x6e13;
+    if (activated != 1 || deactivated || nonclientActivated != 1 || nonclientDeactivated ||
+            GetActiveWindow() != window) return 0x6e13;
     RECT area;
     if (lifecycle != 3 || !IsWindowVisible(window) || !GetClientRect(window, &area) || area.right != 64 ||
             !GetWindowRect(window, &area) || area.left != 4 || area.top != 8) return 0x6e04;
+    POINT point = {-6, -10};
+    SetLastError(ERROR_RETRY);
+    if (!ClientToScreen(window, &point) || point.x != -2 || point.y != -2 ||
+            !ScreenToClient(window, &point) || point.x != -6 || point.y != -10 ||
+            GetLastError() != ERROR_RETRY) return 0x6e17;
+    const UINT moveFlags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    if (!SetWindowPos(window, NULL, -12, 23, 0, 0, moveFlags) ||
+            !ClientToScreen(window, &point) || point.x != -18 || point.y != 13 ||
+            !SetWindowPos(window, NULL, 4, 8, 0, 0, moveFlags)) return 0x6e18;
+    point = (POINT){MAXLONG, 3};
+    if (ClientToScreen(window, &point) || GetLastError() != ERROR_ARITHMETIC_OVERFLOW ||
+            point.x != MAXLONG || point.y != 3) return 0x6e19;
     const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     HMONITOR enumerated = NULL;
     MONITORINFOEXW wide;
@@ -143,7 +156,9 @@ static unsigned int TryGraphics(void) {
     ShowWindow(next, SW_SHOWNA);
     activationRedirect = next;
     if (!DestroyWindow(window) || activationRedirect || activated != 1 || deactivated ||
-            GetForegroundWindow() != next) return 0x6e16;
+            GetForegroundWindow() != next || GetActiveWindow() != next) return 0x6e16;
+    if (ScreenToClient(window, &point) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE ||
+            point.x != MAXLONG || point.y != 3) return 0x6e1a;
     if (!DestroyWindow(next) || lifecycle != 15 ||
             !UnregisterClassW(windowClass.lpszClassName, image)) return 0x6e0d;
     if (activated != 1 || deactivated != 1 || nonclientActivated != 2 || nonclientDeactivated != 2) return 0x6e14;

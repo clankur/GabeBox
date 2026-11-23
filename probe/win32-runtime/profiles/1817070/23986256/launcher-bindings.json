@@ -27,6 +27,9 @@
     "SteamAPI_RestartAppIfNecessary": "XboxWin32SteamDiscovery.dll"
   },
   "user32.dll": {
+    "GetActiveWindow": "XboxWin32Window.dll",
+    "ClientToScreen": "XboxWin32Window.dll",
+    "ScreenToClient": "XboxWin32Window.dll",
     "MonitorFromWindow": "XboxWin32Window.dll",
     "GetMonitorInfoW": "XboxWin32Window.dll",
     "EnumDisplayMonitors": "XboxWin32Window.dll",

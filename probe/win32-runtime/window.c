@@ -274,6 +274,13 @@ HWND WINAPI XboxGetForegroundWindow(void) {
     return native ? native() : NULL;
 }
 
+HWND WINAPI XboxGetActiveWindow(void) {
+    if (OwnsVirtualActivation()) return VirtualForegroundWindow();
+    typedef HWND (WINAPI *Native)(void);
+    Native native = (Native)(void *)NativeWindowProcedure("GetActiveWindow");
+    return native ? native() : NULL;
+}
+
 BOOL WINAPI XboxSetForegroundWindow(HWND handle) {
     if (!IsVirtualWindowHandle(handle)) {
         const BOOL reconcile = OwnsVirtualActivation();
@@ -521,6 +528,40 @@ BOOL WINAPI XboxGetClientRect(HWND handle, RECT *area) {
 
 BOOL WINAPI XboxGetWindowRect(HWND handle, RECT *area) {
     return HostedWindowBounds(handle, area);
+}
+
+static BOOL TranslateWindowPoint(HWND handle, POINT *point, BOOL toScreen) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef BOOL (WINAPI *Native)(HWND, LPPOINT);
+        Native native = (Native)(void *)NativeWindowProcedure(toScreen ? "ClientToScreen" : "ScreenToClient");
+        return native ? native(handle, point) : FALSE;
+    }
+    if (!point) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    RECT bounds;
+    if (!HostedWindowBounds(handle, &bounds)) return FALSE;
+    // The virtual client occupies the whole window, including for a negative screen origin.
+    const LONG64 direction = toScreen ? 1 : -1;
+    const LONG64 x = point->x + direction * bounds.left;
+    const LONG64 y = point->y + direction * bounds.top;
+    const LONG64 minimum = -(LONG64)MAXLONG - 1;
+    if (x < minimum || x > MAXLONG || y < minimum || y > MAXLONG) {
+        SetLastError(ERROR_ARITHMETIC_OVERFLOW);
+        return FALSE;
+    }
+    point->x = (LONG)x;
+    point->y = (LONG)y;
+    return TRUE;
+}
+
+BOOL WINAPI XboxClientToScreen(HWND handle, POINT *point) {
+    return TranslateWindowPoint(handle, point, TRUE);
+}
+
+BOOL WINAPI XboxScreenToClient(HWND handle, POINT *point) {
+    return TranslateWindowPoint(handle, point, FALSE);
 }
 
 HDC WINAPI XboxGetDC(HWND handle) {

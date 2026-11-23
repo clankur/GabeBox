@@ -148,6 +148,10 @@ Build `1.0.230.273`, run `1795439727749`, kept the native host and restored the 
 
 The checkpoint observer attached to that same run. It reported the observed lobby and frontend records in sequence. A separate five-second trial required a different mode and exited with `checkpoint-stalled`, saved the loader trace and frame timestamps, and left the Xbox session running. [Startup checkpoint observer](../probe/XBOX-DIAGNOSTICS.md#require-game-startup-checkpoints)
 
+Build `1.0.230.274`, run `1795441427797`, reached the lobby after a verified GPU submission. Samples showed the two flags checked by the lobby draw predicate set and its frontend view state at zero. The selection flags did not request a new game. This narrows the investigation to the paths that follow those checks and the delivery of input to the game.
+
+The reference window module exports `GetActiveWindow`, `ClientToScreen`, and `ScreenToClient`. The Steam game imports all three. The shared adapter now returns the active hosted window to its owning thread and translates between screen coordinates and the virtual client using the stored window origin. Xbox control `1.0.230.275`, run `1795442382428`, returned `0x51A7` after checking active-window lookup, a reentrant window switch, coordinate conversion at nonzero and negative origins, last-error preservation, overflow, and stale handles. [GetActiveWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getactivewindow) · [ClientToScreen](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-clienttoscreen) · [ScreenToClient](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-screentoclient)
+
 ## Reproduce the launch trial
 
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
