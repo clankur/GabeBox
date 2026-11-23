@@ -14,6 +14,8 @@ You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on t
 
 To run the original packaged-process diagnostic, follow its separate deployment instructions. [Probe setup and report fields](probe/README.md)
 
+Use the read-only observer to collect Big Picture startup checkpoints, game launch reports, and native frame traces through Device Portal. [Xbox runtime diagnostics](probe/XBOX-DIAGNOSTICS.md)
+
 ### Play Hades on Xbox Series X
 
 The signed Hades profile runs the Steam x64 DirectX build through Big Picture. Controller gameplay works on Series X. Expect intermittent stutter in the current build. [Hades setup and hardware results](analysis/hades-compatibility.md)
