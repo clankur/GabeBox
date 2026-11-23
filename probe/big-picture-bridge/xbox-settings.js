@@ -7,7 +7,10 @@ function installXboxSettings(client, getRuntime) {
     function codec() { return getRuntime()(29303).Ne; }
     function values() {
         const configured = typeof xboxNativeWindow !== 'undefined' && xboxNativeWindow.deviceFamily === 'Windows.Xbox';
-        const result = configured ? {oobe_completed: true, oobe_stage_2_completed: true} : {};
+        // Valve calculates recording usage in Storage even when there are no
+        // recordings. Its bitrate parser expects the client's preset string.
+        const result = configured ? {oobe_completed: true, oobe_stage_2_completed: true,
+            gamerecording_video_bitrate: 'default'} : {};
         for (const key of names) {
             const value = localStorage.getItem(prefix + key);
             if (value === 'true' || value === 'false') result[key] = value === 'true';

@@ -54,4 +54,5 @@ jobs:
       - run: python -m unittest discover -s tests
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-launch-detail.test.cpp -o /tmp/steam-launch-detail-test && /tmp/steam-launch-detail-test
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-cloud-manifest.test.cpp -o /tmp/steam-cloud-manifest-test && /tmp/steam-cloud-manifest-test
+      - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-library-manifest.test.cpp -o /tmp/steam-library-manifest-test && /tmp/steam-library-manifest-test
       - run: g++ -std=c++20 -O2 -Wall -Wextra -Werror tests/steam-sdl-frame.test.cpp -o /tmp/steam-sdl-frame-test && /tmp/steam-sdl-frame-test

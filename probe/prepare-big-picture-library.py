@@ -186,10 +186,22 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         (layout / name).write_bytes(data)
 
 
+def stage_storage_capability(layout):
+    manifest = layout / "AppxManifest.xml"
+    original = manifest.read_bytes()
+    capabilities = ElementTree.fromstring(original).find("{*}Capabilities")
+    name = "{http://schemas.microsoft.com/appx/manifest/uap/windows10}Capability"
+    if capabilities is None or original.count(b"</Capabilities>") != 1:
+        raise ValueError("The Steam package must declare application capabilities.")
+    if capabilities.find(f"{name}[@Name='removableStorage']") is None:
+        manifest.write_bytes(original.replace(b"</Capabilities>",
+            b'<uap:Capability Name="removableStorage" /></Capabilities>', 1))
+
+
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
-                   win32_trial_profiles=(), win32_runtime_template=None):
+                   win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if (presenter_artifact is None) != (presenter_checksum is None):
@@ -250,6 +262,11 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
             (staged / "steam-library-inventory.txt").touch()
         stage_surfaceless_profiles(staged, surfaceless_profiles)
         stage_win32_trial_profiles(staged, win32_trial_profiles, win32_runtime_template)
+        stage_storage_capability(staged)
+        if b"SteamLibraryCommand\x00" not in (staged / "XboxProbe.Native.winmd").read_bytes():
+            raise ValueError("Use a Steam Core native component built with the Xbox storage interface.")
+        if migrate_legacy_library:
+            (staged / "steam-migrate-legacy-library.txt").touch()
         staged.rename(layout)
 
 
@@ -278,8 +295,10 @@ if __name__ == "__main__":
                         help="stage a local import compatibility trial from an audited recipe directory")
     parser.add_argument("--win32-runtime-template", type=Path,
                         help="Steam Core APPX template containing the Win32 trial runtime built for this checkout")
+    parser.add_argument("--migrate-legacy-library", action="store_true",
+                        help="request a verified one-time move of existing app-local Steam games to Xbox internal storage")
     args = parser.parse_args()
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
-                   args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template)
+                   args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template, args.migrate_legacy_library)

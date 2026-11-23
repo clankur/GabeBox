@@ -173,12 +173,12 @@ jobs:
                                     @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
                                     @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
-              $objects = foreach ($source in $adapter.Sources) {
+              $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"
                 & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
                   -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "probe/win32-runtime/$source.c" -o $object
                 $object
-              }
+              })
               & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
                 /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
                 "/def:probe/win32-runtime/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects $lib

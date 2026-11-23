@@ -38,6 +38,7 @@ PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 BIG_PICTURE_NAME: 'Steam Big Picture'}
 PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
+DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 SDL_TRIALS = {
     975370: ('Dwarf Fortress', '2.26.2', '9603fdfd2b4bd75b3574bb993e25332bae820a66f18e7ffb6f8c82cb4f6c004a'),
     413150: ('Stardew Valley', '2.30.9', '58f0a2af6653445b48e58ace6890fbe237bf76452c9743e800358d6b935ded64'),
@@ -235,9 +236,11 @@ def slay_console_summary(raw):
     return '\n'.join(result + slay_exception_types(text))
 
 
-def read_game_file(portal, package, folder, filename, limit):
-    query = urlencode({'knownfolderid': 'LocalAppData', 'packagefullname': package['PackageFullName'],
-                       'path': folder, 'filename': filename})
+def read_game_file(portal, package, folder, filename, limit, *, knownfolder='LocalAppData'):
+    parameters = {'knownfolderid': knownfolder, 'path': folder, 'filename': filename}
+    if knownfolder == 'LocalAppData':
+        parameters['packagefullname'] = package['PackageFullName']
+    query = urlencode(parameters)
     try:
         _, data = portal.request('GET', '/api/filesystem/apps/file?' + query, read_limit=limit)
     except PortalError as error:
@@ -409,11 +412,16 @@ def xbox_executable_requirement(summary):
 
 
 def inspect_game(portal, package, app_id, executable):
-    raw = read_game_file(portal, package, STEAMAPPS_PATH, f'appmanifest_{app_id}.acf', 65536)
-    if raw is None:
-        raise ValueError('Steam has not created a local manifest for this AppID.')
+    libraries = (('D', 'DevelopmentFiles', DEVELOPER_STEAMAPPS_PATH), ('local', 'LocalAppData', STEAMAPPS_PATH))
+    for drive, knownfolder, steamapps in libraries:
+        raw = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf', 65536, knownfolder=knownfolder)
+        if raw is not None:
+            break
+    else:
+        raise ValueError('Steam has no manifest for this AppID on Device Portal’s internal libraries.')
+    print(f'steam_library_drive={drive}')
     manifest = decode_report(raw)
-    fields = ('StateFlags', 'UpdateResult', 'BytesToDownload', 'BytesDownloaded', 'SizeOnDisk')
+    fields = ('StateFlags', 'UpdateResult', 'buildid', 'BytesToDownload', 'BytesDownloaded', 'SizeOnDisk')
     for field in fields:
         match = re.search(rf'^[ \t]*"{field}"[ \t]+"([0-9]+)"', manifest, re.MULTILINE | re.IGNORECASE)
         if match:
@@ -430,8 +438,8 @@ def inspect_game(portal, package, app_id, executable):
 
     candidates = (('installed', ('common', install[1])), ('staging', ('downloading', str(app_id))))
     for source, folder in candidates:
-        path = '\\'.join((STEAMAPPS_PATH, *folder, *parts[:-1]))
-        header = read_game_file(portal, package, path, parts[-1], 131072)
+        path = '\\'.join((steamapps, *folder, *parts[:-1]))
+        header = read_game_file(portal, package, path, parts[-1], 131072, knownfolder=knownfolder)
         if header is not None:
             print(f'executable_source={source}')
             summary = pe_summary(header)
@@ -865,6 +873,8 @@ def main():
                                 const='steam-library-art.txt', help='read the Steam library artwork counters')
     report_variant.add_argument('--inventory', dest='report_file', action='store_const',
                                 const='steam-library-inventory.json', help='read the opted-in game name and AppID inventory')
+    report_variant.add_argument('--storage-migration', dest='report_file', action='store_const',
+                                const='steam-library-migration.json', help='read the Steam library migration result')
     report_variant.add_argument('--steam-cloud', dest='report_file', action='store_const',
                                 const='steam-cloud-report.txt', help='read the Steam Cloud restore checkpoint')
     report_variant.add_argument('--sdl-startup', dest='report_file', action='store_const',

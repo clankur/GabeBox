@@ -44,7 +44,9 @@ internal static class StartupHook
         }
         if (package != null && local != null && File.Exists(Path.Combine(package, "stardew-game-directory.txt")))
         {
-            var expectedGame = Path.Combine(local, "SteamLibrary", "steamapps", "common", "Stardew Valley");
+            // Steam's native launcher supplies the manifest-verified game directory.
+            var expectedGame = Environment.GetEnvironmentVariable("XBOX_SDL_WORKING_DIRECTORY") ??
+                Path.Combine(local, "SteamLibrary", "steamapps", "common", "Stardew Valley");
             if (string.Equals(Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\'), expectedGame,
                               StringComparison.OrdinalIgnoreCase))
             {

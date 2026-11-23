@@ -63,6 +63,37 @@ function fixture({activationError = false, primary = false, xaml = false, warm =
     };
 }
 
+test("storage inventory may load during startup and only approved visible writes reach the broker", async () => {
+    const app = fixture({warm: true});
+    const calls = [];
+    const start = app.start({storage(operation, argument) {
+        calls.push([operation, argument]);
+        return operation === "list" ? {defaultId: "D", folders: []} : {ok: true};
+    }});
+    const send = request => app.incoming.push(JSON.stringify(request));
+    await drain();
+    send({id: 1, method: "storage-list"});
+    send({id: 2, method: "storage-select", argument: "E"});
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(calls, [["list", ""]]);
+    assert.deepEqual(app.replies.find(reply => reply.id === 1).result, {defaultId: "D", folders: []});
+    assert.equal(app.replies.find(reply => reply.id === 2).error, "unavailable");
+
+    await app.advance("warmup-gamepad-layout");
+    await app.advance("gamepad-ready");
+    await start;
+    send({id: 3, method: "storage-select", argument: "E"});
+    send({id: 4, method: "storage-move", argument: {appIds: [42], destination: "D"}});
+    send({id: 5, method: "storage-select", argument: "C:\\"});
+    send({id: 6, method: "storage-move", argument: {appIds: ["42"], destination: "D"}});
+    await app.advance("gamepad-ready");
+    assert.deepEqual(calls.map(([operation, argument]) => [operation, JSON.stringify(argument)]), [
+        ["list", '""'], ["select", '"E"'], ["move", '{"appIds":[42],"destination":"D"}']
+    ]);
+    for (const id of [3, 4]) assert.deepEqual(app.replies.find(reply => reply.id === id).result, {ok: true});
+    for (const id of [5, 6]) assert.equal(app.replies.find(reply => reply.id === id).error, "unavailable");
+});
+
 test("a signed warmup keeps QR foreground until a real layout and a fresh physical foreground check", async () => {
     const app = fixture({warm: true, expected: 5368709120});
     let ready = false, plays = 0;

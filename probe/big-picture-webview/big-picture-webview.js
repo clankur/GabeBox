@@ -313,6 +313,21 @@
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
             else if (request.method === "session") action = function () { return broker.session(); };
+            else if (request.method === "storage-list") action = function () { return broker.storage("list", ""); };
+            else if (request.method === "storage-select" || request.method === "storage-move") {
+                if (!settled || !visible || playing) return respond(id, false, "unavailable");
+                var argument = request.argument;
+                if (request.method === "storage-select" && (argument === "D" || argument === "E"))
+                    action = function () { return broker.storage("select", argument); };
+                else if (request.method === "storage-move" && argument &&
+                        (argument.destination === "D" || argument.destination === "E") &&
+                        Array.isArray(argument.appIds) && argument.appIds.length === 1 &&
+                        Number.isInteger(argument.appIds[0]) && argument.appIds[0] > 0 && argument.appIds[0] <= 0xffffff) {
+                    action = function () {
+                        return broker.storage("move", {appIds: argument.appIds, destination: argument.destination});
+                    };
+                } else return respond(id, false, "unavailable");
+            }
             else if (request.method === "sign-out") action = function () {
                 if (!settled || !visible || playing || failed) return "busy";
                 return broker.signOut();

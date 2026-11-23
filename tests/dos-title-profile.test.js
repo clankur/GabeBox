@@ -32,6 +32,9 @@ function fixture(config, options = {}) {
     const frames = [];
     const delays = [];
     const launches = [];
+    const stageRequests = [];
+    const stageDeletes = [];
+    const installName = options.staged ? "SteamDosStage-fixture" : "XCom UFO Defense";
     const body = element();
     const library = element();
     const playButton = element();
@@ -53,7 +56,7 @@ function fixture(config, options = {}) {
                 return child;
             },
             async getFileAsync(childName) {
-                assert.equal(name, "XCom UFO Defense");
+                assert.equal(name, installName);
                 assert.equal(childName, "dosbox.conf");
                 return file(childName);
             }
@@ -63,12 +66,14 @@ function fixture(config, options = {}) {
         folder("DATA", [file("LEVEL.DAT")]), folder("GAME_10", [file("PRIVATE.SAV")]),
         file("dosbox.exe"), file("UFO Defense_Patched.exe"), file("SDL.DLL")
     ]);
-    const common = folder("common", [folder("XCom UFO Defense", [guest])]);
+    const install = folder(installName, [guest]);
+    const common = folder("common", options.staged ? [] : [install]);
     const local = folder("LocalState", [folder("SteamLibrary", [folder("steamapps", [common])])]);
     local.createFileAsync = async name => { frames.push(name); return file(name); };
     const storage = {
         ApplicationData: {current: {localFolder: local}},
         StorageItemTypes: {file: "file", folder: "folder"}, CreationCollisionOption: {failIfExists: 0},
+        StorageDeleteOption: {permanentDelete: "permanent"},
         FileIO: {
             readTextAsync: async () => config,
             readBufferAsync: async source => {
@@ -85,6 +90,14 @@ function fixture(config, options = {}) {
     };
     const game = {exit() { this.exited = true; }};
     const window = {exports: {WDOSBOX() {}}};
+    if (options.staged) {
+        install.deleteAsync = async mode => { stageDeletes.push([installName, mode]); };
+        storage.ApplicationData.current.temporaryFolder = folder("TemporaryState", [install]);
+        window.XboxProbe = {Native: {ProbeRunner: {async steamLibraryCommand(operation, argument) {
+            stageRequests.push([operation, argument]);
+            return JSON.stringify({ok: true, folder: installName});
+        }}}};
+    }
     const navigator = options.noPointerMode ? {} : {gamepadInputEmulation: "keyboard"};
     let now = 25000;
     vm.runInNewContext(adapterSource, {
@@ -94,7 +107,8 @@ function fixture(config, options = {}) {
         Dos: async () => ({fs: runtimeFs, main: async args => { launches.push(Array.from(args)); return game; }})
     });
     const start = (automatic, checkpoint = () => Promise.resolve()) => window.xcomDosRuntime.start(checkpoint, automatic);
-    return {adapter: window.xcomDosRuntime, start, dirs, foldersRead, filesRead, copies, launches, frames, delays, game, body, library, playButton, navigator};
+    return {adapter: window.xcomDosRuntime, start, dirs, foldersRead, filesRead, copies, launches, frames,
+        delays, game, body, library, playButton, navigator, stageRequests, stageDeletes};
 }
 
 test("a pointer-driven title enables Xbox mouse mode until it returns to the library", async () => {
@@ -141,6 +155,23 @@ test("changed vendor autoexec cannot select a different mount or entry point", a
         assert.equal(host.filesRead.length, 0);
         assert.equal(host.frames.length, 0);
     }
+});
+
+test("native DOS staging is deleted after mounting or rejecting the staged files", async () => {
+    const host = fixture(publishedConfig, {staged: true});
+    let cleanupAtGuestStart;
+    assert.match(await host.start(false, async phase => {
+        if (phase === "starting-guest") cleanupAtGuestStart = host.stageDeletes.length;
+    }), /steam_dos_files=1\r\nsteam_dos=guest-started/);
+    assert.equal(cleanupAtGuestStart, 1);
+    assert.deepEqual(host.stageRequests, [["stage-dos", "7760"]]);
+    assert.deepEqual(host.stageDeletes, [["SteamDosStage-fixture", "permanent"]]);
+
+    const invalidConfig = publishedConfig.replace("call ufocd.bat", "call OTHER.BAT");
+    const invalid = fixture(invalidConfig, {staged: true});
+    assert.match(await invalid.start(false), /steam_dos_phase=reading-config/);
+    assert.deepEqual(invalid.stageDeletes, [["SteamDosStage-fixture", "permanent"]]);
+    assert.deepEqual(invalid.launches, []);
 });
 
 test("automatic trial captures retain their names and eight- and eighteen-second timing", async () => {

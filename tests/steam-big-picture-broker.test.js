@@ -4,6 +4,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const context = vm.createContext({});
+vm.runInContext("delete Promise.prototype.finally", context);
 vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-big-picture-broker.js"), "utf8"), context);
 
 function fixture() {
@@ -80,6 +81,20 @@ test("signing out while an install check or catalog request is pending revokes t
     await assert.rejects(library, /signed-out/);
     assert.equal(await broker.play(12), "signed-out");
     assert.deepEqual(calls, []);
+});
+
+test("a completed or rejected storage action releases Play in the Xbox host", async () => {
+    const {session, broker} = fixture();
+    let finish;
+    session.storage = () => new Promise(resolve => { finish = resolve; });
+    const migration = broker.storage("migrate", "");
+    assert.equal(await broker.play(12), "busy");
+    finish({ok: true});
+    assert.equal((await migration).ok, true);
+    assert.equal(await broker.play(12), "presented");
+    session.storage = async () => { throw new Error("storage unavailable"); };
+    await assert.rejects(broker.storage("move", {}), /storage unavailable/);
+    assert.equal(await broker.play(12), "presented");
 });
 
 test("pending native actions cannot overlap and failures leave the broker usable", async () => {

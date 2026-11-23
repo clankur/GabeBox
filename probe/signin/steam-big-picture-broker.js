@@ -62,7 +62,36 @@ var steamBigPictureBroker = (function () {
                 return "failed";
             });
         }
+        function storage(operation, argument) {
+            if (!active()) return Promise.reject(new Error("signed-out"));
+            if (typeof session.storage !== "function") return Promise.reject(new Error("storage-unavailable"));
+            if (operation === "list") {
+                return Promise.resolve(session.storage(operation, argument)).then(function (result) {
+                    if (!active()) throw new Error("signed-out");
+                    var owned = new Set(session.games.map(function (game) { return game.id; }));
+                    result.folders.forEach(function (folder) {
+                        folder.apps = folder.apps.filter(function (app) { return owned.has(app.appId); });
+                    });
+                    return result;
+                });
+            }
+            if (operation !== "select" && operation !== "move" && operation !== "migrate")
+                return Promise.reject(new Error("invalid-storage-operation"));
+            if (acting || session.busy()) return Promise.resolve({ok: false, error: "Steam is busy."});
+            acting = true;
+            return Promise.resolve().then(function () {
+                if (!active()) throw new Error("signed-out");
+                return session.storage(operation, argument);
+            }).then(function (result) {
+                acting = false;
+                return result;
+            }, function (error) {
+                acting = false;
+                throw error;
+            });
+        }
         return {
+            storage: storage,
             session: function () { return Promise.resolve().then(identity); },
             library: library,
             signOut: function () {

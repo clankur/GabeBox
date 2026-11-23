@@ -234,7 +234,26 @@
         return play.hidden ? download : play;
     }
 
+    function nativeStorage(operation, argument) {
+        var native = XboxProbe.Native.ProbeRunner;
+        return Promise.resolve().then(function () {
+            return native.steamLibraryCommand(operation, typeof argument === "object" ?
+                JSON.stringify(argument) : (argument || ""));
+        }).then(JSON.parse);
+    }
+
+    function mountedInstalls(state) {
+        var installed = new Set();
+        state.folders.forEach(function (folder) {
+            if (folder.mounted) folder.apps.forEach(function (app) { installed.add(app.appId); });
+        });
+        return installed;
+    }
+
     function readLocalInstall(entry) {
+        if (typeof XboxProbe.Native.ProbeRunner.steamLibraryCommand === "function") {
+            return nativeStorage("list").then(function (state) { return mountedInstalls(state).has(entry.id); });
+        }
         var storage = Windows.Storage;
         return Promise.resolve(manifestFolder).then(function (folder) {
             return folder ? folder.tryGetItemAsync("appmanifest_" + entry.id + ".acf") : null;
@@ -247,14 +266,12 @@
     }
 
     function checkLocalInstall(entry) {
-        if (entry.installed || !manifestFolder) return Promise.resolve(!!entry.installed);
         if (entry.installCheck) return entry.installCheck;
         entry.installCheck = readLocalInstall(entry).then(function (installed) {
-            if (installed) {
-                entry.installed = true;
-                if (selected && selected.entry === entry) updateActions();
-            }
-            return !!entry.installed;
+            entry.installCheck = null;
+            entry.installed = installed;
+            if (selected && selected.entry === entry) updateActions();
+            return installed;
         }, function () {
             entry.installCheck = null;
             return !!entry.installed;
@@ -348,6 +365,8 @@
             return current === attempt && games === entries && !signingOut;
         }
         function installedGames() {
+            if (typeof XboxProbe.Native.ProbeRunner.steamLibraryCommand === "function")
+                return nativeStorage("list").then(mountedInstalls);
             return Promise.resolve(manifestFolder).then(function (folder) {
                 return folder ? folder.getFilesAsync() : null;
             }).then(function (files) {
@@ -410,12 +429,42 @@
                 return !!transfer || launching || restoring || !document.getElementById("sdl-game").hidden ||
                     !!document.getElementById("xcom-game");
             },
-            install: startDownload, play: playGame, signOut: signOutCurrent
+            install: startDownload, play: playGame, signOut: signOutCurrent, storage: nativeStorage
         });
         function failed() {
             if (currentSession()) showBigPictureStatus("Steam Big Picture could not open. Reopen the app to retry.");
         }
-        return Promise.resolve().then(function () { return host.open(broker, failed); }).then(function () {
+        // Only the explicitly signed migration package requests the one-time bulk move.
+        function migrateLegacyLibrary() {
+            var storage = Windows.Storage;
+            var pkg = Windows.ApplicationModel.Package.current;
+            var values = storage.ApplicationData.current.localSettings.values;
+            var key = "steamLegacyLibraryMigration";
+            return pkg.installedLocation.tryGetItemAsync("steam-migrate-legacy-library.txt").then(function (marker) {
+                if (!marker || !currentSession() || (values.hasKey(key) && values.lookup(key) === pkg.id.fullName)) return;
+                showBigPictureStatus("Moving existing Steam games to internal storage…");
+                return broker.storage("migrate", "").then(function (result) {
+                    if (result.ok) values.insert(key, pkg.id.fullName);
+                    return broker.storage("list", "").then(function (state) {
+                        result.defaultDrive = state.defaultId;
+                        result.libraries = state.folders.map(function (folder) {
+                            return {drive: folder.id, installedGames: folder.apps.length,
+                                capacity: folder.totalBytes, freeBytes: folder.freeBytes};
+                        });
+                    }).catch(function () {}).then(function () {
+                        return storage.ApplicationData.current.localFolder.createFileAsync(
+                            "steam-library-migration.json", storage.CreationCollisionOption.replaceExisting
+                        );
+                    }).then(function (file) { return storage.FileIO.writeTextAsync(file, JSON.stringify(result) + "\n"); });
+                });
+            });
+        }
+
+        return Promise.resolve().then(migrateLegacyLibrary).catch(function () {
+            // Failure to run the optional migration must not prevent sign-in.
+        }).then(function () {
+            return host.open(broker, failed);
+        }).then(function () {
             if (currentSession()) showBigPictureStatus("");
         }, failed);
     }
