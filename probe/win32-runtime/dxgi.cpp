@@ -245,8 +245,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
             Trace("gpu-frame-submitted", code);
             tracedFrame_ = true;
         } else if (FAILED(code) && !tracedError_) {
-            Trace("gpu-frame-error", code);
             tracedError_ = true;
+            if (const char* stage = publisher_.FailureStage()) Trace(stage, code);
             if (code == DXGI_ERROR_DEVICE_REMOVED && queue_) {
                 const DWORD error = GetLastError();
                 ComPtr<ID3D12Device> device;
@@ -258,6 +258,7 @@ class HostedSwapChain final : public IDXGISwapChain4 {
                 device.Reset();
                 SetLastError(error);
             }
+            Trace("gpu-frame-error", code);
         }
     }
 

@@ -248,32 +248,42 @@ HRESULT DxgiFramePublisher::CreateSlots(ID3D12Device* share, ID3D11Device5* d3d1
 }
 
 HRESULT DxgiFramePublisher::Publish(IDXGISwapChain1* chain, UINT backBuffer) {
-    if (status_ == E_PENDING) status_ = OpenMailboxes();
+    failureStage_ = nullptr;
+    if (status_ == E_PENDING) {
+        status_ = OpenMailboxes();
+        if (FAILED(status_)) return FailedAt("gpu-frame-mailbox-error", status_);
+    }
     if (status_ != S_OK) return status_;
     if (InterlockedCompareExchange(&base_->quit, 0, 1) == 1) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
     return queue_ ? Publish12(chain, backBuffer) : Publish11(chain);
 }
 
+HRESULT DxgiFramePublisher::FailedAt(const char* stage, HRESULT error) {
+    failureStage_ = stage;
+    return error;
+}
+
 HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
     ComPtr<ID3D11Texture2D> source;
     HRESULT error = chain->GetBuffer(0, IID_PPV_ARGS(&source));
-    if (FAILED(error)) return error;
+    if (FAILED(error)) return FailedAt("gpu-frame-backbuffer-error", error);
     D3D11_TEXTURE2D_DESC desc{};
     source->GetDesc(&desc);
     if (generation_ && (desc.Width != width_ || desc.Height != height_ || desc.Format != format_)) ClearSlots();
     if (!generation_) {
         status_ = Connect(source.Get(), desc);
-        if (FAILED(status_)) return status_;
+        if (FAILED(status_)) return FailedAt("gpu-frame-share-setup-error", status_);
     }
     const auto index = static_cast<unsigned>((next_ - 1) % SDL_GPU_SLOTS);
     auto& slot = slots_[index];
     const UINT64 ready = slot.ready->GetCompletedValue();
     const UINT64 done = slot.done->GetCompletedValue();
-    if (ready == UINT64_MAX || done == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+    if (ready == UINT64_MAX) return FailedAt("gpu-frame-producer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
+    if (done == UINT64_MAX) return FailedAt("gpu-frame-consumer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
     if (ready < slot.submitted || done < slot.submitted) return S_FALSE;
     context_->CopyResource(slot.texture.Get(), source.Get());
     error = context_->Signal(slot.ready.Get(), next_);
-    if (FAILED(error)) return error;
+    if (FAILED(error)) return FailedAt("gpu-frame-signal-error", error);
     context_->Flush();
     PublishSequence(index);
     return S_OK;
@@ -282,24 +292,25 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
 HRESULT DxgiFramePublisher::Publish12(IDXGISwapChain1* chain, UINT backBuffer) {
     ComPtr<ID3D12Resource> source;
     HRESULT error = chain->GetBuffer(backBuffer, IID_PPV_ARGS(&source));
-    if (FAILED(error)) return error;
+    if (FAILED(error)) return FailedAt("gpu-frame-backbuffer-error", error);
     const auto desc = source->GetDesc();
     if (generation_ && (desc.Width != width_ || desc.Height != height_ || desc.Format != format_))
-        return DXGI_ERROR_INVALID_CALL;
+        return FailedAt("gpu-frame-format-change-error", DXGI_ERROR_INVALID_CALL);
     if (!generation_) {
         status_ = Connect(source.Get(), desc);
-        if (FAILED(status_)) return status_;
+        if (FAILED(status_)) return FailedAt("gpu-frame-share-setup-error", status_);
     }
     const auto index = static_cast<unsigned>((next_ - 1) % SDL_GPU_SLOTS);
     auto& slot = slots_[index];
     const UINT64 ready = slot.ready12->GetCompletedValue();
     const UINT64 done = slot.done12->GetCompletedValue();
-    if (ready == UINT64_MAX || done == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+    if (ready == UINT64_MAX) return FailedAt("gpu-frame-producer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
+    if (done == UINT64_MAX) return FailedAt("gpu-frame-consumer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
     if (ready < slot.submitted || done < slot.submitted) return S_FALSE;
 
     error = slot.allocator->Reset();
     if (SUCCEEDED(error)) error = slot.commands->Reset(slot.allocator.Get(), nullptr);
-    if (FAILED(error)) return status_ = error;
+    if (FAILED(error)) return FailedAt("gpu-frame-command-reset-error", status_ = error);
     auto* texture = slot.texture12.Get();
     const D3D12_RESOURCE_BARRIER before[] = {
         Transition(source.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
@@ -313,14 +324,14 @@ HRESULT DxgiFramePublisher::Publish12(IDXGISwapChain1* chain, UINT backBuffer) {
     slot.commands->CopyResource(texture, source.Get());
     slot.commands->ResourceBarrier(ARRAYSIZE(after), after);
     error = slot.commands->Close();
-    if (FAILED(error)) return status_ = error;
+    if (FAILED(error)) return FailedAt("gpu-frame-command-close-error", status_ = error);
 
     slot.source12 = std::move(source);
     ID3D12CommandList* commands[] = {slot.commands.Get()};
     slot.queued12 = next_;
     queue_->ExecuteCommandLists(ARRAYSIZE(commands), commands);
     error = queue_->Signal(slot.ready12.Get(), next_);
-    if (FAILED(error)) return status_ = error;
+    if (FAILED(error)) return FailedAt("gpu-frame-signal-error", status_ = error);
     PublishSequence(index);
     return S_OK;
 }

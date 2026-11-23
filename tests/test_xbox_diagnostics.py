@@ -71,7 +71,7 @@ def gpu_mailbox(generation=2, width=1920, sequence=25, format_code=28):
 def options(**overrides):
     args = dict(version='1.2.3.4', startup=False, app_id=APP_ID, run_id=None, image_name=None, timeout=8,
                 frame_seconds=0, output=None, bootstrap_frame=False, require_checkpoint=[],
-                fail_on_checkpoint=[], checkpoint_timeout=2)
+                fail_on_checkpoint=[], watch_checkpoint=[], checkpoint_timeout=2, checkpoint_timeouts=[])
     args.update(overrides)
     return SimpleNamespace(**args)
 
@@ -230,8 +230,63 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(fixture.now, 3)
             self.assertEqual(result['outcome'], 'checkpoint-stalled')
             self.assertEqual(result['checkpoints'], {'reached': [boot], 'waiting_for': ready,
-                                                    'records': [boot + ' detail=0x1'], 'source': 'live-loader'})
+                                                    'records': [boot + ' detail=0x1'], 'source': 'live-loader',
+                                                    'waiting_for_timeout_seconds': 2})
             self.assertIn('loader-trace.txt', result['artifacts'])
+
+    def test_stage_deadline_and_latest_watched_field_identify_the_stall(self):
+        launch = EPOCH_MS + 1
+        gpu = 'dxgi gpu-frame-submitted'
+        zone = 'asset menu-zone-flags=*'
+        ready = zone + ' detail=0x3'
+        first = 'asset menu-zone-flags=0x400 detail=0x0'
+        latest = 'asset menu-zone-flags=0x402 detail=0x1'
+        not_ready = 'asset menu-zone-flags=0x402 detail=0x30'
+        report = probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS)
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: report},
+            {diagnostics.PROBE_REPORT: report},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: f'{gpu}\r\n{first}\r\n'.encode()},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: f'{gpu}\r\n{first}\r\n{not_ready}\r\n{latest}\r\n'.encode()},
+        ], stages=[[stage(LIVE_STAGE, launch)]])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[gpu, ready], checkpoint_timeouts=[5, 1],
+                                         watch_checkpoint=[zone, 'asset never-emitted']))
+        self.assertEqual(fixture.now, 3)
+        self.assertEqual(result['outcome'], 'checkpoint-stalled')
+        checks = result['checkpoints']
+        self.assertEqual(checks['waiting_for'], ready)
+        self.assertEqual(checks['waiting_for_timeout_seconds'], 1)
+        self.assertEqual(checks['watched'], {zone: {'record': latest, 'source': 'live-loader'},
+                                            'asset never-emitted': None})
+
+    def test_checkpoint_value_wildcard_matches_one_nonempty_field(self):
+        pattern = 'asset menu-zone-flags=* detail=0x3'
+        self.assertTrue(diagnostics.valid_checkpoint_pattern(pattern))
+        self.assertFalse(diagnostics.valid_checkpoint_pattern('asset menu-*=0x3'))
+        self.assertFalse(diagnostics.valid_checkpoint_pattern('asset menu-zone-flags=**'))
+        self.assertTrue(diagnostics.checkpoint_matches('asset menu-zone-flags=0xC02 detail=0x3 extra=1', pattern))
+        self.assertFalse(diagnostics.checkpoint_matches('asset menu-zone-flags= detail=0x3', pattern))
+        self.assertFalse(diagnostics.checkpoint_matches('asset menu-zone-flags=0xC02 extra=1 detail=0x3', pattern))
+
+    def test_checkpoint_received_after_its_deadline_does_not_pass(self):
+        launch = EPOCH_MS + 1
+        gpu, ready = 'dxgi gpu-frame-submitted', 'asset menu-zone-ready'
+        report = probe(launch, extra=VERIFIED_STAGE + RENDER_FIELDS)
+
+        class SlowTrace(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                raw = super().read(portal, app, folder, name, limit)
+                if (folder, name) == LIVE_TRACE and self.step == 1:
+                    self.now += 3
+                return raw
+
+        fixture = SlowTrace([
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: f'{gpu}\r\n'.encode()},
+            {diagnostics.PROBE_REPORT: report, LIVE_TRACE: f'{gpu}\r\n{ready}\r\n'.encode()},
+        ], stages=[[stage(LIVE_STAGE, launch)]])
+        result = fixture.observe(options(run_id=launch, require_checkpoint=[gpu, ready]))
+        self.assertEqual(result['outcome'], 'checkpoint-stalled')
+        self.assertEqual(result['checkpoints']['reached'], [gpu])
 
     def test_attached_checkpoint_contract_requires_order_and_resets_budget_on_progress(self):
         launch = EPOCH_MS + 1

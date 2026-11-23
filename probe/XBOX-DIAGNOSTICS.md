@@ -40,14 +40,15 @@ Use a short sequence of loader records from the diagnostic build under test. Kee
 python3 xbox-deploy.py observe --version "$version" --app-id "$steam_app_id" \
     --image-name "$game_exe_basename" --timeout 180 --checkpoint-timeout 20 \
     --require-checkpoint 'dxgi gpu-frame-submitted' \
-    --require-checkpoint "$game_ready_checkpoint" \
+    --require-checkpoint "8:$game_ready_checkpoint" \
+    --watch-checkpoint "$game_progress_record" \
     --fail-on-checkpoint 'dxgi gpu-frame-error result=0x887A0005' \
     --output startup-checkpoints
 ```
 
-Each required checkpoint matches a complete filtered loader record or the first tokens of one. The checkpoints must appear in order. The per-checkpoint clock starts when the child, its window, or its first frame is observed. A new required checkpoint restarts that clock. Repeated markers and frame presents leave its deadline in effect. The overall `--timeout` still covers staging and the full observation.
+Each checkpoint matches a complete filtered loader record or its opening tokens. Use `key=*` to accept any nonempty value for that field while still matching the following tokens. The required records must appear in order. Prefix a required record with `SECONDS:` to override `--checkpoint-timeout` for that stage. The first budget begins when the child, its window, or its first frame is observed. Each new required record starts the next budget. Repeated markers and frame presents leave its deadline in effect. The overall `--timeout` still covers staging and the full observation.
 
-The result reports the checkpoints reached and the next record it was waiting for. `checkpoint-stalled` means that record failed to appear in time. The trace source is included so a missing diagnostic can be distinguished from a trace that recorded the preceding steps. `checkpoint-failed` identifies an explicitly selected failure record. The CLI returns a nonzero status if the required sequence is incomplete and saves the available artifacts. An attached `--run-id` uses the same checks and gives the current game a fresh observation budget. The observer leaves the Xbox session running.
+The result reports the checkpoints reached, the trace source, and the next expected record with its time budget. `--watch-checkpoint` includes the last matching record and its source, or `null` if the run produced no match. Watched records leave the deadline in effect. `checkpoint-stalled` means the expected record failed to appear in time. `checkpoint-failed` identifies an explicitly selected failure record. An in-flight Device Portal read or final artifact collection can delay the command's return. The CLI returns a nonzero status if the required sequence is incomplete and saves the available artifacts. An attached `--run-id` reads the current launch's existing trace and gives its unresolved checkpoint a fresh budget. The observer leaves the Xbox session running.
 
 ## Inspect the current game's render state
 

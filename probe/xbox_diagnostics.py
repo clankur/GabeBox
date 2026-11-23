@@ -143,7 +143,18 @@ def embedded_loader_lines(report, *, ordered=False):
 
 
 def checkpoint_matches(record, prefix):
-    return record == prefix or record.startswith(prefix + ' ')
+    if '*' not in prefix:
+        return record == prefix or record.startswith(prefix + ' ')
+    expected = prefix.split()
+    actual = record.split()
+    return len(actual) >= len(expected) and all(
+        token.startswith(pattern[:-1]) and len(token) >= len(pattern)
+        if pattern.endswith('=*') else token == pattern
+        for token, pattern in zip(actual, expected))
+
+
+def valid_checkpoint_pattern(pattern):
+    return not pattern.endswith(' ') and bool(LOADER_TRACE.fullmatch(re.sub(r'=\*(?= |$)', '=0', pattern)))
 
 
 def checkpoint_progress(records, required, failures):
@@ -524,12 +535,16 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
     last_state = None
     required = args.require_checkpoint
     failures = args.fail_on_checkpoint
+    watched = args.watch_checkpoint
+    checkpoint_timeouts = args.checkpoint_timeouts or [args.checkpoint_timeout] * len(required)
     checkpoint_deadline = None
     checkpoint_records = []
     failed_checkpoint = None
     failed_checkpoint_source = None
     checkpoint_source = 'unavailable'
     checkpoint_trace_truncated = False
+    watched_records = {}
+    watch_priority = {'exit-report': 0, 'live-loader': 1, 'launch-report': 2}
     if progress and clock() < deadline:
         progress('waiting-for-startup' if args.startup else 'attaching-to-launch' if args.run_id else 'waiting-for-launch')
 
@@ -594,6 +609,13 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
                     primary_loader_lines = embedded_loader_lines(probe_text) or primary_loader_lines
                 if (args.output or required) and exit_report.get('steam_shadow_child_status') == 'exited':
                     exit_loader_lines = terminal_loader_lines(exit_name, exit_text, ordered=bool(required))
+                if required:
+                    # A Portal poll can return after its observation deadline.
+                    poll_deadline = min(deadline, checkpoint_deadline or deadline)
+                    if clock() > poll_deadline:
+                        if poll_deadline == checkpoint_deadline:
+                            outcome = 'checkpoint-stalled'
+                        break
                 last_snapshot = snapshot
                 finished = finish_reason(probe, exit_report)
                 if process_missing is not None and clock() - process_missing >= 3:
@@ -601,10 +623,22 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
                 if probe.get('steam_sdl_host_frame') == 'presented' and first_frame is None:
                     first_frame = clock()
                 if required:
+                    previous_count = len(checkpoint_records)
                     if live_records:
                         checkpoint_trace_truncated = len(raw) == LIVE_LOADER_LIMIT
                     sources = (('live-loader', live_records), ('exit-report', exit_loader_lines),
                                ('launch-report', embedded_loader_lines(probe_text, ordered=True)))
+                    # The exit report can contain records written after the last live read.
+                    for pattern in watched:
+                        previous = watched_records.get(pattern, {}).get('source', 'launch-report')
+                        for source, records in (sources[1], sources[0], sources[2]):
+                            if watch_priority[source] > watch_priority[previous]:
+                                break
+                            latest = next((record for record in reversed(records)
+                                           if checkpoint_matches(record, pattern)), None)
+                            if latest:
+                                watched_records[pattern] = {'record': latest, 'source': source}
+                                break
                     for source, records in sources:
                         if not records:
                             continue
@@ -614,7 +648,6 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
                         if len(reached) > len(checkpoint_records):
                             checkpoint_records = reached
                             checkpoint_source = source
-                            checkpoint_deadline = clock() + args.checkpoint_timeout
                             if progress:
                                 progress(f'checkpoint-reached {len(reached)}/{len(required)}')
                         if failure:
@@ -632,8 +665,12 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
                         break
                     game_started = (probe.get('steam_shadow_child') == 'created' or first_frame is not None
                                     or process_seen or finished == 'window-ready')
-                    if checkpoint_deadline is None and game_started:
-                        checkpoint_deadline = clock() + args.checkpoint_timeout
+                    completed = len(checkpoint_records)
+                    if completed > previous_count or (checkpoint_deadline is None and game_started):
+                        budget = checkpoint_timeouts[completed]
+                        checkpoint_deadline = clock() + budget
+                        if progress:
+                            progress(f'waiting-for-checkpoint {completed + 1}/{len(required)} ({budget}s) {required[completed]}')
                 elif finished:
                     outcome = finished
                     break
@@ -671,6 +708,9 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
             result['checkpoints']['trace_at_read_limit'] = True
         if completed < len(required):
             result['checkpoints']['waiting_for'] = required[completed]
+            result['checkpoints']['waiting_for_timeout_seconds'] = checkpoint_timeouts[completed]
+        if watched:
+            result['checkpoints']['watched'] = {pattern: watched_records.get(pattern) for pattern in watched}
         if failed_checkpoint is not None:
             result['checkpoints']['failure'] = failed_checkpoint
             result['checkpoints']['failure_source'] = failed_checkpoint_source

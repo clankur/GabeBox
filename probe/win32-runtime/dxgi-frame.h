@@ -15,6 +15,7 @@ public:
     void SetQueue(ID3D12CommandQueue* queue) { queue_ = queue; }
     HRESULT Publish(IDXGISwapChain1* chain, UINT backBuffer);
     bool IsActive() const { return generation_ != 0 && status_ == S_OK; }
+    const char* FailureStage() const { return failureStage_; }
     HRESULT Reset();
 
 private:
@@ -38,6 +39,7 @@ private:
         UINT width, UINT height, DXGI_FORMAT format);
     HRESULT Publish11(IDXGISwapChain1* chain);
     HRESULT Publish12(IDXGISwapChain1* chain, UINT backBuffer);
+    HRESULT FailedAt(const char* stage, HRESULT error);
     void PublishSequence(unsigned index);
 
     SdlHostMailbox* base_ = nullptr;
@@ -50,4 +52,5 @@ private:
     UINT width_ = 0, height_ = 0;
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
     HRESULT status_ = E_PENDING;
+    const char* failureStage_ = nullptr;
 };

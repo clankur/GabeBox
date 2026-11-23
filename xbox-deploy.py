@@ -960,10 +960,12 @@ def main():
     observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
     observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
     observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
-    observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='TRACE',
-                                 help='require this loader record or prefix in sequence instead of the first frame')
+    observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='[SECONDS:]TRACE',
+                                 help='require this loader record or prefix in sequence, optionally with its own deadline')
     observe_command.add_argument('--fail-on-checkpoint', action='append', default=[], metavar='TRACE',
                                  help='fail immediately when this loader record or prefix appears')
+    observe_command.add_argument('--watch-checkpoint', action='append', default=[], metavar='TRACE',
+                                 help='include the last matching record in the result without extending the deadline')
     observe_command.add_argument('--checkpoint-timeout', type=int, metavar='SECONDS',
                                  help='seconds to wait per required checkpoint after the game starts (default 20)')
     observe_command.add_argument('--output', type=Path, help='save filtered observations and available run artifacts to a new directory')
@@ -1031,21 +1033,29 @@ def main():
             observe_command.error('--bootstrap-frame requires --output and --app-id')
         if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
             observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
-        if (args.fail_on_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
-            observe_command.error('--fail-on-checkpoint and --checkpoint-timeout require --require-checkpoint')
+        if (args.fail_on_checkpoint or args.watch_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
+            observe_command.error('--fail-on-checkpoint, --watch-checkpoint and --checkpoint-timeout require --require-checkpoint')
+        args.checkpoint_timeouts = []
         if args.require_checkpoint:
-            from probe.xbox_diagnostics import LOADER_TRACE
+            from probe.xbox_diagnostics import valid_checkpoint_pattern
 
             if not args.app_id:
                 observe_command.error('--require-checkpoint requires --app-id')
-            for checkpoints in (args.require_checkpoint, args.fail_on_checkpoint):
-                if len(checkpoints) > 8 or len(set(checkpoints)) != len(checkpoints) or any(
-                        not LOADER_TRACE.fullmatch(checkpoint) or checkpoint.endswith(' ') for checkpoint in checkpoints):
-                    observe_command.error('Use up to eight distinct, complete loader record prefixes per checkpoint option')
             if args.checkpoint_timeout is None:
                 args.checkpoint_timeout = 20
             if not 1 <= args.checkpoint_timeout <= 900:
                 observe_command.error('--checkpoint-timeout must be between 1 and 900 seconds')
+            for index, checkpoint in enumerate(args.require_checkpoint):
+                seconds, separator, trace = checkpoint.partition(':')
+                if separator:
+                    if not re.fullmatch(r'[0-9]{1,3}', seconds) or not 1 <= int(seconds) <= 900:
+                        observe_command.error('A required checkpoint deadline must be between 1 and 900 seconds')
+                    args.require_checkpoint[index] = trace
+                args.checkpoint_timeouts.append(int(seconds) if separator else args.checkpoint_timeout)
+            for checkpoints in (args.require_checkpoint, args.fail_on_checkpoint, args.watch_checkpoint):
+                if (len(checkpoints) > 8 or len(set(checkpoints)) != len(checkpoints)
+                        or not all(map(valid_checkpoint_pattern, checkpoints))):
+                    observe_command.error('Use up to eight distinct loader record prefixes per checkpoint option. Use key=* to match a field value.')
     if args.command == 'inspect-game':
         if not 0 < args.app_id <= 0xFFFFFFFF:
             game.error('--app-id must be a positive Steam AppID')
