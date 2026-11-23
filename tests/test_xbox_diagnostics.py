@@ -588,6 +588,84 @@ class ObserverTests(unittest.TestCase):
                 fixture.inspect_loader(options(run_id=launch))
             self.assertTrue(all(name == diagnostics.PROBE_REPORT for _, name, _ in fixture.reads))
 
+    def test_loader_inspection_reads_the_associated_exit_report_after_cleanup(self):
+        launch = EPOCH_MS + 1
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        exit_marker = f'steam_shadow_exit_report={exit_file}\r\n'
+        fault = 'fault access-violation module=Game.exe rva=0x000AB123 read near-null'
+        fixture = Fixture([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE + exit_marker),
+            exit_file: (f'steam_shadow_child_status=exited\r\nsteam_shadow_child_exit_u32=4294930433\r\n'
+                        f'steam_shadow_loader={fault}\r\nsteam_shadow_loader={fault}\r\n'
+                        'steam_shadow_loader=load C:\\Users\\private\\other.dll\r\n'
+                        'steam_shadow_loader_trace=collected\r\n').encode(),
+        }])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'loader'
+            result = fixture.inspect_loader(options(run_id=launch, output=output))
+            self.assertEqual(result['process_exit'], '0xFFFF7001')
+            self.assertEqual(result['loader_trace']['source'], 'exit-report')
+            self.assertEqual(result['loader_trace']['records'], 2)
+            self.assertEqual((output / 'loader-trace.txt').read_text(), (fault + '\n') * 2)
+        self.assertEqual([name for _, name, _ in fixture.reads],
+                         [diagnostics.PROBE_REPORT, exit_file, diagnostics.PROBE_REPORT])
+
+    def test_loader_inspection_rejects_exit_report_that_changes_during_capture(self):
+        launch = EPOCH_MS + 1
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        exit_marker = f'steam_shadow_exit_report={exit_file}\r\n'
+
+        class ExitReportChanges(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                data = super().read(portal, app, folder, name, limit)
+                if name == exit_file:
+                    self.snapshots[0][diagnostics.PROBE_REPORT] = probe(launch, extra=VERIFIED_STAGE +
+                                                                      exit_marker.replace('2274', '2275'))
+                return data
+
+        fixture = ExitReportChanges([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE + exit_marker),
+            exit_file: b'steam_shadow_child_status=exited\r\nsteam_shadow_loader_trace=no-output\r\n',
+        }])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'loader'
+            with self.assertRaisesRegex(ValueError, 'changed during capture'):
+                fixture.inspect_loader(options(run_id=launch, output=output))
+            self.assertFalse(output.exists())
+
+    def test_loader_inspection_requires_a_terminal_exit_trace_and_matching_hosted_run(self):
+        launch = EPOCH_MS + 1
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        pointer = VERIFIED_STAGE + f'steam_shadow_exit_report={exit_file}\r\n'
+        for extra, expected in ((pointer, 'still pending'),
+                                (pointer + 'steam_launch_sdl_run=2275\r\n', 'does not match the hosted launch')):
+            fixture = Fixture([{
+                diagnostics.PROBE_REPORT: probe(launch, extra=extra),
+                exit_file: (b'steam_shadow_child_status=exited\r\n'
+                            b'steam_shadow_loader=asset a-complete-record\r\n'),
+            }])
+            with self.assertRaisesRegex(ValueError, expected):
+                fixture.inspect_loader(options(run_id=launch))
+
+    def test_loader_inspection_rejects_exit_fallback_when_a_matching_stage_appears(self):
+        launch = EPOCH_MS + 1
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+
+        class StageAppears(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                data = super().read(portal, app, folder, name, limit)
+                if name == exit_file:
+                    self.stages[0] = [stage(LIVE_STAGE, launch)]
+                return data
+
+        fixture = StageAppears([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE +
+                                            f'steam_shadow_exit_report={exit_file}\r\n'),
+            exit_file: b'steam_shadow_child_status=exited\r\nsteam_shadow_loader_trace=no-output\r\n',
+        }], stages=[[]])
+        with self.assertRaisesRegex(ValueError, 'staging directory changed'):
+            fixture.inspect_loader(options(run_id=launch))
+
     def test_live_loader_reports_pipeline_request_ordinals_commit_and_failures(self):
         summary, _ = diagnostics.live_loader_snapshot(
             b'asset graphics-pso-before bytes=0x0000000000001000 flags=0x00000080 available-commit-kib=0x00000100\n'

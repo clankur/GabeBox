@@ -321,8 +321,12 @@ def complete_loader_lines(data):
 def live_loader_snapshot(raw):
     data = (raw or b'')[:LIVE_LOADER_LIMIT]
     lines = complete_loader_lines(data)
-    summary = {'state': 'observed' if lines else 'no-complete-records' if data else 'unavailable',
-               'bytes_read': len(data), 'truncated': bool(raw and len(raw) > LIVE_LOADER_LIMIT),
+    return loader_summary(lines, len(data), bool(raw and len(raw) > LIVE_LOADER_LIMIT)), lines
+
+
+def loader_summary(lines, bytes_read, truncated=False):
+    summary = {'state': 'observed' if lines else 'no-complete-records' if bytes_read else 'unavailable',
+               'bytes_read': bytes_read, 'truncated': truncated,
                'records': len(lines), 'recent': lines[-12:], 'events': {}}
     for label, pattern in LIVE_LOADER_EVENTS.items():
         matching = [line for line in lines if pattern.match(line)]
@@ -350,7 +354,7 @@ def live_loader_snapshot(raw):
             stats['latest_failure_hresult'] = f'0x{value:08X}'
     if pipelines:
         summary['pipelines'] = pipelines
-    return summary, lines
+    return summary
 
 
 def collect_live_loader(args, portal, app, read_file, decode_report, portal_error):
@@ -370,21 +374,45 @@ def collect_live_loader(args, portal, app, read_file, decode_report, portal_erro
     if before.get('steam_shadow_stage') != 'verified-local-copy':
         raise ValueError('The current Steam launch does not report a verified compatibility copy.')
     matches = candidates()
-    if len(matches) != 1:
+    filename = named_exit_report(before, args.app_id)
+    hosted_run = numeric(before, 'steam_launch_sdl_run')
+    exit_code = None
+    if len(matches) == 1:
+        (name, _), = matches
+        raw = blob('loader-trace.txt', LIVE_LOADER_LIMIT, TEMP + '\\' + name)
+        current = candidates()
+        summary, lines = live_loader_snapshot(raw)
+        summary['source'] = 'live-stage'
+    elif not matches and filename:
+        if hosted_run is not None and filename != f'steam-win32-shadow-{args.app_id}-exit-{hosted_run}.txt':
+            raise ValueError('The child exit report does not match the hosted launch.')
+        raw = blob(filename, REPORT_LIMIT)
+        report = decode_report(raw) if raw and len(raw) <= REPORT_LIMIT else ''
+        report_fields = fields(report)
+        terminal = report.rstrip('\r\n').rpartition('\n')[2]
+        if (not report.endswith('\n') or report_fields.get('steam_shadow_child_status') != 'exited'
+                or not re.fullmatch(r'steam_shadow_loader_trace=(?:collected|no-output|no-complete-records|read-error|too-large)',
+                                    terminal)):
+            raise ValueError('The child exit report is unavailable or its loader trace is still pending.')
+        lines = embedded_loader_lines(report, ordered=True)
+        summary = loader_summary(lines, len(raw))
+        summary['source'] = 'exit-report'
+        exit_code = numeric(report_fields, 'steam_shadow_child_exit_u32')
+        current = candidates()
+    else:
         raise ValueError(f'Expected one staging directory created for the requested launch. Found {len(matches)}.')
-    (name, _), = matches
-    raw = blob('loader-trace.txt', LIVE_LOADER_LIMIT, TEMP + '\\' + name)
-    current = candidates()
     after = launch_report()
     if (not matching_probe(after, args.run_id, args.app_id)
-            or any(before.get(key) != after.get(key) for key in ('run_id', 'steam_shadow_stage'))):
+            or any(before.get(key) != after.get(key) for key in
+                   ('run_id', 'steam_shadow_stage', 'steam_shadow_exit_report', 'steam_launch_sdl_run'))):
         raise ValueError('The Steam launch changed during capture. No loader trace was saved.')
     if current != matches:
         raise ValueError('The staging directory changed during capture. No loader trace was saved.')
 
-    summary, lines = live_loader_snapshot(raw)
     result = {'version': args.version, 'mode': 'loader', 'app_id': args.app_id, 'run_id': args.run_id,
               'loader_trace': summary}
+    if exit_code is not None and 0 <= exit_code <= 0xffffffff:
+        result['process_exit'] = f'0x{exit_code:08X}'
     if args.output:
         artifacts = {'loader-trace.txt': ('\n'.join(lines) + '\n').encode('ascii')} if lines else {}
         result['artifacts'] = {filename: len(data) for filename, data in artifacts.items()}

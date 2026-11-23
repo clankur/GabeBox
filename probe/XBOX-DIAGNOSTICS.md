@@ -85,18 +85,18 @@ With `--output`, the command saves filtered metadata to `observation.json` and c
 
 ## Inspect the current game's loader trace
 
-For a running game that reports `steam_shadow_stage=verified-local-copy`, use the AppID and exact `steam_launch_run_id` from the same package version.
+For a game that reports `steam_shadow_stage=verified-local-copy`, use the AppID and exact `steam_launch_run_id` from the same package version.
 
 ```sh
 python3 xbox-deploy.py inspect-loader --version "$version" --app-id "$steam_app_id" \
     --run-id "$launch_run_id" --output loader-check
 ```
 
-The command finds a single staging directory created between the launch timestamp and five minutes after it. It stops if that window contains zero or multiple candidates, or if the launch or selected directory changes during collection. The trace remains available while the staged copy exists.
+The command reads the live trace from a single staging directory created within five minutes of launch. After stage cleanup, it can read the terminal report named by the same launch and include the child exit code. The JSON identifies the source as `live-stage` or `exit-report`. The command stops if the launch or its diagnostic source changes during collection, or if multiple staging directories match.
 
 The JSON summary gives the latest filtered records and counts for graphics pipeline compilation, boot waits, and shell requests. Counts cover recorded events, including repeats. If the runtime records graphics or compute pipeline request ordinals, `pipelines` reports the highest recorded request for each kind, the most recent sampled commit headroom, and the last observed failure HRESULT when present. The request ordinal is a lower bound and can include an in-flight request. If the runtime also samples its cumulative counters, `latest_counter_sample` gives the counter values and whether a pipeline call was active at that instant.
 
-The inspector reads up to 1 MiB of the trace and marks `truncated` when more bytes are available. A record still being written is skipped. Pass `--output` to save the summary and the complete allowlisted records within the read limit. The inspection only reads the selected package's diagnostics through Device Portal.
+The inspector reads up to 1 MiB of the live trace and marks `truncated` when more bytes are available. A record still being written is skipped. A terminal report must include its completion marker. Pass `--output` to save the summary and the complete allowlisted records within the read limit. The inspection only reads the selected package's diagnostics through Device Portal.
 
 ## Collect and measure
 
