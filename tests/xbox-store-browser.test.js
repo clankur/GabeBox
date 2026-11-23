@@ -79,6 +79,30 @@ test('clips native bounds and forwards controller edges only while Valve focuses
     assert.equal(sent.at(-1).action,'close');
 });
 
+test('two B taps remain Steam navigation while the Store has focus', () => {
+    const {client, owner, view, sent, adapter} = environment();
+    const inputSource = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-input.js'), 'utf8');
+    let tick, pressed = false;
+    Object.assign(owner, {document: {hidden: false}, setTimeout(callback) { tick = callback; return 1; }});
+    client.System = {};
+    const gamepads = {read() {
+        const buttons = Array.from({length: 16}, (_, index) => ({pressed: index === 1 && pressed}));
+        return [{id: 'pad', index: 0, mapping: 'standard', axes: [0, 0], buttons}];
+    }};
+    const install = runInNewContext(inputSource + '\ninstallXboxInput', {
+        window: owner, getXboxGamepadWindow: () => owner, notifyXboxControllerListChanged() {}
+    });
+    install(client, gamepads, adapter);
+    const valve = [];
+    client.Input.RegisterForControllerInputMessages((slot, code, down) => valve.push([slot, code, down]));
+    adapter.setActionset(true);
+    view.SetVisible(true); view.SetFocus(true);
+    const beforeBack = sent.length;
+    for (const edge of [true, false, true, false]) { pressed = edge; tick(); }
+    assert.deepEqual(valve, [[0, 1, true], [0, 1, false], [0, 1, true], [0, 1, false]]);
+    assert.deepEqual(sent.slice(beforeBack), []);
+});
+
 test('a controller release follows its press across Store focus changes and disconnects', () => {
     const inputSource = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-input.js'), 'utf8');
     for (const [index, code, key] of [[0, 0, 'enter'], [12, 20, 'up']]) {

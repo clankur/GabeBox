@@ -1,0 +1,4 @@
+LIBRARY XboxWin32Timer.dll
+EXPORTS
+    timeSetEvent=XboxTimeSetEvent
+    timeKillEvent=XboxTimeKillEvent

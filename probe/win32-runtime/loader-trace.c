@@ -47,7 +47,10 @@ static const char *ModuleLocation(HANDLE module) {
     while (imageLength && image[imageLength - 1] != '\\') --imageLength;
     while (loadedLength && loaded[loadedLength - 1] != '\\') --loadedLength;
     if (!imageLength || !loadedLength) return "unknown";
-    return CompareStringOrdinal(image, (int)imageLength, loaded, (int)loadedLength, 1) == 2 ? "adjacent" : "other";
+    if (loadedLength < imageLength ||
+            CompareStringOrdinal(image, (int)imageLength, loaded, (int)imageLength, TRUE) != CSTR_EQUAL)
+        return "other";
+    return loadedLength == imageLength ? "adjacent" : "staged-subdirectory";
 }
 
 static const WCHAR *AssetName(const WCHAR *path) {
@@ -212,14 +215,117 @@ static void StartFaultTrace(void) {
     AppendTrace(line, length);
 }
 
+static BOOL DynamicCompanionsEnabled(void) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_DYNAMIC_COMPANIONS", enabled, ARRAYSIZE(enabled)) == 1 &&
+        enabled[0] == L'1';
+}
+
+static BOOL FindStagedCompanion(LPCWSTR name, WCHAR *staged, DWORD capacity) {
+    if (!name) return FALSE;
+    WCHAR original[512], normalized[512];
+    DWORD root = GetEnvironmentVariableW(L"XBOX_WIN32_ORIGINAL_EXECUTABLE", original, ARRAYSIZE(original));
+    if (!root || root >= ARRAYSIZE(original)) return FALSE;
+    for (DWORD i = 0; i < root; ++i) {
+        if (original[i] == L'/') original[i] = L'\\';
+    }
+    while (root && original[root - 1] != L'\\') --root;
+    if (!root) return FALSE;
+
+    DWORD length = 0;
+    while (length < ARRAYSIZE(normalized) && name[length]) {
+        normalized[length] = name[length] == L'/' ? L'\\' : name[length];
+        ++length;
+    }
+    if (length <= root || length == ARRAYSIZE(normalized) ||
+            CompareStringOrdinal(original, (int)root, normalized, (int)root, TRUE) != CSTR_EQUAL) return FALSE;
+    normalized[length] = 0;
+    const WCHAR *part = normalized + root;
+    for (const WCHAR *p = part; ; ++p) {
+        if (!*p || *p == L'\\') {
+            if (p == part || (p[-1] == L'.' || p[-1] == L' ')) return FALSE;
+            if (!*p) break;
+            part = p + 1;
+        } else if (*p < L' ' || *p == L':') {
+            return FALSE;
+        }
+    }
+    if (length < root + 4 || CompareStringOrdinal(normalized + length - 4, 4, L".dll", 4, TRUE) != CSTR_EQUAL)
+        return FALSE;
+
+    DWORD directory = GetModuleFileNameW(NULL, staged, capacity);
+    if (!directory || directory >= capacity) return FALSE;
+    while (directory && staged[directory - 1] != L'\\') --directory;
+    if (!directory || directory + length - root >= capacity) return FALSE;
+    for (DWORD i = root; i <= length; ++i) staged[directory + i - root] = normalized[i];
+    for (WCHAR *p = staged + directory; *p; ++p) {
+        if (*p != L'\\') continue;
+        *p = 0;
+        const DWORD attributes = GetFileAttributesW(staged);
+        *p = L'\\';
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return FALSE;
+    }
+    const DWORD attributes = GetFileAttributesW(staged);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
+}
+
 HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     DWORD previous = GetLastError();
     RestoreWorkingDirectory();
     StartFaultTrace();
+    WCHAR wide[512], staged[512];
+    const BOOL companion = name && DynamicCompanionsEnabled() &&
+        MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) &&
+        FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
     SetLastError(previous);
-    HANDLE result = LoadLibraryA(name);
+    HANDLE result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
     DWORD error = GetLastError();
     Record(name, result, 1, result != 0, error);
+    SetLastError(error);
+    return result;
+}
+
+static void RecordWideLoad(LPCWSTR path, HMODULE result, DWORD error) {
+    if (!path) {
+        Record(NULL, result, 1, result != NULL, error);
+        return;
+    }
+    const WCHAR *leaf = path;
+    for (const WCHAR *part = path; *part; ++part) {
+        if (*part == L'\\' || *part == L'/' || *part == L':') leaf = part + 1;
+    }
+    char name[101];
+    unsigned length = 0;
+    while (length + 1 < ARRAYSIZE(name) && leaf[length]) {
+        name[length] = leaf[length] < 128 ? (char)leaf[length] : '_';
+        ++length;
+    }
+    name[length] = 0;
+    Record(name, result, 1, result != NULL, error);
+}
+
+HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
+    const DWORD previous = GetLastError();
+    WCHAR staged[512];
+    const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
+    SetLastError(previous);
+    HMODULE result = LoadLibraryW(companion ? staged : name);
+    const DWORD error = GetLastError();
+    RecordWideLoad(name, result, error);
+    SetLastError(error);
+    return result;
+}
+
+HMODULE WINAPI XboxLoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
+    const DWORD previous = GetLastError();
+    WCHAR staged[512];
+    const BOOL companion = !file && DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
+    SetLastError(previous);
+    HMODULE result = LoadLibraryExW(companion ? staged : name, file, flags);
+    const DWORD error = GetLastError();
+    RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
 }

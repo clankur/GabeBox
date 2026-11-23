@@ -17,6 +17,14 @@
         return counters;
     }
 
+    function gpuCheckpoint(host) {
+        try {
+            return host.status().split(/\r?\n/).filter(function (line) {
+                return /^gpu_stage=[a-z][a-z0-9-]{0,47}$/.test(line) || /^gpu_hresult=[0-9]{1,10}$/.test(line);
+            }).map(function (line) { return "steam_sdl_" + line + "\r\n"; }).join("");
+        } catch (_) { return ""; }
+    }
+
     // The native panel is a sibling of the QR WebView and Valve's Steam surface.
     // Count unique successful swaps only during one continuous foreground interval.
     function openPanel(host, path, events, nativePad, screen, mainId) {
@@ -63,7 +71,7 @@
                     return;
                 }
                 var swaps = +count[1];
-                if (!shown) { shown = true; events.presented(stats); }
+                if (!shown) { shown = true; events.presented(stats, gpuCheckpoint(host)); }
                 if (!sampleStart) sampleStart = {time: now, swaps: swaps, counters: panelCounters(stats)};
                 var elapsed = Math.round((now - sampleStart.time) * 1000);
                 if (events.measured && elapsed >= 30000000) {

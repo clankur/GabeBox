@@ -1,4 +1,5 @@
 #include "window.h"
+#include "../steam-handoff-control.h"
 #include <appmodel.h>
 
 #define CONTEXT_COUNT 16
@@ -49,6 +50,9 @@ typedef struct Context {
 static SdlGl sdl;
 static BOOL initialized;
 static BOOL hostEvents;
+static BOOL steamChecked;
+static volatile LONG startupSwapAttempts;
+static enum { HostPollBeforeSwap, HostPollPending, HostPollTraced } startupHostPoll;
 static Context contexts[CONTEXT_COUNT];
 static ULONG_PTR nextContext = 0x584243000001ULL;
 
@@ -69,8 +73,26 @@ static BOOL PackagePath(LPCWSTR variable, LPCWSTR library) {
     return !*library && SetEnvironmentVariableW(variable, path);
 }
 
+static void InitializeSteamworks(void) {
+    if (steamChecked) return;
+    steamChecked = TRUE;
+    if (GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_SDK", NULL, 0) <= 1) return;
+    typedef DWORD (WINAPI *Initialize)(BOOL);
+    HMODULE module = LoadPackagedLibrary(L"XboxWin32SteamDiscovery.dll", 0);
+    Initialize initialize = module ? (Initialize)(void *)GetProcAddress(module, "XboxSteamInitialize") : NULL;
+    if (!initialize) {
+        XboxWindowTrace("win32_steam_handoff=unavailable\n");
+    } else {
+        const DWORD required = STEAM_HANDOFF_SDK_INITIALIZED | STEAM_HANDOFF_SDK_MATCHED;
+        const DWORD result = initialize(TRUE);
+        XboxWindowTrace((result & required) == required ? "win32_steam_handoff=ready\n" : "win32_steam_handoff=error\n");
+    }
+    if (module) FreeLibrary(module);
+}
+
 static BOOL Initialize(void) {
     if (initialized) return TRUE;
+    InitializeSteamworks();
     HMODULE module = LoadLibraryExW(L"SDL2.dll", NULL, 0);
     if (!module) return FALSE;
 #define SDL_BIND(member, exportName) \
@@ -118,6 +140,11 @@ fail:
 
 void XboxPollWglHostEvents(void) {
     if (!hostEvents) return;
+    const BOOL trace = startupHostPoll == HostPollPending;
+    if (trace) {
+        startupHostPoll = HostPollTraced;
+        XboxWindowTrace("win32_wgl_post_swap_events=begin\n");
+    }
     sdl.pumpEvents();
     SdlWindowEvent events[32];
     const int count = sdl.peepEvents(events, ARRAYSIZE(events), SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT);
@@ -131,6 +158,7 @@ void XboxPollWglHostEvents(void) {
             }
         }
     }
+    if (trace) XboxWindowTrace("win32_wgl_post_swap_events=returned\n");
 }
 
 static Context *FindContext(HGLRC handle) {
@@ -215,6 +243,7 @@ static HGLRC CreateContext(HDC dc, int major, int minor, int profile, int flags)
 }
 
 HGLRC WINAPI XboxWglCreateContext(HDC dc) {
+    XboxWatchHostExit();
     return CreateContext(dc, 2, 1, 0, 0);
 }
 
@@ -293,14 +322,36 @@ BOOL WINAPI XboxWglDeleteContext(HGLRC handle) {
     return TRUE;
 }
 
+HGLRC WINAPI XboxWglGetCurrentContext(void) {
+    const Context *context = CurrentContext();
+    return context ? context->handle : NULL;
+}
+
+HDC WINAPI XboxWglGetCurrentDC(void) {
+    const Context *context = CurrentContext();
+    return context ? (HDC)context->window->handle : NULL;
+}
+
 BOOL WINAPI XboxSwapBuffers(HDC dc) {
-    if (!XboxWindowThread()) return FALSE;
+    LONG attempt = 0;
+    if (startupSwapAttempts < 2) attempt = InterlockedIncrement(&startupSwapAttempts);
+    if (attempt == 1) XboxWindowTrace("win32_wgl_swap_entry=first\n");
+    else if (attempt == 2) XboxWindowTrace("win32_wgl_swap_entry=second\n");
+    const BOOL trace = attempt == 1 || attempt == 2;
+    if (!XboxWindowThread()) {
+        if (trace) XboxWindowTrace("win32_wgl_swap_rejected=thread\n");
+        return FALSE;
+    }
     Context *context = CurrentContext();
     if (!context || context->window->handle != (HWND)dc) {
+        if (trace) XboxWindowTrace("win32_wgl_swap_rejected=context-or-dc\n");
         SetLastError(ERROR_INVALID_HANDLE);
         return FALSE;
     }
+    if (trace) XboxWindowTrace("win32_wgl_sdl_swap=begin\n");
     sdl.swapWindow(context->sdlWindow);
+    if (trace) XboxWindowTrace("win32_wgl_sdl_swap=returned\n");
+    if (hostEvents && startupHostPoll == HostPollBeforeSwap) startupHostPoll = HostPollPending;
     if (!context->presented) {
         context->presented = TRUE;
         XboxWindowTrace("win32_wgl_swap=submitted\n");
@@ -312,15 +363,28 @@ static BOOL WINAPI SwapInterval(int interval) {
     return XboxWindowThread() && CurrentContext() && sdl.swapInterval(interval) == 0;
 }
 
-static LPCSTR WINAPI ExtensionString(HDC dc) {
+static const char wglExtensions[] = "WGL_ARB_extensions_string WGL_EXT_extensions_string "
+    "WGL_ARB_create_context WGL_ARB_create_context_profile WGL_EXT_swap_control";
+
+static LPCSTR WINAPI ExtensionStringARB(HDC dc) {
     if (!XboxFindWindow((HWND)dc)) return NULL;
-    return "WGL_ARB_extensions_string WGL_ARB_create_context WGL_ARB_create_context_profile WGL_EXT_swap_control";
+    return wglExtensions;
+}
+
+static LPCSTR WINAPI ExtensionStringEXT(void) {
+    if (!XboxWindowThread()) return NULL;
+    if (!CurrentContext()) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+    return wglExtensions;
 }
 
 PROC WINAPI XboxWglGetProcAddress(LPCSTR name) {
     if (!XboxWindowThread() || !CurrentContext() || (ULONG_PTR)name <= 0xffffu) return NULL;
     if (Equals(name, "wglCreateContextAttribsARB")) return (PROC)(void *)CreateContextAttribs;
-    if (Equals(name, "wglGetExtensionsStringARB")) return (PROC)(void *)ExtensionString;
+    if (Equals(name, "wglGetExtensionsStringARB")) return (PROC)(void *)ExtensionStringARB;
+    if (Equals(name, "wglGetExtensionsStringEXT")) return (PROC)(void *)ExtensionStringEXT;
     if (Equals(name, "wglSwapIntervalEXT")) return (PROC)(void *)SwapInterval;
     if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l') return NULL;
     return (PROC)sdl.procedure(name);
@@ -332,6 +396,8 @@ FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
         if (Equals(name, "wglMakeCurrent")) return (FARPROC)(void *)XboxWglMakeCurrent;
         if (Equals(name, "wglDeleteContext")) return (FARPROC)(void *)XboxWglDeleteContext;
         if (Equals(name, "wglGetProcAddress")) return (FARPROC)(void *)XboxWglGetProcAddress;
+        if (Equals(name, "wglGetCurrentContext")) return (FARPROC)(void *)XboxWglGetCurrentContext;
+        if (Equals(name, "wglGetCurrentDC")) return (FARPROC)(void *)XboxWglGetCurrentDC;
     }
     return GetProcAddress(module, name);
 }

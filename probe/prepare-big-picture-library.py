@@ -93,8 +93,11 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
     files = {}
     trace = False
     desktop_gl = False
+    unity_host = False
     crash_reports = False
+    steam_sdk = False
     desktop_dxgi = False
+    storage_trace = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -106,21 +109,32 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         companion_name = f"steam-win32-files-{app}.txt"
         profile = (root / profile_name).read_bytes()
         fields = profile.decode("ascii").splitlines()
-        if (not 2 <= len(fields) <= 7 or not re.fullmatch(r"[1-9][0-9]{0,19}", fields[0])
+        if (not 2 <= len(fields) <= 8 or not re.fullmatch(r"[1-9][0-9]{0,19}", fields[0])
                 or not re.fullmatch(r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.exe", fields[1])
                 or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d12"))
-                or (len(fields) >= 4 and fields[3] not in ("", "godot"))
-                or (len(fields) >= 3 and fields[2] and fields[3:4] != ["godot"])
+                or (len(fields) >= 4 and fields[3] not in ("", "godot", "unity"))
+                or (len(fields) >= 3 and fields[2] and fields[3:4] not in (["godot"], ["unity"]))
                 or (len(fields) >= 5 and fields[4] and not re.fullmatch(
                     r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.(?:exe|dll)", fields[4]))
                 or (len(fields) >= 6 and len(fields[5]) > 260)
                 or (len(fields) >= 7 and fields[6] not in ("", "loader-trace"))):
             raise ValueError(f"Invalid Win32 trial profile for AppID {app}.")
+        if len(fields) == 8:
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if (fields[7] != "accessibility=disabled" or fields[2:4] != ["opengl3", "godot"]
+                    or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"The accessibility option needs a matching hosted OpenGL profile for AppID {app}.")
         trace |= fields[6:7] == ["loader-trace"]
         desktop_gl |= fields[2:3] == ["opengl3"]
         recipe = (root / recipe_name).read_bytes()
         validate_recipe(recipe)
         files.update({profile_name: profile, recipe_name: recipe})
+        storage_marker = f"steam-win32-storage-trace-{app}.txt"
+        if (root / storage_marker).is_file():
+            if (root / storage_marker).stat().st_size or fields[6:7] != ["loader-trace"]:
+                raise ValueError(f"The storage marker requires an empty file and a loader trace for AppID {app}.")
+            files[storage_marker] = b""
+            storage_trace = True
         argument_name = f"steam-win32-arguments-{app}.txt"
         if (root / argument_name).is_file():
             with (root / argument_name).open("rb") as source:
@@ -141,19 +155,60 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                 raise ValueError(f"The DXGI marker requires the game's default native renderer for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
-        for option in ("working-directory", "original-executable"):
+        for option in ("working-directory", "original-executable", "dynamic-companions"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
                 if (root / marker).stat().st_size:
                     raise ValueError(f"Expected an empty {option} marker for AppID {app}.")
                 files[marker] = b""
                 trace = True
+        shader_cache = f"steam-win32-godot-shader-cache-{app}.txt"
+        if (root / shader_cache).is_file():
+            with (root / shader_cache).open("rb") as source:
+                cache_option = source.read(17)
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if (len(cache_option) > 16 or cache_option.rstrip(b"\r\n") not in (b"control", b"disabled")
+                    or fields[2:4] != ["opengl3", "godot"] or any(fields[4:6])
+                    or f"steam-win32-original-executable-{app}.txt" in files or argument_name in files
+                    or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"The shader cache trial needs a matching staged Godot OpenGL launcher for AppID {app}.")
+            files[shader_cache] = cache_option.rstrip(b"\r\n")
         companions = root / companion_name
+        if f"steam-win32-dynamic-companions-{app}.txt" in files and (
+                f"steam-win32-original-executable-{app}.txt" not in files
+                or not companions.is_file() or fields[6:7] != ["loader-trace"]):
+            raise ValueError(f"Dynamic companions require the original executable path, a companion list, and loader trace for AppID {app}.")
+        unity = fields[3:4] == ["unity"]
+        if unity:
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if (fields[2] != "opengl3" or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
+                    or not companions.is_file() or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"The Unity option needs a matching hosted OpenGL launcher and loader trace for AppID {app}.")
+            unity_host = True
+        sdk_marker = f"steam-win32-steam-sdk-{app}.txt"
+        sdk_profile = root / sdk_marker
+        sdk_relative = None
+        if sdk_profile.is_file():
+            if sdk_profile.stat().st_size > 512 or fields[2:4] != ["opengl3", "godot"] or not companions.is_file():
+                raise ValueError(f"The Steam SDK option needs a staged OpenGL profile for AppID {app}.")
+            sdk_relative = sdk_profile.read_text(encoding="ascii").rstrip("\r\n")
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if (not re.fullmatch(r"(?:[A-Za-z0-9._ -]+/)*steam_api64\.dll", sdk_relative)
+                    or any(part.endswith((".", " ")) for part in sdk_relative.split("/"))
+                    or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"Invalid Steam SDK path or missing hosted profile for AppID {app}.")
+            files[sdk_marker] = sdk_relative.encode("ascii")
+            steam_sdk = True
         if companions.is_file():
             if companions.stat().st_size > 65536:
                 raise ValueError(f"Win32 trial companion list is too large for AppID {app}.")
             data = companions.read_bytes()
             rows = data.decode("utf-8-sig").splitlines()
+            if sdk_relative is not None and sdk_relative not in rows:
+                raise ValueError(f"The Steam SDK must appear as an unchanged companion for AppID {app}.")
+            if unity and sum(row.partition("\t")[0] == "UnityPlayer.dll" for row in rows) != 1:
+                raise ValueError(f"UnityPlayer.dll must appear once as a companion for AppID {app}.")
             for row in rows:
                 image, tab, key = row.partition("\t")
                 if not tab:
@@ -174,16 +229,36 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             raise ValueError("Use an x64 Steam Core runtime template built for this checkout.")
         for name in ("ProbeNative.dll", "XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
             files[name] = package.read(name)
+        if "XboxWin32Timer.dll" in package.namelist():
+            files["XboxWin32Timer.dll"] = package.read("XboxWin32Timer.dll")
         if desktop_gl or desktop_dxgi:
             files["XboxWin32Window.dll"] = package.read("XboxWin32Window.dll")
         if desktop_dxgi:
             files["XboxWin32Dxgi.dll"] = package.read("XboxWin32Dxgi.dll")
+        if unity_host:
+            files["XboxWin32Unity.dll"] = package.read("XboxWin32Unity.dll")
+            if "XboxWin32DisplayConfig.dll" in package.namelist():
+                files["XboxWin32DisplayConfig.dll"] = package.read("XboxWin32DisplayConfig.dll")
         if crash_reports:
             files["XboxWin32CrashReport.dll"] = package.read("XboxWin32CrashReport.dll")
+        if steam_sdk:
+            files["XboxWin32SteamDiscovery.dll"] = package.read("XboxWin32SteamDiscovery.dll")
         if trace:
             files["XboxWin32LoaderTrace.dll"] = package.read("XboxWin32LoaderTrace.dll")
+        if storage_trace:
+            files["XboxWin32StorageTrace.dll"] = package.read("XboxWin32StorageTrace.dll")
     for name, data in files.items():
         (layout / name).write_bytes(data)
+
+
+def stage_bridge(layout):
+    steamui = layout / "ValveClient/steamui"
+    shell = steamui / "xbox"
+    shell.mkdir()
+    bundle = runpy.run_path(str(PROBE / "big-picture-bridge/bundle.py"))["bundle"]
+    movie_assets = steamui if (steamui / "movies/bigpicture_startup.webm").is_file() else None
+    (shell / "bridge.js").write_text(bundle(layout / "ValveClient/public/url_list.txt",
+        movie_probe_assets=movie_assets, local_cloud_cache_reads=True), encoding="utf-8")
 
 
 def stage_storage_capability(layout):
@@ -201,9 +276,12 @@ def stage_storage_capability(layout):
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
-                   win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False):
+                   win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False,
+                   early_library_reveal=False):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
+    if early_library_reveal and primary_xaml is None:
+        raise ValueError("--early-library-reveal requires --primary-xaml.")
     if (presenter_artifact is None) != (presenter_checksum is None):
         raise ValueError("Supply both --presenter-artifact and --presenter-checksum.")
     if layout.exists():
@@ -251,13 +329,10 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
                                           b'    <script src="big-picture-webview.js"></script>\n    ' + marker))
 
         stage_client(staged / "ValveClient", archive_cache, ui_only=True, include_url_catalog=True)
-        shell = staged / "ValveClient/steamui/xbox"
-        shell.mkdir()
-        bundle = runpy.run_path(str(PROBE / "big-picture-bridge/bundle.py"))["bundle"]
-        (shell / "bridge.js").write_text(bundle(staged / "ValveClient/public/url_list.txt"), encoding="utf-8")
+        stage_bridge(staged)
         if primary_xaml is not None:
             stage_primary = runpy.run_path(str(PROBE / "big-picture-primary/stage.py"))["stage_primary"]
-            stage_primary(staged, primary_xaml, primary_checksum)
+            stage_primary(staged, primary_xaml, primary_checksum, early_library_reveal)
         if library_inventory:
             (staged / "steam-library-inventory.txt").touch()
         stage_surfaceless_profiles(staged, surfaceless_profiles)
@@ -283,6 +358,8 @@ if __name__ == "__main__":
     parser.add_argument("--presenter-checksum", help="SHA256 of the presenter artifact SHA256SUMS file")
     parser.add_argument("--primary-xaml", type=Path, help="optional Windows native primary XAML host artifact")
     parser.add_argument("--primary-checksum", help="SHA256 of the XAML host artifact SHA256SUMS file")
+    parser.add_argument("--early-library-reveal", action="store_true",
+                        help="trial earlier foreground reveal after serving the authenticated Steam library on primary XAML")
     parser.add_argument("--dwarf-sdl", nargs=2, metavar=("ARTIFACT", "DLL_SHA256"),
                         help="Windows SDL 2.26.2 artifact for Dwarf Fortress")
     parser.add_argument("--shared-sdl", nargs=2, metavar=("ARTIFACT", "DLL_SHA256"),
@@ -301,4 +378,5 @@ if __name__ == "__main__":
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
-                   args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template, args.migrate_legacy_library)
+                   args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template,
+                   args.migrate_legacy_library, args.early_library_reveal)

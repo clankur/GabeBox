@@ -1,5 +1,6 @@
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
+#include <appmodel.h>
 #include <new>
 #include "dxgi-frame.h"
 #include "../sdl-swap-clock.h"
@@ -54,6 +55,130 @@ void Trace(const char* phase, HRESULT code) {
     AppendTrace(line, static_cast<DWORD>(out - line));
 }
 
+template<size_t N>
+bool HasPackageMarker(const WCHAR (&suffix)[N]) {
+    WCHAR path[1024];
+    UINT32 length = ARRAYSIZE(path);
+    if (GetCurrentPackagePath(&length, path) != ERROR_SUCCESS || !length ||
+            length - 1 + N > ARRAYSIZE(path)) return false;
+    for (size_t i = 0; i < N; ++i) path[length - 1 + i] = suffix[i];
+    const HANDLE marker = CreateFile2FromAppW(path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, nullptr);
+    if (marker == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(marker);
+    return true;
+}
+
+class ProducerCadenceTrace {
+    static constexpr LONG maxRecords = 48;
+    inline static volatile LONG records_ = 0;
+    inline static volatile LONG stallRecords_ = 0;
+    UINT64 frequency_ = 0, start_ = 0, last_ = 0, maxGap_ = 0;
+    UINT64 previousReturn_ = 0;
+    UINT attempts_ = 0, submitted_ = 0, busy_ = 0;
+    UINT immediate_ = 0, syncOne_ = 0;
+    bool aggregate_ = true;
+
+    static void Field(char*& out, const char* label, UINT64 value) {
+        while (*label) *out++ = *label++;
+        char digits[20];
+        unsigned count = 0;
+        do {
+            digits[count++] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        } while (value);
+        while (count) *out++ = digits[--count];
+    }
+
+public:
+    struct PresentTiming {
+        UINT64 entered = 0, locked = 0, split = 0, prepared = 0, returned = 0;
+        bool pacerFirst = false;
+    };
+
+    void Enable() {
+        LARGE_INTEGER frequency{};
+        if (GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", nullptr, 0) &&
+                QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+            frequency_ = static_cast<UINT64>(frequency.QuadPart);
+    }
+
+    bool Enabled() const { return frequency_ != 0; }
+
+    UINT64 Timestamp() const {
+        if (!frequency_) return 0;
+        LARGE_INTEGER counter{};
+        const DWORD previous = GetLastError();
+        const BOOL sampled = QueryPerformanceCounter(&counter);
+        SetLastError(previous);
+        return sampled && counter.QuadPart > 0 ? static_cast<UINT64>(counter.QuadPart) : 0;
+    }
+
+    void RecordPresent(const PresentTiming& timing, bool active) {
+        if (!timing.entered || !timing.locked || !timing.split || !timing.prepared || !timing.returned || !active) {
+            previousReturn_ = 0;
+            return;
+        }
+        const UINT64 begin = previousReturn_ && previousReturn_ < timing.entered ? previousReturn_ : timing.entered;
+        previousReturn_ = timing.returned;
+        if (timing.returned - begin < frequency_ / 20 || stallRecords_ >= maxRecords ||
+                InterlockedIncrement(&stallRecords_) > maxRecords) return;
+        // The loader's report also accepts this line at maximum QPC width.
+        char line[182], *out = line;
+        Field(out, "dxgi stall qpc=", begin);
+        Field(out, " enter=", timing.entered);
+        Field(out, " lock=", timing.locked);
+        Field(out, " split=", timing.split);
+        Field(out, " present=", timing.prepared);
+        Field(out, " end=", timing.returned);
+        Field(out, " prepace=", timing.pacerFirst);
+        *out++ = '\r';
+        *out++ = '\n';
+        AppendTrace(line, static_cast<DWORD>(out - line));
+        // Exclude diagnostic file I/O from the next call's measured interval.
+        previousReturn_ = Timestamp();
+    }
+
+    void Record(HRESULT result, bool active, UINT interval, UINT flags) {
+        if (!aggregate_) return;
+        const auto now = Timestamp();
+        if (!now) return;
+        if (!start_) start_ = now;
+        if (last_ && now - last_ > maxGap_) maxGap_ = now - last_;
+        last_ = now;
+        ++attempts_;
+        if (result == S_OK) ++submitted_;
+        if (result == S_FALSE && active) ++busy_;
+        if (!flags && interval == 0) ++immediate_;
+        if (!flags && interval == 1) ++syncOne_;
+        if (now - start_ >= frequency_ * 5) Flush();
+    }
+
+    void Flush() {
+        if (!attempts_ || !aggregate_) return;
+        if (InterlockedIncrement(&records_) > maxRecords) {
+            aggregate_ = false;
+            return;
+        }
+        char line[240], *out = line;
+        Field(out, "dxgi cadence end-qpc=", last_);
+        Field(out, " elapsed-ms=", (last_ - start_) * 1000 / frequency_);
+        Field(out, " attempts=", attempts_);
+        Field(out, " submitted=", submitted_);
+        Field(out, " slot-busy=", busy_);
+        Field(out, " max-gap-ms=", maxGap_ * 1000 / frequency_);
+        Field(out, " immediate=", immediate_);
+        Field(out, " sync-one=", syncOne_);
+        *out++ = '\r';
+        *out++ = '\n';
+        AppendTrace(line, static_cast<DWORD>(out - line));
+        start_ = last_;
+        maxGap_ = 0;
+        attempts_ = submitted_ = busy_ = 0;
+        immediate_ = syncOne_ = 0;
+    }
+};
+
 class HostedSwapChain final : public IDXGISwapChain1 {
     IDXGISwapChain1* native_;
     IDXGIFactory2* factory_;
@@ -61,8 +186,10 @@ class HostedSwapChain final : public IDXGISwapChain1 {
     volatile LONG references_ = 1;
     SRWLOCK lock_ = SRWLOCK_INIT;
     DxgiFramePublisher publisher_;
+    ProducerCadenceTrace cadence_;
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
+    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
@@ -79,7 +206,11 @@ class HostedSwapChain final : public IDXGISwapChain1 {
         if (!counterFrequency_) {
             if (!QueryPerformanceFrequency(&counter) || counter.QuadPart <= 0) return interval;
             counterFrequency_ = static_cast<UINT64>(counter.QuadPart);
-            clock_.frequency = counterFrequency_;
+            // The shared clock divides by 60. Scaling its numerator by
+            // 1001/1000 selects a 60000/1001 Hz period; QPC still uses its
+            // unmodified frequency when converting ticks to sleep time.
+            clock_.frequency = counterFrequency_ + (use5994_ ? counterFrequency_ / 1000 : 0);
+            if (use5994_) Trace("pacing-rate-millihz", 59940);
         }
         if (!QueryPerformanceCounter(&counter)) return interval;
 
@@ -95,9 +226,10 @@ class HostedSwapChain final : public IDXGISwapChain1 {
         return 0;
     }
 
-    void Publish(UINT flags) {
+    void Publish(UINT interval, UINT flags) {
         if (flags & DXGI_PRESENT_TEST) return;
         const HRESULT code = publisher_.Publish(native_);
+        cadence_.Record(code, publisher_.IsActive(), interval, flags);
         if (code == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
             using RequestClose = void (WINAPI *)(HWND);
             auto windows = GetModuleHandleW(L"XboxWin32Window.dll");
@@ -112,6 +244,23 @@ class HostedSwapChain final : public IDXGISwapChain1 {
         }
     }
 
+    UINT PreparePresent(UINT interval, UINT flags, ProducerCadenceTrace::PresentTiming& timing) {
+        timing.pacerFirst = paceBeforePublish_ && interval == 1 && flags == 0 && publisher_.IsActive();
+        if (timing.pacerFirst) {
+            const UINT nativeInterval = NativeInterval(interval, flags);
+            if (timing.entered) timing.split = cadence_.Timestamp();
+            Publish(interval, flags);
+            if (nativeInterval == 0 && !tracedPublishTiming_) {
+                Trace("pacing-before-publish", S_OK);
+                tracedPublishTiming_ = true;
+            }
+            return nativeInterval;
+        }
+        Publish(interval, flags);
+        if (timing.entered) timing.split = cadence_.Timestamp();
+        return NativeInterval(interval, flags);
+    }
+
     void TracePresent(UINT interval, UINT nativeInterval, UINT flags, HRESULT code) {
         if (!tracedPresent_ && !(flags & DXGI_PRESENT_TEST)) {
             Trace("present-interval", static_cast<HRESULT>(interval));
@@ -122,9 +271,33 @@ class HostedSwapChain final : public IDXGISwapChain1 {
         }
     }
 
+    template <class NativePresent>
+    HRESULT PresentHosted(UINT interval, UINT flags, NativePresent present) {
+        ProducerCadenceTrace::PresentTiming timing;
+        const bool measure = cadence_.Enabled() && !(flags & DXGI_PRESENT_TEST);
+        if (measure) timing.entered = cadence_.Timestamp();
+        AcquireSRWLockExclusive(&lock_);
+        if (timing.entered) timing.locked = cadence_.Timestamp();
+        const UINT nativeInterval = PreparePresent(interval, flags, timing);
+        if (timing.entered) timing.prepared = cadence_.Timestamp();
+        const HRESULT result = present(nativeInterval);
+        if (timing.entered) timing.returned = cadence_.Timestamp();
+        TracePresent(interval, nativeInterval, flags, result);
+        if (measure) cadence_.RecordPresent(timing, publisher_.IsActive());
+        ReleaseSRWLockExclusive(&lock_);
+        return result;
+    }
+
 public:
     HostedSwapChain(IDXGISwapChain1* native, IDXGIFactory2* factory, HWND window)
         : native_(native), factory_(factory), window_(window) {
+        const DWORD error = GetLastError();
+        if (HasPackageMarker(L"\\fhd-measure.txt")) {
+            paceBeforePublish_ = HasPackageMarker(L"\\fhd-paced-publish.txt");
+            use5994_ = HasPackageMarker(L"\\fhd-refresh-5994.txt");
+            cadence_.Enable();
+        }
+        SetLastError(error);
         factory_->AddRef();
     }
 
@@ -142,6 +315,7 @@ public:
     ULONG STDMETHODCALLTYPE Release() override {
         const LONG count = InterlockedDecrement(&references_);
         if (!count) {
+            cadence_.Flush();
             publisher_.Reset();
             native_->Release();
             factory_->Release();
@@ -164,13 +338,9 @@ public:
     HRESULT STDMETHODCALLTYPE GetDevice(REFIID iid, void** out) override { return native_->GetDevice(iid, out); }
 
     HRESULT STDMETHODCALLTYPE Present(UINT interval, UINT flags) override {
-        AcquireSRWLockExclusive(&lock_);
-        Publish(flags);
-        const UINT nativeInterval = NativeInterval(interval, flags);
-        const HRESULT code = native_->Present(nativeInterval, flags);
-        TracePresent(interval, nativeInterval, flags, code);
-        ReleaseSRWLockExclusive(&lock_);
-        return code;
+        return PresentHosted(interval, flags, [this, flags](UINT nativeInterval) {
+            return native_->Present(nativeInterval, flags);
+        });
     }
     HRESULT STDMETHODCALLTYPE GetBuffer(UINT index, REFIID iid, void** out) override { return native_->GetBuffer(index, iid, out); }
     HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL fullscreen, IDXGIOutput* output) override {
@@ -213,13 +383,9 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID iid, void** out) override { return native_->GetCoreWindow(iid, out); }
     HRESULT STDMETHODCALLTYPE Present1(UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters) override {
-        AcquireSRWLockExclusive(&lock_);
-        Publish(flags);
-        const UINT nativeInterval = NativeInterval(interval, flags);
-        const HRESULT code = native_->Present1(nativeInterval, flags, parameters);
-        TracePresent(interval, nativeInterval, flags, code);
-        ReleaseSRWLockExclusive(&lock_);
-        return code;
+        return PresentHosted(interval, flags, [this, flags, parameters](UINT nativeInterval) {
+            return native_->Present1(nativeInterval, flags, parameters);
+        });
     }
     BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() override { return native_->IsTemporaryMonoSupported(); }
     HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput** out) override { return native_->GetRestrictToOutput(out); }

@@ -24,7 +24,7 @@ IMPORT int WINAPI WideCharToMultiByte(unsigned int codePage, DWORD flags, const 
 IMPORT int WINAPI GetLocaleInfoW(DWORD locale, DWORD field, WCHAR *result, int capacity);
 IMPORT void WINAPI SetLastError(DWORD error);
 
-static Procedure User32Export(const char *name) {
+Procedure XboxUser32Export(const char *name) {
     Module user = GetModuleHandleW(L"user32.dll");
     if (!user) user = LoadLibraryExW(L"user32.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return user ? GetProcAddress(user, name) : 0;
@@ -33,9 +33,9 @@ static Procedure User32Export(const char *name) {
 void *WINAPI XboxLoadCursorFromFileW(const WCHAR *path) {
     typedef void *(WINAPI *LoadCursor)(const WCHAR *);
     typedef void *(WINAPI *LoadImage)(Module, const WCHAR *, unsigned int, int, int, unsigned int);
-    LoadCursor native = (LoadCursor)User32Export("LoadCursorFromFileW");
+    LoadCursor native = (LoadCursor)XboxUser32Export("LoadCursorFromFileW");
     if (native) return native(path);
-    LoadImage loadImage = (LoadImage)User32Export("LoadImageW");
+    LoadImage loadImage = (LoadImage)XboxUser32Export("LoadImageW");
     if (loadImage) return loadImage(0, path, IMAGE_CURSOR, 0, 0, LR_LOADFROMFILE);
     SetLastError(ERROR_NOT_SUPPORTED);
     return 0;
@@ -43,7 +43,7 @@ void *WINAPI XboxLoadCursorFromFileW(const WCHAR *path) {
 
 int WINAPI XboxGetPointerPenInfo(unsigned int pointerId, void *penInfo) {
     typedef int (WINAPI *GetPenInfo)(unsigned int, void *);
-    GetPenInfo native = (GetPenInfo)User32Export("GetPointerPenInfo");
+    GetPenInfo native = (GetPenInfo)XboxUser32Export("GetPointerPenInfo");
     if (native) return native(pointerId, penInfo);
     SetLastError(ERROR_NOT_SUPPORTED);
     return 0;
@@ -51,9 +51,9 @@ int WINAPI XboxGetPointerPenInfo(unsigned int pointerId, void *penInfo) {
 
 unsigned int WINAPI XboxMapVirtualKeyExA(unsigned int code, unsigned int mapType, void *layout) {
     typedef unsigned int (WINAPI *MapKey)(unsigned int, unsigned int, void *);
-    MapKey ansi = (MapKey)User32Export("MapVirtualKeyExA");
+    MapKey ansi = (MapKey)XboxUser32Export("MapVirtualKeyExA");
     if (ansi) return ansi(code, mapType, layout);
-    MapKey wide = (MapKey)User32Export("MapVirtualKeyExW");
+    MapKey wide = (MapKey)XboxUser32Export("MapVirtualKeyExW");
     if (!wide) {
         SetLastError(ERROR_NOT_SUPPORTED);
         return 0;

@@ -133,3 +133,24 @@ Add `--measure-sdl-frames` to a repeat launch of an enabled SDL profile to recor
 ```sh
 python3 probe/fhd/measure.py fhd-present-times.bin --start-utc "$scene_start_plus_eight_seconds" --duration 30
 ```
+
+The current GPU receiver checks the presenter's DXGI adapter flags and confirms that its adapter LUID matches the game's shared textures. The fullscreen and primary XAML presenters write version 2 frame traces. Use `--require-gpu-60` with `measure.py` to require a scene of at least 30 seconds, exclusively hardware shared-texture frames, an average of at least 59.5 FPS, and at least 57 distinct frames in each rolling second. The average threshold accommodates nominal 60 Hz displays such as 59.94 Hz. Use the same flag with the compatibility coverage tool. Record the observed gameplay sample as `performance_scene: "gameplay"` and include its measured summary as `performance`. [DXGI adapter flags](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ne-dxgi-dxgi_adapter_flag)
+
+Series X build `1.0.230.54` ran Slay the Spire through the primary XAML presenter at 1920 × 1080. The first 30-second window, beginning five seconds after the first frame, averaged 57.40 FPS with a 1.25-second startup stall. The immediately following 30-second title window submitted 1,798 hardware frames at 59.93 FPS. Its lowest rolling second was 59 FPS, its 95th-percentile frame interval was 16.76 ms, and every frame used a shared texture. This establishes the updated hardware path and title pacing for the original Slay the Spire.
+
+### Hosted Direct3D 11 pacing experiment
+
+Build the same `XboxWin32Dxgi.dll` into each signed package with the title's hosted Direct3D 11 profile and `fhd-measure.txt` at package root. Select the optional settings by adding empty package-root markers before packing and signing.
+
+| Package-root markers in addition to `fhd-measure.txt` | Producer timing |
+| --- | --- |
+| None | Publish the GPU texture before waiting on the existing 60 Hz clock. |
+| `fhd-paced-publish.txt` | For an established hosted swap chain presenting at interval 1 with no DXGI flags, wait before copying and publishing the GPU texture. |
+| `fhd-refresh-5994.txt` | Use the 60000/1001 Hz period when the producer honors a synchronized interval. Use this variant on a display measured near 59.94 Hz. |
+| Both | Wait before copying and publishing at the 60000/1001 Hz cadence. |
+
+Keep the game build, resolution, display setting, and gameplay scene fixed. Compare distinct GPU frames and frame intervals in the same settled 30-second scene using `measure.py --require-gpu-60`. With the loader trace enabled, `dxgi pacing-before-publish` confirms the reorder ran and `dxgi pacing-rate-millihz` reports 59940 as hexadecimal `0x0000EA24`. Compare the producer's `attempts`, `submitted`, `slot-busy` and `max-gap-ms` with the panel report's visible render callbacks, source-empty callbacks, and presentation-busy callbacks. A large producer gap with few busy slots still needs timing for the game's work and the underlying DXGI call. A visibility pause can stop the panel from retiring textures and make both slots busy even while the game keeps presenting. The standard package uses the existing 60 Hz path unless measurement and an experiment marker are present.
+
+For Hades, time a 40–45-second block of movement and combat after the room settles. Record the start and end with a clock checked against the Xbox. Use the same central 30 seconds in both traces with `measure.py --start-utc "$scene_start_plus_five_seconds" --duration 30 --require-gpu-60`. Let the game keep presenting for a few seconds after the block so the last buffered records are available. Collect the app's frame file and producer trace before installing the next build. The automatic first-frame sampling window can include menus and loading.
+
+Add `--diagnose-stalls --producer-log loader-trace.txt` to correlate the longest gaps with game calls, GPU publication, software pacing and native Present. The producer log can also come from the same run's saved launch report after normal exit. Use both records from the same game process and scene. A gap without a matching producer phase remains unattributed.

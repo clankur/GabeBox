@@ -6,21 +6,40 @@
         'SteamClient' in window) return;
     const host = window.chrome?.webview;
     if (!host) return;
+    installXboxStartupMovieProbe(host, xboxStartupMovieOverrideAbsent);
 
     const pending = new Map();
     const listeners = new Set();
     const detailListeners = new Set();
     let requestId = crypto.getRandomValues(new Uint32Array(1))[0] & 0x3fffffff;
-    let runtime;
+    let runtime, installCloudCacheReads;
     let updating;
     let refreshAgain = false;
     let activeApp = 0;
     let controlsApp = 0;
     let focusStore;
     // Capture the release's serializer without replacing its entry, routes or modules.
-    (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => { runtime = require; }]);
+    (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => {
+        runtime = require;
+        if (xboxLocalCloudCacheReads && typeof xboxNativeWindow !== 'undefined' &&
+            xboxNativeWindow.deviceFamily === 'Windows.Xbox') {
+            // The pinned library entry defers on chunk 41. Run this callback
+            // before its entry so the store's first data request uses the cache.
+            require.O(undefined, [41], () => {
+                try {
+                    const module = require(83957);
+                    installCloudCacheReads?.(module.__esModule ? module.default : module);
+                } catch (_) {}
+            }, -1);
+        }
+    }]);
+    installXboxStartupTiming(host, xboxProfileStartupServices, () => runtime?.(76725).J());
 
     host.addEventListener('message', ({data}) => {
+        if (data?.event === 'xbox-install') {
+            installer.update(data.appId, data.stage);
+            return;
+        }
         if (data?.event === 'xbox-game') {
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
@@ -146,7 +165,7 @@
                 const local = {clientid: '0', installed: game.installed};
                 if (game.id === activeApp && game.installed) local.display_status = status.Fi; // Running
                 else if (game.installed) local.display_status = game.canPlay ? status.hr : status.Yh; // ReadyToLaunch / NotLaunchable
-                else local.display_status = status.jw; // ReadyToInstall
+                else local.display_status = installer.status(game.id, status) ?? status.jw; // ReadyToInstall
                 return {appid: game.id, gameid: String(game.id), app_type: 1, display_name: game.name,
                     sort_as: game.name.toLowerCase(), visible_in_game_list: true, subscribed_to: true,
                     per_client_data: [local]};
@@ -239,6 +258,7 @@
     const refreshLibrary = () => refresh().catch(error => console.error('Steam library unavailable', error.message));
     const storage = installXboxStorage(client, (operation, argument) => send(`storage-${operation}`, undefined, argument),
         appId => runtime?.(90544).tw.GetAppOverviewByAppID(appId)?.display_name, () => runtime(94601), refreshLibrary);
+    const installer = installXboxInstalls(client, send, refreshLibrary, () => runtime);
     const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {
         installXboxNotifications(runtime);
@@ -340,7 +360,7 @@
     installXboxMessaging(client);
     installXboxCoreStartup(client, send);
     installXboxServices(client, send);
-    installXboxCloudCache(client, send);
+    installCloudCacheReads = installXboxCloudCache(client, send);
     const showGameOverlay = installXboxUrls(client, () => activeApp);
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {

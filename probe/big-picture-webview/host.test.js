@@ -6,7 +6,8 @@ const test = require("node:test");
 const source = fs.readFileSync(require.resolve("./big-picture-webview.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({activationError = false, primary = false, xaml = false, warm = false, expected = 0, hostedApps = [], findRequest, openReport = async () => ({})} = {}) {
+function fixture({hostedApps = [], activationError = false, primary = false, xaml = false, warm = false, earlyLibrary = false,
+                  expected = 0, findRequest, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
@@ -26,7 +27,11 @@ function fixture({activationError = false, primary = false, xaml = false, warm =
     renderer.openForPrimaryAccount = id => { assert(xaml); owners.push(id); stage = "composition"; };
     const window = {steamSdlRuntimes: hostedApps.map(appId => ({appId}))}, memory = {appMemoryUsage: 262144, appMemoryUsageLimit: 1073741824,
         expectedAppMemoryUsageLimit: expected, trySetAppMemoryUsageLimit(bytes) { memoryRequests.push(bytes); return false; }};
-    if (xaml) window.document = {documentElement:{getAttribute: key => key === "data-steam-primary-xaml" ? "true" : null}};
+    if (xaml || earlyLibrary) window.document = {documentElement: {getAttribute(key) {
+        if ((xaml && key === "data-steam-primary-xaml") || (earlyLibrary && key === "data-steam-early-library-reveal"))
+            return "true";
+        return null;
+    }}};
     vm.runInNewContext(source, {
         Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
         Windows: {
@@ -46,9 +51,9 @@ function fixture({activationError = false, primary = false, xaml = false, warm =
         setTimeout(callback) { timeout = callback; return 2; }, clearTimeout() {}
     });
     return {
-        start(broker, failure) {
+        start(broker, failure, timing) {
             if (broker && !broker.session) broker.session = async () => ({steamId: "76561198000000001"});
-            return window.steamBigPictureHost.open(broker, failure);
+            return window.steamBigPictureHost.open(broker, failure, timing);
         },
         async advance(nextStage) {
             if (!warm && owners.length && (nextStage === "gamepad-ready" || nextStage === "setup-ready")) {
@@ -236,6 +241,93 @@ test("the named primary XAML host reveals Valve in the same Game window during a
     await app.advance("gamepad-ready");
     await ready;
     assert.deepEqual(app.owners, ["76561198000000001"]);
+});
+
+test("cached account timing reports shell milestones while keeping early Play unavailable", async () => {
+    const app = fixture({primary: true, xaml: true, warm: true});
+    let elapsed = 4100, played = false;
+    const timing = {
+        marks: {cache_check_finished: 4000},
+        mark(stage) { this.marks[stage] ??= elapsed; }
+    };
+    const ready = app.start({play() { played = true; }}, undefined, timing);
+    await drain();
+    elapsed = 5100;
+    app.incoming.push(JSON.stringify({method: "startup-route", stage: "library-selected"}),
+        JSON.stringify({id: 5, method: "play", appId: 42}));
+    await app.advance("gamepad-window-created");
+    assert.equal(played, false);
+    assert.match(app.reports.at(-1), /startup_elapsed_ms=cache_check_finished:4000,shell_open:4100/);
+    assert.match(app.reports.at(-1), /\bbrowser_gamepad_window_created:5100,shell_library_selected:5100\b/);
+    assert.doesNotMatch(app.reports.at(-1), /shell_gamepad_ready:/);
+
+    elapsed = 5300;
+    await app.advance("warmup-gamepad-layout");
+    elapsed = 5500;
+    await app.advance("gamepad-ready");
+    await ready;
+    assert.match(app.reports.at(-1), /\bshell_warmup_handoff:5300,shell_revealed:5300,shell_gamepad_ready:5500\b/);
+});
+
+test("the early Library trial reveals the same primary window and waits for native readiness", async () => {
+    const app = fixture({primary: true, xaml: true, warm: true, earlyLibrary: true});
+    let ready = false, plays = 0;
+    let serveLibrary;
+    const library = new Promise(resolve => { serveLibrary = resolve; });
+    const started = app.start({library() { return library; }, play() { ++plays; }}).then(() => { ready = true; });
+    await drain();
+    app.memory.appMemoryUsage = 2400 * 1024 * 1024;
+    app.memory.appMemoryUsageLimit = 5368709120;
+    app.elapse(900);
+    app.incoming.push(JSON.stringify({method: "startup-route", stage: "library-selected"}),
+        JSON.stringify({id: 1, method: "library"}));
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(app.replies, []);
+    app.elapse(600);
+    serveLibrary([{id: 42, name: "Game"}]);
+    await drain();
+    await app.advance("gamepad-window-created");
+    assert.match(app.reports.at(-1), /warmup=primary-library-served elapsed_ms=1500/);
+    assert.deepEqual(app.switches, []);
+    assert.equal(app.replies.filter(reply => reply.nativeWarmupComplete).length, 1);
+    app.incoming.push(JSON.stringify({id: 5, method: "play", appId: 42}));
+    await app.advance("gamepad-window-created");
+    assert(!ready);
+    assert.equal(plays, 0);
+    await app.advance("gamepad-ready");
+    await started;
+    assert(ready);
+});
+
+test("the early Library option never advances secondary view activation", async () => {
+    const app = fixture({warm: true, earlyLibrary: true});
+    const started = app.start({library: async () => [{id: 42, name: "Game"}]});
+    await drain();
+    app.elapse(1500);
+    app.incoming.push(JSON.stringify({id: 1, method: "library"}));
+    await app.advance("gamepad-window-created");
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(app.switches, []);
+    assert(!app.replies.some(reply => reply.nativeWarmupComplete));
+    app.elapse(1500);
+    await app.advance("warmup-gamepad-layout");
+    assert.deepEqual(app.switches, [[10, 3]]);
+    await app.advance("gamepad-ready");
+    await started;
+});
+
+test("the startup movie override records a single bounded outcome", async () => {
+    const app = fixture({primary: true, xaml: true, warm: true});
+    const started = app.start({});
+    await drain();
+    app.incoming.push(JSON.stringify({method: "startup-movie-override-js", state: "untrusted text"}),
+        JSON.stringify({method: "startup-movie-override-js", state: "absent-404"}));
+    await app.advance("gamepad-window-created");
+    assert.match(app.reports.at(-1), /startup_movie_override_js=absent-404/);
+    assert.doesNotMatch(app.reports.at(-1), /untrusted text/);
+    await app.advance("warmup-gamepad-layout");
+    await app.advance("gamepad-ready");
+    await started;
 });
 
 test("a local operator request captures the active console renderer only after startup", async () => {
@@ -490,6 +582,47 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     assert.equal(await app.shell.showForGame(1145360, 90, restore), false);
 });
 
+test("a configured launch waits for Valve, uses the owned Play path, and keeps the explicit game exit", async () => {
+    const app = fixture({hostedApps: [2868840]});
+    const brokerContext = {};
+    vm.runInNewContext(fs.readFileSync(require.resolve("../signin/steam-big-picture-broker.js"), "utf8"), brokerContext);
+    let installed = false, launches = 0, quits = 0;
+    const broker = brokerContext.steamBigPictureBroker.create({
+        current: () => true,
+        steamId: () => "76561198000000001",
+        games: [{id: 2868840}],
+        busy: () => false,
+        isInstalled: async () => installed,
+        play: async () => { launches++; return "presented"; }
+    });
+    const ready = app.start(broker);
+    await drain();
+    assert.equal(await app.shell.playConfiguredTrial(2868840), "unavailable");
+    await app.advance("gamepad-ready");
+    await ready;
+    app.incoming.push(JSON.stringify({id: 1, method: "playConfiguredTrial", appId: 2868840}));
+    await app.advance("gamepad-ready");
+    assert.ok(app.replies.some(reply => reply.id === 1 && reply.error === "unavailable"));
+    assert.equal(await app.shell.playConfiguredTrial(646570), "not-owned");
+    assert.equal(await app.shell.playConfiguredTrial(2868840), "not-installed");
+    assert.deepEqual(app.switches, [[10,3]]);
+    assert.equal(launches, 0);
+    installed = true;
+    assert.equal(await app.shell.playConfiguredTrial(2868840), "presented");
+    assert.equal(await app.shell.playConfiguredTrial(2868840), "unavailable");
+    assert.deepEqual(app.switches, [[10,3],[3,10]]);
+    assert.equal(launches, 1);
+    assert.equal(quits, 0);
+    assert.equal(await app.shell.showForGame(2868840, 90, async () => true, () => { quits++; return true; }), true);
+    app.incoming.push(JSON.stringify({id: 2, method: "quit-game", appId: 2868840}));
+    await app.advance("gamepad-ready");
+    assert.ok(app.replies.some(reply => reply.id === 2 && reply.result === "quit-requested"));
+    assert.equal(quits, 1);
+    await app.shell.resume(2868840);
+    await drain();
+    assert.match(app.reports.at(-1), /game-returned-to-steam/);
+});
+
 test("only fixed Store JS milestones persist and stay separate from native HTTP results", async () => {
     const app = fixture();
     const start = app.start({});
@@ -499,4 +632,31 @@ test("only fixed Store JS milestones persist and stay separate from native HTTP 
     await app.advance("gamepad-ready");
     assert.match(app.reports.at(-1), /store_js_stages=create,geometry,visible,blank-complete,navigate\r\n/);
     assert.doesNotMatch(app.reports.at(-1), /private\.invalid|public_store_navigation=/);
+});
+
+test("the foreground Valve library relays authorized native install milestones without a game handoff", async () => {
+    const app = fixture();
+    const requests = [];
+    let finishInstall;
+    const started = app.start({install(id, progress) {
+        requests.push(id);
+        progress("queued");
+        return new Promise(resolve => { finishInstall = resolve; });
+    }});
+    await drain();
+    app.incoming.push('{"method":"install","id":11,"appId":2868840}');
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(requests, []);
+    await app.advance("gamepad-ready");
+    await started;
+    const switches = [...app.switches];
+    app.incoming.push('{"method":"install","id":12,"appId":2868840}');
+    await app.advance("gamepad-ready");
+    assert.deepEqual(requests, [2868840]);
+    assert(app.replies.some(reply => reply.event === "xbox-install" && reply.appId === 2868840 && reply.stage === "queued"));
+    assert(!app.replies.some(reply => reply.id === 12));
+    finishInstall("installed");
+    await drain();
+    assert(app.replies.some(reply => reply.id === 12 && reply.result === "installed"));
+    assert.deepEqual(app.switches, switches);
 });

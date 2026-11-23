@@ -168,10 +168,15 @@ jobs:
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
             }
-            foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'xinput') },
+            foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'input-raw', 'xinput') },
                                     @{ Module = 'desktop'; Name = 'XboxWin32Desktop'; Sources = @('desktop') },
                                     @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
+                                    @{ Module = 'unity'; Name = 'XboxWin32Unity'; Sources = @('unity') },
+                                    @{ Module = 'display-config'; Name = 'XboxWin32DisplayConfig'; Sources = @('display-config') },
+                                    @{ Module = 'timer'; Name = 'XboxWin32Timer'; Sources = @('timer') },
+                                    @{ Module = 'storage-trace'; Name = 'XboxWin32StorageTrace'; Sources = @('storage-trace') },
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
+                                    @{ Module = 'steam-discovery'; Name = 'XboxWin32SteamDiscovery'; Sources = @('steam-discovery') },
                                     @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
               $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"

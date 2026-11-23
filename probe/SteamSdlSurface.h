@@ -48,6 +48,8 @@ class SteamSdlSurface {
     }
 
 public:
+    enum class GpuMailbox { None, Required, Optional };
+
     SteamSdlSurface() = default;
     SteamSdlSurface(SteamSdlSurface const&) = delete;
     SteamSdlSurface& operator=(SteamSdlSurface const&) = delete;
@@ -58,13 +60,20 @@ public:
         if (stagedGame_) steam_win32_stage::RemoveStageAfterExit(std::move(stagedGame_), std::move(process_));
     }
 
-    void Open(std::wstring const& path, bool hostedDxgi) {
+    bool Open(std::wstring const& path, GpuMailbox prepareGpu) {
         view_ = OpenMailbox<SdlHostMailbox>(path, file_, SDL_HOST_MAGIC);
-        if (hostedDxgi) {
+        if (prepareGpu == GpuMailbox::None) return false;
+        try {
             auto* gpu = OpenMailbox<SdlGpuMailbox>(path + L".gpu", gpuFile_, SDL_GPU_MAGIC);
             UnmapViewOfFile(gpu);
-            gpuFrameSequence_ = true;
+        } catch (winrt::hresult_error const&) {
+            if (prepareGpu == GpuMailbox::Required) throw;
+            return false;
         }
+        // DXGI signals first publication through the sequence. OpenGL keeps
+        // publishing a complete CPU frame until the presenter accepts GPU sharing.
+        gpuFrameSequence_ = prepareGpu == GpuMailbox::Required;
+        return true;
     }
 
     void Attach(winrt::handle process, winrt::Windows::Storage::StorageFolder stagedGame = nullptr) {

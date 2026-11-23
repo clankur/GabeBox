@@ -77,6 +77,9 @@ function installXboxUser(client, send, getRuntime) {
     // The Xbox QR host selects the account before starting this renderer. No
     // Steam desktop user chooser is pending (default chooser state in this release).
     client.User.GetStartupUserChooserState = async () => 0;
+    // Valve starts its login panel before the first account event can arrive.
+    // Check the existing Xbox session and deliver the verified login state.
+    client.User.StartLogin = refresh;
     client.User.SignOutAndRestart = async () => {
         if (await send("sign-out") !== "signed-out") throw Error("sign-out-unavailable");
     };
