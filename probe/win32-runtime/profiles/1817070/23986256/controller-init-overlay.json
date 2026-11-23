@@ -3,5 +3,10 @@
     "offset": 30279320,
     "expected_sha256": "764c4c7b78d6fd3b7bf72e531e81b2304ff57df646d084f9b4bdd51b8e350955",
     "replacement": "controller-init-continue.bin"
+  },
+  {
+    "offset": 30491273,
+    "expected_sha256": "c1ab084cf94e130fb501389e8674afa849e6f74b0e1c57caf9c54b5e8310f714",
+    "replacement": "controller-init-select-xinput.bin"
   }
 ]
