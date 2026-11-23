@@ -13,23 +13,28 @@
         });
     }
 
-    function open(broker, onFailure) {
-        if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure); });
+    function open(broker, onFailure, timing) {
+        if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure, timing); });
         if (session) {
             if (session.broker === broker) return session.ready;
             if (!session.replaceable()) return Promise.reject(new Error("steam-view-busy"));
-            return session.finish("account-changed", true).then(function () { return open(broker, onFailure); });
+            return session.finish("account-changed", true).then(function () { return open(broker, onFailure, timing); });
         }
+        function markStartup(stage) { if (timing) timing.mark(stage); }
+        markStartup("shell_open");
         var storage = Windows.Storage, views = Windows.UI.ViewManagement;
-        var primaryXaml = !!(window.document &&
-            window.document.documentElement.getAttribute("data-steam-primary-xaml") === "true");
+        var documentRoot = window.document && window.document.documentElement;
+        var primaryXaml = !!(documentRoot && documentRoot.getAttribute("data-steam-primary-xaml") === "true");
+        var earlyPrimaryLibrary = primaryXaml && documentRoot.getAttribute("data-steam-early-library-reveal") === "true";
         var run = Windows.Foundation.GuidHelper.createNewGuid();
         var network, networkDiagnostic = "", storeNavigation = "";
         var storeStages = [];
         var storeJsStages = [];
         var file, report = Promise.resolve();
         var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
-        var surfaceSizing = "", warmReport = "", memoryRequest = "", triedMemory = false;
+        var surfaceSizing = "", startupMovieOverride = "";
+        var startupServices = {}, startupCloudReads = {};
+        var warmReport = "", memoryRequest = "", triedMemory = false;
         var warming = false, warmStarted = 0, warmProgress = 0, warmSwitch = false;
         var nextChargeCheck = 0, heldForMemory = false, belowBudgetSince = 0;
         function sampleMemory(stage) {
@@ -71,6 +76,16 @@
             var text = "run_id=" + run + "\r\nstatus=" + stage + "\r\n" +
                 (servedGames === undefined ? "" : "owned_games_served=" + servedGames + "\r\n") +
                 (warmReport ? "warmup=" + warmReport + "\r\n" : "") +
+                (startupMovieOverride ? "startup_movie_override_js=" + startupMovieOverride + "\r\n" : "") +
+                (Object.keys(startupServices).length ? "startup_service_elapsed_ms=" + Object.keys(startupServices).map(function (key) {
+                    return key + ":" + startupServices[key];
+                }).join(",") + "\r\n" : "") +
+                (Object.keys(startupCloudReads).length ? "startup_cloud_cache_reads=" + Object.keys(startupCloudReads).map(function (key) {
+                    return key + ":" + startupCloudReads[key];
+                }).join(",") + "\r\n" : "") +
+                (timing ? "startup_elapsed_ms=" + Object.keys(timing.marks).map(function (key) {
+                    return key + ":" + timing.marks[key];
+                }).join(",") + "\r\n" : "") +
                 (memoryRequest ? "shell_memory_request=" + memoryRequest + "\r\n" : "") +
                 (surfaceSizing ? "surface_sizing=" + surfaceSizing + "\r\n" : "") +
                 (networkDiagnostic ? "xbox_network=" + networkDiagnostic + "\r\n" : "") +
@@ -138,6 +153,7 @@
                     return views.ApplicationViewSwitcher.switchAsync(viewId, mainId);
                 }) : show(viewId, from || mainId)).then(function () {
                 firstActivation = false;
+                markStartup("shell_revealed");
                 sampleMemory("steam_view");
                 record(last, true);
                 visible = true; activeSwitch = null;
@@ -167,6 +183,7 @@
                 if (now - belowBudgetSince < 1500) return;
             }
             warmSwitch = true;
+            markStartup("shell_warmup_handoff");
             warmReport = reason + " elapsed_ms=" + Math.max(0, Date.now() - warmStarted);
             sampleMemory("warm_handoff");
             record(last, true);
@@ -209,6 +226,42 @@
             });
         }
         function played(appId) { return !failed && playing && presented && appId === playingApp; }
+        function playGame(appId) {
+            if (playing) {
+                if (!played(appId) || !returnToGame) return "busy";
+                return broker.session().then(function (user) { return user && user.steamId ? raiseGame(appId) : "signed-out"; });
+            }
+            playing = true; playingApp = appId; gameFrames = {};
+            // Make the expensive view handoff only after the broker has
+            // verified this account, the title and its local installation.
+            return broker.play(appId, function () {
+                // The QR host creates the game's fullscreen presenter.
+                return show(mainId, viewId).then(function () {
+                    visible = false;
+                    setGameForeground(true);
+                    sampleMemory("handoff");
+                    return record("game-window-backgrounded");
+                });
+            }).then(function (outcome) {
+                if (outcome === "presented" || outcome === "window-ready") {
+                    presented = playing && playingApp === appId && outcome === "presented";
+                    sampleMemory("first_frame"); gameEvent(false);
+                    record("game-" + outcome);
+                    return outcome;
+                }
+                return resume().then(function () { return outcome; });
+            }, function (err) { return resume().then(function () { throw err; }); });
+        }
+        function playConfiguredTrial(appId) {
+            return Promise.resolve().then(function () {
+                if (!broker || !settled || !visible || failed) return "unavailable";
+                if (playing) return "busy";
+                if (!Number.isInteger(appId) || appId <= 0 || appId > 0x00ffffff) return "invalid-app";
+                markStartup("configured_play");
+                record("configured-game-trial");
+                return playGame(appId);
+            });
+        }
         function resume(exitedApp) {
             if (warming && !settled) return Promise.resolve();
             if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
@@ -303,7 +356,33 @@
             if (request.method === "startup-route" && /^(waiting-user|waiting-store|waiting-window|waiting-portal|selecting-library|library-selected|selection-pending)$/.test(request.stage)) {
                 if (warming && request.stage !== startupRoute) warmProgress = Date.now();
                 startupRoute = request.stage;
-                if (request.stage === "library-selected") sampleMemory("library_selected");
+                if (request.stage === "library-selected") {
+                    markStartup("shell_library_selected");
+                    sampleMemory("library_selected");
+                }
+                record(last, true);
+                return;
+            }
+            if (request.method === "startup-movie-override-js" && !startupMovieOverride && request.state === "absent-404") {
+                markStartup("browser_startup_movie_override_js");
+                startupMovieOverride = request.state;
+                record(last, true);
+                return;
+            }
+            if (request.method === "startup-service-timing" &&
+                    /^(total|key|key_cloud|key_friends|key_settings|key_tour|apps|apps_store|friends|friends_store|collections|collections_store|remaining|remaining_appinfo|remaining_ui|remaining_library)$/.test(request.label) &&
+                    Number.isInteger(request.elapsedMs) && request.elapsedMs >= 0 && request.elapsedMs <= 120000 &&
+                    startupServices[request.label] === undefined) {
+                startupServices[request.label] = request.elapsedMs;
+                if (/^(total|key|apps|friends|collections|remaining)$/.test(request.label))
+                    markStartup("service_" + request.label + "_reported");
+                record(last, true);
+                return;
+            }
+            if (request.method === "startup-cloud-cache-read" && /^(index|namespace-[134](?:\.modified)?)$/.test(request.label) &&
+                    [200, 403, 404, 503].indexOf(request.status) >= 0 && startupCloudReads[request.label] === undefined) {
+                startupCloudReads[request.label] = request.status;
+                markStartup("cloud_cache_" + request.label.replace(/[^a-z0-9]/g, "_"));
                 record(last, true);
                 return;
             }
@@ -372,32 +451,7 @@
                         }
                     });
                 };
-                else action = function () {
-                    if (playing) {
-                        if (!played(appId) || !returnToGame) return "busy";
-                        return broker.session().then(function (user) { return user && user.steamId ? raiseGame(appId) : "signed-out"; });
-                    }
-                    playing = true; playingApp = appId; gameFrames = {};
-                    // Make the expensive view handoff only after the broker has
-                    // verified this account, the title and its local installation.
-                    return broker.play(appId, function () {
-                        // The QR host creates the game's fullscreen presenter.
-                        return show(mainId, viewId).then(function () {
-                            visible = false;
-                            setGameForeground(true);
-                            sampleMemory("handoff");
-                            return record("game-window-backgrounded");
-                        });
-                    }).then(function (outcome) {
-                        if (outcome === "presented" || outcome === "window-ready") {
-                            presented = playing && playingApp === appId && outcome === "presented";
-                            sampleMemory("first_frame"); gameEvent(false);
-                            record("game-" + outcome);
-                            return outcome;
-                        }
-                        return resume().then(function () { return outcome; });
-                    }, function (err) { return resume().then(function () { throw err; }); });
-                };
+                else action = function () { return playGame(appId); };
             } else return respond(id, false, "unavailable");
             Promise.resolve().then(function () { if (!failed) return action(); }).then(function (result) {
                 respond(id, true, result);
@@ -412,6 +466,7 @@
                 }
                 if (!failed && request.method === "library" && Array.isArray(result) && servedGames !== result.length) {
                     if (warming) warmProgress = Date.now();
+                    markStartup("shell_library_served");
                     servedGames = result.length;
                     host.reply(JSON.stringify({nativeEmptyLibrary: servedGames === 0}));
                     record(last, true);
@@ -484,6 +539,10 @@
                 var stage = host.status();
                 if (stage !== lastNative) {
                     if (warming) warmProgress = Date.now();
+                    if (/^(environment|controller|navigation|document-loaded|gamepad-window-created|app-initialized|warmup-gamepad-layout|warmup-setup-layout)$/.test(stage))
+                        markStartup("browser_" + stage.replace(/-/g, "_"));
+                    if (visible && (stage === "setup-ready" || stage === "gamepad-ready"))
+                        markStartup("shell_" + stage.replace(/-/g, "_"));
                     if (stage === "gamepad-window-created") sampleMemory("steam_popup");
                     if (stage === "gamepad-ready") sampleMemory("steam_ready");
                     record(stage);
@@ -495,6 +554,7 @@
                     if (viewId) {
                         if (warming) {
                             warmStarted = warmProgress = Date.now();
+                            markStartup("shell_warmup_started");
                             sampleMemory("warm_view");
                             warmReport = "preparing";
                             record(last, true);
@@ -502,6 +562,7 @@
                     }
                 }
                 if (!settled && visible && (stage === "gamepad-ready" || stage === "setup-ready")) {
+                    markStartup("shell_" + stage.replace(/-/g, "_"));
                     sampleMemory("steam_foreground");
                     settled = true; clearTimeout(readinessTimer);
                     warming = false;
@@ -515,6 +576,10 @@
                 }
                 if (warming && viewId && !warmSwitch) {
                     if (stage === "warmup-gamepad-layout" || stage === "warmup-setup-layout") handoffWarmup(stage);
+                    // The primary XAML layout stays within the same foreground window.
+                    // Reveal Library sooner while native observation still gates readiness.
+                    else if (earlyPrimaryLibrary && viewId === mainId && servedGames !== undefined)
+                        handoffWarmup("primary-library-served");
                     else if (Date.now() - warmStarted >= 32000) handoffWarmup("time-limit");
                     else if (Date.now() - warmProgress >= 14000) handoffWarmup("no-layout-progress");
                 }
@@ -541,6 +606,7 @@
                 var owner = identity && identity.steamId;
                 if (typeof owner !== "string" || !/^[1-9][0-9]{16,19}$/.test(owner) ||
                     (owner.length === 20 && owner > "18446744073709551615")) throw new Error("signed-out");
+                markStartup("shell_identity_verified");
                 warming = true;
                 if (primaryXaml) host.openForPrimaryAccount(owner);
                 else host.openForAccount(owner);
@@ -553,7 +619,8 @@
         }).catch(fail);
         if (!broker) ready.catch(function () {});
         session = {broker: broker, replaceable: function () { return !!broker && !playing; }, finish: finish,
-            resume: resume, showForGame: showForGame, sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
+            resume: resume, showForGame: showForGame, playConfiguredTrial: playConfiguredTrial,
+            sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
             ready: broker ? ready : startup};
         return session.ready;
     }
@@ -565,6 +632,9 @@
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);
         },
         resume: function (appId) { return session ? session.resume(appId) : Promise.resolve(); },
+        playConfiguredTrial: function (appId) {
+            return session ? session.playConfiguredTrial(appId) : Promise.resolve("unavailable");
+        },
         showForGame: function (appId, viewId, restore, requestExit) {
             return session ? session.showForGame(appId, viewId, restore, requestExit) : Promise.resolve(false);
         }

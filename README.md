@@ -37,6 +37,8 @@ To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream 
 
 ## Missing features and planned work
 
+- Expand local Windows game support using shared runtime components and measure playability across the owned Steam library. The current work tracks Hades frame pacing and startup blockers for Slay the Spire 2 and Halo MCC. [Compatibility work and verification](analysis/steam-compatibility.md)
+
 - Verify in-game Xbox controller input for X-COM and add persistent saves that survive an app restart. [X-COM follow-up](https://github.com/clankur/steam-xbox-devmode/issues/44)
 - Fix game-path resolution after the first shared prerequisite install and refresh the competing AppID when the Steam download queue changes. [Prerequisite path](https://github.com/clankur/steam-xbox-devmode/issues/54) · [Download queue reporting](https://github.com/clankur/steam-xbox-devmode/issues/55)
 - Investigate Windows game startup and graphics blockers. Use controlled renderer tests and title-by-title launch checks for the other Windows games under test. [Current compatibility issues](https://github.com/clankur/steam-xbox-devmode/issues) · [ANGLE experiment](https://github.com/clankur/steam-xbox-devmode/pull/53) · [Win32 experiment plan](https://github.com/clankur/steam-xbox-devmode/pull/51)

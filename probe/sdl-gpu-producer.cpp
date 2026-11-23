@@ -17,6 +17,11 @@ struct MesaResource { ID3D12Resource *resource; uint64_t offset; };
 typedef void (APIENTRY *GlFlush)();
 template<class T> void release(T *&v) { if (v) { v->Release(); v = nullptr; } }
 
+struct PreserveLastError {
+    DWORD value = GetLastError();
+    ~PreserveLastError() { SetLastError(value); }
+};
+
 struct Slot {
     ID3D12Resource *texture = nullptr, *source = nullptr;
     ID3D12Fence *ready = nullptr, *done = nullptr;
@@ -40,6 +45,8 @@ struct Producer {
     UINT64 next = 1;
     LONG generation = 0;
     bool failed = false;
+    bool traceStartup = false, tracedCopy = false;
+    unsigned startupSwaps = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     int width = 0, height = 0;
     void close() {
@@ -157,7 +164,7 @@ HRESULT create_slot(Producer *p, Slot &s, D3D12_RESOURCE_DESC desc, unsigned i, 
     }
     return hr;
 }
-bool initialize(Producer *p, void *egl, void *display, void *context, void *flush, unsigned color, int w, int h) {
+bool initialize(Producer *p, void *egl, void *display, void *context, void *flush, unsigned color, int w, int h, int *retry) {
     if (!egl || !display || !context || !flush) return fail(p, "context", E_NOINTERFACE);
     auto query = reinterpret_cast<decltype(&MesaGLInteropEGLQueryDeviceInfo)>(SDL_LoadFunction(egl, "MesaGLInteropEGLQueryDeviceInfo"));
     p->export_object = reinterpret_cast<decltype(p->export_object)>(SDL_LoadFunction(egl, "MesaGLInteropEGLExportObject"));
@@ -190,7 +197,10 @@ bool initialize(Producer *p, void *egl, void *display, void *context, void *flus
         guid[2 * i] = hex[bytes[i] >> 4];
         guid[2 * i + 1] = hex[bytes[i] & 15];
     }
-    if (InterlockedCompareExchange(&p->box->generation, 1, 0) != 0) return fail(p, "mailbox-owned", E_PENDING);
+    if (InterlockedCompareExchange(&p->box->generation, 1, 0) != 0) {
+        *retry = 1;
+        return false;
+    }
     p->generation = InterlockedAdd(&generation_counter, 2);
     InterlockedExchange(&p->box->accepted_generation, 0);
     p->box->adapter_luid = p->mesa.luid;
@@ -218,10 +228,35 @@ void transition(ID3D12GraphicsCommandList *list, ID3D12Resource *r, D3D12_RESOUR
     barrier.Transition.StateAfter = after;
     list->ResourceBarrier(1, &barrier);
 }
+
+bool producerReady(Producer *p, bool hostBound, Uint32 shape, int w, int h, const void *rgba) {
+    const bool followUp = p->traceStartup && p->startupSwaps == 1;
+    if (p->traceStartup && p->startupSwaps < 2) ++p->startupSwaps;
+    if (!hostBound && !followUp) return false;
+
+    const bool accepted = InterlockedCompareExchange(&p->box->accepted_generation, 0, 0) == p->generation;
+    const bool heartbeat = (accepted || followUp) &&
+        (DWORD)(GetTickCount() - (DWORD)InterlockedCompareExchange(&p->box->heartbeat_ms, 0, 0)) <= 1000;
+    const bool cursor = (heartbeat || followUp) &&
+        (!shape || (rgba && w >= 1 && h >= 1 && w <= SDL_GPU_CURSOR_SIZE && h <= SDL_GPU_CURSOR_SIZE &&
+                   InterlockedCompareExchange(&p->box->supports_cursor, 0, 0)));
+    if (followUp) {
+        const PreserveLastError preserve;
+        char line[128];
+        SDL_snprintf(line, sizeof(line), "sdl_gpu_followup=host_bound=%d accepted=%d heartbeat_fresh=%d cursor_supported=%d\n",
+                     hostBound, accepted, heartbeat, cursor);
+        XboxSdlTrace(line);
+    }
+    if (!hostBound) return false;
+    if (accepted && heartbeat && cursor) return true;
+    InterlockedExchange(&p->box->gpu_active, 0);
+    return false;
+}
 } // namespace
 
 extern "C" void XboxSdlDestroyGpu(void *state) {
     if (!state) return;
+    const PreserveLastError preserve;
     auto *p = static_cast<Producer *>(state);
     p->close();
     p->~Producer();
@@ -229,26 +264,29 @@ extern "C" void XboxSdlDestroyGpu(void *state) {
 }
 
 extern "C" void *XboxSdlCreateGpu(void *egl, void *display, void *context, void *flush, unsigned color, int width, int height, int *retry) {
+    const PreserveLastError preserve;
     *retry = 0;
     auto *box = open_mailbox(retry);
     if (!box) return nullptr;
+    // Contention can outlast a frame. Retry without exporting a GL renderbuffer
+    // or touching the generation still held by the other context.
+    if (InterlockedCompareExchange(&box->generation, 0, 0) != 0) {
+        *retry = 1;
+        UnmapViewOfFile(box);
+        return nullptr;
+    }
     void *storage = SDL_malloc(sizeof(Producer));
     if (!storage) { UnmapViewOfFile(box); return nullptr; }
     auto *p = new(storage) Producer;
     p->box = box;
-    if (!initialize(p, egl, display, context, flush, color, width, height)) { XboxSdlDestroyGpu(p); return nullptr; }
+    p->traceStartup = GetEnvironmentVariableW(L"XBOX_SDL_TRACE_FILE", nullptr, 0) > 1;
+    if (!initialize(p, egl, display, context, flush, color, width, height, retry)) { XboxSdlDestroyGpu(p); return nullptr; }
     return p;
 }
-extern "C" int XboxSdlGpuFrame(void *state, unsigned color, Uint32 shape, int x, int y, int w, int h, int pitch, const void *rgba) {
+extern "C" int XboxSdlGpuFrame(void *state, int host_bound, unsigned color, Uint32 shape, int x, int y,
+                              int w, int h, int pitch, const void *rgba) {
     auto *p = static_cast<Producer *>(state);
-    if (!p || p->failed) return 0;
-    if (InterlockedCompareExchange(&p->box->accepted_generation, 0, 0) != p->generation ||
-        (DWORD)(GetTickCount() - (DWORD)InterlockedCompareExchange(&p->box->heartbeat_ms, 0, 0)) > 1000 ||
-        (shape && (!rgba || w < 1 || h < 1 || w > SDL_GPU_CURSOR_SIZE || h > SDL_GPU_CURSOR_SIZE ||
-                   !InterlockedCompareExchange(&p->box->supports_cursor, 0, 0)))) {
-        InterlockedExchange(&p->box->gpu_active, 0);
-        return 0;
-    }
+    if (!p || p->failed || !producerReady(p, host_bound != 0, shape, w, h, rgba)) return 0;
     unsigned i = (unsigned)((p->next - 1) % SDL_GPU_SLOTS);
     Slot &s = p->slots[i];
     UINT64 ready = s.ready->GetCompletedValue(), done = s.done->GetCompletedValue();
@@ -259,10 +297,22 @@ extern "C" int XboxSdlGpuFrame(void *state, unsigned color, Uint32 shape, int x,
     auto in = object(color);
     // Pinned Mesa transitions to COMMON, glFlush submits it on the exported
     // queue. ExportObject also waits for Mesa's GL dispatch thread to finish.
+    const bool traceCopy = p->traceStartup && !p->tracedCopy;
+    if (traceCopy) {
+        p->tracedCopy = true;
+        XboxSdlTrace("sdl_gpu_mesa_flush=begin\n");
+    }
     int rc = p->flush_objects(p->display, p->context, 1, &in, nullptr);
+    if (traceCopy) XboxSdlTrace("sdl_gpu_mesa_flush=returned\n");
     if (rc) return fail(p, "mesa-flush", rc);
+    if (traceCopy) XboxSdlTrace("sdl_gpu_gl_flush=begin\n");
     p->gl_flush();
+    if (traceCopy) {
+        XboxSdlTrace("sdl_gpu_gl_flush=returned\n");
+        XboxSdlTrace("sdl_gpu_mesa_export=begin\n");
+    }
     auto *source = export_color(p, color);
+    if (traceCopy) XboxSdlTrace("sdl_gpu_mesa_export=returned\n");
     if (!source) return fail(p, "mesa-export", E_NOINTERFACE);
     auto source_desc = source->GetDesc();
     if (source_desc.Width != (UINT64)p->width || source_desc.Height != (UINT)p->height ||

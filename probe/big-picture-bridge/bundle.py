@@ -11,11 +11,12 @@ URL_LIST_SHA256 = "3958c79099dc94ee99c3a5dc841cb70530013c68656649e5c96fc931c5c71
 MODULES = (
     "xbox-gamepads.js", "xbox-controller-service.js", "xbox-notifications.js", "xbox-game-actions.js", "xbox-installs.js", "xbox-downloads.js", "xbox-user.js", "xbox-gamepad-surface.js", "xbox-window.js", "xbox-browser-view.js", "xbox-store-browser.js", "xbox-input.js",
     "xbox-lifecycle.js", "xbox-network.js", "xbox-messaging.js", "xbox-core-startup.js", "xbox-services.js",
-    "xbox-cloud-cache.js", "xbox-settings.js", "xbox-storage.js", "xbox-url-roots.js", "xbox-url.js", "bridge.js",
+    "xbox-cloud-cache.js", "xbox-settings.js", "xbox-storage.js", "xbox-startup-movie.js", "xbox-startup-timing.js",
+    "xbox-url-roots.js", "xbox-url.js", "bridge.js",
 )
 
 
-def bundle(url_list):
+def bundle(url_list, movie_probe_assets=None, profile_startup_services=False, local_cloud_cache_reads=False):
     raw = url_list.read_bytes()
     if hashlib.sha256(raw).hexdigest() != URL_LIST_SHA256:
         raise ValueError("Expected public/url_list.txt from the pinned Steam release.")
@@ -43,11 +44,30 @@ def bundle(url_list):
     release = json.loads((SOURCE.parents[1] / "analysis/valve-release.json").read_text())
     version = "const xboxSteamReleaseVersion = " + str(int(release["version"])) + ";"
     definitions = "const xboxUrlTemplates = " + json.dumps(entries, separators=(",", ":")) + ";"
-    return "\n".join(["(() => {", "'use strict';", version, definitions,
+    absent_override = False
+    if movie_probe_assets is not None:
+        movie = Path("movies/bigpicture_startup.webm")
+        if not (movie_probe_assets / movie).is_file():
+            raise ValueError("Expected the packaged Valve startup movie.")
+        try:
+            (movie_probe_assets / "uioverrides" / movie).lstat()
+        except FileNotFoundError:
+            absent_override = True
+    movie_probe = "const xboxStartupMovieOverrideAbsent = " + json.dumps(absent_override) + ";"
+    profile = "const xboxProfileStartupServices = " + json.dumps(profile_startup_services) + ";"
+    cloud_reads = "const xboxLocalCloudCacheReads = " + json.dumps(local_cloud_cache_reads) + ";"
+    return "\n".join(["(() => {", "'use strict';", version, definitions, movie_probe, profile, cloud_reads,
                       *((SOURCE / name).read_text() for name in MODULES), "})();", ""])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url_list", type=Path)
-    print(bundle(parser.parse_args().url_list), end="")
+    parser.add_argument("--movie-probe-assets", type=Path,
+                        help="verify absence of the optional startup movie in this staged Steam UI layout")
+    parser.add_argument("--profile-startup-services", action="store_true",
+                        help="record bounded timings for the pinned Valve startup-service groups")
+    parser.add_argument("--local-cloud-cache-reads", action="store_true",
+                        help="trial account-scoped Steam UI cloud cache reads through the pinned Axios bridge")
+    args = parser.parse_args()
+    print(bundle(args.url_list, args.movie_probe_assets, args.profile_startup_services, args.local_cloud_cache_reads), end="")

@@ -13,6 +13,7 @@ test("the XAML game panel counts visible swaps and serializes replacement across
         async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
         async setPanelVisible(value) { visible = value; calls.push(["visible", value]); },
         closePanel() { calls.push(["close"]); return new Promise(resolve => { finishClose = resolve; }); },
+        status() { return "gpu_stage=open-texture-and-fences\r\ngpu_hresult=2147942405\r\nother=discarded\r\n"; },
         panelStatus() { return "width=1920\r\nheight=1080\r\nprimary_panel=1\r\nvisible=" +
             Number(visible) + "\r\npresented=" + swaps + "\r\nrender_callbacks=" + callbacks +
             "\r\nsource_empty_callbacks=" + empty + "\r\npresent_busy_callbacks=" + busy +
@@ -20,7 +21,7 @@ test("the XAML game panel counts visible swaps and serializes replacement across
         openMedia() { assert.fail("The XAML panel should own playback"); }
     };
     const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
-        presented: stats => first.push(stats), measured: (frames, us, stats) => samples.push([frames, us, stats])};
+        presented: (stats, gpu) => first.push({stats, gpu}), measured: (frames, us, stats) => samples.push([frames, us, stats])};
     const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
         steamBigPictureHost: {switchView: async (to, from) => { assert.equal(to, from); }}};
     const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
@@ -32,7 +33,8 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     const game = open(1);
     await drain();
     tick(); assert.equal(first.length, 0);
-    swaps = 1; tick(); assert.match(first[0], /primary_panel=1/);
+    swaps = 1; tick(); assert.match(first[0].stats, /primary_panel=1/);
+    assert.equal(first[0].gpu, "steam_sdl_gpu_stage=open-texture-and-fences\r\nsteam_sdl_gpu_hresult=2147942405\r\n");
     now += 10000; swaps += 600; tick();
     game.cover(); await drain();
     now += 50000; swaps += 1200; tick();

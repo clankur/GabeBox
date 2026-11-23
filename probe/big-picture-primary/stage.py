@@ -10,7 +10,7 @@ PAGE = "ms-appx-web:///steam-signin.html"
 UAP = "{http://schemas.microsoft.com/appx/manifest/uap/windows10}"
 
 
-def stage_primary(layout: Path, artifact: Path, checksum: str):
+def stage_primary(layout: Path, artifact: Path, checksum: str, early_library_reveal: bool = False):
     manifest = layout / "AppxManifest.xml"
     sums = (artifact / "SHA256SUMS").read_bytes()
     if hashlib.sha256(sums).hexdigest() != (checksum or "").lower():
@@ -43,7 +43,10 @@ def stage_primary(layout: Path, artifact: Path, checksum: str):
     # All existing script URLs resolve within the signed package. Remote artwork and
     # the existing sign-in HTTP requests remain available without permitting remote code.
     csp = b"""<meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'">"""
-    page = page.replace(marker, marker + b' data-steam-primary-xaml="true"')
+    attributes = b' data-steam-primary-xaml="true"'
+    if early_library_reveal:
+        attributes += b' data-steam-early-library-reveal="true"'
+    page = page.replace(marker, marker + attributes)
     with (layout / EXE).open("xb") as output:
         output.write(data)
     html.write_bytes(page.replace(charset, charset + b"\n    " + csp))

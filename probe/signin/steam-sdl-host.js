@@ -720,14 +720,14 @@
                             "steam_sdl_host_input=" + (padAcknowledged ? "delivered" : "unconfirmed") + "\r\n" +
                             (padAcknowledged ? "steam_sdl_host_gamepad=delivered\r\n" : ""));
                     },
-                    presented: function (stats) {
+                    presented: function (stats, gpuCheckpoint) {
                         if (window.steamBigPictureHost && window.steamBigPictureHost.recordGameFrame)
                             window.steamBigPictureHost.recordGameFrame(appId, "first", stats);
                         firstFrame = performance.now();
                         status.textContent = "";
                         keyboardReady = !!(runner.steamSdlKeyboardReady && runner.steamSdlKeyboardReady());
                         keyboard.hidden = !keyboardReady;
-                        if (!attempt.automaticTrial) complete(report + "steam_sdl_host_frame=presented\r\n");
+                        if (!attempt.automaticTrial) complete(report + (gpuCheckpoint || "") + "steam_sdl_host_frame=presented\r\n");
                     }
                 }, nativePad, bigPictureMode ? screen : null);
             }

@@ -116,7 +116,8 @@ test("integrated sign-in goes directly to the Valve host, including when startup
     class Operation extends Promise {
         done(resolve, reject) { this.then(resolve, reject); }
     }
-    for (const outcome of ["ready", "missing", "failed", "lost"]) {
+    for (const outcome of ["ready", "missing", "failed", "lost", "configured", "configured-consumed",
+        "cold-hosted-trial", "mounted-storage", "native-unavailable"]) {
         const elements = new Map();
         const statuses = [];
         const rootAttributes = {};
@@ -126,6 +127,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 setAttribute(name, value) { rootAttributes[name] = value; }
             },
             getElementById(id) {
+                if (id === "xcom-game") return null;
                 if (!elements.has(id)) elements.set(id, {
                     hidden: true, value: "", addEventListener(type, listener) { this[type] = listener; },
                     appendChild() {}, setAttribute() {}, focus() {}
@@ -138,33 +140,102 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         };
         const window = { steamBigPictureBroker: context.steamBigPictureBroker };
         const calls = [];
-        let loseRenderer;
+        const configured = outcome.startsWith("configured");
+        const coldTrial = outcome === "cold-hosted-trial";
+        const configuredAppIds = [];
+        const marker = {name: coldTrial ? "steam-launch-app.txt" : "steam-launch-via-big-picture.txt"};
+        let closeTrial, latestReport;
+        if (coldTrial) window.steamSdlRuntimes = [{appId: 12, backend: "sdl-host", launch(_, appId, attempt) {
+            assert.equal(appId, 12);
+            closeTrial = attempt.onExit;
+            return "steam_sdl_host_frame=presented\r\n";
+        }}];
+        const settings = new Map();
+        const markerKey = "steamBigPictureLaunchProbePackage";
+        const packageId = "signed-host-1";
+        if (outcome === "configured-consumed") settings.set(markerKey, packageId);
+        let finishWarmup;
+        const warmup = new Promise(resolve => { finishWarmup = resolve; });
+        let loseRenderer, activeBroker, firstManifest, inventory;
         if (outcome !== "missing") {
             window.steamBigPictureHost = { async open(broker, onFailure) {
                 loseRenderer = onFailure;
+                activeBroker = broker;
                 calls.push(await broker.library());
                 if (outcome === "failed") throw Error("renderer startup");
-            } };
+                if (configured) await warmup;
+            }, playConfiguredTrial(appId) { configuredAppIds.push(appId); } };
         }
-        const localFolder = { createFileAsync: () => Operation.resolve({}), tryGetItemAsync: () => Operation.resolve(null) };
+        const manifests = {
+            getFilesAsync: () => Operation.resolve({size: 1, getAt: () => firstManifest}),
+            tryGetItemAsync: () => Operation.resolve(firstManifest)
+        };
+        const steamLibrary = {tryGetItemAsync: () => Operation.resolve(manifests)};
+        const localFolder = {createFileAsync: name => Operation.resolve({name}), tryGetItemAsync: () =>
+            Operation.resolve(firstManifest ? steamLibrary : null)};
         const globals = {
             window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
+            setTimeout, clearTimeout,
             Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker, libraryArt: {schedule() {}},
             Windows: {
+                ApplicationModel: { Package: { current: { id: {fullName: packageId}, installedLocation: {
+                    tryGetItemAsync: name => Operation.resolve(
+                        outcome === "ready" && name === "steam-library-inventory.txt" ? {} :
+                            (configured || coldTrial) && name === marker.name ? marker : null)
+                } } } },
                 System: { Profile: { AnalyticsInfo: { versionInfo: {
                     deviceFamily: outcome === "missing" ? "Windows.Desktop" : "Windows.Xbox"
                 } } } },
                 Storage: {
-                    ApplicationData: { current: { localFolder } },
+                    ApplicationData: { current: { localFolder, localSettings: {values: {
+                        hasKey: key => settings.has(key),
+                        lookup: key => settings.get(key),
+                        insert: (key, value) => settings.set(key, value)
+                    }} } },
                     CreationCollisionOption: { replaceExisting: 1 },
-                    FileIO: { writeTextAsync: () => Operation.resolve(), readTextAsync: () => Operation.resolve("status=steam-library-rendering\r\n") }
+                    FileIO: {
+                        writeTextAsync(file, text) {
+                            if (file.name === "steam-library-inventory.json") inventory = JSON.parse(text);
+                            latestReport = text;
+                            return Operation.resolve();
+                        },
+                        readTextAsync: file => Operation.resolve(
+                            file === firstManifest ? '"StateFlags" "4"\r\n' :
+                                file === marker ? "12" : "status=steam-library-rendering\r\n")
+                    }
                 },
                 Web: { Http: { Filters: { HttpBaseProtocolFilter: class {} }, HttpClient: class { close() {} } } }
             },
-            XboxProbe: { Native: { ProbeRunner: { steamSessionSteamId: () => "76561197960268001", resumeSteamSignIn: () =>
-                Operation.resolve(JSON.stringify([{ id: 12, name: "A", game: true }])) } } }
+            XboxProbe: { Native: { ProbeRunner: {
+                steamSessionSteamId: () => "76561197960268001",
+                resumeSteamSignIn() {
+                    if (outcome === "native-unavailable") {
+                        throw Object.assign(Error("local activation details"), {number: 0x80040154 | 0});
+                    }
+                    return Operation.resolve(JSON.stringify([{ id: 12, name: "A", game: true }]));
+                },
+                queueSteamDownload: appId => {
+                    assert.equal(appId, 12);
+                    firstManifest = {name: "appmanifest_12.acf"};
+                    return Operation.resolve("installed:4\r\nsteam_download_bytes_downloaded=2048\r\n" +
+                        "steam_download_bytes_to_download=2048\r\n");
+                }
+            } } }
         };
-        vm.runInNewContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), globals);
+        let driveMounted = true;
+        const nativeStorageCalls = [];
+        if (outcome === "mounted-storage") {
+            globals.XboxProbe.Native.ProbeRunner.steamLibraryCommand = (operation, argument) => {
+                nativeStorageCalls.push([operation, argument]);
+                return Operation.resolve(JSON.stringify({
+                    folders: [{id: "D", mounted: true, apps: []},
+                        {id: "E", mounted: driveMounted, apps: [{appId: 12}]}]
+                }));
+            };
+        }
+        const signInPage = vm.createContext(globals);
+        vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-game-launch.js"), "utf8"), signInPage);
+        vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), signInPage);
         // The platform's first session lookup has not completed. Fresh QR
         // must already use focus navigation, even when no session is restored.
         assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");
@@ -183,9 +254,31 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             }
         }
         await new Promise(resolve => setImmediate(resolve));
+        if (outcome === "native-unavailable") {
+            assert.match(latestReport, /steam_session_restore=unavailable\r\nsteam_session_restore_hresult=0x80040154/);
+            assert.doesNotMatch(latestReport, /steam_qr_challenge|local activation details/);
+            assert.match(document.getElementById("status").textContent, /runtime could not open/);
+            assert.deepEqual(calls, []);
+            continue;
+        }
         assert.equal(document.getElementById("signin").hidden, true);
         assert.equal(document.getElementById("library").hidden, true);
         assert.equal(statuses.length, 1);
+        if (coldTrial) {
+            assert.match(latestReport, /steam_sdl_host_frame=presented/);
+            assert.deepEqual(calls, [], "Steam cannot start while the cold game owns the primary window");
+            closeTrial();
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(calls.length, 1);
+        }
+        if (configured) {
+            assert.deepEqual(configuredAppIds, []);
+            finishWarmup();
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(statuses[0].hidden, true);
+            assert.equal(settings.get(markerKey), packageId);
+            assert.deepEqual(configuredAppIds, outcome === "configured" ? [12] : []);
+        }
         if (outcome === "lost") {
             assert.equal(statuses[0].hidden, true);
             loseRenderer();
@@ -195,9 +288,24 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         }
         if (outcome === "missing") assert.match(statuses[0].textContent, /Reinstall/);
         if (outcome === "failed") assert.match(statuses[0].textContent, /Reopen/);
+        if (outcome === "mounted-storage") {
+            assert.equal(calls[0][0].installed, true);
+            driveMounted = false;
+            assert.equal((await activeBroker.library())[0].installed, false);
+            assert.equal(await activeBroker.play(12), "not-installed");
+            assert.deepEqual(nativeStorageCalls, [["list", ""], ["list", ""], ["list", ""]]);
+        }
         if (outcome === "ready") {
             assert.equal(statuses[0].hidden, true);
+            assert.deepEqual(inventory, [{id: 12, name: "A"}]);
             assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
+            const stages = [];
+            assert.equal(await activeBroker.install(12, (stage, progress) => {
+                stages.push(progress ? [stage, {...progress}] : [stage]);
+            }), "installed");
+            assert.deepEqual(stages, [["starting"], ["installed", {downloaded: 2048, downloadTotal: 2048}]]);
+            assert.equal((await activeBroker.library())[0].installed, true);
+            assert.equal(await activeBroker.install(12), "already-installed");
             globals.navigator.gamepadInputEmulation = "mouse";
             globals.XboxProbe.Native.ProbeRunner.signOutSteam = () => Operation.resolve(true);
             assert.equal(await elements.get("sign-out").click(), "signed-out");

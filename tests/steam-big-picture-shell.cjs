@@ -721,6 +721,7 @@ async function checkInstalledTab(popup, installed, other) {
     assert.equal(await panel.getByRole('link', {name:other, exact:true}).count(), 0);
     return tile;
 }
+
 async function checkInstall(page, popup) {
     const tile = stockTile(popup, 'Fixture B');
     await tile.waitFor({state: 'visible'});

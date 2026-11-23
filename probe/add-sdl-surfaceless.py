@@ -113,6 +113,8 @@ def add_surfaceless(tree):
                           'extern int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval);')
     old = 'extern int OFFSCREEN_GLES_SetSwapInterval(_THIS, int interval);'
     source = replace_once(source, old, old + '\nextern void OFFSCREEN_GLES_SetWindowSize(_THIS, SDL_Window *window);')
+    source = replace_once(source, '#define OFFSCREEN_GLES_DeleteContext   SDL_EGL_DeleteContext',
+                          'extern void OFFSCREEN_GLES_DeleteContext(_THIS, SDL_GLContext context);')
     context_header.write_text(source, encoding='utf-8')
 
     context = offscreen / 'SDL_offscreenopengles.c'
@@ -126,6 +128,12 @@ def add_surfaceless(tree):
 void *OFFSCREEN_GLES_GetProcAddress(_THIS, const char *name)
 {
     return XboxSdlGetProcAddress(_this, name);
+}
+
+void OFFSCREEN_GLES_DeleteContext(_THIS, SDL_GLContext context)
+{
+    XboxSdlReleaseContext(_this, context);
+    SDL_EGL_DeleteContext(_this, context);
 }
 
 void OFFSCREEN_GLES_SetWindowSize(_THIS, SDL_Window *window)

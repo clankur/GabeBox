@@ -25,6 +25,7 @@ from zipfile import BadZipFile, ZipFile
 PACKAGE_API = '/api/app/packagemanager'
 PROBE_NAME = 'XboxPortabilityProbe.ChildProcess'
 PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
+GRAPHICS_CONTROL_NAME = PROBE_NAME + '.GraphicsControl'
 PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
@@ -34,6 +35,7 @@ ACTIVATION_REPORT = 'big-picture-activation.txt'
 BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
 PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_CONTROL_NAME: 'Packaged process startup control',
+                GRAPHICS_CONTROL_NAME: 'Graphics runtime control',
                 PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe',
                 BIG_PICTURE_NAME: 'Steam Big Picture'}
 PROBE_REPORT = 'probe-report.txt'
@@ -851,6 +853,8 @@ def main():
     variant = probe.add_mutually_exclusive_group()
     variant.add_argument('--control', dest='probe_name', action='store_const', const=PROBE_CONTROL_NAME,
                          help='watch the clean-registration control')
+    variant.add_argument('--graphics-control', dest='probe_name', action='store_const', const=GRAPHICS_CONTROL_NAME,
+                         help='watch the static OpenGL import and EGL render control')
     variant.add_argument('--steam-core', dest='probe_name', action='store_const', const=PROBE_STEAM_CORE_NAME,
                          help='watch the Steam Core Loader Probe')
     variant.add_argument('--big-picture', dest='probe_name', action='store_const', const=BIG_PICTURE_NAME,
@@ -1028,10 +1032,19 @@ def main():
                 print('sdl_startup=no-trace-request')
                 return
             trace = read_game_file(portal, app, r'\LocalState', f'sdl-startup-{run[1]}.txt', 4096)
-            snapshots = re.findall(r'^sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
-                                   r'audio_init|audio_device|base_path|pref_path|pref_path_local|message_box|gl_library|gl_context|gl_swap_interval)'
+            snapshots = re.findall(r'^(?:sdl_(?:(?:main_ready|working_directory|init|subsystem_init|video_init|window|renderer|'
+                                   r'audio_init|audio_device|base_path|pref_path|pref_path_local|message_box|gl_library|gl_context|'
+                                   r'gl_swap_interval|surfaceless_egl|surfaceless_context|surfaceless_framebuffer)'
                                    r'=(?:begin|ready|error)|software_frame=(?:ready|error|uniform)|'
-                                   r'init_flags=0x[0-9A-F]{8})$', decode_report(trace or b''), re.MULTILINE)
+                                   r'gpu_interop=published|gpu_first_copy=submitted|gpu_failure=[a-z-]{1,32}:0x[0-9a-fA-F]{8}|'
+                                   r'gpu_followup=host_bound=[01] accepted=[01] heartbeat_fresh=[01] cursor_supported=[01]|'
+                                   r'gpu_(?:mesa_flush|gl_flush|mesa_export)=(?:begin|returned)|'
+                                   r'init_flags=0x[0-9A-F]{8})|win32_(?:window_class=registered|window=created|'
+                                   r'window_create=(?:begin|nccreate|create|thread-unsupported|class-missing|parent-or-menu-unsupported|'
+                                   r'limit-reached|invalid-size|nccreate-refused|create-refused)|'
+                                   r'host_exit=[a-z-]{1,32}|host_exit_(?:error|code)=0x[0-9a-fA-F]{8}|'
+                                   r'wgl_context=created|wgl_swap=submitted|steam_handoff=(?:ready|error|unavailable)))\r?$',
+                                   decode_report(trace or b''), re.MULTILINE)
             print('\n'.join(snapshots) or 'sdl_startup=no-checkpoints')
             return
         if args.report_file == 'slay-console':

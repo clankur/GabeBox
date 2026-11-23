@@ -56,7 +56,6 @@
     var launching = false;
     var signingOut = false;
     var restoring = false;
-    var manifestFolder;
     // Only packaged adapters can be selected. Steam library metadata supplies the AppID.
     var hostedGames = window.xcomDosRuntime ? [{
         appId: window.xcomDosRuntime.appId,
@@ -199,6 +198,12 @@
         }
     }
 
+    function errorCheckpoint(field, error) {
+        var code = error && error.number;
+        if (typeof code !== "number" || !isFinite(code)) return "";
+        return "\r\n" + field + "=0x" + ("00000000" + (code >>> 0).toString(16)).slice(-8);
+    }
+
     function select(button) {
         if (selected) selected.setAttribute("aria-pressed", "false");
         if (selected !== button) closeCloudSaves();
@@ -250,12 +255,19 @@
         return installed;
     }
 
-    function readLocalInstall(entry) {
+    function getSteamAppsFolder() {
+        return Windows.Storage.ApplicationData.current.localFolder
+            .tryGetItemAsync("SteamLibrary").then(function (folder) {
+                return folder ? folder.tryGetItemAsync("steamapps") : null;
+            });
+    }
+
+    function readLocalInstall(entry, manifestFolder) {
         if (typeof XboxProbe.Native.ProbeRunner.steamLibraryCommand === "function") {
             return nativeStorage("list").then(function (state) { return mountedInstalls(state).has(entry.id); });
         }
         var storage = Windows.Storage;
-        return Promise.resolve(manifestFolder).then(function (folder) {
+        return Promise.resolve(manifestFolder === undefined ? getSteamAppsFolder() : manifestFolder).then(function (folder) {
             return folder ? folder.tryGetItemAsync("appmanifest_" + entry.id + ".acf") : null;
         }).then(function (file) {
             return file ? storage.FileIO.readTextAsync(file) : "";
@@ -367,18 +379,19 @@
         function installedGames() {
             if (typeof XboxProbe.Native.ProbeRunner.steamLibraryCommand === "function")
                 return nativeStorage("list").then(mountedInstalls);
-            return Promise.resolve(manifestFolder).then(function (folder) {
-                return folder ? folder.getFilesAsync() : null;
-            }).then(function (files) {
-                var manifests = new Set();
-                for (var i = 0; files && i < files.size; i++) {
-                    var match = /^appmanifest_([1-9][0-9]*)\.acf$/i.exec(files.getAt(i).name);
-                    if (match) manifests.add(+match[1]);
-                }
+            return Promise.resolve(getSteamAppsFolder()).then(function (folder) {
                 var installed = new Set();
-                return Promise.all(games.filter(function (game) { return manifests.has(game.id); }).map(function (game) {
-                    return readLocalInstall(game).then(function (local) { if (local) installed.add(game.id); });
-                })).then(function () { return installed; });
+                if (!folder) return installed;
+                return folder.getFilesAsync().then(function (files) {
+                    var manifests = new Set();
+                    for (var i = 0; files && i < files.size; i++) {
+                        var match = /^appmanifest_([1-9][0-9]*)\.acf$/i.exec(files.getAt(i).name);
+                        if (match) manifests.add(+match[1]);
+                    }
+                    return Promise.all(games.filter(function (game) { return manifests.has(game.id); }).map(function (game) {
+                        return readLocalInstall(game, folder).then(function (local) { if (local) installed.add(game.id); });
+                    })).then(function () { return installed; });
+                });
             });
         }
         function resume(appId) {
@@ -463,13 +476,29 @@
         return Promise.resolve().then(migrateLegacyLibrary).catch(function () {
             // Failure to run the optional migration must not prevent sign-in.
         }).then(function () {
-            return host.open(broker, failed);
+            return host.open(broker, failed, attempt.startup);
         }).then(function () {
-            if (currentSession()) showBigPictureStatus("");
+            if (!currentSession()) return;
+            showBigPictureStatus("");
+            var storage = Windows.Storage;
+            var packageInfo = Windows.ApplicationModel.Package.current;
+            var key = "steamBigPictureLaunchProbePackage";
+            return Promise.resolve().then(function () {
+                return packageInfo.installedLocation.tryGetItemAsync("steam-launch-via-big-picture.txt");
+            }).then(function (file) { return file ? storage.FileIO.readTextAsync(file) : ""; })
+                .then(function (text) {
+                    if (!text || !currentSession()) return;
+                    var config = steamGameLaunch.parseTrial(text);
+                    if (!config || config.install || config.repeat) return;
+                    var values = storage.ApplicationData.current.localSettings.values;
+                    if (values.hasKey(key) && values.lookup(key) === packageInfo.id.fullName) return;
+                    values.insert(key, packageInfo.id.fullName);
+                    return host.playConfiguredTrial(config.appId);
+                }).catch(function () { /* The optional trial cannot block the signed-in library. */ });
         }, failed);
     }
 
-    function completeLibrary(attempt) {
+    function completeLibrary(attempt, launchOnly) {
         var storage = Windows.Storage;
         var packageInfo = Windows.ApplicationModel.Package.current;
         var values = storage.ApplicationData.current.localSettings.values;
@@ -477,6 +506,18 @@
         var complete = "status=steam-core-complete\r\n";
         function save(checkpoint) {
             return storage.FileIO.writeTextAsync(attempt.file, attempt.libraryReport + checkpoint);
+        }
+
+        function launchTrial(game) {
+            if (!launchOnly) return runGameLaunch(attempt, game, true);
+            var closed;
+            var stopped = new Promise(function (resolve) { closed = resolve; });
+            return runGameLaunch(attempt, game, false, closed).then(function (result) {
+                if (!/^steam_sdl_host_frame=presented\r?$/m.test(result)) return result;
+                // The first frame writes the launch report while the game owns
+                // the primary window. Open the Steam canvas after panel cleanup.
+                return stopped.then(function () { return result; });
+            });
         }
 
         function runConfiguredTrial(file) {
@@ -490,7 +531,7 @@
                 }
                 var game = entries.filter(function (entry) { return entry.id === config.appId; })[0];
                 if (!game) return save("steam_launch=game-unavailable\r\n" + complete);
-                if (!config.install) return runGameLaunch(attempt, game, true);
+                if (!config.install) return launchTrial(game);
                 return save("status=steam-game-install-checking\r\n").then(function () {
                     return checkLocalInstall(game);
                 }).then(function (installed) {
@@ -501,11 +542,16 @@
                 }).then(function (stage) {
                     attempt.libraryReport += "steam_launch_install=" + stage + "\r\n";
                     if (stage !== "installed" && stage !== "already-installed") return save(complete);
-                    return runGameLaunch(attempt, game, true);
+                    return launchTrial(game);
                 });
             });
         }
 
+        if (launchOnly) {
+            return packageInfo.installedLocation.tryGetItemAsync("steam-launch-app.txt").then(function (file) {
+                return file ? runConfiguredTrial(file) : undefined;
+            });
+        }
         return packageInfo.installedLocation.tryGetItemAsync("steam-cloud-preview.txt").then(function (preview) {
             if (preview) {
                 return runCloudRestore(646570, true).then(function (result) {
@@ -553,18 +599,17 @@
     }
 
     function finishNative(attempt, payload) {
+        attempt.startup.mark("native_signin_returned");
         var reportRead = Windows.Storage.FileIO.readTextAsync(attempt.file);
         if (bigPictureMode && payload) {
             reportRead = Promise.resolve(reportRead).catch(function () { return attempt.prefix; });
         }
         return reportRead.then(function (report) {
+            attempt.startup.mark("signin_report_read");
             if (payload) {
                 entries = JSON.parse(payload);
                 entries.sort(function (a, b) { return a.name.localeCompare(b.name); });
-                manifestFolder = Windows.Storage.ApplicationData.current.localFolder
-                    .tryGetItemAsync("SteamLibrary").then(function (folder) {
-                        return folder ? folder.tryGetItemAsync("steamapps") : null;
-                    });
+                attempt.startup.mark("catalog_parsed");
                 signin.hidden = true;
                 if (bigPictureMode) {
                     showBigPictureStatus("Opening Steam Big Picture…");
@@ -585,8 +630,15 @@
                     attempt.libraryReport = report.replace("status=steam-library-rendering\r\n",
                         "steam_library_provider=big-picture\r\n");
                     function openLibrary() { return openBigPicture(attempt); }
-                    return Windows.Storage.FileIO.writeTextAsync(attempt.file,
-                        attempt.libraryReport + "status=steam-core-complete\r\n").then(openLibrary, openLibrary);
+                    return saveLibraryInventory().then(function (checkpoint) {
+                        attempt.startup.mark("inventory_export_finished");
+                        attempt.libraryReport += checkpoint;
+                        return Windows.Storage.FileIO.writeTextAsync(attempt.file,
+                            attempt.libraryReport + "status=steam-core-complete\r\n").then(function () {
+                                attempt.startup.mark("signin_report_written");
+                                return completeLibrary(attempt, true);
+                            }).then(openLibrary, openLibrary);
+                    });
                 }
                 attempt.libraryReport = report.replace("status=steam-library-rendering\r\n", "steam_library_rendered=yes\r\n");
                 return saveLibraryInventory().then(function (checkpoint) {
@@ -785,12 +837,21 @@
 
     function start() {
         if (current && !current.done) return;
+        var clock = window.performance && typeof window.performance.now === "function" ?
+            function () { return window.performance.now(); } : Date.now;
+        var started = clock(), startupMarks = Object.create(null);
         retry.hidden = true;
         remember.checked = false;
         status.textContent = "Checking for a saved Steam session…";
         var attempt = {
             client: httpClient(),
-            prefix: "probe=steam-signin\r\nrun_id=" + Date.now() + "\r\n"
+            prefix: "probe=steam-signin\r\nrun_id=" + Date.now() + "\r\n",
+            startup: {
+                marks: startupMarks,
+                mark: function (stage) {
+                    if (startupMarks[stage] === undefined) startupMarks[stage] = Math.max(0, Math.round(clock() - started));
+                }
+            }
         };
         current = attempt;
         Windows.Storage.ApplicationData.current.localFolder.createFileAsync(
@@ -799,15 +860,29 @@
             attempt.file = file;
             return Windows.Storage.FileIO.writeTextAsync(file, attempt.prefix + "status=steam-session-checking\r\n");
         }).then(function () {
-            return XboxProbe.Native.ProbeRunner.resumeSteamSignIn(attempt.file, attempt.prefix).then(null, function () {
-                return "fallback";
-            });
+            try {
+                attempt.startup.mark("cache_check_started");
+                return XboxProbe.Native.ProbeRunner.resumeSteamSignIn(attempt.file, attempt.prefix).then(null, function (error) {
+                    var details = errorCheckpoint("steam_session_restore_hresult", error);
+                    if (details) attempt.prefix += details.slice(2) + "\r\n";
+                    return "fallback";
+                });
+            } catch (error) {
+                finish(attempt, "Steam's Xbox runtime could not open. Reopen the app to retry.",
+                    "steam_session_restore=unavailable" + errorCheckpoint("steam_session_restore_hresult", error));
+            }
         }).then(function (payload) {
+            if (attempt.done) return;
+            attempt.startup.mark("cache_check_finished");
             if (payload && payload !== "fallback") return finishNative(attempt, payload);
             if (payload === "fallback") attempt.prefix += "steam_session_restore=fallback\r\n";
-            return prepareQr(attempt);
-        }).done(null, function () {
-            finish(attempt, "Steam could not prepare an approval code. Try again.", "steam_qr_challenge=failed");
+            return prepareQr(attempt).then(null, function (error) {
+                finish(attempt, "Steam could not prepare an approval code. Try again.",
+                    "steam_qr_challenge=failed" + errorCheckpoint("steam_qr_hresult", error));
+            });
+        }).done(null, function (error) {
+            finish(attempt, "Steam could not finish opening. Reopen the app to retry.",
+                "steam_startup=failed" + errorCheckpoint("steam_startup_hresult", error));
         });
     }
 
@@ -927,7 +1002,6 @@
             launching = false;
             signOut.disabled = false;
             entries = [];
-            manifestFolder = null;
             renderList();
             if (originalInputMode !== undefined) navigator.gamepadInputEmulation = bigPictureMode ? "keyboard" : originalInputMode;
             library.hidden = true;

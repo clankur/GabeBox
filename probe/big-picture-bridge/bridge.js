@@ -6,19 +6,34 @@
         'SteamClient' in window) return;
     const host = window.chrome?.webview;
     if (!host) return;
+    installXboxStartupMovieProbe(host, xboxStartupMovieOverrideAbsent);
 
     const pending = new Map();
     const listeners = new Set();
     const detailListeners = new Set();
     let requestId = crypto.getRandomValues(new Uint32Array(1))[0] & 0x3fffffff;
-    let runtime;
+    let runtime, installCloudCacheReads;
     let updating;
     let refreshAgain = false;
     let activeApp = 0;
     let controlsApp = 0;
     let focusStore;
     // Capture the release's serializer without replacing its entry, routes or modules.
-    (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => { runtime = require; }]);
+    (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => {
+        runtime = require;
+        if (xboxLocalCloudCacheReads && typeof xboxNativeWindow !== 'undefined' &&
+            xboxNativeWindow.deviceFamily === 'Windows.Xbox') {
+            // The pinned library entry defers on chunk 41. Run this callback
+            // before its entry so the store's first data request uses the cache.
+            require.O(undefined, [41], () => {
+                try {
+                    const module = require(83957);
+                    installCloudCacheReads?.(module.__esModule ? module.default : module);
+                } catch (_) {}
+            }, -1);
+        }
+    }]);
+    installXboxStartupTiming(host, xboxProfileStartupServices, () => runtime?.(76725).J());
 
     host.addEventListener('message', ({data}) => {
         if (data?.event === 'xbox-install') {
@@ -346,7 +361,7 @@
     installXboxMessaging(client);
     installXboxCoreStartup(client, send);
     installXboxServices(client, send);
-    installXboxCloudCache(client, send);
+    installCloudCacheReads = installXboxCloudCache(client, send);
     const showGameOverlay = installXboxUrls(client, () => activeApp);
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {

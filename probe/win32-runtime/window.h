@@ -29,3 +29,4 @@ void XboxPollWglHostEvents(void);
 void XboxResizeCurrentContext(XboxWindow *window);
 RECT XboxDesktopBounds(void);
 void XboxWindowTrace(const char *line);
+void XboxWatchHostExit(void);
