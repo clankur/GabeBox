@@ -176,7 +176,19 @@ Build `1.0.230.283`, run `1795446848863`, raised only the trial `AssetHeap` cap 
 
 A local mip-preparation control used bounded reads from the installed `g00s000` archive. It matched the reference input and output hashes for the first two entries in `mip256-full.tsv` and reduced their logical payloads from 349,632 to 87,488 bytes and from 174,880 to 43,808 bytes. The control verifies the texture transformation on owned build `23986256`. The effect of prepared archives on Xbox `AssetHeap` usage remains open. [Reference owned-file preparation](https://github.com/BBCPrince/UWP-Spider-Launcher/tree/main/asset-preparation)
 
+Build `1.0.230.284`, run `1795448096223`, used a private package containing a generated index with exactly two rerouted textures. Its file-open probe reported a successful open of both the prepared TOC and DSAR and reached its first GPU frame. The 3,247,528-byte menu-zone `AssetHeap` request still failed. The router kept the game's original logical archive path and forwarded the other archive basenames to the installed Steam copy.
+
+Build `1.0.230.285`, run `1795448268127`, reused the 256 MiB heap cap and supplied 3,993 prepared textures from `g00s000` and `g00s019`. Independent verification decoded all 857 generated DSAR blocks, matched every texture's output SHA-256 to the reference, and verified that every unrelated TOC entry stayed the same. The game opened and read the prepared archive on Xbox. It reported 125,080 KiB of available commit at the same failed menu-zone allocation, versus 53,884 KiB in the `.282` run at the same heap cap. This is a comparison of two launches. The change in available commit does not quantify the runtime residency of each texture.
+
 ## Reproduce the launch trial
+
+Prepare the mip overlay from the verified Steam installation and a local copy of the reference `asset-preparation/recipes` directory. The standalone tool verifies the original TOC, input assets and generated output against the build and reference fingerprints. It writes a separate `toc` and `local_mip256_hdclosed.dsar` and validates the generated archive after writing. Keep these private, generated files outside the Steam installation. The signed `.284` and `.285` tests map these two paths from the original installation to their equivalent files in the package's `owned-mip-overlay` directory. [Mip preparation tool](../probe/win32-runtime/profiles/1817070/23986256/prepare-mip-overlay.py) · [Reference recipes](https://github.com/BBCPrince/UWP-Spider-Launcher/tree/main/asset-preparation/recipes)
+
+```sh
+python3 probe/win32-runtime/profiles/1817070/23986256/prepare-mip-overlay.py \
+  "$owned_game/asset_archive" "$reference/asset-preparation/recipes" "$trial/prepared" \
+  --archive g00s000 --archive g00s019
+```
 
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
 
