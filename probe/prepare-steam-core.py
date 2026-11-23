@@ -48,6 +48,30 @@ def system_imports(objdump, binary):
     return imports
 
 
+def coff_imports(readobj, binary):
+    """Read both the load-time and delay-load tables of a Windows PE image."""
+    result = subprocess.run([readobj, '--coff-imports', str(binary)], check=True,
+                            timeout=45, capture_output=True, text=True).stdout
+    if not re.search(r'^Format: COFF-', result, re.MULTILINE):
+        raise ValueError(f'Could not read the PE imports of {binary.name}.')
+    tables = {'Import {': {}, 'DelayImport {': {}}
+    table = module = None
+    for line in result.splitlines():
+        if line in tables:
+            table, module = tables[line], None
+        elif line == '}':
+            table = module = None
+        elif table is not None:
+            name = re.fullmatch(r'  Name: ([a-zA-Z0-9_.-]+)', line)
+            if name:
+                module = table.setdefault(name[1].lower(), set())
+            elif module is not None:
+                symbol = re.fullmatch(r'\s+Symbol:\s*(\S*)\s*\((\d+)\)', line)
+                if symbol:
+                    module.add(symbol[1] or '#' + symbol[2])
+    return tables['Import {'], tables['DelayImport {']
+
+
 def adapt_pinned_keyboard(binary, objdump):
     audit = json.loads((ANALYSIS / 'client-imports.json').read_text())
     pin = next(component for component in audit['components'] if component['member'] == binary.name)
@@ -195,7 +219,8 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
                    startup_sdl_renderer=None, startup_sdl_dummy_video=False,
                    startup_sdl_working_directory=False, startup_wait_only=False, startup_sdl_local_preferences=False,
                    startup_sdl_late_frame=False, startup_sdl_host=False, stardew_sdl_host=None, slay_sdl_host=None,
-                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None, stardew_sdl_runtime=None):
+                   measure_sdl_frames=False, fhd_presenter=None, fhd_presenter_checksum=None, stardew_sdl_runtime=None,
+                   readobj=None):
     if (fhd_presenter is None) != (fhd_presenter_checksum is None):
         raise ValueError('Supply the presenter artifact directory and its checksum together.')
     presenter = presenter_payload(fhd_presenter, fhd_presenter_checksum) if fhd_presenter else {}
@@ -208,8 +233,11 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             raise ValueError('Use the same shared SDL 2.30.9 build for both hosted profiles.')
     imports = {}
     for binary in inspect_binaries:
-        for module, symbols in system_imports(objdump, binary).items():
-            imports.setdefault(module, set()).update(symbols)
+        tables = coff_imports(readobj, binary) if readobj else (system_imports(objdump, binary),)
+        for table in tables:
+            for module, symbols in table.items():
+                if module not in VALVE_FILES:
+                    imports.setdefault(module, set()).update(symbols)
     version_parts = tuple(int(part) for part in version.split('.'))
     startup_app_id = launch_app_id
     hosted_profiles = {646570: slay_sdl_host, 413150: stardew_sdl_host, 975370: startup_sdl_host}
@@ -410,6 +438,7 @@ def main():
     parser.add_argument('--objdump', default='llvm-objdump', help='path to LLVM objdump')
     parser.add_argument('--inspect-pe', type=Path, action='append', default=[],
                         help='report the system imports of a local PE file without packaging it')
+    parser.add_argument('--readobj', help='include delayed imports in --inspect-pe using this LLVM readobj executable')
     parser.add_argument('--unicode-keyboard', action='store_true',
                         help='test a local Unicode import adaptation of the pinned Steam core')
     parser.add_argument('--steam-sign-in', action='store_true', help='start the interactive Steam Guard page')
@@ -529,7 +558,8 @@ def main():
                    startup_sdl_late_frame=args.startup_sdl_late_frame, startup_sdl_host=args.startup_sdl_host,
                    stardew_sdl_host=args.stardew_sdl_host, slay_sdl_host=args.slay_sdl_host,
                    measure_sdl_frames=args.measure_sdl_frames, fhd_presenter=args.fhd_presenter,
-                   fhd_presenter_checksum=args.fhd_presenter_checksum, stardew_sdl_runtime=args.stardew_sdl_runtime)
+                   fhd_presenter_checksum=args.fhd_presenter_checksum, stardew_sdl_runtime=args.stardew_sdl_runtime,
+                   readobj=args.readobj)
 
 
 if __name__ == '__main__':

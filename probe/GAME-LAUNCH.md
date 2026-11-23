@@ -15,6 +15,47 @@ The default route calls Steam Play for the selected AppID. Use the publisher's W
 
 Check a failed launch against the installed executable's architecture, supported Windows API imports, runtime dependencies, and graphics backend. `inspect-game --executable` reads the installed PE header. The loader and process checkpoints show where the request stopped. Any runtime dependency added to the package should come from the original signed redistributable. Keep changes scoped to the verified title and depot.
 
+### Check desktop namespace assumptions before adapting a title
+
+Audit the executable and its companions together. Include delayed imports and the paths a library passes to dynamic loads, named IPC, and helper processes. Use the same AppContainer and package dependencies as the real launch when testing the following boundaries.
+
+| Desktop assumption | Xbox compatibility check |
+| --- | --- |
+| A local IPC name reaches the same object in both processes | Keep the endpoints in the same app. For named pipes, resolve both creation and open/wait calls in `\\.\pipe\LOCAL\`. Exercise the helper launch and handle inheritance when the protocol uses them. |
+| A mutex, event, semaphore, timer, or file mapping uses a shared desktop name | Check that both processes open the same object under the app's identity. Trace the actual name and access flags. When the protocol shares a handle, verify that both endpoints can use it and close it. |
+| DLLs resolve beside the original executable or from a desktop runtime install | Stage verified game companions at the expected relative paths. Check system exports and signed package-framework exports with the corresponding loader search modes. |
+| Documents and app data use ordinary desktop profile paths | Supply writable paths scoped to the signed-in account and AppID. Exercise the game's log and save locations through its actual Win32 folder APIs. |
+| The Steam SDK discovers a global desktop client registration | Resolve the real authenticated Steam session with the app's private discovery configuration and verify the SDK reports the expected signed-in account. |
+
+Check device creation and reported graphics capabilities separately. A successful DLL load or a usable window does not establish the feature level, shader model, presentation path, or frame rate required by the game. [AppContainer named pipes](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew) · [Packaged library loading](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-loadpackagedlibrary)
+
+The compatibility scan flags named-pipe, synchronization, and file-mapping imports across the executable and its companion DLLs, including delay imports where available. Use these leads to decide what to trace. Synchronization and mapping calls can create unnamed objects, so check their runtime arguments before selecting an adapter. [Sharing named objects](https://learn.microsoft.com/en-us/windows/apps/develop/communication/sharing-named-objects)
+
+If the game exits during startup, a trial can bind `kernel32.dll!VirtualAlloc` to `XboxWin32LoaderTrace.dll`. The trace records failed commits with the requested bytes, Windows error, and available commit in KiB. The adapter preserves the allocation result and last error. Use the diagnostic to distinguish a CPU commit failure from a D3D heap failure when both occur during renderer startup.
+
+Legacy CRTs can query the file type of standard-output and standard-error handles while a companion DLL attaches. For an opted-in import, `XboxWin32LoaderTrace.dll` turns the Xbox runtime's `STATUS_INVALID_HANDLE` exception into the documented `GetFileType` result of `FILE_TYPE_UNKNOWN` with `ERROR_INVALID_HANDLE`. Valid handles use the native result. [GetFileType contract](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfiletype)
+
+Use `system-sha256:` in the Win32 companion list to authorize a verified staged DLL as a fallback for a system-only `LoadLibraryEx` request. The loader first attempts the original search. On `ERROR_MOD_NOT_FOUND`, it loads the approved module by its absolute path and searches the module directory and System32 for dependencies. The profile's digest check runs before the module becomes eligible. [Library search flags](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw)
+
+When a shader fails after device creation, reproduce pipeline creation on the same adapter with the original bytecode and root signature. For fixed resource bindings, `dxil-legacy-bindings.py` can translate DXC disassembly from Shader Model 6.6 to 6.4. Assemble the result with `dxa`, validate and write the container with `dxv -o`, then verify the translated shader's output on the Xbox GPU. A verified PE recipe can use `redirect-pe-imports.py --recipe --overlays` to apply same-length, source-hash-matched ranges to the temporary launch copy.
+
+### Verify owned Windows files before a trial
+
+Add `--win32-source-profile APPID=FILE` with a current `--win32-runtime-template` when a game needs a build-matched runtime or asset preparation. The JSON keys are Steam build IDs. Each build lists the relative paths, byte sizes, and SHA-256 hashes needed for the trial. After verifying Steam ownership and the completed installation, Play checks these files in the selected Steam library and logs `steam_source_check`. A failed check reports the installed build and, for file errors, the relative filename. Use a small set of launch-critical files to keep checks fast.
+
+For Marvel’s Spider-Man Remastered, use `--win32-source-profile 1817070=probe/win32-runtime/profiles/1817070/source.json`. This profile checks the executable, asset index, Direct3D 12, audio, and selected companion libraries for Steam builds `14752622` and `23986256` against the original and experimental UWP Spider Launcher fingerprints. To check the inputs offline, run the command below with the build ID from the local Steam manifest. [Original build fingerprints](https://github.com/BBCPrince/UWP-Spider-Launcher/blob/1865c248825f617b24ee75b258f10e634338ff0b/source/SteamFiles.json) · [Experimental build fingerprints](https://github.com/BBCPrince/UWP-Spider-Launcher/blob/1865c248825f617b24ee75b258f10e634338ff0b/source/SteamFiles40630.json)
+
+```sh
+python3 probe/verify-win32-source.py probe/win32-runtime/profiles/1817070/source.json \
+  "$owned_game_directory" --build "$steam_build_id"
+```
+
+The same game builds can be tested independently in the upstream combined launcher. The attached 0.6.0.57 Xbox MSIX has SHA-256 `908bbe74275b20036d9ab533849745851573f2f3efedd6b6fdaaf48b1254d6d6` and contains the launcher’s native host and preparation support. Its preparation step generates lower-detail assets and pipeline data from the player’s own files. Our preflight can establish source compatibility for an Xbox launch trial. Gameplay in our layer still requires validating Direct3D 12 presentation, the game’s memory budget and prepared assets, Steam handoff, controller, sound, saves, and return to Big Picture. [Upstream release package](https://github.com/BBCPrince/UWP-Spider-Launcher/releases/tag/v0.6.0.56-experimental.1)
+
+### Scope a Win32 trial’s Documents folder
+
+When an audited image uses `SHGetFolderPathW` for Documents, bind that import to `XboxWin32Desktop.dll` and include an empty `steam-win32-documents-APPID.txt` in the matching trial profile. The native launcher creates a persistent Documents folder under the existing account and AppID profile in LocalState. The adapter returns that folder for the current user’s Documents query. It delegates unrelated queries to the system. Verify local save and reload separately from Steam Cloud. [Windows folder API](https://learn.microsoft.com/windows/win32/api/shlobj_core/nf-shlobj_core-shgetfolderpathw)
+
 ## Hosted titles
 
 Register an adapter only when a bundled runtime can execute the verified installed format. An adapter declares its AppID, backend, native authorization method, success marker, and start function. The dispatcher opens a hosted runtime only after that method verifies the selected install. A refused or failed authorization returns to the library with its diagnostic.

@@ -101,6 +101,41 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot replace"):
             stage_profiles(self.layout, ["413150=123"])
 
+    def test_win32_legacy_steam_sdk_requires_a_matching_unmodified_staged_companion(self):
+        self.layout.mkdir()
+        profile = self.work / "legacy-sdk-profile"
+        profile.mkdir()
+        app = "1817070"
+        build = "23986256"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({build: [
+            {"path": "Game.exe", "size": 512, "sha256": "1" * 64}]}))
+        marker = f"steam-win32-steam-legacy-sdk-{app}.txt"
+        digest = "2" * 64
+        (profile / marker).write_text(digest + "\n")
+        companions = profile / f"steam-win32-files-{app}.txt"
+        companions.write_text("steam_api64.dll\n")
+        (profile / "steam_api64.dll").write_bytes(b"owned fixture must stay local")
+        template = self.work / "legacy-sdk-runtime.appx"
+        feature = "XBOX_STEAM_HANDOFF_LEGACY\0".encode("utf-16le")
+        with ZipFile(template, "w") as archive:
+            archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+            archive.writestr("ProbeNative.dll", feature + "steam_source_check=steam_shadow_companion_hashes=verified".encode("utf-16le"))
+            archive.writestr("XboxWin32SteamDiscovery.dll", feature)
+            for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll"):
+                archive.writestr(name, b"runtime fixture")
+        stage_trials = library_builder["stage_win32_trial_profiles"]
+        with self.assertRaisesRegex(ValueError, "matching hash-pinned companion"):
+            stage_trials(self.layout, [f"{app}={profile}"], template)
+        companions.write_text(f"steam_api64.dll\tsha256:{digest}\n")
+        stage_trials(self.layout, [f"{app}={profile}"], template)
+        self.assertEqual((self.layout / marker).read_text(), digest)
+        self.assertEqual((self.layout / "XboxWin32SteamDiscovery.dll").read_bytes(), feature)
+        self.assertFalse((self.layout / "steam_api64.dll").exists())
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
@@ -139,6 +174,25 @@ class BigPicturePackageTests(unittest.TestCase):
             stage_trials(self.layout, [f"1145360={profile}"] * 2, template)
         with self.assertRaisesRegex(ValueError, "x64 Steam Core"):
             stage_trials(self.layout, [f"1145360={profile}"], self.template)
+
+        documents_marker = "steam-win32-documents-1145360.txt"
+        documents = profile / documents_marker
+        documents.write_text("C:\\Users\\Someone\\Documents")
+        with self.assertRaisesRegex(ValueError, "empty Documents marker"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        documents.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "template with profile Documents support"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        current_template = self.work / "documents-runtime.appx"
+        with ZipFile(template) as original, ZipFile(current_template, "w") as updated:
+            for name in original.namelist():
+                data = original.read(name)
+                if name in ("ProbeNative.dll", "XboxWin32Desktop.dll"):
+                    data += "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
+                updated.writestr(name, data)
+        stage_trials(self.layout, [f"1145360={profile}"], current_template)
+        self.assertEqual((self.layout / documents_marker).read_bytes(), b"")
+        documents.unlink()
 
         (profile / marker).write_text("10929685\nGame.exe\nopengl3\ngodot\n")
         stage_trials(self.layout, [f"1145360={profile}"], template)
@@ -237,6 +291,108 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / dynamic_companions).read_bytes(), b"")
         self.assertEqual((self.layout / nested_recipe).read_bytes(), (profile / nested_recipe).read_bytes())
         self.assertFalse((self.layout / nested_runtime).exists())
+
+    def test_win32_source_profile_requires_verifier_and_stages_only_fingerprints(self):
+        self.layout.mkdir()
+        profile = ROOT / "probe/win32-runtime/profiles/1817070/source.json"
+        template = self.work / "runtime.appx"
+        stage_profiles = library_builder["stage_win32_trial_profiles"]
+        entry = f"1817070={profile}"
+        with self.assertRaisesRegex(ValueError, "runtime template together"):
+            stage_profiles(self.layout, [], None, [entry])
+        for native in (b"old", "steam_source_check=".encode("utf-16le")):
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("XboxProbe.Native.winmd", b"metadata")
+                archive.writestr("ProbeNative.dll", native)
+            if native == b"old":
+                with self.assertRaisesRegex(ValueError, "source-profile verification"):
+                    stage_profiles(self.layout, [], template, [entry])
+                self.assertEqual(list(self.layout.iterdir()), [])
+            else:
+                stage_profiles(self.layout, [], template, [entry])
+        staged_name = "steam-win32-source-1817070.json"
+        self.assertEqual({path.name for path in self.layout.iterdir()},
+                         {staged_name, "ProbeNative.dll", "XboxProbe.Native.winmd"})
+        self.assertEqual(json.loads((self.layout / staged_name).read_bytes()), json.loads(profile.read_bytes()))
+        with self.assertRaisesRegex(ValueError, "one APPID"):
+            stage_profiles(self.layout, [], template, [entry, entry])
+
+    def test_win32_trial_packages_embedded_source_and_companion_fingerprints(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        source = ROOT / "probe/win32-runtime/profiles/1817070/source.json"
+        (profile / "steam-win32-source-1817070.json").write_bytes(source.read_bytes())
+        marker = profile / "steam-win32-shadow-1817070.txt"
+        marker.write_text("14752622\nSpider-Man.exe\n")
+        (profile / "steam-win32-shadow-1817070.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        files = profile / "steam-win32-files-1817070.txt"
+        pin = "D3D12/D3D12Core.dll\tsha256:" + "a" * 64 + "\n"
+        files.write_text(pin)
+        template = self.work / "runtime.appx"
+        stage_trials = library_builder["stage_win32_trial_profiles"]
+        base = "steam_source_check=".encode("utf-16le")
+        for binary in (base, base + "steam_shadow_companion_hashes=verified".encode("utf-16le")):
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+                archive.writestr("ProbeNative.dll", binary)
+            if binary == base:
+                with self.assertRaisesRegex(ValueError, "companion fingerprint verification"):
+                    stage_trials(self.layout, [f"1817070={profile}"], template)
+                self.assertEqual(list(self.layout.iterdir()), [])
+            else:
+                stage_trials(self.layout, [f"1817070={profile}"], template)
+        self.assertEqual((self.layout / files.name).read_text(), pin)
+        self.assertFalse((self.layout / "D3D12").exists())
+        self.assertEqual(json.loads((self.layout / "steam-win32-source-1817070.json").read_text()),
+                         json.loads(source.read_text()))
+        files.write_text(pin + pin.lower())
+        with self.assertRaisesRegex(ValueError, "duplicate companion path"):
+            stage_trials(self.layout, [f"1817070={profile}"], template)
+        marker.write_text("3\nSpider-Man.exe\n")
+        with self.assertRaisesRegex(ValueError, "does not include the trial build"):
+            stage_trials(self.layout, [f"1817070={profile}"], template)
+
+    def test_win32_system_companions_require_a_matching_runtime_and_top_level_dll(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        (profile / "steam-win32-shadow-1817070.txt").write_text(
+            "14752622\nSpider-Man.exe\n\n\n\n\nloader-trace\n")
+        (profile / "steam-win32-shadow-1817070.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        files = profile / "steam-win32-files-1817070.txt"
+        pin = "XAudio2_7.dll\tsystem-sha256:" + "a" * 64 + "\n"
+        files.write_text(pin)
+        template = self.work / "runtime.appx"
+        stage_trials = library_builder["stage_win32_trial_profiles"]
+        profiles = [f"1817070={profile}"]
+        variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
+        hash_check = "steam_shadow_companion_hashes=verified".encode("utf-16le")
+        for loader in (b"old loader", variable):
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+                archive.writestr("ProbeNative.dll", hash_check + variable)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+            if loader != variable:
+                with self.assertRaisesRegex(ValueError, "verified system companion support"):
+                    stage_trials(self.layout, profiles, template)
+                self.assertEqual(list(self.layout.iterdir()), [])
+        files.write_text("nested/" + pin)
+        with self.assertRaisesRegex(ValueError, "top-level DLL"):
+            stage_trials(self.layout, profiles, template)
+        files.write_text(pin)
+        stage_trials(self.layout, profiles, template)
+        self.assertEqual((self.layout / files.name).read_text(), pin)
 
     def test_changed_cached_archive_and_manifest_leave_no_partial_layout(self):
         self.archive.write_bytes(b"x" * self.archive.stat().st_size)

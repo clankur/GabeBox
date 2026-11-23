@@ -1,0 +1,5 @@
+{
+  "kernel32.dll": {
+    "GetFileType": "XboxWin32LoaderTrace.dll"
+  }
+}

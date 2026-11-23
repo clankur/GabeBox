@@ -115,11 +115,11 @@ inline void EnsureDirectory(std::wstring_view path) {
 
 struct File {
     HANDLE handle = INVALID_HANDLE_VALUE;
-    File(std::wstring_view path, DWORD access, DWORD disposition) {
+    File(std::wstring_view path, DWORD access, DWORD disposition, DWORD share = FILE_SHARE_READ) {
         CREATEFILE2_EXTENDED_PARAMETERS options{};
         options.dwSize = sizeof(options);
         options.dwFileFlags = FILE_FLAG_OPEN_REPARSE_POINT;
-        handle = CreateFile2(ApiPath(path).c_str(), access, FILE_SHARE_READ, disposition, &options);
+        handle = CreateFile2(ApiPath(path).c_str(), access, share, disposition, &options);
         if (handle == INVALID_HANDLE_VALUE) Fail("Open Steam library file");
         FILE_ATTRIBUTE_TAG_INFO attributes{};
         const bool inspected = GetFileInformationByHandleEx(
@@ -405,6 +405,46 @@ inline std::optional<DownloadProgress> ReadDownloadProgress(std::wstring_view li
     if (!Exists(path, false)) return std::nullopt;
     const auto manifest = ParseManifest(ReadManifest(path), id);
     return manifest ? std::optional(manifest->download) : std::nullopt;
+}
+
+struct DepotActivity {
+    std::uint64_t latestWrite{};
+    std::uint64_t totalSize{};
+    std::uint32_t files{};
+};
+
+inline std::optional<DepotActivity> ReadDepotActivity(std::wstring_view library, std::uint32_t id) {
+    using namespace storage_detail;
+    const auto apps = Child(library, L"steamapps");
+    const auto downloading = Child(apps, L"downloading");
+    if (!Exists(library, true) || !Exists(apps, true) || !Exists(downloading, true)) return std::nullopt;
+    DepotActivity activity;
+    bool complete = true;
+    const auto prefix = L"state_" + std::to_wstring(id) + L"_";
+    constexpr std::wstring_view suffix = L".patch";
+    Visit(downloading, prefix + L"*" + std::wstring(suffix), [&](std::wstring_view name, WIN32_FIND_DATAW const &entry) {
+        if (!complete || (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+                !name.starts_with(prefix) || !name.ends_with(suffix) || name.size() <= prefix.size() + suffix.size()) return;
+        const auto depot = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+        if (depot.find_first_not_of(L"0123456789") != std::wstring_view::npos) return;
+        BY_HANDLE_FILE_INFORMATION info{};
+        try {
+            // Directory entries can lag while Steam holds the patch open.
+            // Query its handle without reading the file or restricting Steam's access.
+            const File patch(Child(downloading, name), FILE_READ_ATTRIBUTES, OPEN_EXISTING,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            complete = GetFileInformationByHandle(patch.handle, &info) != 0;
+        } catch (std::system_error const &) {
+            complete = false;
+        }
+        if (!complete) return;
+        const auto write = (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+            info.ftLastWriteTime.dwLowDateTime;
+        activity.latestWrite = std::max(activity.latestWrite, write);
+        activity.totalSize += (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+        ++activity.files;
+    });
+    return complete && activity.files ? std::optional(activity) : std::nullopt;
 }
 
 inline std::optional<App> FindApp(Drive drive, std::wstring_view localState, std::uint32_t id) {

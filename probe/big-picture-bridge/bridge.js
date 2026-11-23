@@ -250,6 +250,8 @@
                 throw new Error('Unsupported Steam launch request');
             }
             const result = await runAction(appId, source, () => send('play', appId));
+            if (result === 'unsupported-build') throw new Error('This Steam build has no matching Xbox compatibility profile.');
+            if (result === 'source-file-check-failed') throw new Error('The Xbox compatibility file check failed.');
             if (result !== 'presented' && result !== 'window-ready') throw new Error(String(result || 'Launch unconfirmed'));
         }
     }};
@@ -258,7 +260,7 @@
     const refreshLibrary = () => refresh().catch(error => console.error('Steam library unavailable', error.message));
     const storage = installXboxStorage(client, (operation, argument) => send(`storage-${operation}`, undefined, argument),
         appId => runtime?.(90544).tw.GetAppOverviewByAppID(appId)?.display_name, () => runtime(94601), refreshLibrary);
-    const publishDownload = installXboxDownloads(client, () => runtime);
+    const publishDownload = installXboxDownloads(client, () => runtime, () => xboxGamepadPopup);
     const installer = installXboxInstalls(client, send, refreshLibrary, () => runtime, storage.refresh, publishDownload);
     const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {

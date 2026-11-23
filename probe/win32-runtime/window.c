@@ -17,6 +17,7 @@ typedef struct WindowClass {
 static volatile LONG windowThread;
 static WindowClass classes[CLASS_COUNT];
 static XboxWindow windows[WINDOW_COUNT];
+static SRWLOCK windowGeometryLock = SRWLOCK_INIT;
 static ULONG_PTR nextHandle = WINDOW_HANDLE_BASE + 1;
 static MSG messages[MESSAGE_COUNT];
 static UINT messageCount;
@@ -25,6 +26,7 @@ static volatile LONG hostExitChecked;
 static void* volatile foregroundWindow;
 static HWND focusWindow;
 static UINT activationChange;
+static BOOL applicationActive;
 
 void XboxWindowTrace(const char *line) {
     const DWORD error = GetLastError();
@@ -203,6 +205,12 @@ static BOOL IsVirtualWindowHandle(HWND handle) {
     return ((ULONG_PTR)handle & ~(ULONG_PTR)0xffffff) == WINDOW_HANDLE_BASE;
 }
 
+static void InvalidateWindowGeometry(XboxWindow *window) {
+    AcquireSRWLockExclusive(&windowGeometryLock);
+    window->handle = NULL;
+    ReleaseSRWLockExclusive(&windowGeometryLock);
+}
+
 static HWND VirtualForegroundWindow(void) {
     return InterlockedCompareExchangePointer(&foregroundWindow, NULL, NULL);
 }
@@ -226,7 +234,16 @@ static void UpdateWindowActivation(HWND foreground, HWND focus) {
     InterlockedExchangePointer(&foregroundWindow, foreground);
     // The window procedure may synchronously change activation or destroy a window.
     if (previousForeground != foreground) {
-        NotifyWindow(previousForeground, WM_ACTIVATE, WA_INACTIVE, foreground);
+        NotifyWindow(previousForeground, WM_NCACTIVATE, FALSE, foreground);
+        if (activationChange == change) NotifyWindow(previousForeground, WM_ACTIVATE, WA_INACTIVE, foreground);
+        if (activationChange == change && applicationActive != (foreground != NULL)) {
+            // A callback can switch virtual windows before deactivation is delivered.
+            applicationActive = foreground != NULL;
+            XboxWindowTrace(applicationActive ? "win32_virtual_activation=active\n" :
+                "win32_virtual_activation=inactive\n");
+            NotifyWindow(applicationActive ? foreground : previousForeground, WM_ACTIVATEAPP, applicationActive, NULL);
+        }
+        if (activationChange == change) NotifyWindow(foreground, WM_NCACTIVATE, TRUE, previousForeground);
         if (activationChange == change) NotifyWindow(foreground, WM_ACTIVATE, WA_ACTIVE, previousForeground);
     }
     if (activationChange == change && previousFocus != focus) {
@@ -420,8 +437,10 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     }
     const HWND handle = (HWND)nextHandle++;
     const RECT bounds = {x, y, x + width, y + height};
+    AcquireSRWLockExclusive(&windowGeometryLock);
     *window = (XboxWindow){handle, entry->procedure, classInstance, bounds, style, exStyle, 0,
         (ATOM)(entry - classes + 1), 0, 0, FALSE};
+    ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
     if (!window->procedure(handle, WM_NCCREATE, 0, (LPARAM)&create)) {
@@ -430,7 +449,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
             window->destroying = TRUE;
             ClearWindowActivation(handle);
             window->procedure(handle, WM_NCDESTROY, 0, 0);
-            window->handle = NULL;
+            InvalidateWindowGeometry(window);
         }
         return NULL;
     }
@@ -457,7 +476,7 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
     ClearWindowActivation(handle);
     window->procedure(handle, WM_DESTROY, 0, 0);
     window->procedure(handle, WM_NCDESTROY, 0, 0);
-    window->handle = NULL;
+    InvalidateWindowGeometry(window);
     for (UINT i = 0; i < messageCount;) {
         if (messages[i].hwnd != handle) { ++i; continue; }
         for (UINT j = i + 1; j < messageCount; ++j) messages[j - 1] = messages[j];
@@ -469,23 +488,39 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
 LRESULT WINAPI XboxDefWindowProcW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
     (void)wparam;
     (void)lparam;
-    if (message == WM_NCCREATE) return TRUE;
+    if (message == WM_NCCREATE || message == WM_NCACTIVATE) return TRUE;
     if (message == WM_CLOSE) XboxDestroyWindow(handle);
     return 0;
 }
 
+static BOOL HostedWindowBounds(HWND handle, RECT *area) {
+    if (!area) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    // The rendering thread can query geometry while the window thread owns input and messages.
+    if (IsVirtualWindowHandle(handle)) {
+        AcquireSRWLockShared(&windowGeometryLock);
+        for (UINT i = 0; i < WINDOW_COUNT; ++i) {
+            if (windows[i].handle != handle) continue;
+            *area = windows[i].bounds;
+            ReleaseSRWLockShared(&windowGeometryLock);
+            return TRUE;
+        }
+        ReleaseSRWLockShared(&windowGeometryLock);
+    }
+    SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+    return FALSE;
+}
+
 BOOL WINAPI XboxGetClientRect(HWND handle, RECT *area) {
-    XboxWindow *window = XboxFindWindow(handle);
-    if (!window || !area) return FALSE;
-    *area = (RECT){0, 0, window->bounds.right - window->bounds.left, window->bounds.bottom - window->bounds.top};
+    if (!HostedWindowBounds(handle, area)) return FALSE;
+    *area = (RECT){0, 0, area->right - area->left, area->bottom - area->top};
     return TRUE;
 }
 
 BOOL WINAPI XboxGetWindowRect(HWND handle, RECT *area) {
-    XboxWindow *window = XboxFindWindow(handle);
-    if (!window || !area) return FALSE;
-    *area = window->bounds;
-    return TRUE;
+    return HostedWindowBounds(handle, area);
 }
 
 HDC WINAPI XboxGetDC(HWND handle) {
@@ -503,11 +538,19 @@ BOOL WINAPI XboxShowWindow(HWND handle, int command) {
     if (!window) return FALSE;
     const BOOL previous = (window->style & WS_VISIBLE) != 0;
     const BOOL showing = command != SW_HIDE;
+    const UINT change = activationChange;
     if (previous != showing) {
         if (showing) window->style |= WS_VISIBLE;
         else window->style &= ~WS_VISIBLE;
         window->procedure(handle, WM_SHOWWINDOW, showing, 0);
         if (!showing && window->handle == handle && !(window->style & WS_VISIBLE)) ClearWindowActivation(handle);
+    }
+    if (activationChange == change && window->handle == handle && !window->destroying &&
+            (window->style & WS_VISIBLE) && (command == SW_SHOW || command == SW_SHOWNORMAL ||
+            command == SW_RESTORE || command == SW_SHOWMAXIMIZED || command == SW_SHOWMINIMIZED ||
+            command == SW_SHOWDEFAULT)) {
+        XboxWindowTrace("win32_window_show=activate\n");
+        UpdateWindowActivation(handle, handle);
     }
     return previous;
 }
@@ -528,7 +571,9 @@ BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int wi
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    AcquireSRWLockExclusive(&windowGeometryLock);
     window->bounds = (RECT){x, y, x + width, y + height};
+    ReleaseSRWLockExclusive(&windowGeometryLock);
     if (width != previous.right - previous.left || height != previous.bottom - previous.top) {
         XboxResizeCurrentContext(window);
         window->procedure(handle, WM_SIZE, SIZE_RESTORED, MAKELPARAM(width, height));
@@ -536,7 +581,7 @@ BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int wi
     if (window->handle != handle) return FALSE;
     if (x != previous.left || y != previous.top) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(x, y));
     if (window->handle != handle) return FALSE;
-    if (flags & SWP_SHOWWINDOW) XboxShowWindow(handle, SW_SHOW);
+    if (flags & SWP_SHOWWINDOW) XboxShowWindow(handle, (flags & SWP_NOACTIVATE) ? SW_SHOWNA : SW_SHOW);
     if (flags & SWP_HIDEWINDOW) XboxShowWindow(handle, SW_HIDE);
     return window->handle == handle;
 }

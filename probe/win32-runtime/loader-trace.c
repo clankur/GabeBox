@@ -1,15 +1,30 @@
 /* An opt-in loader trace for unsigned, locally staged Windows images. */
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #include "loader-trace-output.h"
+#include <d3dcommon.h>
+#include <dxgi1_2.h>
+#include <objbase.h>
 
-static unsigned int events;
+static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
 static volatile LONG workingDirectoryStarted;
 static volatile LONG originalImageObserved;
 static volatile LONG assetEvents;
+static volatile LONG deviceEvents;
+static volatile LONG devicePrimed;
+static volatile LONG failedCommits;
 static DWORD faultTraceCount;
+static const DWORD delayModuleMissing = 0xC06D007E;
+static const DWORD delayExportMissing = 0xC06D007F;
 typedef BOOL (WINAPI *FindImage)(DWORD, LPCWSTR, HMODULE *);
 static FindImage findImage;
+typedef HRESULT (WINAPI *CreateD3D12Device)(IUnknown *, UINT, const IID *, void **);
+static PVOID volatile d3d12CreateDevice;
+static const IID adapter1Iid = {0x29038F61, 0x3839, 0x4626, {0x91,0xFD,0x08,0x68,0x79,0x01,0x1A,0x05}};
+static const IID factory1Iid = {0x770AAE78, 0xF26F, 0x4DBA, {0xA8,0x29,0x25,0x3C,0x83,0xD1,0xB3,0x87}};
+static const IID deviceIid = {0x189819F1, 0x1DB6, 0x4B57, {0xBE,0x54,0x18,0x21,0x33,0x9B,0x85,0xF7}};
+static IUnknown *startupDevice;
 
 static char *Text(char *out, const char *text) {
     while (*text) *out++ = *text++;
@@ -39,6 +54,14 @@ static char *Hex(char *out, unsigned long value, int digits) {
     return out;
 }
 
+static BOOL SameName(const char *left, const char *right) {
+    while (*left && *left == *right) {
+        ++left;
+        ++right;
+    }
+    return *left == *right;
+}
+
 static const char *ModuleLocation(HANDLE module) {
     WCHAR image[512], loaded[512];
     DWORD imageLength = GetModuleFileNameW(0, image, 512);
@@ -51,6 +74,54 @@ static const char *ModuleLocation(HANDLE module) {
             CompareStringOrdinal(image, (int)imageLength, loaded, (int)imageLength, TRUE) != CSTR_EQUAL)
         return "other";
     return loadedLength == imageLength ? "adjacent" : "staged-subdirectory";
+}
+
+static BOOL LegacyXAudioClass(REFCLSID clsid) {
+    static const GUID legacy = {0x5A508685, 0xA254, 0x4FBA, {0x9B,0x82,0x9A,0x24,0xB0,0x03,0x06,0xAF}};
+    if (!clsid || clsid->Data1 != legacy.Data1 || clsid->Data2 != legacy.Data2 || clsid->Data3 != legacy.Data3)
+        return FALSE;
+    for (UINT index = 0; index < ARRAYSIZE(legacy.Data4); ++index)
+        if (clsid->Data4[index] != legacy.Data4[index]) return FALSE;
+    return TRUE;
+}
+
+HRESULT WINAPI XboxCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *object) {
+    HRESULT result = CoCreateInstance(clsid, outer, context, iid, object);
+    if (result != REGDB_E_CLASSNOTREG || outer || !iid || !object || context != CLSCTX_INPROC_SERVER ||
+            !LegacyXAudioClass(clsid)) return result;
+
+    // The launch profile supplies a verified redistributable next to the staged executable.
+    // Keep its server loaded while an object returned directly from its class factory may live.
+    const DWORD error = GetLastError();
+    HMODULE audio = NULL;
+    if (GetModuleHandleExW(0, L"XAudio2_7.dll", &audio)) {
+        typedef HRESULT (WINAPI *GetClassObject)(REFCLSID, REFIID, LPVOID *);
+        static const GUID classFactory = {1, 0, 0, {0xC0,0,0,0,0,0,0,0x46}};
+        const GetClassObject getFactory = SameName(ModuleLocation(audio), "adjacent") ?
+            (GetClassObject)(void *)GetProcAddress(audio, "DllGetClassObject") : NULL;
+        if (getFactory) {
+            IClassFactory *factory = NULL;
+            result = getFactory(clsid, &classFactory, (void **)&factory);
+            if (SUCCEEDED(result) && !factory) result = E_UNEXPECTED;
+            if (SUCCEEDED(result)) {
+                HMODULE pinned = NULL;
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                        (LPCWSTR)(const void *)getFactory, &pinned)) {
+                    result = IClassFactory_CreateInstance(factory, NULL, iid, object);
+                } else {
+                    result = HRESULT_FROM_WIN32(GetLastError());
+                }
+            }
+            if (factory) IClassFactory_Release(factory);
+        }
+        FreeLibrary(audio);
+    }
+    char line[72];
+    char *out = Hex(Text(line, "asset xaudio27-activation result=0x"), (DWORD)result, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+    SetLastError(error);
+    return result;
 }
 
 static const WCHAR *AssetName(const WCHAR *path) {
@@ -140,8 +211,21 @@ static DWORD RuntimeError(HMODULE runtime) {
     return getError && getError(&error) == 0 ? (DWORD)error : ERROR_PROC_NOT_FOUND;
 }
 
+static BOOL NewLoaderEvent(const char *text, DWORD size) {
+    ULONGLONG key = 14695981039346656037ULL;
+    for (DWORD i = 0; i < size; ++i) key = (key ^ (unsigned char)text[i]) * 1099511628211ULL;
+    if (!key) key = 1;
+    const UINT first = key % ARRAYSIZE(loaderEvents);
+    for (UINT i = 0; i < ARRAYSIZE(loaderEvents); ++i) {
+        const UINT slot = (first + i) % ARRAYSIZE(loaderEvents);
+        const LONG64 previous = InterlockedCompareExchange64(&loaderEvents[slot], (LONG64)key, 0);
+        if (!previous) return TRUE;
+        if ((ULONGLONG)previous == key) return FALSE;
+    }
+    return FALSE;
+}
+
 static void Record(const char *name, HANDLE loaded, int isLoad, int success, DWORD error) {
-    if (__atomic_fetch_add(&events, 1u, __ATOMIC_RELAXED) >= 128) return;
     char buffer[181];
     char *out = Text(buffer, isLoad ? "load " : "export ");
     if (!isLoad && (unsigned long long)name <= 0xffffu) {
@@ -162,19 +246,14 @@ static void Record(const char *name, HANDLE loaded, int isLoad, int success, DWO
     }
     *out++ = '\r';
     *out++ = '\n';
-    AppendTrace(buffer, (DWORD)(out - buffer));
+    const DWORD size = (DWORD)(out - buffer);
+    if (NewLoaderEvent(buffer, size)) AppendTrace(buffer, size);
 }
 
-static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
-    const EXCEPTION_RECORD *fault = exception->ExceptionRecord;
-    if (fault->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-            __atomic_fetch_add(&faultTraceCount, 1u, __ATOMIC_RELAXED) >= 8) return EXCEPTION_CONTINUE_SEARCH;
-    const DWORD error = GetLastError();
-    char line[150];
-    char *out = Text(line, "fault access-violation");
+static char *RecordImageAddress(char *out, const void *address) {
     HMODULE module = NULL;
     if (findImage && findImage(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (LPCWSTR)fault->ExceptionAddress, &module)) {
+            (LPCWSTR)address, &module)) {
         WCHAR path[512];
         DWORD length = GetModuleFileNameW(module, path, ARRAYSIZE(path));
         if (length && length < ARRAYSIZE(path)) {
@@ -186,9 +265,25 @@ static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
             token[i] = '\0';
             out = Token(Text(out, " module="), token, 1);
         }
-        out = Hex(Text(out, " rva=0x"), (DWORD)((ULONG_PTR)fault->ExceptionAddress - (ULONG_PTR)module), 8);
+        out = Hex(Text(out, " rva=0x"), (DWORD)((ULONG_PTR)address - (ULONG_PTR)module), 8);
     }
-    if (fault->NumberParameters >= 2) {
+    return out;
+}
+
+static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
+    const EXCEPTION_RECORD *fault = exception->ExceptionRecord;
+    const BOOL access = fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION;
+    const BOOL breakpoint = fault->ExceptionCode == EXCEPTION_BREAKPOINT;
+    const BOOL delayModule = fault->ExceptionCode == delayModuleMissing;
+    const BOOL delayExport = fault->ExceptionCode == delayExportMissing;
+    if ((!access && !breakpoint && !delayModule && !delayExport) ||
+            __atomic_fetch_add(&faultTraceCount, 1u, __ATOMIC_RELAXED) >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD error = GetLastError();
+    char line[150];
+    char *out = Text(line, access ? "fault access-violation" : breakpoint ? "fault breakpoint" :
+                           delayModule ? "fault delay-load-module" : "fault delay-load-export");
+    out = RecordImageAddress(out, fault->ExceptionAddress);
+    if (access && fault->NumberParameters >= 2) {
         const ULONG_PTR operation = fault->ExceptionInformation[0];
         out = Text(out, operation == 0 ? " read" : operation == 1 ? " write" : operation == 8 ? " execute" : " other");
         if (fault->ExceptionInformation[1] < 4096) out = Text(out, " near-null");
@@ -208,11 +303,76 @@ static void StartFaultTrace(void) {
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     RegisterHandler registerHandler = kernel ? (RegisterHandler)(void *)GetProcAddress(kernel, "AddVectoredExceptionHandler") : NULL;
     findImage = kernel ? (FindImage)(void *)GetProcAddress(kernel, "GetModuleHandleExW") : NULL;
-    const char *line = registerHandler && registerHandler(0, ObserveFault)
+    const char *line = registerHandler && registerHandler(1, ObserveFault)
         ? "fault observer=ready\r\n" : "fault observer=unavailable\r\n";
     DWORD length = 0;
     while (line[length]) ++length;
     AppendTrace(line, length);
+}
+
+static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
+    const DWORD error = GetLastError();
+    StartFaultTrace();
+    char line[150];
+    char *out = Text(Text(line, "fault "), api);
+    out = Hex(Text(out, " code=0x"), code, 8);
+    out = RecordImageAddress(out, caller);
+    *out++ = '\r';
+    *out++ = '\n';
+    AppendTrace(line, (DWORD)(out - line));
+    SetLastError(error);
+}
+
+DECLSPEC_NORETURN void WINAPI XboxExitProcess(UINT code) {
+    RecordProcessExit("exit-process", code, __builtin_return_address(0));
+    ExitProcess(code);
+}
+
+BOOL WINAPI XboxTerminateProcess(HANDLE process, UINT code) {
+    RecordProcessExit("terminate-process", code, __builtin_return_address(0));
+    return TerminateProcess(process, code);
+}
+
+void WINAPI XboxRaiseException(DWORD code, DWORD flags, DWORD count, const ULONG_PTR *arguments) {
+    if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_ACCESS_VIOLATION ||
+            code == delayModuleMissing || code == delayExportMissing)
+        RecordProcessExit("raise-exception", code, __builtin_return_address(0));
+    RaiseException(code, flags, count, arguments);
+}
+
+LPVOID WINAPI XboxTraceVirtualAlloc(LPVOID address, SIZE_T bytes, DWORD type, DWORD protection) {
+    const LPVOID allocation = VirtualAlloc(address, bytes, type, protection);
+    if (allocation || !(type & MEM_COMMIT)) return allocation;
+
+    const DWORD error = GetLastError();
+    if (InterlockedIncrement(&failedCommits) <= 12) {
+        char line[180];
+        char *out = Hex(Text(line, "fault virtual-alloc bytes=0x"), (DWORD)((UINT64)bytes >> 32), 8);
+        out = Hex(out, (DWORD)bytes, 8);
+        out = Hex(Text(out, " error=0x"), error, 8);
+        MEMORYSTATUSEX memory;
+        memory.dwLength = sizeof(memory);
+        if (GlobalMemoryStatusEx(&memory)) {
+            const UINT64 availableKiB = memory.ullAvailPageFile / 1024;
+            out = Hex(Text(out, " commit-left-kib=0x"), (DWORD)(availableKiB >> 32), 8);
+            out = Hex(out, (DWORD)availableKiB, 8);
+        }
+        out = RecordImageAddress(out, __builtin_return_address(0));
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(error);
+    return allocation;
+}
+
+DWORD WINAPI XboxGetFileType(HANDLE file) {
+    const DWORD statusInvalidHandle = 0xC0000008u;
+    __try {
+        return GetFileType(file);
+    } __except (GetExceptionCode() == statusInvalidHandle ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FILE_TYPE_UNKNOWN;
+    }
 }
 
 static BOOL DynamicCompanionsEnabled(void) {
@@ -271,6 +431,36 @@ static BOOL FindStagedCompanion(LPCWSTR name, WCHAR *staged, DWORD capacity) {
         !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
 }
 
+static HMODULE LoadVerifiedSystemCompanion(LPCWSTR name, DWORD *error) {
+    if (!name) return NULL;
+    WCHAR approved[1024], path[512];
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_SYSTEM_COMPANIONS", approved, ARRAYSIZE(approved));
+    if (!length || length >= ARRAYSIZE(approved)) return NULL;
+
+    const WCHAR *start = approved;
+    for (const WCHAR *end = approved; *end; ++end) {
+        if (*end != L'|') continue;
+        const DWORD size = (DWORD)(end - start);
+        if (size && CompareStringOrdinal(start, (int)size, name, -1, TRUE) == CSTR_EQUAL) {
+            DWORD directory = GetModuleFileNameW(NULL, path, ARRAYSIZE(path));
+            if (!directory || directory >= ARRAYSIZE(path)) return NULL;
+            while (directory && path[directory - 1] != L'\\') --directory;
+            if (!directory || directory + size >= ARRAYSIZE(path)) return NULL;
+            for (DWORD i = 0; i < size; ++i) path[directory + i] = start[i];
+            path[directory + size] = 0;
+            const DWORD attributes = GetFileAttributesW(path);
+            if (attributes == INVALID_FILE_ATTRIBUTES ||
+                    (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return NULL;
+            const HMODULE library = LoadLibraryExW(path, NULL,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            *error = library ? ERROR_SUCCESS : GetLastError();
+            return library;
+        }
+        start = end + 1;
+    }
+    return NULL;
+}
+
 HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     DWORD previous = GetLastError();
     RestoreWorkingDirectory();
@@ -324,16 +514,176 @@ HMODULE WINAPI XboxLoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
     const BOOL companion = !file && DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
     HMODULE result = LoadLibraryExW(companion ? staged : name, file, flags);
-    const DWORD error = GetLastError();
+    DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND && !file && flags == LOAD_LIBRARY_SEARCH_SYSTEM32)
+        result = LoadVerifiedSystemCompanion(name, &error);
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
+}
+
+HMODULE WINAPI XboxLoadLibraryExA(LPCSTR name, HANDLE file, DWORD flags) {
+    const DWORD previous = GetLastError();
+    WCHAR wide[512], staged[512];
+    const BOOL companion = !file && name && DynamicCompanionsEnabled() &&
+        MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) &&
+        FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
+    SetLastError(previous);
+    HMODULE result = companion ? LoadLibraryExW(staged, file, flags) : LoadLibraryExA(name, file, flags);
+    DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND && !file && flags == LOAD_LIBRARY_SEARCH_SYSTEM32 && name &&
+            MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)))
+        result = LoadVerifiedSystemCompanion(wide, &error);
+    if (!result && error == ERROR_MOD_NOT_FOUND && !file && !flags && name) {
+        WCHAR option[2];
+        if (SameName(name, "sl.interposer.dll") &&
+                GetEnvironmentVariableW(L"XBOX_WIN32_STREAMLINE_UNAVAILABLE", option, ARRAYSIZE(option)) == 1 &&
+                option[0] == L'1') {
+            result = LoadPackagedLibrary(L"XboxWin32LoaderTrace.dll", 0);
+            if (result) {
+                error = previous;
+                const char trace[] = "asset streamline-delay-load=unavailable-adapter\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
+            }
+        }
+    }
+    Record(name, result, 1, result != NULL, error);
+    SetLastError(error);
+    return result;
+}
+
+int __cdecl XboxStreamlineSetD3DDevice(void *device) {
+    (void)device;
+    // NVIDIA Streamline's sl::Result::eErrorInitNotCalled.
+    return 23;
+}
+
+static BOOL DescribeD3D12Adapter(IUnknown *adapter, DXGI_ADAPTER_DESC1 *desc) {
+    IDXGIAdapter1 *dxgi = NULL;
+    if (!adapter || FAILED(IUnknown_QueryInterface(adapter, &adapter1Iid, (void **)&dxgi))) return FALSE;
+    const HRESULT result = IDXGIAdapter1_GetDesc1(dxgi, desc);
+    IDXGIAdapter1_Release(dxgi);
+    return SUCCEEDED(result);
+}
+
+static BOOL SameAdapter(LUID left, LUID right) {
+    return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
+}
+
+static BOOL DefaultD3D12AdapterEnabled(void) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_DEFAULT_ADAPTER", enabled, ARRAYSIZE(enabled)) == 1 &&
+        enabled[0] == L'1';
+}
+
+void WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup) {
+    GetStartupInfoW(startup);
+    const DWORD previous = GetLastError();
+    if (DefaultD3D12AdapterEnabled() && InterlockedExchange(&devicePrimed, 1) == 0) {
+        const HMODULE library = LoadLibraryW(L"d3d12.dll");
+        const CreateD3D12Device create = library ?
+            (CreateD3D12Device)(PVOID)GetProcAddress(library, "D3D12CreateDevice") : NULL;
+        // Keep the first device until process exit so the game can reuse the native singleton.
+        const HRESULT result = create ?
+            create(NULL, D3D_FEATURE_LEVEL_11_0, &deviceIid, (void **)&startupDevice) :
+            HRESULT_FROM_WIN32(GetLastError());
+        char line[90];
+        char *out = Hex(Text(line, "asset d3d12-crt-entry result=0x"), (DWORD)result, 8);
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(previous);
+}
+
+static BOOL UseDefaultD3D12Adapter(const DXGI_ADAPTER_DESC1 *requested) {
+    if (!DefaultD3D12AdapterEnabled() || (requested->Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) return FALSE;
+    typedef HRESULT (WINAPI *CreateFactory)(const IID *, void **);
+    const HMODULE module = GetModuleHandleW(L"dxgi.dll");
+    const CreateFactory factoryEntry = module ? (CreateFactory)(PVOID)GetProcAddress(module, "CreateDXGIFactory1") : NULL;
+    IDXGIFactory1 *factory = NULL;
+    if (!factoryEntry || FAILED(factoryEntry(&factory1Iid, (void **)&factory))) return FALSE;
+    IDXGIAdapter *primary = NULL;
+    BOOL matches = FALSE;
+    if (SUCCEEDED(IDXGIFactory1_EnumAdapters(factory, 0, &primary))) {
+        DXGI_ADAPTER_DESC1 desc;
+        matches = DescribeD3D12Adapter((IUnknown *)primary, &desc) &&
+            !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && SameAdapter(desc.AdapterLuid, requested->AdapterLuid);
+        IDXGIAdapter_Release(primary);
+    }
+    IDXGIFactory1_Release(factory);
+    return matches;
+}
+
+static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, const IID *iid, void **device) {
+    const DWORD previous = GetLastError();
+    const CreateD3D12Device create = (CreateD3D12Device)InterlockedCompareExchangePointer(&d3d12CreateDevice, NULL, NULL);
+    DXGI_ADAPTER_DESC1 desc;
+    const BOOL described = DescribeD3D12Adapter(adapter, &desc);
+    const BOOL useDefault = described && UseDefaultD3D12Adapter(&desc);
+    if (useDefault) {
+        const char checkpoint[] = "asset d3d12-default-adapter=matched\r\n";
+        AppendTrace(checkpoint, sizeof(checkpoint) - 1);
+    }
+    SetLastError(previous);
+    const HRESULT result = create(useDefault ? NULL : adapter, level, iid, device);
+    const DWORD error = GetLastError();
+    if (InterlockedIncrement(&deviceEvents) <= 16) {
+        char line[170];
+        char *out = Text(line, adapter && !useDefault ? "asset d3d12-create adapter=explicit level=0x" :
+                                                       "asset d3d12-create adapter=default level=0x");
+        out = Hex(out, level, 4);
+        if (iid) out = Hex(Text(out, " iid-first=0x"), iid->Data1, 8);
+        out = Hex(Text(out, " result=0x"), (DWORD)result, 8);
+        if (described) {
+            out = Hex(Text(out, " vendor=0x"), desc.VendorId, 4);
+            out = Hex(Text(out, " device=0x"), desc.DeviceId, 4);
+            out = Hex(Text(out, " flags=0x"), desc.Flags, 8);
+        }
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(error);
+    return result;
+}
+
+static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
+    WCHAR enabled[2];
+    if (!(SameName(name, "CreateDXGIFactory2") || SameName(name, "CreateDXGIFactory1") ||
+            SameName(name, "CreateDXGIFactory")) || module != GetModuleHandleW(L"dxgi.dll") ||
+            GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", enabled, ARRAYSIZE(enabled)) != 1 ||
+            enabled[0] != L'1') return NULL;
+    static PVOID volatile loaded;
+    HMODULE adapter = (HMODULE)InterlockedCompareExchangePointer(&loaded, NULL, NULL);
+    if (!adapter) {
+        adapter = LoadPackagedLibrary(L"XboxWin32Dxgi.dll", 0);
+        if (!adapter) return NULL;
+        HMODULE existing = (HMODULE)InterlockedCompareExchangePointer(&loaded, adapter, NULL);
+        if (existing) {
+            FreeLibrary(adapter);
+            adapter = existing;
+        }
+    }
+    return GetProcAddress(adapter, name);
 }
 
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     FARPROC result = GetProcAddress(module, name);
     DWORD error = GetLastError();
     Record(name, module, 0, result != 0, error);
+    if (result && (ULONG_PTR)name > 0xffffu) {
+        if (name[0] == 'D' && SameName(name, "D3D12CreateDevice") &&
+                module == GetModuleHandleW(L"d3d12.dll")) {
+            const PVOID first = InterlockedCompareExchangePointer(&d3d12CreateDevice, (PVOID)result, NULL);
+            if (!first || first == (PVOID)result) result = (FARPROC)(PVOID)TraceD3D12CreateDevice;
+        } else if (name[0] == 'C') {
+            const FARPROC hosted = HostedDxgiFactory(module, name);
+            if (hosted) {
+                const char trace[] = "asset dxgi-factory=hosted\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
+                result = hosted;
+            }
+        }
+    }
     SetLastError(error);
     return result;
 }
@@ -368,10 +718,79 @@ DWORD WINAPI XboxOriginalGetModuleFileNameW(HMODULE module, LPWSTR filename, DWO
     return GetModuleFileNameW(module, filename, size);
 }
 
+// Redirect simple desktop pipe names into the namespace shared by this app's
+// AppContainer processes. Explicit namespaces and ordinary paths keep their meaning.
+static LPCWSTR LocalPipePath(LPCWSTR path, WCHAR *buffer, DWORD capacity) {
+    const WCHAR prefix[] = L"\\\\.\\pipe\\";
+    const WCHAR local[] = L"LOCAL\\";
+    const DWORD prefixLength = ARRAYSIZE(prefix) - 1;
+    if (!path) return NULL;
+    for (DWORD i = 0; i < prefixLength; ++i) {
+        WCHAR character = path[i];
+        if (character >= L'A' && character <= L'Z') character += L'a' - L'A';
+        if (character != prefix[i]) return NULL;
+        buffer[i] = path[i];
+    }
+    const WCHAR *suffix = path + prefixLength;
+    const DWORD start = prefixLength + ARRAYSIZE(local) - 1;
+    if (!*suffix || capacity <= start) return NULL;
+    for (DWORD i = 0; i < ARRAYSIZE(local) - 1; ++i) buffer[prefixLength + i] = local[i];
+    for (DWORD i = 0; i < capacity - start; ++i) {
+        const WCHAR character = suffix[i];
+        if (character == L'\\' || character == L'/' || character == L':') return NULL;
+        buffer[start + i] = character;
+        if (!character) return buffer;
+    }
+    return NULL;
+}
+
+static void ObserveNativeResult(const char *operation, BOOL success, DWORD error) {
+    if (InterlockedIncrement(&assetEvents) <= 64) {
+        char line[120];
+        char *out = Text(Text(line, "asset "), operation);
+        out = success ? Text(out, "=ok") : Hex(Text(out, " error=0x"), error, 8);
+        *out++ = '\r';
+        *out++ = '\n';
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(error);
+}
+
+HANDLE WINAPI XboxCreateNamedPipeW(LPCWSTR path, DWORD access, DWORD mode, DWORD instances,
+        DWORD outputSize, DWORD inputSize, DWORD timeout, LPSECURITY_ATTRIBUTES security) {
+    WCHAR local[256];
+    const LPCWSTR mapped = LocalPipePath(path, local, ARRAYSIZE(local));
+    HANDLE handle = CreateNamedPipeW(mapped ? mapped : path, access, mode, instances,
+        outputSize, inputSize, timeout, security);
+    ObserveNativeResult(mapped ? "pipe-create-local" : "pipe-create", handle != INVALID_HANDLE_VALUE, GetLastError());
+    return handle;
+}
+
+BOOL WINAPI XboxWaitNamedPipeW(LPCWSTR path, DWORD timeout) {
+    WCHAR local[256];
+    const LPCWSTR mapped = LocalPipePath(path, local, ARRAYSIZE(local));
+    BOOL available = WaitNamedPipeW(mapped ? mapped : path, timeout);
+    ObserveNativeResult(mapped ? "pipe-wait-local" : "pipe-wait", available, GetLastError());
+    return available;
+}
+
+BOOL WINAPI XboxTraceCreateProcessW(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES processSecurity,
+        LPSECURITY_ATTRIBUTES threadSecurity, BOOL inherit, DWORD flags, LPVOID environment, LPCWSTR directory,
+        LPSTARTUPINFOW startup, LPPROCESS_INFORMATION process) {
+    BOOL created = CreateProcessW(application, command, processSecurity, threadSecurity, inherit, flags,
+        environment, directory, startup, process);
+    ObserveNativeResult("process-create", created, GetLastError());
+    return created;
+}
+
 HANDLE WINAPI XboxTraceCreateFileW(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
         DWORD creation, DWORD attributes, HANDLE templateFile) {
-    HANDLE result = CreateFileW(path, access, share, security, creation, attributes, templateFile);
-    ObserveAsset(path, "open", result != INVALID_HANDLE_VALUE, GetLastError());
+    WCHAR local[256];
+    const LPCWSTR mapped = LocalPipePath(path, local, ARRAYSIZE(local));
+    HANDLE result = CreateFileW(mapped ? mapped : path, access, share, security, creation, attributes, templateFile);
+    const DWORD error = GetLastError();
+    if (mapped) ObserveNativeResult("pipe-open-local", result != INVALID_HANDLE_VALUE, error);
+    else ObserveAsset(path, "open", result != INVALID_HANDLE_VALUE, error);
     return result;
 }
 

@@ -1,34 +1,39 @@
 // Project the active Xbox install into Valve's local Downloads store.
-function installXboxDownloads(client, getRuntime) {
+function installXboxDownloads(client, getRuntime, getPopup) {
     const overviewListeners = new Set(), itemListeners = new Set();
     const completed = new Map();
     let active;
+    let observedDocument, noticeObserver, notice, hiddenStats;
     function subscribe(listeners, callback, publish) {
         if (typeof callback !== 'function') throw new TypeError('Expected a download callback');
         listeners.add(callback);
         queueMicrotask(() => { if (listeners.has(callback)) publish(callback); });
         return {unregister() { listeners.delete(callback); }};
     }
+    function value(number) {
+        return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+    }
+    function byteCounts(transfer) {
+        const count = transfer?.progress;
+        if (!count || count.measurement === 'unavailable') return [0, 0, 0, 0];
+        const downloadTotal = value(count.downloadTotal), stagingTotal = value(count.stagingTotal);
+        return [Math.min(value(count.downloaded), downloadTotal), downloadTotal,
+            Math.min(value(count.staged), stagingTotal), stagingTotal];
+    }
     function progress(transfer) {
         const runtime = getRuntime();
         const {PK: overview} = runtime(12619);
         const {tgE: types} = runtime(94601);
         const values = overview.progress.map(row => ({...row}));
-        if (transfer) {
-            const count = transfer.progress || {};
-            Object.assign(values[types.k_EAppUpdateProgress_Download], {
-                bytes_in_progress: count.downloaded || 0, bytes_total: count.downloadTotal || 0
-            });
-            Object.assign(values[types.k_EAppUpdateProgress_Staging], {
-                bytes_in_progress: count.staged || 0, bytes_total: count.stagingTotal || 0
-            });
-        }
+        const [downloaded, downloadTotal, staged, stagingTotal] = byteCounts(transfer);
+        Object.assign(values[types.k_EAppUpdateProgress_Download], {bytes_in_progress: downloaded, bytes_total: downloadTotal});
+        Object.assign(values[types.k_EAppUpdateProgress_Staging], {bytes_in_progress: staged, bytes_total: stagingTotal});
         return values;
     }
     function percent(transfer) {
-        const {downloaded, downloadTotal, staged, stagingTotal} = transfer?.progress || {};
-        const total = (downloadTotal || 0) + (stagingTotal || 0);
-        return total ? Math.min(100, Math.trunc(100 * ((downloaded || 0) + (staged || 0)) / total)) : 0;
+        const [downloaded, downloadTotal, staged, stagingTotal] = byteCounts(transfer);
+        const total = downloadTotal + stagingTotal;
+        return total ? Math.trunc(100 * (downloaded + staged) / total) : 0;
     }
     function stageState(transfer) {
         if (transfer?.stage === 'downloading') return 'Downloading';
@@ -36,12 +41,72 @@ function installXboxDownloads(client, getRuntime) {
         if (transfer?.stage === 'paused') return 'Paused';
         return 'None';
     }
+    function clearNotice() {
+        notice?.remove();
+        notice = undefined;
+        hiddenStats?.style.removeProperty('display');
+        hiddenStats = undefined;
+    }
+    function renderNotice() {
+        const counts = active?.progress;
+        const working = ['downloading', 'staging'].includes(active?.stage);
+        const bytesUnavailable = !counts || counts.measurement === 'unavailable';
+        const ratesUnavailable = counts?.networkBytesPerSecond === undefined && counts?.diskBytesPerSecond === undefined;
+        const depotWorkingWithoutBytes = counts?.depotActivity && !counts.downloaded && !counts.staged &&
+            !counts.networkBytesPerSecond && !counts.diskBytesPerSecond;
+        const popup = working && (bytesUnavailable || ratesUnavailable || depotWorkingWithoutBytes) ? getPopup?.() : undefined;
+        const doc = popup && !popup.closed ? popup.document : undefined;
+        if (doc !== observedDocument) {
+            noticeObserver?.disconnect();
+            clearNotice();
+            observedDocument = doc;
+            if (doc) {
+                noticeObserver = new MutationObserver(renderNotice);
+                noticeObserver.observe(doc.documentElement, {childList: true, subtree: true});
+            }
+        }
+        if (!doc) return;
+        // The pinned Downloads page assumes its client always supplies a rate.
+        // Keep its queue and progress controls, and explain missing telemetry above the stats.
+        const styles = getRuntime()(25527);
+        const wrapper = doc.querySelector(`.${styles.DownloadGraphStatsWrapper}`);
+        if (!wrapper) {
+            clearNotice();
+            return;
+        }
+        const stats = wrapper.querySelector(`.${styles.DownloadGraphStats}`);
+        if (ratesUnavailable && stats !== hiddenStats) {
+            hiddenStats?.style.removeProperty('display');
+            hiddenStats = stats;
+            hiddenStats?.style.setProperty('display', 'none');
+        } else if (!ratesUnavailable && hiddenStats) {
+            hiddenStats.style.removeProperty('display');
+            hiddenStats = undefined;
+        }
+        if (notice?.parentNode !== wrapper) {
+            notice = doc.createElement('div');
+            notice.setAttribute('role', 'status');
+            wrapper.prepend(notice);
+        }
+        let message = 'Waiting for Steam to report a transfer rate.';
+        if (bytesUnavailable) {
+            message = counts?.depotActivity ? 'Steam is processing depot files. Byte progress is temporarily unavailable.' :
+                'Waiting for Steam to report byte progress.';
+        } else if (depotWorkingWithoutBytes) {
+            message = 'Steam is processing depot files. Byte counters have not advanced.';
+        }
+        if (notice.textContent !== message) notice.textContent = message;
+    }
     function overview(callback) {
         const defaults = getRuntime()(12619).PK;
         const state = stageState(active);
         const shown = state === 'Downloading' || state === 'Unpacking';
+        const counts = shown ? active.progress : undefined;
         callback({...defaults, update_appid: shown ? active.appId : 0, update_state: shown ? state : 'None',
             update_is_install: shown, overall_percent_complete: shown ? percent(active) : 0,
+            update_network_bytes_per_second: value(counts?.networkBytesPerSecond),
+            update_peak_network_bytes_per_second: shown ? active.peakNetworkRate : 0,
+            update_disc_bytes_per_second: value(counts?.diskBytesPerSecond),
             progress: progress(shown ? active : undefined), history: []});
     }
     function item(transfer) {
@@ -69,6 +134,7 @@ function installXboxDownloads(client, getRuntime) {
     function refresh() {
         for (const callback of overviewListeners) overview(callback);
         for (const callback of itemListeners) items(callback);
+        renderNotice();
     }
     const unsupported = () => false;
     client.Downloads = {
@@ -97,7 +163,7 @@ function installXboxDownloads(client, getRuntime) {
     return function publish(appId, stage, counts) {
         if (stage === 'starting') {
             completed.delete(appId);
-            active = {appId, stage};
+            active = {appId, stage, peakNetworkRate: 0};
         }
         if (active?.appId !== appId) return;
         if (stage === 'installed') {
@@ -107,7 +173,10 @@ function installXboxDownloads(client, getRuntime) {
             active = undefined;
         } else {
             active.stage = stage;
-            if (counts) active.progress = counts;
+            if (counts) {
+                active.progress = counts;
+                active.peakNetworkRate = Math.max(active.peakNetworkRate, value(counts.networkBytesPerSecond));
+            }
         }
         refresh();
     };

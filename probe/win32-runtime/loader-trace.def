@@ -11,3 +11,15 @@ EXPORTS
     fopen=XboxTraceFopen @9
     LoadLibraryExW=XboxLoadLibraryExW @10
     LoadLibraryW=XboxLoadLibraryW @11
+    ExitProcess=XboxExitProcess @12
+    TerminateProcess=XboxTerminateProcess @13
+    RaiseException=XboxRaiseException @14
+    CreateNamedPipeW=XboxCreateNamedPipeW @15
+    WaitNamedPipeW=XboxWaitNamedPipeW @16
+    CreateProcessW=XboxTraceCreateProcessW @17
+    LoadLibraryExA=XboxLoadLibraryExA @18
+    GetStartupInfoW=XboxGetStartupInfoW @19
+    slSetD3DDevice=XboxStreamlineSetD3DDevice @20
+    VirtualAlloc=XboxTraceVirtualAlloc @21
+    GetFileType=XboxGetFileType @22
+    CoCreateInstance=XboxCoCreateInstance @23

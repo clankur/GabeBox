@@ -7,9 +7,11 @@ sdl_video=false
 win32_imports=false
 desktop_window=false
 desktop_endpoints=false
+desktop_documents=false
 dxgi_composition=false
 dxgi_window=false
 dxgi_exchange=false
+dxgi_d3d12=false
 win32_opengl=false
 sdl_artifact=
 sdl_version=
@@ -31,6 +33,10 @@ case ${1:-} in
         desktop_endpoints=true
         shift
         ;;
+    --desktop-documents)
+        desktop_documents=true
+        shift
+        ;;
     --dxgi-composition)
         dxgi_composition=true
         shift
@@ -40,10 +46,11 @@ case ${1:-} in
         dxgi_window=true
         shift
         ;;
-    --dxgi-exchange)
+    --dxgi-exchange|--dxgi-d3d12)
         dxgi_composition=true
         dxgi_window=true
         dxgi_exchange=true
+        if [[ $1 == --dxgi-d3d12 ]]; then dxgi_d3d12=true; fi
         shift
         ;;
     --sdl-runtime|--sdl-video|--loader-order|--win32-opengl)
@@ -56,7 +63,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --desktop-window | --desktop-endpoints | --dxgi-composition | --dxgi-window | --dxgi-exchange | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --desktop-window | --desktop-endpoints | --desktop-documents | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
@@ -179,8 +186,10 @@ if $dxgi_window; then
     done
     "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/dxgi.def" "/out:$layout/XboxWin32Dxgi.dll" \
         "$build/dxgi.obj" "$build/dxgi-frame.obj" "$windows_app"
-    cat > "$build/dxgi-window-bindings.json" <<'EOF'
-{"user32.dll":{"RegisterClassW":"XboxWin32Window.dll","CreateWindowExW":"XboxWin32Window.dll","DefWindowProcW":"XboxWin32Window.dll"},"dxgi.dll":{"CreateDXGIFactory1":"XboxWin32Dxgi.dll"}}
+    factory=CreateDXGIFactory1
+    if $dxgi_d3d12; then factory=CreateDXGIFactory2; fi
+    cat > "$build/dxgi-window-bindings.json" <<EOF
+{"user32.dll":{"RegisterClassW":"XboxWin32Window.dll","CreateWindowExW":"XboxWin32Window.dll","DefWindowProcW":"XboxWin32Window.dll"},"dxgi.dll":{"$factory":"XboxWin32Dxgi.dll"}}
 EOF
     cat > "$build/dxgi-user32.def" <<'EOF'
 LIBRARY user32.dll
@@ -226,9 +235,21 @@ PY
     done
     child="$src/window-child.c"
     child_output="$build/standard-window.exe"
-elif $desktop_window; then
-    child="$probe/win32-runtime/desktop-control.c"
-    if $desktop_endpoints; then compiler+=(-DPROBE_DESKTOP_ENDPOINTS); fi
+elif $desktop_window || $desktop_documents; then
+    if $desktop_documents; then
+        child="$src/documents-child.c"
+        child_output="$build/standard-documents.exe"
+        cat > "$build/documents-shell32.def" <<'EOF'
+LIBRARY shell32.dll
+EXPORTS
+    SHGetFolderPathW
+EOF
+        "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/documents-shell32.def" "/out:$build/documents-shell32.lib"
+        graphics_libs+=("$build/documents-shell32.lib")
+    else
+        child="$probe/win32-runtime/desktop-control.c"
+        if $desktop_endpoints; then compiler+=(-DPROBE_DESKTOP_ENDPOINTS); fi
+    fi
     "${compiler[@]}" -c "$probe/win32-runtime/desktop.c" -o "$build/win32-desktop.obj"
     "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/desktop.def" "/out:$layout/XboxWin32Desktop.dll" \
         "$build/win32-desktop.obj" "$windows_app"
@@ -287,6 +308,7 @@ elif $dxgi_composition; then
     else
         dxgi_flags=()
     fi
+    if $dxgi_d3d12; then dxgi_flags+=(-DPROBE_DXGI_D3D12); fi
     "${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver with Windows SDK headers}" \
         -std=c++20 -O2 -DNDEBUG -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 "${dxgi_flags[@]+${dxgi_flags[@]}}" \
         -ffreestanding -fno-rtti -fno-exceptions \
@@ -300,10 +322,32 @@ if $win32_imports; then
     python3 "$probe/redirect-pe-imports.py" "$child_output" "$probe/win32-runtime/bindings.json" "$layout/child.exe"
 fi
 if $win32_opengl; then
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$window_bindings" "$layout/child.exe"
+    python3 - "$probe/redirect-pe-imports.py" "$child_output" "$window_bindings" "$build/window-control-bindings.json" <<'PY'
+import json
+from pathlib import Path
+import runpy
+import sys
+
+redirector, child, bindings, output = map(Path, sys.argv[1:])
+image = runpy.run_path(str(redirector))["PeImage"](child.read_bytes())
+rules = json.loads(bindings.read_text())
+used = {}
+for lookup, name, iat, _ in image.import_descriptors():
+    library = image.string(name).lower()
+    members = rules.get(library, {})
+    for _, _, symbol in image.imported_symbols(lookup, iat):
+        if symbol in members:
+            used.setdefault(library, {})[symbol] = members[symbol]
+output.write_text(json.dumps(used))
+PY
+    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/window-control-bindings.json" "$layout/child.exe"
 fi
 if $dxgi_window; then
     python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/dxgi-window-bindings.json" "$layout/child.exe"
+fi
+if $desktop_documents; then
+    printf '%s\n' '{"shell32.dll":{"SHGetFolderPathW":"XboxWin32Desktop.dll"}}' > "$build/documents-bindings.json"
+    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/documents-bindings.json" "$layout/child.exe"
 fi
 "${compiler[@]}" -DPROBE_CHILD_WAIT_MS=15000 -c "$probe/child-process.c" -o "$build/graphics-child-process.obj"
 "${linker[@]}" /dll /noentry "/implib:$build/child-process.lib" "/out:$layout/child-process.dll" \
