@@ -1,0 +1,12 @@
+[
+  {
+    "offset": 30563628,
+    "expected_sha256": "9d34092996f178fc7a4aa422d37286144c22dce3b72a8a3320ea883b3d41af84",
+    "replacement": "scaleform-arena-backing.bin"
+  },
+  {
+    "offset": 30563778,
+    "expected_sha256": "7f9230d31e3a7d2cbfafec35248ade51ca8b582f88a008b3eb9591d39b675a41",
+    "replacement": "scaleform-arena-limit.bin"
+  }
+]
