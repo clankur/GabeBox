@@ -2439,9 +2439,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (dummyVideo) {
             report += videoHint.Set(L"dummy") ? L"steam_launch_sdl_video=dummy\r\n" : L"steam_launch_sdl_video=unavailable\r\n";
         }
-        if (sdlWorkingDirectory) {
-            report += gameDirectoryHint.Set(gameDirectory.c_str()) ? L"steam_launch_sdl_cwd=requested\r\n" :
-                L"steam_launch_sdl_cwd=unavailable\r\n";
+        if (sdlWorkingDirectory || hostedStardew) {
+            const bool applied = gameDirectoryHint.Set(gameDirectory.c_str());
+            report += applied ? L"steam_launch_sdl_cwd=requested\r\n" : L"steam_launch_sdl_cwd=unavailable\r\n";
+            if (hostedStardew && !applied)
+                co_return winrt::hstring(report + L"steam_sdl_host=environment-error\r\n");
         }
         if (!sdlPreferencesPath.empty()) {
             report += preferencesHint.Set(sdlPreferencesPath.c_str()) ? L"steam_launch_sdl_preferences=requested\r\n" :
