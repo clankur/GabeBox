@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--startup-history] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--install] [--downloads] [--startup-history] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,15 +8,18 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--startup-history'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--install', '--downloads', '--startup-history'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
 const storageOnly = process.argv.includes('--storage');
 const storeOnly = process.argv.includes('--store');
 const homeOnly = process.argv.includes('--home');
+const installOnly = process.argv.includes('--install');
+const downloadsOnly = process.argv.includes('--downloads');
+const installAppId = 1817070;
 const startupHistory = process.argv.includes('--startup-history');
-const framedGamepad = startupHistory || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const framedGamepad = startupHistory || installOnly || downloadsOnly || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -30,7 +33,7 @@ const emptyAccount = '76561198000000002';
 const catalogs = {
     [emptyAccount]: [],
     [fixtureAccount]: [{id: 42, name: 'Fixture A', installed: true, canPlay: true},
-        {id: 73, name: 'Fixture B', installed: false, canPlay: false}],
+        {id: installOnly || downloadsOnly ? installAppId : 73, name: 'Fixture B', installed: false, canPlay: false}],
     [secondAccount]: [{id: 81, name: 'Second Atlas', installed: false, canPlay: false},
         {id: 93, name: 'Second Lantern', installed: true, canPlay: true}]
 };
@@ -114,6 +117,15 @@ function setupHost(steamId, windowState, catalogs) {
                 case 'restart-client': reply = {result: window.fixtureSteamId ? 'restart' : 'signed-out'}; break;
                 case 'system-mode': reply = {result: false}; break;
                 case 'play': reply = games?.some(g => g.id === request.appId && g.canPlay) ? {result: 'presented'} : {error: games ? 'not-installed' : 'signed-out'}; break;
+                case 'install': {
+                    const game = games?.find(entry => entry.id === request.appId);
+                    if (!game) { reply = {result: games ? 'not-owned' : 'signed-out'}; break; }
+                    window.fixtureFinishInstall = result => {
+                        if (result === 'installed') game.installed = game.canPlay = true;
+                        hostEvent({id: request.id, result});
+                    };
+                    return;
+                }
                 case 'quit-game':
                     reply = request.appId === window.fixtureRunningApp && games?.some(g => g.id === request.appId)
                         ? {result: 'quit-requested'} : {error: 'unavailable'};
@@ -709,6 +721,75 @@ async function checkInstalledTab(popup, installed, other) {
     assert.equal(await panel.getByRole('link', {name:other, exact:true}).count(), 0);
     return tile;
 }
+async function checkInstall(page, popup) {
+    const tile = stockTile(popup, 'Fixture B');
+    await tile.waitFor({state: 'visible'});
+    await tile.click();
+    const requests = () => page.evaluate(() => fixtureCalls.filter(request =>
+        request.method === 'install').map(request => request.appId));
+    const button = popup.getByText(/^install$/i).first();
+    await button.click();
+    await page.waitForFunction(() => typeof fixtureFinishInstall === 'function');
+    assert.deepEqual(await requests(), [installAppId]);
+    await page.evaluate(appId => hostEvent({event: 'xbox-install', appId, stage: 'downloading'}), installAppId);
+    await button.waitFor({state:'hidden'});
+    await page.evaluate(() => fixtureFinishInstall('stalled'));
+    const failureMessage = /An unexpected error occurred while installing Fixture B|Steam is unable to install content when in Offline Mode/i;
+    const failure = popup.getByText(failureMessage);
+    await failure.waitFor({state:'visible'}).catch(async error => {
+        throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 700));
+    });
+    await popup.getByRole('dialog').filter({hasText: failureMessage}).getByText(/^close$/i).click();
+    await failure.waitFor({state:'hidden'});
+    await button.click();
+    await page.waitForFunction(() => fixtureCalls.filter(request => request.method === 'install').length === 2);
+    await page.evaluate(() => fixtureFinishInstall('installed'));
+    await popup.getByText(/^play$/i).first().waitFor({state:'visible'});
+    assert.deepEqual(await requests(), [installAppId, installAppId]);
+    assert.equal(await page.evaluate(() => fixtureCalls.filter(request => request.method === 'play').length), 0);
+    console.log('Valve installed an owned title through the Xbox broker, displayed a Steam error, and offered Play after retry without reopening.');
+}
+async function checkDownloads(page, popup) {
+    async function menuItem(name) {
+        await pressNative(page, 3);
+        await popup.frameLocator('iframe[name="MainMenu_uid2"]').getByText(name, {exact: true}).first().click();
+    }
+    await menuItem('Downloads');
+    const empty = popup.getByText(/no downloads/i).first();
+    await empty.waitFor({state: 'visible', timeout: 12000}).catch(async error => {
+        throw new Error(error.message + '\n' + (await popup.locator('#popup_target').innerText()).slice(0, 1200));
+    });
+    await menuItem('Library');
+    await stockTile(popup, 'Fixture B').click();
+    await popup.getByText(/^install$/i).first().click();
+    await page.waitForFunction(() => typeof fixtureFinishInstall === 'function');
+    await page.evaluate(appId => hostEvent({event: 'xbox-install', appId, stage: 'downloading',
+        progress: {downloaded: 8 * 1024 ** 2, downloadTotal: 32 * 1024 ** 2}}), installAppId);
+    await menuItem('Downloads');
+    const game = popup.getByText('Fixture B', {exact: true}).first();
+    await game.waitFor({state: 'visible', timeout: 12000});
+    assert.deepEqual(await page.evaluate(() => {
+        let runtime;
+        webpackChunksteamui.push([['fixture-download-state'], {}, value => { runtime = value; }]);
+        const store = runtime(55426).hj;
+        const overview = store.LocalDownloadOverview;
+        const bytes = overview.progress[runtime(94601).tgE.k_EAppUpdateProgress_Download];
+        return {queue: store.QueuedTransfers.map(item => item.appid), appId: overview.update_appid,
+            state: overview.update_state, percent: overview.overall_percent_complete,
+            downloaded: bytes.bytes_in_progress, total: bytes.bytes_total};
+    }), {queue: [installAppId], appId: installAppId, state: 'Downloading', percent: 25,
+        downloaded: 8 * 1024 ** 2, total: 32 * 1024 ** 2});
+    await page.evaluate(() => fixtureFinishInstall('installed'));
+    await page.waitForFunction(appId => {
+        let runtime;
+        webpackChunksteamui.push([['fixture-download-complete-' + crypto.randomUUID()], {}, value => { runtime = value; }]);
+        const store = runtime(55426).hj;
+        return store.CompletedTransfers.some(item => item.appid === appId) && store.QueuedTransfers.length === 0;
+    }, installAppId);
+    assert.equal(await game.isVisible(), true);
+    console.log('Valve Downloads opened empty, showed Spider-Man byte progress, and moved the finished install to Completed.');
+}
+
 async function readSeen(page) {
     return page.evaluate(async () => {
         let r; webpackChunksteamui.push([['fixture-tour-read-' + crypto.randomUUID()], {}, value => { r = value; }]);
@@ -965,7 +1046,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 await checkEmptyLibrary(page);
                 return;
             }
-            assert.deepEqual(boot.ownedAppStore, [[42, 'Fixture A'], [73, 'Fixture B']]);
+            assert.deepEqual(boot.ownedAppStore, catalogs[steamId].map(game => [game.id, game.name]));
             await checkPlatform(page);
             const gamepad = windows.findIndex(win => /^(SP BPM)(?:$|_uid\d+$)/.test(win.name));
             const popup = surfaces[gamepad];
@@ -999,6 +1080,13 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 if (hasTour) await completeTour(page, popup);
                 if (startupHistory) {
                     await checkStartupHistory(page, popup, async () => { await openOwner(); return page; });
+                    return;
+                }
+                if (installOnly) { await checkInstall(page, popup); return; }
+                if (downloadsOnly) {
+                    await checkDownloads(page, popup).catch(error => {
+                        throw new Error(error.message + '\n' + [...errors].slice(-8).join('\n'));
+                    });
                     return;
                 }
                 if (homeOnly) { await checkHome(page, popup); return; }

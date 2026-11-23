@@ -1509,6 +1509,16 @@ static winrt::hstring ReadSteamDownload() {
         checkpoint = L"queued";
     }
     auto report = checkpoint + L":" + std::to_wstring(state);
+    try {
+        if (const auto progress = steam_storage::ReadDownloadProgress(session->libraryPath, app)) {
+            report += L"\r\nsteam_download_bytes_downloaded=" + std::to_wstring(progress->downloaded) +
+                L"\r\nsteam_download_bytes_to_download=" + std::to_wstring(progress->downloadTotal) +
+                L"\r\nsteam_download_bytes_staged=" + std::to_wstring(progress->staged) +
+                L"\r\nsteam_download_bytes_to_stage=" + std::to_wstring(progress->stagingTotal);
+        }
+    } catch (std::runtime_error const&) {
+        // Steam can replace its manifest between polls. Keep the native state.
+    }
     if (!session->downloadApp) {
         using winrt::Windows::ApplicationModel::Package;
         using winrt::Windows::Storage::ApplicationData;
@@ -1521,6 +1531,8 @@ static winrt::hstring ReadSteamDownload() {
         const auto retry = session->downloadRetry;
         report += std::wstring(L"steam_download_retry=") +
             (retry == Retry::Accepted ? L"accepted" : retry == Retry::Declined ? L"declined" : L"not-attempted") + L"\r\n";
+    } else {
+        report += L"\r\n";
     }
     return winrt::hstring(report);
 }

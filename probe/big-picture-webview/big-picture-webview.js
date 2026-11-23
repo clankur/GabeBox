@@ -363,7 +363,15 @@
                         return "quit-requested";
                     });
                 };
-                else if (request.method === "install") action = function () { return broker.install(appId); };
+                else if (request.method === "install") action = function () {
+                    if (!visible || playing) return "busy";
+                    return broker.install(appId, function (stage, progress) {
+                        if (!failed && host) {
+                            try { host.reply(JSON.stringify({event: "xbox-install", appId: appId, stage: stage, progress: progress})); }
+                            catch (_) { /* The native download continues if the view closes. */ }
+                        }
+                    });
+                };
                 else action = function () {
                     if (playing) {
                         if (!played(appId) || !returnToGame) return "busy";

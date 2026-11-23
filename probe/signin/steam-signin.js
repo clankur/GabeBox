@@ -640,6 +640,20 @@
         }
     }
 
+    function downloadProgress(checkpoint, previous) {
+        var fields = {
+            bytes_downloaded: "downloaded", bytes_to_download: "downloadTotal",
+            bytes_staged: "staged", bytes_to_stage: "stagingTotal"
+        };
+        var counts = Object.assign({}, previous);
+        var lines = /^steam_download_(bytes_downloaded|bytes_to_download|bytes_staged|bytes_to_stage)=(\d+)\r?$/gm;
+        for (var match; (match = lines.exec(checkpoint));) {
+            var value = Number(match[2]);
+            if (Number.isSafeInteger(value) && value > 0) counts[fields[match[1]]] = value;
+        }
+        return Object.keys(counts).length ? counts : undefined;
+    }
+
     function updateDownload(job, checkpoint) {
         if (transfer !== job) return;
         var firstLineEnd = checkpoint.indexOf("\r\n");
@@ -651,6 +665,8 @@
             stage === "paused" || stage === "downloading" || stage === "staging";
         if (checkpoint !== job.last) {
             job.last = checkpoint;
+            job.counts = downloadProgress(checkpoint, job.counts);
+            if (job.progress && (active || stage === "installed")) job.progress(stage, job.counts);
             var message = downloadMessages[stage] || "Steam could not start or track the download";
             downloadStatus.textContent = job.entry.name + " · " + message;
             if (job.file) {
@@ -689,11 +705,11 @@
         if (transfer === job) job.timer = setTimeout(function () { pollDownload(job); }, 2000);
     }
 
-    function startDownload(entry) {
+    function startDownload(entry, progress) {
         if (transfer || launching || restoring) return Promise.resolve("busy");
         if (!entry || !entry.game) return Promise.resolve("game-unavailable");
         if (entry.installed) return Promise.resolve("already-installed");
-        var job = { entry: entry, id: Date.now() };
+        var job = { entry: entry, id: Date.now(), progress: progress };
         var completion = new Promise(function (resolve) { job.complete = resolve; });
         transfer = job;
         updateActions();
@@ -703,7 +719,8 @@
             "steam-download-report.txt", Windows.Storage.CreationCollisionOption.replaceExisting
         ).then(function (file) {
             job.file = file;
-            job.prefix = "probe=steam-download\r\nrun_id=" + job.id + "\r\n" + storageCheckpoint("before");
+            job.prefix = "probe=steam-download\r\nrun_id=" + job.id + "\r\nsteam_download_app_id=" +
+                job.entry.id + "\r\n" + storageCheckpoint("before");
             return Windows.Storage.FileIO.writeTextAsync(file, job.prefix +
                 "steam_download=starting\r\nstatus=steam-download-in-progress\r\n");
         }).then(function () {

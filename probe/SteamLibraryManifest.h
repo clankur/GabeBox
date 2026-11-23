@@ -9,6 +9,13 @@
 
 namespace steam_library_storage {
 
+struct DownloadProgress {
+    std::uint64_t downloaded = 0;
+    std::uint64_t downloadTotal = 0;
+    std::uint64_t staged = 0;
+    std::uint64_t stagingTotal = 0;
+};
+
 struct Manifest {
     std::uint32_t id = 0;
     std::uint32_t state = 0;
@@ -16,6 +23,7 @@ struct Manifest {
     std::string name;
     std::string installDir;
     std::string buildId;
+    DownloadProgress download;
 
     bool IsInstalled() const { return (state & 0x7000a6) == 4; }
 };
@@ -132,6 +140,14 @@ inline std::optional<Manifest> ParseManifest(std::string_view text, std::uint32_
         if (key.text == "name") manifest.name = std::move(value.text);
         if (key.text == "installdir") manifest.installDir = std::move(value.text);
         if (key.text == "buildid") manifest.buildId = std::move(value.text);
+        if (key.text.starts_with("bytes")) {
+            std::uint64_t count{};
+            if (!ParseNumber(value.text, count)) continue;
+            if (key.text == "bytesdownloaded") manifest.download.downloaded = count;
+            if (key.text == "bytestodownload") manifest.download.downloadTotal = count;
+            if (key.text == "bytesstaged") manifest.download.staged = count;
+            if (key.text == "bytestostage") manifest.download.stagingTotal = count;
+        }
     }
     if (!foundState || !manifest.id || manifest.id != expectedId || manifest.installDir.empty() ||
             ReadToken(text).kind != Kind::End)

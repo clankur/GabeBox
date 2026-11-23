@@ -26,6 +26,21 @@ function installXboxSettings(client, getRuntime) {
         }
     }
     const settings = client.Settings ||= {};
+    settings.RegisterForSettingsChanges = callback => {
+        if (typeof callback !== 'function') throw new TypeError('Expected a settings listener');
+        const format = new Intl.DateTimeFormat(undefined, {hour: 'numeric', timeZone: 'UTC'});
+        let subscribed = true;
+        queueMicrotask(() => {
+            if (!subscribed) return;
+            callback({
+                vecValidDownloadRegions: [],
+                vecValidAutoUpdateRestrictHours: Array.from({length: 24}, (_, nHour) => ({
+                    nHour, strDisplay: format.format(Date.UTC(2000, 0, 1, nHour))
+                }))
+            });
+        });
+        return {unregister() { subscribed = false; }};
+    };
     settings.RegisterForSettingsArrayChanges = callback => {
         if (typeof callback !== 'function') throw new TypeError('Expected a settings listener');
         listeners.add(callback);

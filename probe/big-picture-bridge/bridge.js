@@ -21,6 +21,10 @@
     (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => { runtime = require; }]);
 
     host.addEventListener('message', ({data}) => {
+        if (data?.event === 'xbox-install') {
+            installer.update(data.appId, data.stage, data.progress);
+            return;
+        }
         if (data?.event === 'xbox-game') {
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
@@ -146,7 +150,7 @@
                 const local = {clientid: '0', installed: game.installed};
                 if (game.id === activeApp && game.installed) local.display_status = status.Fi; // Running
                 else if (game.installed) local.display_status = game.canPlay ? status.hr : status.Yh; // ReadyToLaunch / NotLaunchable
-                else local.display_status = status.jw; // ReadyToInstall
+                else local.display_status = installer.status(game.id, status) ?? status.jw; // ReadyToInstall
                 return {appid: game.id, gameid: String(game.id), app_type: 1, display_name: game.name,
                     sort_as: game.name.toLowerCase(), visible_in_game_list: true, subscribed_to: true,
                     per_client_data: [local]};
@@ -239,6 +243,8 @@
     const refreshLibrary = () => refresh().catch(error => console.error('Steam library unavailable', error.message));
     const storage = installXboxStorage(client, (operation, argument) => send(`storage-${operation}`, undefined, argument),
         appId => runtime?.(90544).tw.GetAppOverviewByAppID(appId)?.display_name, () => runtime(94601), refreshLibrary);
+    const publishDownload = installXboxDownloads(client, () => runtime);
+    const installer = installXboxInstalls(client, send, refreshLibrary, () => runtime, storage.refresh, publishDownload);
     const gamepads = installXboxGamepadReader();
     client.System = {async IsSteamInTournamentMode() {
         installXboxNotifications(runtime);
