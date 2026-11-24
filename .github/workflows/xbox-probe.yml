@@ -4,6 +4,11 @@ on:
   push:
     paths:
       - 'probe/**'
+      - 'runtime/**'
+      - 'ui/Assets/**'
+      - 'ui/signin/**'
+      - 'build_tools/**'
+      - 'tools/artifacts.py'
       - '.github/workflows/xbox-probe.yml'
       - '.github/workflows/xbox-fhd-present.yml'
   workflow_dispatch:
@@ -20,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the hosted MonoGame adapter
-        run: dotnet build probe/stardew-diagnostic/StardewStartupDiagnostic.csproj --configuration Release --output "${{ runner.temp }}/hosted-monogame"
+        run: dotnet build runtime/stardew/StardewStartupDiagnostic.csproj --configuration Release --output "${{ runner.temp }}/hosted-monogame"
       - uses: actions/upload-artifact@v4
         with:
           name: xbox-hosted-monogame
@@ -50,7 +55,7 @@ jobs:
           $layout = Join-Path $work 'layout'
           $artifacts = Join-Path $work 'artifacts'
           New-Item -ItemType Directory -Path $layout, $artifacts | Out-Null
-          Copy-Item -Recurse probe/Assets $layout
+          Copy-Item -Recurse ui/Assets $layout
           Copy-Item probe/web/* $layout
 
           [xml]$manifest = Get-Content probe/Package.appxmanifest
@@ -83,11 +88,11 @@ jobs:
           $projection = Join-Path $work 'projection'
           $winmd = "$layout/XboxProbe.Native.winmd"
           & "$bin\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
-            /out $work /winmd $winmd probe/XboxProbe.Native.idl
+            /out $work /winmd $winmd runtime/steam/XboxProbe.Native.idl
           & "$bin\cppwinrt.exe" -input $winmd -reference $metadata -output $projection -include XboxProbe.Native -overwrite
           & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DUNICODE /D_UNICODE `
             "/I$projection" "/I$sdk\Include\$sdkVersion\cppwinrt" "/Fo$work\ProbeNative.obj" "/Fe$layout\ProbeNative.dll" `
-            probe/ProbeNative.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/ProbeNative.lib" `
+            runtime/steam/ProbeNative.cpp $lib /link /APPCONTAINER "/IMPLIB:$work/ProbeNative.lib" `
             /EXPORT:DllGetActivationFactory=ProbeGetActivationFactory /EXPORT:DllCanUnloadNow=ProbeCanUnloadNow
 
           $targets = @(
@@ -152,18 +157,18 @@ jobs:
             New-Item -ItemType Directory -Path $steamArtifacts | Out-Null
             $jni = Join-Path $env:JAVA_HOME 'include'
             & cl.exe /nologo /c /O2 /GS- /Zl /TC /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
-              "/I$jni" "/I$jni\win32" "/Fo$work\slay-working-directory.obj" probe/slay-working-directory.c
+              "/I$jni" "/I$jni\win32" "/Fo$work\slay-working-directory.obj" runtime/lwjgl/slay-working-directory.c
             & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
               "/out:$steamLayout\slay-working-directory.dll" "/implib:$work\slay-working-directory.lib" `
               "$work\slay-working-directory.obj" $lib
             & cl.exe /nologo /LD /O2 /EHsc /MT /std:c++20 /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
               "/I$jni" "/I$jni\win32" "/Fo$work\slay-sdl-display.obj" "/Fe$steamLayout\slay-sdl-display.dll" `
-              probe/slay-sdl-display.cpp $lib /link /APPCONTAINER "/IMPLIB:$work\slay-sdl-display.lib"
+              runtime/lwjgl/slay-sdl-display.cpp $lib /link /APPCONTAINER "/IMPLIB:$work\slay-sdl-display.lib"
             $user32 = "$sdk\Lib\$sdkVersion\um\x64\User32.lib"
             foreach ($variant in @('ansi', 'wide')) {
               $defines = @(if ($variant -eq 'wide') { '/DPROBE_WIDE_IMPORT' })
               & cl.exe /nologo /c /O2 /GS- /Zl /TC @defines `
-                "/Fo$work\keyboard-$variant.obj" probe/keyboard-import.c
+                "/Fo$work\keyboard-$variant.obj" runtime/win32/keyboard-import.c
               & link.exe /nologo /dll /noentry /appcontainer /nodefaultlib `
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
@@ -181,30 +186,31 @@ jobs:
               $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"
                 & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
-                  -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "probe/win32-runtime/$source.c" -o $object
+                  -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "runtime/win32/$source.c" -o $object
                 $object
               })
               $libraries = @($lib)
               if ($adapter.Module -eq 'loader-trace') {
                 $exceptionLibrary = "$work\win32-exceptions.lib"
-                & "$llvm\llvm-dlltool.exe" -m i386:x86-64 -d probe/win32-runtime/ntdll-eh.def -l $exceptionLibrary
+                & "$llvm\llvm-dlltool.exe" -m i386:x86-64 -d runtime/win32/ntdll-eh.def -l $exceptionLibrary
                 $libraries += $exceptionLibrary
               }
               & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
                 /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
-                "/def:probe/win32-runtime/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects @libraries
+                "/def:runtime/win32/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects @libraries
             }
             $dxgiObjects = foreach ($source in @('dxgi', 'dxgi-frame')) {
               $object = "$work/win32-$source.obj"
               & "$llvm\clang++.exe" --target=x86_64-pc-windows-msvc -std=c++20 -O2 -ffreestanding `
                 -fno-rtti -fno-exceptions -Wall -Wextra -Werror -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 `
-                -c "probe/win32-runtime/$source.cpp" -o $object
+                -c "runtime/win32/$source.cpp" -o $object
               $object
             }
             & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
               /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
-              /def:probe/win32-runtime/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
-            Copy-Item probe/signin/* $steamLayout
+              /def:runtime/win32/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
+            Copy-Item ui/signin/* $steamLayout
+            Copy-Item runtime/dos/* $steamLayout
             $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
             Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive
             if ((Get-FileHash $qrArchive).Hash -ne 'ab6ed47d378877441deae95972e07b2716c26545a735a23aa6b9d442b33026ed') {
@@ -222,7 +228,7 @@ jobs:
             $steam.Save("$steamLayout/AppxManifest.xml")
             $presenter = Join-Path $env:RUNNER_TEMP 'xbox-fhd-present'
             $pin = (Get-FileHash "$presenter/SHA256SUMS").Hash
-            & python -c "import runpy,sys; from pathlib import Path; stage=runpy.run_path('probe/prepare-steam-core.py')['stage_native_presenter']; stage(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3])" $steamLayout $presenter $pin
+            & python -c "import sys; from pathlib import Path; from build_tools.presenter import stage_native_presenter; stage_native_presenter(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3])" $steamLayout $presenter $pin
             Write-ProbePackage $steamLayout $steamArtifacts $cert
             $lifetimeLayout = Join-Path $work 'lifetime-layout'
             $lifetimeArtifacts = Join-Path $work 'lifetime-artifacts'

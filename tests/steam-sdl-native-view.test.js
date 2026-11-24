@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
+const source = fs.readFileSync(require.resolve("../ui/signin/steam-sdl-native-view.js"), "utf8");
 
 test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
     const calls = [], samples = [], first = [], menus = [];

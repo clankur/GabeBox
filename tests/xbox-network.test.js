@@ -11,7 +11,7 @@ function hostFixture() {
     }}};
     const state = {windows, profile: null, changes: 0};
     const window = {};
-    vm.runInNewContext(fs.readFileSync(require.resolve('../probe/signin/xbox-network.js'), 'utf8'), {window});
+    vm.runInNewContext(fs.readFileSync(require.resolve('../ui/signin/xbox-network.js'), 'utf8'), {window});
     const watcher = window.steamXboxNetwork(windows, () => ++state.changes);
     return {...watcher, state};
 }
@@ -57,7 +57,7 @@ test('Windows preferred profile, interface changes and disconnection', () => {
 
 test('an old successful query cannot overwrite disconnection; revocation stops callbacks', async () => {
     const host = new EventTarget(), window = new EventTarget(), client = {System: {}}, reads = [];
-    const api = vm.runInNewContext(fs.readFileSync(require.resolve('../probe/big-picture-bridge/xbox-network.js'), 'utf8') +
+    const api = vm.runInNewContext(fs.readFileSync(require.resolve('../ui/big-picture-bridge/xbox-network.js'), 'utf8') +
         '\ninstallXboxNetwork', {window});
     const runtime = n => n === 78544 ? {co:{fromObject: value => ({serializeBinary: () => value})}} :
         n === 20887 ? {WO:{Wired:1, Wireless:2, Unknown:0}, $J:{Connected:5}} :

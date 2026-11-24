@@ -1,4 +1,4 @@
-#include "../probe/steam-session-cache-policy.h"
+#include "../runtime/steam/steam-session-cache-policy.h"
 #include <array>
 #include <cassert>
 #include <cstring>

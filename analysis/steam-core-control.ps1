@@ -11,7 +11,7 @@ if ((Test-Path $WorkDirectory) -or (Get-Process -Name steam, steamwebhelper -Err
     throw 'Use a clean Windows VM and a new work directory.'
 }
 $work = New-Item -ItemType Directory -Path $WorkDirectory
-$pin = Get-Content (Join-Path $PSScriptRoot 'valve-release.json') -Raw | ConvertFrom-Json
+$pin = Get-Content (Join-Path $PSScriptRoot '../runtime/steam/pins/valve-release.json') -Raw | ConvertFrom-Json
 $spec = $pin.archives | Where-Object { $_.members -contains 'steamclient64.dll' }
 $url = [uri]::new([uri]$pin.manifest_url, $spec.file)
 $download = Join-Path $work.FullName 'bins_win64.zip'

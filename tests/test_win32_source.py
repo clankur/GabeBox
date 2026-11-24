@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-VERIFY = Path(__file__).resolve().parents[1] / "probe" / "verify-win32-source.py"
+VERIFY = Path(__file__).resolve().parents[1] / "build_tools/verify_win32_source.py"
 
 
 class Win32SourceTests(unittest.TestCase):

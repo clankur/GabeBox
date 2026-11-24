@@ -1,5 +1,5 @@
-#include "../probe/fhd/media-frame-count.h"
-#include "../probe/fhd/media-frame-clock.h"
+#include "../runtime/presenter/media-frame-count.h"
+#include "../runtime/presenter/media-frame-clock.h"
 #include <cassert>
 
 int main() {

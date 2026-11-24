@@ -1,5 +1,5 @@
 #include <stdbool.h>
-#include "steam-handoff-control.h"
+#include "../runtime/shared/steam-handoff-control.h"
 
 static DWORD SteamHandoffControl(HMODULE client) {
     typedef int (__cdecl *CreatePipe)(void);

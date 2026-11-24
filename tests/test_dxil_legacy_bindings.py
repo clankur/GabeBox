@@ -3,7 +3,7 @@ import runpy
 import unittest
 
 
-lower = runpy.run_path(str(Path(__file__).parents[1] / "probe" / "dxil-legacy-bindings.py"))["lower_fixed_bindings"]
+lower = runpy.run_path(str(Path(__file__).parents[1] / "tools/dxil-legacy-bindings.py"))["lower_fixed_bindings"]
 ASSEMBLY = """\
 define void @main() {
   %1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 7, i32 18, i32 2, i8 1 }, i32 9, i1 true)

@@ -218,7 +218,7 @@ if ($PinnedClient) {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to stage the pinned client.' }
     if ($BigPicture) {
         $manifest = Join-Path $installation 'package/steam_client_win64.manifest'
-        $release = Get-Content -Raw (Join-Path $PSScriptRoot 'valve-release.json') | ConvertFrom-Json
+        $release = Get-Content -Raw (Join-Path $PSScriptRoot '../runtime/steam/pins/valve-release.json') | ConvertFrom-Json
         if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $release.manifest_sha256) {
             throw 'Staged Valve manifest does not match the pinned SHA-256.'
         }

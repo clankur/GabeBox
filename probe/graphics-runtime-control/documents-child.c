@@ -1,5 +1,5 @@
 /* Exercise a scoped Documents path through a redirected Shell32 import. */
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 
 #define IMPORT __declspec(dllimport)
 #define WINAPI __stdcall

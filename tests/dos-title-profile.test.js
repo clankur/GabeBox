@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const adapterSource = fs.readFileSync(path.join(__dirname, "../probe/signin/xcom-dos.js"), "utf8");
+const adapterSource = fs.readFileSync(path.join(__dirname, "../runtime/dos/xcom-dos.js"), "utf8");
 const publishedConfig = [
     "[dosbox]", " machine = VGA ", "memsize=32", "[cpu]", "cycles=auto limit 8000",
     "[sdl]", "fullscreen=true", "[autoexec]", "@ECHO OFF", "mount C XCOM -freesize 1024",

@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import ssl
 from struct import Struct, unpack_from
 import sys
@@ -22,6 +21,9 @@ from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
+
+
+from tools.artifacts import SDL_LIMIT, SDL_TRIALS, load_sdl_artifact, pe_summary
 
 
 PACKAGE_API = '/api/app/packagemanager'
@@ -43,11 +45,6 @@ PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
 PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
-SDL_TRIALS = {
-    975370: ('Dwarf Fortress', '2.26.2', '9603fdfd2b4bd75b3574bb993e25332bae820a66f18e7ffb6f8c82cb4f6c004a'),
-    413150: ('Stardew Valley', '2.30.9', '58f0a2af6653445b48e58ace6890fbe237bf76452c9743e800358d6b935ded64'),
-}
-SDL_LIMIT = 8 * 1024 * 1024
 LIFETIME_REPORT = 'lifetime-report.txt'
 PROTOCOL_REPORT = 'protocol-return.txt'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
@@ -268,7 +265,7 @@ SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_requ
 
 
 def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
-    from probe.xbox_diagnostics import (GPU_MAILBOX_NAME, LOCAL, diagnostic_reader, matching_probe,
+    from tools.xbox_diagnostics import (GPU_MAILBOX_NAME, LOCAL, diagnostic_reader, matching_probe,
                                         save_observation)
 
     blob, launch_report = diagnostic_reader(portal, app, read_game_file, decode_report, PortalError)
@@ -424,7 +421,7 @@ def sdl_frame_stem(report):
 
 
 def read_sdl_frame(portal, app, report, destination):
-    from probe.xbox_diagnostics import BMP_LIMIT, bmp_frame_dimensions
+    from tools.xbox_diagnostics import BMP_LIMIT, bmp_frame_dimensions
 
     stem = sdl_frame_stem(report)
     data = read_game_file(portal, app, r'\LocalState', stem + '.bmp', BMP_LIMIT + 1)
@@ -453,53 +450,6 @@ def wait_for_sdl_frame(portal, package, destination, timeout):
     raise ValueError('No frame was captured after the game’s launch report.')
 
 
-def pe_summary(header):
-    if len(header) < 64 or header[:2] != b'MZ':
-        return {'pe_header': 'unavailable'}
-    pe = unpack_from('<I', header, 0x3c)[0]
-    if pe < 64 or pe + 26 > len(header) or header[pe:pe + 4] != b'PE\0\0':
-        return {'pe_header': 'unavailable'}
-
-    machine, sections = unpack_from('<HH', header, pe + 4)
-    optional_size = unpack_from('<H', header, pe + 20)[0]
-    optional = pe + 24
-    magic = unpack_from('<H', header, optional)[0]
-    directory = {0x10b: 96, 0x20b: 112}.get(magic)
-    section_table = optional + optional_size
-    if directory is None or optional_size < directory or section_table > len(header):
-        return {'pe_header': 'unavailable'}
-
-    summary = {'pe_machine': {0x14c: 'x86', 0x8664: 'x64', 0xaa64: 'arm64'}.get(machine, hex(machine)),
-               'pe_format': 'PE32' if magic == 0x10b else 'PE32+'}
-    clr_entry = directory + 14 * 8
-    count = unpack_from('<I', header, optional + directory - 4)[0]
-    if count < 15:
-        return summary
-    if optional_size < clr_entry + 8:
-        return {**summary, 'clr_flags': 'unavailable'}
-    clr_rva, clr_size = unpack_from('<II', header, optional + clr_entry)
-    if not clr_rva and not clr_size:
-        return summary
-
-    summary['clr_flags'] = 'unavailable'
-    clr_header_size = 72
-    if not clr_rva or clr_size < clr_header_size:
-        return summary
-    for section in range(min(sections, (len(header) - section_table) // 40)):
-        _, address, raw_size, offset = unpack_from('<IIII', header, section_table + 40 * section + 8)
-        relative = clr_rva - address
-        start = offset + relative
-        if 0 <= relative <= raw_size - clr_header_size and start + clr_header_size <= len(header):
-            declared_size = unpack_from('<I', header, start)[0]
-            if not clr_header_size <= declared_size <= min(clr_size, raw_size - relative, len(header) - start):
-                break
-            flags = unpack_from('<I', header, start + 16)[0]
-            summary['clr_flags'] = f'0x{flags:08x}'
-            summary['clr_requires_x86'] = 'yes' if flags & 2 and not flags & 0x20000 else 'no'
-            break
-    return summary
-
-
 def xbox_executable_requirement(summary):
     """Identify executable architectures outside the x64 Xbox app process model."""
     if summary.get('pe_machine') == 'x86':
@@ -523,12 +473,11 @@ GAME_PATH_COMPONENT = re.compile(r"[\w -][\w .()'’\-]*(?<![ .])")
 
 
 def export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, profile, output):
-    helpers = Path(__file__).resolve().parent / 'probe'
-    parse = runpy.run_path(str(helpers / 'steam-compatibility.py'))['parse_installed_manifest']
-    read_profile = runpy.run_path(str(helpers / 'verify-win32-source.py'))['read_profile']
+    from build_tools.verify_win32_source import read_profile
+    from tools.steam_compatibility import parse_installed_manifest
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError('Use a new export directory under an existing parent.')
-    build, install, state = parse(raw, app_id)
+    build, install, state = parse_installed_manifest(raw, app_id)
     if state != '4':
         raise ValueError('Steam must show a completed install before exporting game inputs.')
     if not GAME_PATH_COMPONENT.fullmatch(install):
@@ -564,7 +513,7 @@ def export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, pro
             portal.request('GET', game_file_url(package, folder, parts[-1], knownfolder), receive=receive)
         fresh = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf',
                                1024 * 1024 + 1, knownfolder=knownfolder)
-        if fresh is None or parse(fresh, app_id) != (build, install, state):
+        if fresh is None or parse_installed_manifest(fresh, app_id) != (build, install, state):
             raise ValueError('The Xbox Steam installation changed during the export.')
         if output.exists() or output.is_symlink():
             raise FileExistsError(f'Export directory already exists: {output}.')
@@ -621,27 +570,6 @@ def stop_probe_for_sdl_trial(portal, package):
         if error.status != 404 and not (error.status == 400 and re.search(
                 r'"ErrorCode"\s*:\s*-2147483635\b', str(error))):
             raise
-
-
-def load_sdl_artifact(directory, app_id):
-    name, upstream, _ = SDL_TRIALS[app_id]
-    artifact = directory / 'SDL2.dll'
-    checksum = (directory / 'SHA256SUMS').read_text(encoding='ascii').strip()
-    expected = re.fullmatch(r'([0-9a-f]{64})  SDL2\.dll', checksum)
-    if artifact.stat().st_size > SDL_LIMIT or not expected:
-        raise ValueError('Use a checked SDL2 workflow artifact containing SHA256SUMS.')
-    candidate = artifact.read_bytes()
-    if hashlib.sha256(candidate).hexdigest() != expected[1] or pe_summary(candidate).get('pe_machine') != 'x64':
-        raise ValueError('The SDL2 workflow artifact has an unexpected checksum or architecture.')
-    version_marker = b'\xbd\x04\xef\xfe\x00\x00\x01\x00'
-    version_offset = candidate.find(version_marker)
-    if version_offset < 0 or version_offset + 16 > len(candidate):
-        raise ValueError('The SDL2 workflow artifact has no Windows version resource.')
-    major_minor, patch_build = unpack_from('<II', candidate, version_offset + 8)
-    version = f'{major_minor >> 16}.{major_minor & 0xffff}.{patch_build >> 16}'
-    if version != upstream:
-        raise ValueError(f'{name} requires the version-matched SDL {upstream} workflow artifact.')
-    return candidate
 
 
 def trial_sdl(portal, args):
@@ -1143,7 +1071,7 @@ def main():
             observe_command.error('--fail-on-checkpoint, --watch-checkpoint and --checkpoint-timeout require --require-checkpoint')
         args.checkpoint_timeouts = []
         if args.require_checkpoint:
-            from probe.xbox_diagnostics import valid_checkpoint_pattern
+            from tools.xbox_diagnostics import valid_checkpoint_pattern
 
             if not args.app_id:
                 observe_command.error('--require-checkpoint requires --app-id')
@@ -1221,7 +1149,7 @@ def main():
                        args.require_ipc, restart=args.restart)
         return
     if args.command == 'observe':
-        from probe.xbox_diagnostics import observe
+        from tools.xbox_diagnostics import observe
 
         try:
             app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
@@ -1237,7 +1165,7 @@ def main():
             raise SystemExit(1)
         return
     if args.command in inspections:
-        from probe.xbox_diagnostics import collect_live_loader, collect_render_state
+        from tools.xbox_diagnostics import collect_live_loader, collect_render_state
 
         target = {'inspect-render': 'render state', 'inspect-loader': 'the live loader trace',
                   'inspect-input': 'hosted input'}[args.command]

@@ -4,6 +4,18 @@ This branch opens Valve’s original Big Picture UI in Xbox WebView2 after the e
 
 The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
 
+## Repository layout
+
+The component map follows Valve's Proton 11.0 tree at revision `1f089f56`. Proton builds compatibility components independently and assembles their outputs for Steam. This project applies that pattern to the Xbox runtime and APPX package. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1)
+
+| Area | Responsibility | Upstream reference |
+| --- | --- | --- |
+| [`runtime/`](runtime) | Steam host, Win32 adapters, SDL, native presentation, and hosted game runtimes. Shared protocol headers live in `runtime/shared/`. | [Wine, DXVK, and vkd3d-proton components](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/.gitmodules) · [Steam helper](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/steam_helper) |
+| [`build_tools/`](build_tools) | Verify inputs, assemble APPX layouts, and sign packages. Windows SDK workflows build the native components. | [Root build](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/Makefile) · [Distribution assembly](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/Makefile.in) |
+| [`profiles/`](profiles) | Select compatibility behavior for verified Steam game builds. | [Runtime options and title overrides](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/README.md#runtime-config-options) |
+| [`ui/`](ui), [`probe/`](probe), [`tools/`](tools), [`tests/`](tests) | Xbox sign-in and Big Picture hosts, console controls, host-side diagnostics, and automated tests. | Xbox-specific integration. |
+| [`docs/`](docs), [`analysis/`](analysis) | Operator runbooks and recorded compatibility evidence. | [Proton debugging and controller guides](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/docs) |
+
 ## Setup
 
 You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on the console, and Xbox Device Portal enabled. Run the commands from the repository root on a computer that can reach the console. The deployment CLI requires Python 3.9 or later.
@@ -14,7 +26,7 @@ You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on t
 
 To run the original packaged-process diagnostic, follow its separate deployment instructions. [Probe setup and report fields](probe/README.md)
 
-Use the read-only observer to collect Big Picture startup checkpoints, game launch reports, and native frame traces through Device Portal. [Xbox runtime diagnostics](probe/XBOX-DIAGNOSTICS.md)
+Use the read-only observer to collect Big Picture startup checkpoints, game launch reports, and native frame traces through Device Portal. [Xbox runtime diagnostics](docs/XBOX-DIAGNOSTICS.md)
 
 ### Play Hades on Xbox Series X
 
@@ -22,17 +34,17 @@ The signed Hades profile runs the Steam x64 DirectX build through Big Picture. C
 
 ### Try the earlier Steam Core prototype
 
-Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml) · [Steam setup guide](probe/STEAM-CORE.md)
+Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/steam-xbox-devmode/actions/workflows/xbox-probe.yml) · [Steam setup guide](docs/STEAM-CORE.md)
 
-To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](probe/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
+To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](docs/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
 
 ## Verified features
 
 - **Console diagnostics.** The deployment CLI installs signed packages through Device Portal and reads fresh reports. The baseline probe verified same-package process startup and named-pipe communication. [Console probe](probe/README.md)
 - **Steam sign-in and library.** Prototype builds verified Steam Guard QR approval, optional session reuse across an app upgrade, a searchable games-only library, controller navigation, and artwork caching. [Steam library setup and results](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#run-the-on-console-sign-in)
 - **Downloads and launch diagnostics.** Steam installed owned games into app-local storage. The prototype submits standard Steam Play requests, supports per-title launch options, and records startup checkpoints and process exits. [Download tests](https://github.com/clankur/steam-xbox-devmode/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#test-an-owned-game-download) · [Launch verification](https://github.com/clankur/steam-xbox-devmode/pull/47)
-- **Fullscreen play.** The shared SDL player has displayed Slay the Spire, Dwarf Fortress, and Stardew Valley on Series X. Each title requires its version-matched runtime. [Player setup and console results](probe/GAME-LAUNCH.md)
-- **Slay the Spire cloud saves.** From an installed game, select **Cloud saves** and then **Download and use saves**. The client verifies the downloaded files and backs up the existing save folders before replacement. [Restore setup and scope](probe/STEAM-CORE.md#direct-steam-cloud-research)
+- **Fullscreen play.** The shared SDL player has displayed Slay the Spire, Dwarf Fortress, and Stardew Valley on Series X. Each title requires its version-matched runtime. [Player setup and console results](docs/GAME-LAUNCH.md)
+- **Slay the Spire cloud saves.** From an installed game, select **Cloud saves** and then **Download and use saves**. The client verifies the downloaded files and backs up the existing save folders before replacement. [Restore setup and scope](docs/STEAM-CORE.md#direct-steam-cloud-research)
 - **X-COM: UFO Defense.** On a Series X, the prototype checked Steam ownership and installation, then ran the installed DOS game in its packaged runtime and rendered frames from the original intro. [Series X results](https://github.com/clankur/steam-xbox-devmode/issues/44)
 
 ## Missing features and planned work

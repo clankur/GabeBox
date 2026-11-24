@@ -40,7 +40,7 @@ def run(sdk, linker, objdump):
         if hashlib.file_digest(stream, "sha256").hexdigest() != SDK_SHA256:
             raise ValueError(f"Expected official microsoft.windows.sdk.cpp.x64 {SDK_VERSION}")
     uses = {}
-    for component in json.loads((HERE / "client-imports.json").read_text())["components"]:
+    for component in json.loads((HERE.parent / "runtime/steam/pins/client-imports.json").read_text())["components"]:
         for item in component["selected_imports"]:
             module = item["module"].lower()
             if module in SYSTEM_LIBS:

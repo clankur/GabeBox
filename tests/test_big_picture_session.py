@@ -6,7 +6,7 @@ import unittest
 from zipfile import ZipFile
 
 
-MODULE = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe/big-picture-bridge/stage-session.py"))
+MODULE = runpy.run_path(str(Path(__file__).resolve().parents[1] / "build_tools/stage_session.py"))
 stage = MODULE["stage_session_component"]
 MANIFEST = b"""<Package><Identity Name="XboxPortabilityProbe.ChildProcess.SteamCore"
     ProcessorArchitecture="x64" Publisher="CN=Xbox Portability Probe"/>

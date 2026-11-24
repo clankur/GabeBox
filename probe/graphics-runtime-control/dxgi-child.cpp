@@ -1,4 +1,4 @@
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -8,8 +8,8 @@
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
-#include "../sdl-host-protocol.h"
-#include "../sdl-gpu-protocol.h"
+#include "../../runtime/shared/sdl-host-protocol.h"
+#include "../../runtime/shared/sdl-gpu-protocol.h"
 extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
     LPCWSTR, DWORD, DWORD, DWORD, LPCREATEFILE2_EXTENDED_PARAMETERS);
 #endif

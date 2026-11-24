@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from probe import xbox_diagnostics as diagnostics
+from tools import xbox_diagnostics as diagnostics
 
 
 ROOT = Path(__file__).resolve().parents[1]

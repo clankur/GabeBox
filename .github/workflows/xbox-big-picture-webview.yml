@@ -5,7 +5,8 @@ on:
   push:
     branches: ['feature/native-steam-big-picture']
     paths:
-      - 'probe/big-picture-webview/**'
+      - 'ui/big-picture-webview/**'
+      - 'tests/big-picture-webview/**'
       - '.github/workflows/xbox-big-picture-webview.yml'
 
 permissions:
@@ -19,13 +20,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test probe/big-picture-webview/host.test.js
+      - run: node --test tests/big-picture-webview/host.test.js
       - name: Compile and sign the UWP WebView2 component
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $src = Join-Path $PWD 'probe/big-picture-webview'
+          $src = Join-Path $PWD 'ui/big-picture-webview'
           $work = Join-Path $env:RUNNER_TEMP 'big-picture-webview'
           $out = Join-Path $work 'artifact'
           New-Item -ItemType Directory -Path $out | Out-Null

@@ -201,7 +201,7 @@ WDP keyboard input focused the original Store menu row (TV SHA-256 `363cee8cf307
 
 The original Home carousel showed a focused Dwarf Fortress tile and neighboring covers (TV SHA-256 `8ff9e6063b04cd66dd5d25c7da3f62e4d569185adb4a85c3136976be795b0e5f`). From Home, selecting Slay the Spire opened its stock Play page. The game then displayed its title menu on the full TV in the same run with Java PID `5448`, AppID `646570` (SHA-256 `cff9c4f1f2578926ab57c5833305b562b66a16b5a4c3ef98455b6f692262fe99`). The first native 1920×1080 panel window presented 1,373 distinct frames in 30.1113 seconds. The game and original host disappeared before the operator could open the overlay. The first F10 attempt stopped at its PID guard without sending the key. The cause of process loss is unknown. This trial verifies the title, with no completed overlay, Resume or exit cycle.
 
-In the pinned Valve UI regression, controller input opened Home search, focused a letter on Valve’s keyboard, entered it into the search field, dismissed the keyboard and reopened the Steam menu. The Store regression checked that Valve asked for the public Store URL after the isolated browser proved its initial document was ready. Both checks ran in local Chromium. [Stock UI fixture](../tests/steam-big-picture-shell.cjs) · [Xbox keyboard input](../probe/big-picture-bridge/xbox-input.js)
+In the pinned Valve UI regression, controller input opened Home search, focused a letter on Valve’s keyboard, entered it into the search field, dismissed the keyboard and reopened the Steam menu. The Store regression checked that Valve asked for the public Store URL after the isolated browser proved its initial document was ready. Both checks ran in local Chromium. [Stock UI fixture](../tests/steam-big-picture-shell.cjs) · [Xbox keyboard input](../ui/big-picture-bridge/xbox-input.js)
 
 ## Direct native game display
 
@@ -215,12 +215,12 @@ For a build that presents game frames through the primary XAML panel, retain the
 
 If the console screenshot endpoint fails, identify the missing TV frame and retain any direct physical observation with its time and source. A WebView image, decoded-video frame, source framebuffer or successful native Present call alone cannot prove that the game appeared on the TV.
 
-Retain a JSON object with the independently recorded PNG SHA-256 values keyed by `library-before-play`, `stock-play`, `title`, `overlay`, `library-while-running`, `resume` and `resumed-title`. Each original PNG has a same-stem JSON capture receipt. The checker verifies the pinned package and TV images, acquisition order, process continuity, native panel visibility, and advancing CPU/GPU swap counts. It rejects duplicate image bytes across phases because identical stills cannot resolve whether an old capture was reused. When consecutive game title frames are pixel-identical, obtain a fresh capture showing a visible change. [Direct display checker](../probe/verify-big-picture-display.py)
+Retain a JSON object with the independently recorded PNG SHA-256 values keyed by `library-before-play`, `stock-play`, `title`, `overlay`, `library-while-running`, `resume` and `resumed-title`. Each original PNG has a same-stem JSON capture receipt. The checker verifies the pinned package and TV images, acquisition order, process continuity, native panel visibility, and advancing CPU/GPU swap counts. It rejects duplicate image bytes across phases because identical stills cannot resolve whether an old capture was reused. When consecutive game title frames are pixel-identical, obtain a fresh capture showing a visible change. [Direct display checker](../tools/verify-big-picture-display.py)
 
 Multiple official requests for the same phase sometimes return identical bytes. Use an object containing `file` and `sha256` for that phase's pin to select the independently recorded acquisition time.
 
 ```sh
-python3 probe/verify-big-picture-display.py "$APPX33" "$RUN_DIR" "$TV_PHASE_PINS" \
+python3 tools/verify-big-picture-display.py "$APPX33" "$RUN_DIR" "$TV_PHASE_PINS" \
   --sha256 714a906c907c2e35b1c940755ea59f69d46b8ff48806a44079ce109dc2b3c970 \
   --captures "$RUN_DIR/cycle-1-slay" --app-id 646570 --game-image java.exe
 ```
@@ -258,7 +258,7 @@ On `.19` Dwarf Fortress reached the game on TV on 1/1 attempt and completed 0/1 
 
 ## Capture provenance
 
-The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a927c88875509`. Its Valve UI payload matches the pinned assets in the staging cache. The native host captures the real Big Picture popup only while its signed parent is active, the popup is attached and visible, and the game's surface is in the background. It checks for a visible stock Library tile before and after capturing. The native call writes PNG bytes directly. The collector transfers those bytes from the installed package's LocalState. [Native foreground checks](../probe/big-picture-webview/renderer.cpp) · [Valve Library hit test](../probe/big-picture-webview/library-capture.h)
+The `.17` APPX SHA-256 is `b5f596ce3a05f56272bc5194bde0fd1b4fa0f56bd9ca8aef904a927c88875509`. Its Valve UI payload matches the pinned assets in the staging cache. The native host captures the real Big Picture popup only while its signed parent is active, the popup is attached and visible, and the game's surface is in the background. It checks for a visible stock Library tile before and after capturing. The native call writes PNG bytes directly. The collector transfers those bytes from the installed package's LocalState. [Native foreground checks](../ui/big-picture-webview/renderer.cpp) · [Valve Library hit test](../ui/big-picture-webview/library-capture.h)
 
 | Local receipt | Dimensions | SHA-256 |
 |---|---:|---|
@@ -315,10 +315,10 @@ The `.28` Dwarf Fortress title images have the same digest before and after resu
 
 ### Recheck a retained resume
 
-Run the offline checker with the signed APPX, the original Library-while-running JSON and the release hash recorded above. It reads the PNGs and process log alongside the receipt. This example uses the first `.28` run. [Offline checker](../probe/verify-big-picture-resume.py)
+Run the offline checker with the signed APPX, the original Library-while-running JSON and the release hash recorded above. It reads the PNGs and process log alongside the receipt. This example uses the first `.28` run. [Offline checker](../tools/verify-big-picture-resume.py)
 
 ```sh
-python3 probe/verify-big-picture-resume.py "$APPX28" \
+python3 tools/verify-big-picture-resume.py "$APPX28" \
   big-picture-signed/console-check/production-230-28/tour-28-192556/stock-library-while-running-1795307302426968000.json \
   --game-image 'dwarf fortress.exe' \
   --sha256 045da0be57a4b4852272e9de885d49fb0d6fe2a4be1069fb49e06895f840a585
@@ -330,10 +330,10 @@ Some collector receipts record only the native run and the TV capture source. Su
 
 ### Verify a public Store visit on Xbox
 
-For the first Store visit in a fresh production run, retain original TV frames from the Library, the focused Store entry, the loaded storefront, a linked product if visited, the returned Library, and Settings → Internet. Record the acquisition filename and SHA-256 of each frame independently in a JSON object keyed by its phase. The Store checker compares both process snapshots around each capture, the native HTTPS result, Windows' preferred Internet route and the operator's recorded keyboard selection. A prior successful Store request cannot satisfy a new first-visit check. [Store evidence checker](../probe/verify-big-picture-store.py)
+For the first Store visit in a fresh production run, retain original TV frames from the Library, the focused Store entry, the loaded storefront, a linked product if visited, the returned Library, and Settings → Internet. Record the acquisition filename and SHA-256 of each frame independently in a JSON object keyed by its phase. The Store checker compares both process snapshots around each capture, the native HTTPS result, Windows' preferred Internet route and the operator's recorded keyboard selection. A prior successful Store request cannot satisfy a new first-visit check. [Store evidence checker](../tools/verify-big-picture-store.py)
 
 ```sh
-python3 probe/verify-big-picture-store.py "$APPX" "$LAUNCH_RECEIPT" "$STORE_CAPTURE_DIR" "$PHASE_PINS" \
+python3 tools/verify-big-picture-store.py "$APPX" "$LAUNCH_RECEIPT" "$STORE_CAPTURE_DIR" "$PHASE_PINS" \
   --sha256 "$SIGNED_RELEASE_SHA256"
 ```
 
@@ -343,7 +343,7 @@ Inspect the landing frame for actual public offerings and the side menu frame fo
 
 The `.19` TV and frame receipts use a previously authenticated Steam account on the test console. A cold process start preserves saved credentials, game installations and browser storage. They do not verify a fresh installation, a second real account, or an account with no games.
 
-The signed `.19` archive contains no Steam user directory, WebView2 profile, license catalog or automatic game-launch configuration. Inspection found no fixed individual SteamID in the app-authored JavaScript. The native client checks the live Steam identity against the requested identity before asking for its licenses. The broker rechecks the native owner around asynchronous library and launch operations. The three game-specific presenter adapters explain explicit AppIDs in the game path. [Native sign-in](../probe/ProbeNative.cpp) · [Broker](../probe/signin/steam-big-picture-broker.js)
+The signed `.19` archive contains no Steam user directory, WebView2 profile, license catalog or automatic game-launch configuration. Inspection found no fixed individual SteamID in the app-authored JavaScript. The native client checks the live Steam identity against the requested identity before asking for its licenses. The broker rechecks the native owner around asynchronous library and launch operations. The three game-specific presenter adapters explain explicit AppIDs in the game path. [Native sign-in](../runtime/steam/ProbeNative.cpp) · [Broker](../ui/signin/steam-big-picture-broker.js)
 
 The independent source audit found these limitations on the tested build:
 
@@ -352,7 +352,7 @@ The independent source audit found these limitations on the tested build:
 - The native local cloud cache keys records by SteamID and checks the account again after storage access. Other stock browser storage uses a shared package WebView2 profile. The tested package also supplies completed device-setup defaults for Windows.Xbox on empty machine storage. Hardware account switching and truly fresh Steam first-run behavior remain unverified.
 - The stock Sign Out dialog invokes `SteamClient.User.SignOutAndRestart()`. In the tested package only the legacy package page invokes native sign-out. Opening Big Picture while an old session exists reuses the prior broker, and failed catalog reads alone do not clear previously rendered tiles.
 
-Fourteen local broker, startup and preference tests passed with isolated identities. A hardware account-switch check must confirm that the previous owner's titles disappear, that the new owner sees only their own catalog, and that unowned titles cannot launch. A first-install check must start with the test package's prior session and UI storage absent and proceed through actual QR authorization. No credentials or account identifiers are required in the resulting public receipt. [Broker tests](../tests/steam-big-picture-broker.test.js) · [Startup tests](../probe/big-picture-webview/core-startup.test.js) · [Preference tests](../probe/big-picture-webview/services.test.js)
+Fourteen local broker, startup and preference tests passed with isolated identities. A hardware account-switch check must confirm that the previous owner's titles disappear, that the new owner sees only their own catalog, and that unowned titles cannot launch. A first-install check must start with the test package's prior session and UI storage absent and proceed through actual QR authorization. No credentials or account identifiers are required in the resulting public receipt. [Broker tests](../tests/steam-big-picture-broker.test.js) · [Startup tests](../tests/big-picture-webview/core-startup.test.js) · [Preference tests](../tests/big-picture-webview/services.test.js)
 
 Valve documents `LicensesUpdated_t` as a change notification for owned packages. It carries no payload. The documentation does not establish that it fires on an initial empty account or that all application metadata has arrived. The original Valve client also defines a typed CM license-list response with a result and license list. The current native callback reader does not receive that response. The Web API for owned games requires a key and depends on game-detail visibility. A successful connection or an elapsed timeout therefore cannot certify an empty private catalog through the existing native reader. [ISteamUser callbacks](https://partner.steamgames.com/doc/api/ISteamUser#LicensesUpdated_t) · [IPlayerService.GetOwnedGames](https://partner.steamgames.com/doc/webapi/IPlayerService#GetOwnedGames)
 

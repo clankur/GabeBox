@@ -2,39 +2,9 @@ name: Test Steam game launch
 
 on:
   push:
-    paths:
-      - 'probe/signin/**'
-      - 'probe/big-picture-bridge/**'
-      - 'probe/big-picture-webview/**'
-      - 'probe/prepare-big-picture-library.py'
-      - 'probe/prepare-steam-core.py'
-      - 'probe/ProbeNative.cpp'
-      - 'probe/steam-launch-detail.h'
-      - 'probe/SteamCloud*.h'
-      - 'probe/SteamWin32Stage.h'
-      - 'probe/redirect-pe-imports.py'
-      - 'probe/fhd/measure.py'
-      - 'probe/sdl-frame-copy.h'
-      - 'probe/XboxProbe.Native.idl'
-      - 'tests/**'
-      - '.github/workflows/steam-launch-tests.yml'
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'xbox-deploy.py', '.github/workflows/steam-launch-tests.yml']
   pull_request:
-    paths:
-      - 'probe/signin/**'
-      - 'probe/big-picture-bridge/**'
-      - 'probe/big-picture-webview/**'
-      - 'probe/prepare-big-picture-library.py'
-      - 'probe/prepare-steam-core.py'
-      - 'probe/ProbeNative.cpp'
-      - 'probe/steam-launch-detail.h'
-      - 'probe/SteamCloud*.h'
-      - 'probe/SteamWin32Stage.h'
-      - 'probe/redirect-pe-imports.py'
-      - 'probe/fhd/measure.py'
-      - 'probe/sdl-frame-copy.h'
-      - 'probe/XboxProbe.Native.idl'
-      - 'tests/**'
-      - '.github/workflows/steam-launch-tests.yml'
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'xbox-deploy.py', '.github/workflows/steam-launch-tests.yml']
 
 permissions:
   contents: read
@@ -50,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: node --test tests/*.test.js probe/big-picture-webview/*.test.js
+      - run: node --test tests/*.test.js tests/big-picture-webview/*.test.js
       - run: python -m unittest discover -s tests
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-launch-detail.test.cpp -o /tmp/steam-launch-detail-test && /tmp/steam-launch-detail-test
       - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-cloud-manifest.test.cpp -o /tmp/steam-cloud-manifest-test && /tmp/steam-cloud-manifest-test

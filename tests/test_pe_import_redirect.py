@@ -5,7 +5,7 @@ import runpy
 import unittest
 
 
-tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "redirect-pe-imports.py"))
+tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "build_tools/redirect_pe_imports.py"))
 
 
 def fixture():

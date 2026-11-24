@@ -73,6 +73,7 @@ if (( $# != 5 )); then
 fi
 src=$(cd "$(dirname "$0")" && pwd)
 probe=$(dirname "$src")
+repo=$(dirname "$probe")
 windows_app=$(realpath "$1")
 mesa=$(realpath "$2")
 template=$(realpath "$3")
@@ -178,18 +179,18 @@ if $dxgi_window || $win32_opengl; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
     for source in window window-gl window-monitor; do
-        "${win32_compiler[@]}" -c "$probe/win32-runtime/$source.c" -o "$build/$source.obj"
+        "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
     done
-    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/window.def" "/out:$layout/XboxWin32Window.dll" \
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/window.def" "/out:$layout/XboxWin32Window.dll" \
         "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
 fi
 if $dxgi_window; then
     for source in dxgi dxgi-frame; do
         "${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver}" -std=c++20 -O2 -D_WIN32_WINNT=0x0a00 \
             -DWINVER=0x0a00 -ffreestanding -fno-rtti -fno-exceptions -Wall -Wextra -Werror \
-            -c "$probe/win32-runtime/$source.cpp" -o "$build/$source.obj"
+            -c "$repo/runtime/win32/$source.cpp" -o "$build/$source.obj"
     done
-    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/dxgi.def" "/out:$layout/XboxWin32Dxgi.dll" \
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/dxgi.def" "/out:$layout/XboxWin32Dxgi.dll" \
         "$build/dxgi.obj" "$build/dxgi-frame.obj" "$windows_app"
     factory=CreateDXGIFactory1
     if $dxgi_d3d12; then factory=CreateDXGIFactory2; fi
@@ -211,12 +212,12 @@ if $win32_imports || $desktop_window || $hosted_xinput; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
     for source in input input-raw xinput; do
-        "${win32_compiler[@]}" -c "$probe/win32-runtime/$source.c" -o "$build/win32-$source.obj"
+        "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/win32-$source.obj"
     done
-    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/input.def" "/out:$layout/XboxWin32Input.dll" \
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/input.def" "/out:$layout/XboxWin32Input.dll" \
         "$build/win32-input.obj" "$build/win32-input-raw.obj" "$build/win32-xinput.obj" "$windows_app"
     if $hosted_xinput; then
-        "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/xinput910.def" "/out:$layout/XboxWin32XInput910.dll" \
+        "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/xinput910.def" "/out:$layout/XboxWin32XInput910.dll" \
             "$build/win32-xinput.obj" "$windows_app"
     fi
 fi
@@ -236,7 +237,7 @@ EOF
     child="$src/xinput-child.c"
     child_output="$build/standard-xinput.exe"
 elif $win32_opengl; then
-    window_bindings="$probe/win32-runtime/window-bindings.json"
+    window_bindings="$repo/runtime/win32/window-bindings.json"
     python3 - "$build" "$window_bindings" <<'PY'
 import json
 from pathlib import Path
@@ -267,11 +268,11 @@ EOF
         "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/documents-shell32.def" "/out:$build/documents-shell32.lib"
         graphics_libs+=("$build/documents-shell32.lib")
     else
-        child="$probe/win32-runtime/desktop-control.c"
+        child="$src/desktop-control.c"
         if $desktop_endpoints; then compiler+=(-DPROBE_DESKTOP_ENDPOINTS); fi
     fi
-    "${compiler[@]}" -c "$probe/win32-runtime/desktop.c" -o "$build/win32-desktop.obj"
-    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/desktop.def" "/out:$layout/XboxWin32Desktop.dll" \
+    "${compiler[@]}" -c "$repo/runtime/win32/desktop.c" -o "$build/win32-desktop.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/desktop.def" "/out:$layout/XboxWin32Desktop.dll" \
         "$build/win32-desktop.obj" "$windows_app"
 elif $win32_imports; then
     cat > "$build/ole32.def" <<'EOF'
@@ -293,7 +294,7 @@ EOF
         "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/$name.def" "/out:$build/$name.lib"
     done
     graphics_libs=("$build/ole32.lib" "$build/user32.lib")
-    child="$probe/win32-runtime/launch-control.c"
+    child="$src/launch-control.c"
     child_output="$build/standard-imports.exe"
 elif $loader_order; then
     for name in OpenGL SDL; do
@@ -339,23 +340,25 @@ fi
 "${linker[@]}" /subsystem:windows,6.02 /entry:ChildEntry /manifest:embed /manifestuac:no "/out:$child_output" \
     "$build/graphics-child.obj" ${graphics_libs[@]+"${graphics_libs[@]}"} "$windows_app"
 if $win32_imports; then
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$probe/win32-runtime/bindings.json" "$layout/child.exe"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$repo/runtime/win32/bindings.json" "$layout/child.exe"
 fi
 if $hosted_xinput; then
     cat > "$build/xinput-control-bindings.json" <<'EOF'
 {"xinput1_4.dll":{"XInputGetCapabilities":"XboxWin32Input.dll","XInputGetState":"XboxWin32Input.dll"}}
 EOF
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/xinput-control-bindings.json" "$layout/child.exe"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/xinput-control-bindings.json" "$layout/child.exe"
 fi
 if $win32_opengl; then
-    python3 - "$probe/redirect-pe-imports.py" "$child_output" "$window_bindings" "$build/window-control-bindings.json" <<'PY'
+    python3 - "$repo" "$child_output" "$window_bindings" "$build/window-control-bindings.json" <<'PY'
 import json
 from pathlib import Path
-import runpy
 import sys
 
-redirector, child, bindings, output = map(Path, sys.argv[1:])
-image = runpy.run_path(str(redirector))["PeImage"](child.read_bytes())
+repo, child, bindings, output = map(Path, sys.argv[1:])
+sys.path.insert(0, str(repo))
+from build_tools.redirect_pe_imports import PeImage
+
+image = PeImage(child.read_bytes())
 rules = json.loads(bindings.read_text())
 used = {}
 for lookup, name, iat, _ in image.import_descriptors():
@@ -366,14 +369,14 @@ for lookup, name, iat, _ in image.import_descriptors():
             used.setdefault(library, {})[symbol] = members[symbol]
 output.write_text(json.dumps(used))
 PY
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/window-control-bindings.json" "$layout/child.exe"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/window-control-bindings.json" "$layout/child.exe"
 fi
 if $dxgi_window; then
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/dxgi-window-bindings.json" "$layout/child.exe"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/dxgi-window-bindings.json" "$layout/child.exe"
 fi
 if $desktop_documents; then
     printf '%s\n' '{"shell32.dll":{"SHGetFolderPathW":"XboxWin32Desktop.dll"}}' > "$build/documents-bindings.json"
-    python3 "$probe/redirect-pe-imports.py" "$child_output" "$build/documents-bindings.json" "$layout/child.exe"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/documents-bindings.json" "$layout/child.exe"
 fi
 "${compiler[@]}" -DPROBE_CHILD_WAIT_MS=15000 -c "$probe/child-process.c" -o "$build/graphics-child-process.obj"
 "${linker[@]}" /dll /noentry "/implib:$build/child-process.lib" "/out:$layout/child-process.dll" \

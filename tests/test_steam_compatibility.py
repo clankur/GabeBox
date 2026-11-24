@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 
-compat = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "steam-compatibility.py"))
-measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "fhd" / "measure.py"))
+compat = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/steam_compatibility.py"))
+measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/measure.py"))
 
 
 class SteamCompatibilityTests(unittest.TestCase):
@@ -213,7 +213,7 @@ DelayImport {
             self.assertFalse((output / "Example.exe").exists())
             self.assertEqual(game.read_bytes(), image)
 
-            packager = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe/prepare-big-picture-library.py"))
+            packager = runpy.run_path(str(Path(__file__).resolve().parents[1] / "build_tools/prepare_big_picture_library.py"))
             layout = work / "layout"
             layout.mkdir()
             (layout / "steam-signin.html").write_text(

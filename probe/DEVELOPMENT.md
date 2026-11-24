@@ -55,9 +55,9 @@ A reload, changed identifier, early reply, or incomplete result fails the check.
 
 ### Rebuild the original native executable host
 
-Use `bash probe/package.sh /path/to/x64/WindowsApp.lib NEW_OUTPUT_DIR` when isolating the earlier native launcher in `probe.c`. That build uses Clang, `lld-link`, `makemsix`, OpenSSL, and `osslsigncode`, and emits the signed APPX, public development certificate, and checksums. The prior cross-build used `c/um/x64/WindowsApp.lib` from `Microsoft.Windows.SDK.CPP.x64` version `10.0.26100.8249`, including on an ARM64 build host. The HTML-to-WinRT package comes from the Windows SDK workflow above. [Windows SDK package](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP.x64/10.0.26100.8249) · [Microsoft MSIX SDK](https://github.com/microsoft/msix-packaging)
+Use `bash build_tools/package.sh /path/to/x64/WindowsApp.lib NEW_OUTPUT_DIR` when isolating the earlier native launcher in `probe.c`. That build uses Clang, `lld-link`, `makemsix`, OpenSSL, and `osslsigncode`, and emits the signed APPX, public development certificate, and checksums. The prior cross-build used `c/um/x64/WindowsApp.lib` from `Microsoft.Windows.SDK.CPP.x64` version `10.0.26100.8249`, including on an ARM64 build host. The HTML-to-WinRT package comes from the Windows SDK workflow above. [Windows SDK package](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP.x64/10.0.26100.8249) · [Microsoft MSIX SDK](https://github.com/microsoft/msix-packaging)
 
-See the [Steam Core Loader Probe](STEAM-CORE.md) to stage the genuine Valve client library locally and reproduce its loader result on the console.
+See the [Steam Core Loader Probe](../docs/STEAM-CORE.md) to stage the genuine Valve client library locally and reproduce its loader result on the console.
 
 ## Interpret the feedback
 

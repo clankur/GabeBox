@@ -7,7 +7,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 STAGE = runpy.run_path(str(Path(__file__).resolve().parents[1] /
-                           "probe/big-picture-bridge/stage-glyphs.py"))["stage_glyphs"]
+                           "build_tools/stage_glyphs.py"))["stage_glyphs"]
 
 
 class GlyphStageTests(unittest.TestCase):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import zlib
 
 
-PROFILE = Path(__file__).resolve().parents[1] / 'probe/win32-runtime/profiles/1817070/23986256'
+PROFILE = Path(__file__).resolve().parents[1] / 'profiles/1817070/23986256'
 MIP = runpy.run_path(str(PROFILE / 'prepare-mip-overlay.py'))
 MODEL = runpy.run_path(str(PROFILE / 'model_lod.py'))
 

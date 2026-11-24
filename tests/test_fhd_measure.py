@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 
 
-measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'probe/fhd/measure.py'))
+measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'tools/measure.py'))
 
 
 def trace(rows):

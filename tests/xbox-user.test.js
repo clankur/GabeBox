@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(require.resolve("../probe/big-picture-bridge/xbox-user.js"), "utf8");
+const source = fs.readFileSync(require.resolve("../ui/big-picture-bridge/xbox-user.js"), "utf8");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const steamId = "76561197960268001";
 

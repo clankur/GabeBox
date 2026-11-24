@@ -10,7 +10,7 @@ library=$(realpath "$1")
 mkdir "$2"
 build=$(cd "$2" && pwd)
 mkdir "$build/package"
-cp -r "$src/Assets" "$build/package/"
+cp -r "$src/../ui/Assets" "$build/package/"
 cp "$src/Package.appxmanifest" "$build/package/AppxManifest.xml"
 for target in probe child child-process; do
     "${CLANG:-clang}" --target=x86_64-pc-windows-msvc -O2 -ffreestanding \

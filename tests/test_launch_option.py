@@ -8,7 +8,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 
-prepare = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'probe' / 'prepare-steam-core.py'))
+prepare = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'build_tools/prepare_steam_core.py'))
 
 
 def write_template(root, signin='', extra_entries=()):

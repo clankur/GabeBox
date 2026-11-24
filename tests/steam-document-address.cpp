@@ -1,6 +1,6 @@
-#include "../probe/big-picture-webview/document-address.h"
-#include "../probe/big-picture-webview/display-layout.h"
-#include "../probe/big-picture-webview/process-failure.h"
+#include "../ui/big-picture-webview/document-address.h"
+#include "../ui/big-picture-webview/display-layout.h"
+#include "../ui/big-picture-webview/process-failure.h"
 #include <cassert>
 
 int main() {

@@ -13,9 +13,9 @@ import unittest
 from unittest.mock import patch
 import zlib
 
-PROBE = Path(__file__).resolve().parents[1] / "probe"
-sys.path.insert(0, str(PROBE))
-tool = runpy.run_path(str(PROBE / "verify-big-picture-display.py"))
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
+tool = runpy.run_path(str(TOOLS / "verify-big-picture-display.py"))
 PHASES = tool["PHASES"]
 RUN = "00000000-0000-4000-8000-000000000033"
 APP = 42

@@ -1,5 +1,5 @@
 /* Check that a packaged SDL2 build loads and can initialize its timer. */
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 #include "sdl-version.h"
 
 #define IMPORT __declspec(dllimport)

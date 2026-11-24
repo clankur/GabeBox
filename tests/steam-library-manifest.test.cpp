@@ -1,6 +1,6 @@
 #include <cassert>
 #include <string>
-#include "../probe/SteamLibraryManifest.h"
+#include "../runtime/steam/SteamLibraryManifest.h"
 
 int main() {
     using namespace steam_library_storage;

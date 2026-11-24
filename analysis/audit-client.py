@@ -41,7 +41,7 @@ def inspect(rea, binary, member):
 
 
 def audit(rea, cache):
-    release = json.loads((HERE / "valve-release.json").read_text())
+    release = json.loads((HERE.parent / "runtime/steam/pins/valve-release.json").read_text())
     records = []
     with tempfile.TemporaryDirectory(prefix="steam-native-audit-") as tmp:
         work = Path(tmp)

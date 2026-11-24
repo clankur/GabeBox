@@ -1,6 +1,6 @@
 # Porting Steam’s Windows workflows to Xbox Series X
 
-This review concerns Valve’s desktop client running locally on a retail Series X in Developer Mode. The starting evidence is the [REA import inventory](client-imports.json) from five Valve binaries. An imported function identifies code to investigate. It does not establish that login, first launch, or every game requires that function. The proposed substitutions below require implementation and on-console tests.
+This review concerns Valve’s desktop client running locally on a retail Series X in Developer Mode. The starting evidence is the [REA import inventory](../runtime/steam/pins/client-imports.json) from five Valve binaries. An imported function identifies code to investigate. It does not establish that login, first launch, or every game requires that function. The proposed substitutions below require implementation and on-console tests.
 
 ## Windowing, web UI and input
 

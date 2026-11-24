@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const test = require("node:test");
 
-const source = fs.readFileSync(require.resolve("../probe/big-picture/big-picture.js"), "utf8");
+const source = fs.readFileSync(require.resolve("../ui/big-picture/big-picture.js"), "utf8");
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
 async function launch(component) {

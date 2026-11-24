@@ -23,7 +23,7 @@ const framedGamepad = startupHistory || installOnly || downloadsOnly || homeOnly
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
-const bundle = path.resolve(__dirname, '../probe/big-picture-bridge/bundle.py');
+const repo = path.resolve(__dirname, '..');
 const contentTypes = {'.css': 'text/css', '.js': 'application/javascript', '.html': 'text/html',
     '.json': 'application/json', '.webm': 'video/webm', '.svg': 'image/svg+xml', '.png': 'image/png',
     '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf'};
@@ -869,10 +869,10 @@ async function checkOtherAccount(page) {
 }
 
 async function nativeLibraryPredicates() {
-    const header = await fs.readFile(path.resolve(__dirname, '../probe/big-picture-webview/library-capture.h'), 'utf8');
+    const header = await fs.readFile(path.resolve(__dirname, '../ui/big-picture-webview/library-capture.h'), 'utf8');
     const entries = [...header.matchAll(/constexpr wchar_t (\w+)\[\] = LR"JS\(([\s\S]*?)\)JS"/g)];
     const predicates = Object.fromEntries(entries.map(match => [match[1], match[2]]));
-    const renderer = await fs.readFile(path.resolve(__dirname, '../probe/big-picture-webview/renderer.cpp'), 'utf8');
+    const renderer = await fs.readFile(path.resolve(__dirname, '../ui/big-picture-webview/renderer.cpp'), 'utf8');
     predicates.warmLayout = renderer.match(/fire_and_forget observeGamepad[\s\S]*?wchar_t check\[\] = LR"JS\(([\s\S]*?)\)JS"/)?.[1];
     for (const name of ['emptyLibrary', 'emptyForeground', 'library', 'warmLayout']) assert(predicates[name]);
     return predicates;
@@ -1188,7 +1188,7 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
 
 (async () => {
     await fs.access(path.join(assets, 'sp.js'));
-    const source = execFileSync('python3', [bundle, catalog], {encoding: 'utf8'});
+    const source = execFileSync('python3', ['-m', 'build_tools.bundle_big_picture', catalog], {cwd: repo, encoding: 'utf8'});
     const browser = await chromium.launch({headless: true, chromiumSandbox: true,
         executablePath: process.env.CHROMIUM_PATH, args: ['--host-resolver-rules=MAP * ~NOTFOUND', '--disable-background-networking']});
     try {

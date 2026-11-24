@@ -5,8 +5,13 @@ on:
   push:
     branches: ['feature/native-steam-big-picture']
     paths:
+      - 'ui/big-picture-primary/**'
+      - 'ui/big-picture/**'
+      - 'ui/Assets/**'
       - 'probe/big-picture-primary/**'
-      - 'probe/big-picture-webview/shell-cursor.h'
+      - 'build_tools/**'
+      - 'tests/test_big_picture_primary.py'
+      - 'ui/big-picture-webview/shell-cursor.h'
       - '.github/workflows/xbox-big-picture-primary.yml'
 
 permissions:
@@ -18,13 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test primary manifest and script policy
-        run: python probe/big-picture-primary/test-stage.py
+        run: python -m unittest discover -s tests -p test_big_picture_primary.py
       - name: Build and sign the x64 UWP XAML executable
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $src = Join-Path $PWD 'probe/big-picture-primary'
+          $src = Join-Path $PWD 'ui/big-picture-primary'
           $work = Join-Path $env:RUNNER_TEMP 'steam-primary'
           $out = Join-Path $work 'artifact'
           New-Item -ItemType Directory -Path $out | Out-Null
@@ -51,7 +56,7 @@ jobs:
             $pin = (Get-FileHash "$out/SteamPrimary.exe").Hash.ToLowerInvariant()
             "$pin  SteamPrimary.exe" | Set-Content -Encoding ascii "$out/SHA256SUMS"
             $checksumsPin = (Get-FileHash "$out/SHA256SUMS").Hash.ToLowerInvariant()
-            & python "$src/prepare-smoke.py" "$work/control-layout" $out $checksumsPin
+            & python -m build_tools.prepare_primary_control "$work/control-layout" $out $checksumsPin
             & "$kits/bin/$kit/x64/makeappx.exe" pack /d "$work/control-layout" /p "$control/SteamPrimaryControl.appx" /o
             & "$kits/bin/$kit/x64/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$control/SteamPrimaryControl.appx"
             Export-Certificate -Cert $cert -FilePath "$control/SteamPrimaryControl.cer" | Out-Null

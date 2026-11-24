@@ -22,7 +22,7 @@ test('the local Valve main menu owns a bounded, revocable DOM surface inside its
         window.steamFixture = {};
         window.open = () => 'delegated';
     });
-    await page.addScriptTag({content: fs.readFileSync(require.resolve('../probe/big-picture-bridge/xbox-browser-view.js'), 'utf8')});
+    await page.addScriptTag({content: fs.readFileSync(require.resolve('../ui/big-picture-bridge/xbox-browser-view.js'), 'utf8')});
     const result = await page.evaluate(() => {
         installXboxBrowserView(steamFixture);
         const api = steamFixture.BrowserView;
@@ -119,7 +119,7 @@ test('the signed Steam surface delivers local submit events and blocks form navi
     let attempts = 0;
     await context.route('https://example.invalid/**', route => { attempts++; return route.abort(); });
     await page.goto(entry);
-    await page.addScriptTag({content: fs.readFileSync(require.resolve('../probe/big-picture-bridge/xbox-gamepad-surface.js'), 'utf8')});
+    await page.addScriptTag({content: fs.readFileSync(require.resolve('../ui/big-picture-bridge/xbox-gamepad-surface.js'), 'utf8')});
     await page.evaluate(() => {
         const surface = createXboxGamepadSurface({pid: 100}, {postMessage() {}});
         const win = surface.open('about:blank?createflags=6292754&minwidth=853&minheight=534&pid=100&browser=1&browserType=3&useragent=Valve%20Steam%20Gamepad', 'SP BPM');

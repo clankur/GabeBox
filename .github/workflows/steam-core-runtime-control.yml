@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'analysis/steam-core-control.ps1'
+      - 'runtime/steam/pins/valve-release.json'
       - '.github/workflows/steam-core-runtime-control.yml'
   workflow_dispatch:
 
