@@ -68,17 +68,26 @@ static unsigned VerifyKeyboard(SdlHostMailbox *mailbox) {
     Publish(keyboard, (SdlHostKey){228, 1, {0}});
     if (!Take(window, WM_KEYDOWN, VK_CONTROL, 0x011d0001) || GetKeyState(VK_RCONTROL) >= 0)
         return 0x75580000u;
-    const LONG press = PublishPointer(mailbox, SDL_HOST_POINTER_LEFT);
+    const LONG press = PublishPointer(mailbox, SDL_HOST_POINTER_LEFT | 1536 | (1536 << 12));
     const WPARAM pressed = MK_LBUTTON | MK_SHIFT | MK_CONTROL;
     if (!PeekMessageW(&pending, window, 0, 0, PM_REMOVE) || pending.message != WM_MOUSEMOVE ||
             pending.wParam != pressed || !PeekMessageW(&pending, window, 0, 0, PM_REMOVE) ||
             pending.message != WM_LBUTTONDOWN || pending.wParam != pressed ||
-            SdlHostLoad(&mailbox->input_ack) != press) return 0x75580001u;
+            SdlHostLoad(&mailbox->input_ack) != press ||
+            (USHORT)GetAsyncKeyState(VK_LBUTTON) != 0x8001 ||
+            (USHORT)GetAsyncKeyState(VK_LBUTTON) != 0x8000) return 0x75580001u;
+    const LONG dragPosition = 2496 | (2112 << 12);
+    const LONG drag = PublishPointer(mailbox, SDL_HOST_POINTER_LEFT | dragPosition);
+    if (!PeekMessageW(&pending, window, 0, 0, PM_REMOVE) || pending.message != WM_MOUSEMOVE ||
+            pending.wParam != pressed || !LOWORD(pending.lParam) || !HIWORD(pending.lParam) ||
+            SdlHostLoad(&mailbox->input_ack) != drag ||
+            (USHORT)GetAsyncKeyState(VK_LBUTTON) != 0x8000) return 0x75580004u;
     Publish(keyboard, (SdlHostKey){228, 0, {0}});
     if (!Take(window, WM_KEYUP, VK_CONTROL, 0xc11d0001) || GetKeyState(VK_CONTROL)) return 0x75580002u;
-    const LONG release = PublishPointer(mailbox, 0);
+    const LONG release = PublishPointer(mailbox, dragPosition);
     if (!PeekMessageW(&pending, window, 0, 0, PM_REMOVE) || pending.message != WM_LBUTTONUP ||
-            pending.wParam != MK_SHIFT || SdlHostLoad(&mailbox->input_ack) != release) return 0x75580003u;
+            pending.wParam != MK_SHIFT || SdlHostLoad(&mailbox->input_ack) != release ||
+            GetAsyncKeyState(VK_LBUTTON) || PeekMessageW(&pending, window, 0, 0, PM_REMOVE)) return 0x75580003u;
 
     Publish(keyboard, (SdlHostKey){0, 0, "discard"});
     if (!PeekMessageW(&pending, window, 0, 0, PM_NOREMOVE) || pending.message != WM_CHAR) return 0x75560000u;

@@ -14,7 +14,7 @@ Install the corresponding signed package before running a case. The JSON include
 | Startup, process creation, and named pipes | The packaged process test and startup control below. |
 | Process lifetime across a foreground switch | The [multi-app lifetime control](DEVELOPMENT.md#test-a-foreground-switch), run with `xbox_deploy lifetime`. |
 | Loader, SDL, XInput, raw input, desktop windowing, and DXGI | The [graphics runtime control](graphics-runtime-control/build.sh) and its build options. |
-| Physical relative mouse motion | The foreground UWP mouse source control below. |
+| Physical relative mouse motion | The hosted UWP mouse source control below. |
 | Steam DLL loading and native Big Picture launcher | The [Steam Core Loader Probe](../docs/STEAM-CORE.md#run-the-on-console-sign-in) and [native launcher](../analysis/big-picture.md). |
 | WebView and window activation | The [primary XAML](big-picture-primary/), [WebView smoke](big-picture-webview/), [renderer integration](big-picture-integration-control/), and [windowed](big-picture-windowed/) controls. |
 
@@ -38,7 +38,7 @@ Build `--window-geometry` to check the hosted window messages used for Factorioâ
 
 Build `--window-frame` to exercise the same static and dynamic Window imports as Factorio. The child verifies that disabled and malformed opt-ins retain native resolution, that enabled resolution selects the two hosted DPI exports, and that the popup tool-window shape still calls native User32. It applies a menu-free windowed style and checks that a requested 1920Ã—1080 client area keeps its dimensions at the hosted 96 DPI. Run signed control `1.0.231.59` with `--case window-frame`. The expected exit is `0x51A7`. Codes `0x7540xxxx` through `0x754cxxxx` identify the first failed operation. [Window frame control](graphics-runtime-control/window-frame-child.c)
 
-Build `--window-keyboard` to check the Direct3D hosted window's keyboard mailbox. The child checks that peeking without removal preserves key state, that UTF-8 text arrives as complete UTF-16 characters, and that a reset releases Shift and drops stale input. It also checks keyboard readiness across focus changes and that mouse button messages carry the combined state of left Shift and right Ctrl. The expected exit is `0x51A7`. Codes `0x7550xxxx` through `0x7558xxxx` identify the first failed operation. [Hosted keyboard control](graphics-runtime-control/window-keyboard-child.c)
+Build `--window-keyboard` to check the Direct3D hosted window's keyboard mailbox. The child checks that peeking without removal preserves key state, that UTF-8 text arrives as complete UTF-16 characters, and that a reset releases Shift and drops stale input. It checks keyboard readiness across focus changes, combined left Shift and right Ctrl in mouse messages, and async button state through a synthetic drag and release. The expected exit is `0x51A7`. Codes `0x7550xxxx` through `0x7558xxxx` identify the first failed operation. [Hosted keyboard control](graphics-runtime-control/window-keyboard-child.c)
 
 Build `--d3d11-combined` to call native `D3D11CreateDeviceAndSwapChain` on a hosted window using Factorio's default-hardware, discard-swap-chain fallback. It retries without feature level 11.1 on `E_INVALIDARG`. The child returns the full native HRESULT if creation fails. Exit codes `0x7370xxxx` through `0x7378xxxx` identify the first failed setup or follow-up check. Success checks the chain's parent factory, window association, and back buffer. [D3D11 combined-call control](graphics-runtime-control/d3d11-combined-child.cpp)
 
@@ -78,16 +78,16 @@ Build `--steam-sdk-versioned` to exercise the redirected `SteamInternal_SteamAPI
 
 Run a signed graphics control with `python3 -m tools.xbox_deploy probe --case graphics-control --version "$version" --json`. These variants expect child exit `0x51A7`.
 
-## Foreground UWP mouse source control
+## Hosted UWP mouse source control
 
 ```sh
-bash probe/build.sh --mouse-source "$version" "$windows_app" "$build"
+bash probe/build.sh --mouse-source "$version" "$build"
 bash build_tools/package.sh --layout "$build/package" "$signed"
 python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
 python3 -m tools.xbox_deploy probe --case mouse-source --version "$version" --timeout 45 --json
 ```
 
-Move the physical mouse continuously for 25 seconds after the control opens and leave the controller idle. The probe listens to `MouseDevice.MouseMoved` for 10 seconds with normal pointer settings. If it receives no nonzero delta, it requests pointer capture, hides the cursor, and samples for 15 more seconds. The report includes the CoreWindow activation mode, callback and motion counts, and the HRESULTs for capture and cleanup. Activation mode `0x00000003` is foreground. `0xFFFFFFFF` marks an unavailable or unobserved activation mode. A successful run shows `relative_motion=observed`. Button, wheel, and hosted game delivery need separate checks. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
+Move, click, and scroll with the physical mouse for 25 seconds after the control opens and leave the controller idle. The hosted app counts `MouseDevice.MouseMoved` callbacks and browser pointer events separately. If no nonzero relative delta arrives in the first 10 seconds and the host exposes a CoreWindow, it also tries pointer capture. The report includes document visibility, reported mouse capabilities, relative callbacks and deltas, browser event counts, and the available activation and capture results. The CLI passes when it observes `relative_motion=observed`. Browser events and hosted game delivery are separate results. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
 
 ## Xbox packaged process test
 

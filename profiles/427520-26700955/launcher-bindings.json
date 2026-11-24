@@ -49,6 +49,7 @@
     "EnumDisplayMonitors": "XboxWin32Window.dll",
     "EnumDisplaySettingsA": "XboxWin32Window.dll",
     "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "GetAsyncKeyState": "XboxWin32Window.dll",
     "GetClientRect": "XboxWin32Window.dll",
     "GetCursorPos": "XboxWin32Window.dll",
     "GetDC": "XboxWin32Window.dll",

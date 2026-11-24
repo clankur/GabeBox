@@ -23,6 +23,7 @@
     "IsZoomed": "XboxWin32Window.dll",
     "GetKeyboardState": "XboxWin32Window.dll",
     "GetKeyState": "XboxWin32Window.dll",
+    "GetAsyncKeyState": "XboxWin32Window.dll",
     "TranslateMessage": "XboxWin32Window.dll",
     "GetFocus": "XboxWin32Window.dll",
     "GetActiveWindow": "XboxWin32Window.dll",

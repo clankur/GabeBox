@@ -49,11 +49,6 @@ typedef void *HSTRING;
 #define ERROR_INSUFFICIENT_BUFFER 122u
 #define ERROR_WRITE_FAULT 29u
 #define INVALID_HANDLE_VALUE ((HANDLE)(LONG_PTR)-1)
-#ifdef FHD_MOUSE_SOURCE_CONTROL
-#define REPORT_KIND L"uwp-mouse-source"
-#else
-#define REPORT_KIND L"packaged-child-process"
-#endif
 #ifdef FHD_SECONDARY_VIEW
 #define REPORT_NAME L"native-report.txt"
 #ifdef FHD_HOSTED_VIEW
@@ -162,14 +157,9 @@ typedef struct ICoreWindowVtbl {
     void *get_AutomationHostProvider, *get_Bounds, *get_CustomProperties;
     HRESULT (STDMETHODCALLTYPE *get_Dispatcher)(ICoreWindow *, ICoreDispatcher **);
     void *get_FlowDirection, *put_FlowDirection, *get_IsInputEnabled, *put_IsInputEnabled;
-    HRESULT (STDMETHODCALLTYPE *get_PointerCursor)(ICoreWindow *, IInspectableLike **);
-    HRESULT (STDMETHODCALLTYPE *put_PointerCursor)(ICoreWindow *, IInspectableLike *);
-    void *get_PointerPosition;
+    void *get_PointerCursor, *put_PointerCursor, *get_PointerPosition;
     HRESULT (STDMETHODCALLTYPE *get_Visible)(ICoreWindow *, BYTE *);
     HRESULT (STDMETHODCALLTYPE *Activate)(ICoreWindow *);
-    void *Close, *GetAsyncKeyState, *GetKeyState;
-    HRESULT (STDMETHODCALLTYPE *ReleasePointerCapture)(ICoreWindow *);
-    HRESULT (STDMETHODCALLTYPE *SetPointerCapture)(ICoreWindow *);
 } ICoreWindowVtbl;
 struct ICoreWindow { const ICoreWindowVtbl *lpVtbl; };
 
@@ -343,11 +333,7 @@ static ULONG STDMETHODCALLTYPE ViewRelease(void *self) {
     return (ULONG)remaining;
 }
 
-#ifdef FHD_MOUSE_SOURCE_CONTROL
-static HRESULT RunMouseSourceControl(ICoreWindow *window, ICoreDispatcher *dispatcher);
-#else
 static HRESULT RunProbe(void);
-#endif
 static HRESULT WriteReport(PCWSTR content);
 static HRESULT ReportStartupError(PCWSTR status, HRESULT error);
 static HRESULT ReportWin32Error(PCWSTR status, DWORD error);
@@ -430,8 +416,6 @@ static HRESULT RunFrameworkView(IFrameworkView *self) {
 #else
         hr = FhdPresent(view->window, dispatcher, ProcessPendingFhd, WriteReport);
 #endif
-#elif defined(FHD_MOUSE_SOURCE_CONTROL)
-        hr = RunMouseSourceControl(view->window, dispatcher);
 #else
         hr = RunProbe();
         if (SUCCEEDED(hr)) (void)PumpWindow(dispatcher, 20);
@@ -652,7 +636,7 @@ static HRESULT ReportWin32Error(PCWSTR status, DWORD error) {
 static HRESULT ReportStartupError(PCWSTR status, HRESULT error) {
     WCHAR report[128];
     DWORD used = 0;
-    AppendText(report, 128, &used, L"probe=" REPORT_KIND L"\r\nstatus=");
+    AppendText(report, 128, &used, L"probe=packaged-child-process\r\nstatus=");
     AppendText(report, 128, &used, status);
     AppendText(report, 128, &used, L"\r\nhresult=");
     AppendHex(report, 128, &used, (DWORD)error);
@@ -661,9 +645,6 @@ static HRESULT ReportStartupError(PCWSTR status, HRESULT error) {
     return error;
 }
 
-#ifdef FHD_MOUSE_SOURCE_CONTROL
-#include "mouse-source.inc"
-#else
 static HRESULT RunProbe(void) {
     WCHAR report[1024];
     WCHAR modulePath[MAX_PATH];
@@ -732,7 +713,6 @@ static HRESULT RunProbe(void) {
     hr = WriteReport(report);
     return hr;
 }
-#endif
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, int showCommand) {
     static const WCHAR coreClass[] = L"Windows.ApplicationModel.Core.CoreApplication";
@@ -751,7 +731,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
     g_processId = GetCurrentProcessId();
     apartment = RoInitialize(RO_INIT_MULTITHREADED);
     if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return (int)apartment;
-    (void)WriteReport(L"probe=" REPORT_KIND L"\r\nstatus=core-application-starting\r\n");
+    (void)WriteReport(L"probe=packaged-child-process\r\nstatus=core-application-starting\r\n");
     hr = WindowsCreateString(coreClass, (DWORD)(sizeof(coreClass) / sizeof(coreClass[0]) - 1), &className);
     if (SUCCEEDED(hr)) hr = RoGetActivationFactory(className, &IID_CORE_APPLICATION, (void **)&coreApp);
     if (SUCCEEDED(hr)) {

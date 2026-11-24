@@ -25,6 +25,7 @@
     ],
     "XboxWin32Window.dll": [
       "CallWindowProcW",
+      "GetAsyncKeyState",
       "GetKeyboardState",
       "GetKeyState",
       "IsIconic",

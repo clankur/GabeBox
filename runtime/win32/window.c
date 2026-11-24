@@ -54,6 +54,8 @@ static LONG hostPointerSerial;
 static HWND hostPointerWindow;
 static POINT hostPointerScreen;
 static UINT hostPointerButtons;
+static UINT hostPointerPressedSinceQuery;
+static BOOL hostPointerStateActive;
 
 #define HOSTED_WINDOW_STATE (WS_MINIMIZE | WS_MAXIMIZE)
 #define KEEP_HOSTED_WINDOW_STATE ((DWORD)-1)
@@ -279,9 +281,13 @@ static void UpdateWindowActivation(HWND foreground, HWND focus) {
     const UINT change = ++activationChange;
     if (hostKeyboardWindow && (!foreground || focus != hostKeyboardWindow)) ClearHostedKeyboard();
     focusWindow = focus;
-    InterlockedExchangePointer(&foregroundWindow, foreground);
     // The window procedure may synchronously change activation or destroy a window.
     if (previousForeground != foreground) {
+        AcquireSRWLockExclusive(&windowGeometryLock);
+        hostPointerStateActive = FALSE;
+        hostPointerPressedSinceQuery = 0;
+        InterlockedExchangePointer(&foregroundWindow, foreground);
+        ReleaseSRWLockExclusive(&windowGeometryLock);
         NotifyWindow(previousForeground, WM_NCACTIVATE, FALSE, foreground);
         if (activationChange == change) NotifyWindow(previousForeground, WM_ACTIVATE, WA_INACTIVE, foreground);
         if (activationChange == change && applicationActive != (foreground != NULL)) {
@@ -1140,11 +1146,14 @@ static void PollHostedPointer(void) {
             MAKELPARAM(screen.x, screen.y), time, screen}, 0, 0, FALSE};
     }
     AcquireSRWLockExclusive(&windowGeometryLock);
+    if (hostPointerWindow != handle) hostPointerPressedSinceQuery = 0;
     hostPointerScreen = screen;
     hostPointerWindow = handle;
+    hostPointerButtons = pressed;
+    hostPointerStateActive = TRUE;
+    hostPointerPressedSinceQuery |= pressed & changed;
     ReleaseSRWLockExclusive(&windowGeometryLock);
     hostPointerSerial = serial;
-    hostPointerButtons = pressed;
     InterlockedExchangeAdd(&mailbox->input_events, count);
     InterlockedExchange(&mailbox->input_ack, serial);
 }
@@ -1177,6 +1186,34 @@ BOOL WINAPI XboxGetCursorPos(LPPOINT position) {
 
 BOOL WINAPI XboxGetPhysicalCursorPos(LPPOINT position) {
     return ReadCursorPosition(position, "GetPhysicalCursorPos");
+}
+
+SHORT WINAPI XboxGetAsyncKeyState(int key) {
+    UINT button;
+    switch (key) {
+    case VK_LBUTTON: button = SDL_HOST_POINTER_LEFT; break;
+    case VK_RBUTTON: button = SDL_HOST_POINTER_RIGHT; break;
+    case VK_MBUTTON: button = SDL_HOST_POINTER_MIDDLE; break;
+    case VK_XBUTTON1: button = SDL_HOST_POINTER_X1; break;
+    case VK_XBUTTON2: button = SDL_HOST_POINTER_X2; break;
+    default: button = 0; break;
+    }
+    if (button) {
+        AcquireSRWLockExclusive(&windowGeometryLock);
+        const BOOL hosted = hostPointerStateActive && hostPointerWindow == VirtualForegroundWindow() &&
+            !SdlHostLoad(&hostPointerMailbox->quit);
+        if (hosted) {
+            const SHORT state = (SHORT)(((hostPointerButtons & button) ? 0x8000 : 0) |
+                ((hostPointerPressedSinceQuery & button) ? 1 : 0));
+            hostPointerPressedSinceQuery &= ~button;
+            ReleaseSRWLockExclusive(&windowGeometryLock);
+            return state;
+        }
+        ReleaseSRWLockExclusive(&windowGeometryLock);
+    }
+    typedef SHORT (WINAPI *Native)(int);
+    Native native = (Native)(void *)NativeWindowProcedure("GetAsyncKeyState");
+    return native ? native(key) : 0;
 }
 
 typedef UINT (WINAPI *MapKey)(UINT, UINT);
