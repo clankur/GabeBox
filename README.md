@@ -2,9 +2,9 @@
 
 **Turn your Xbox into a GabeCube.**
 
-GabeBox brings Valve’s controller-friendly Big Picture interface to Xbox Series X in Developer Mode. Sign in with Steam Guard to see your own Steam library. Steam checks ownership and downloads the games you select. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
+GabeBox aims to bring Valve’s controller-friendly Big Picture interface to Xbox Series X and Series S in Developer Mode. Sign in with Steam Guard to see your own Steam library. Steam checks ownership and downloads the games you select. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
 
-The goal is to make the same **Install** and **Play** flow work across the Steam catalog and sustain 60 FPS at native 1080p where the game supports it. Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. Start with the verified results below to see how far each title has progressed.
+The goal is to make the same **Install** and **Play** flow work across the Steam catalog and sustain 60 FPS at native 1080p where the game supports it. Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. The results below are from Series X testing. Series S verification is still open.
 
 [Releases](#releases) · [What works](#what-works) · [Setup](#setup) · [Build from source](#build-from-source) · [Open issues](#open-issues)
 
@@ -34,7 +34,7 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 
 ## Setup
 
-Use an **Xbox Series X in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
+Use an **Xbox Series X or Series S in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
 Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands.
 
