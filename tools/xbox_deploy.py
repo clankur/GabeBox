@@ -23,26 +23,19 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 
+from probe.catalog import (
+    BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
+    PROBE_CONTROL_NAME, PROBE_NAME, PROBE_REPORT, PROBE_STEAM_CORE_NAME,
+)
+from probe.runner import report_fields, run_case
 from tools.artifacts import SDL_LIMIT, SDL_TRIALS, load_sdl_artifact, pe_summary
 
 
 PACKAGE_API = '/api/app/packagemanager'
-PROBE_NAME = 'XboxPortabilityProbe.ChildProcess'
-PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
-GRAPHICS_CONTROL_NAME = PROBE_NAME + '.GraphicsControl'
-PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
-BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
-BIG_PICTURE_REPORT = 'big-picture-report.txt'
 WEBVIEW_REPORT = 'big-picture-webview-report.txt'
 ACTIVATION_REPORT = 'big-picture-activation.txt'
 BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
-PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
-                PROBE_CONTROL_NAME: 'Packaged process startup control',
-                GRAPHICS_CONTROL_NAME: 'Graphics runtime control',
-                PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe',
-                BIG_PICTURE_NAME: 'Steam Big Picture'}
-PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 LIFETIME_REPORT = 'lifetime-report.txt'
@@ -170,7 +163,7 @@ def probe_identity(file):
     with ZipFile(file) as archive:
         manifest = ElementTree.fromstring(archive.read('AppxManifest.xml'))
     identity = manifest.find('{*}Identity')
-    if (identity is None or identity.get('Name') not in PROBE_LABELS
+    if (identity is None or identity.get('Name') not in PACKAGE_CASES
             or identity.get('ProcessorArchitecture') != 'x64'):
         raise ValueError('--test-probe requires the x64 packaged process probe APPX.')
     return identity.attrib['Name'], identity.attrib['Version']
@@ -723,89 +716,63 @@ def stop_probe(portal, app, allow_inactive=False):
         raise
 
 
-def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
-    app = find_installed_probe(portal, name, version)
-    print(f'Installed package: {app["PackageFullName"]}', flush=True)
-    filename = BIG_PICTURE_REPORT if name == BIG_PICTURE_NAME else PROBE_REPORT
-    report_url = probe_report_path(app, filename)
+def collect_probe(portal, key, version, manual, timeout, restart=False, json_output=False):
+    case = CASES[key]
+    app = find_installed_probe(portal, case.package, version)
+    package = app['PackageFullName']
+    stream = sys.stderr if json_output else sys.stdout
+    print(f'Installed package: {package}', file=stream, flush=True)
+    report_url = probe_report_path(app, case.filename)
 
-    def read_report():
+    def read_report(*, polling=False):
         try:
             _, raw = portal.request('GET', report_url)
         except PortalError as error:
-            if error.status != 404:
+            if error.status != 404 and not (polling and error.status == 409):
                 raise
-            return b''
-        return raw
+            return ''
+        return decode_report(raw)
 
-    baseline = read_report()
-    baseline_run = report_fields(decode_report(baseline)).get('run_id')
-    launch_error = ''
-    if manual:
-        print(f'Launch {PROBE_LABELS[name]} once from Xbox Dev Home.', flush=True)
-    else:
+    def launch():
+        if manual:
+            print(f'Launch {case.label} once from Xbox Dev Home.', file=stream, flush=True)
+            return False
         if restart:
             stop_probe(portal, app, allow_inactive=True)
         try:
             activate_probe(portal, app)
         except PortalError as error:
-            launch_error = str(error)
-            print(f'Remote launch returned an error. You can launch from Dev Home while the CLI waits.\n{error}',
-                  flush=True)
+            print('Remote launch returned an error. You can launch from Dev Home while the CLI waits.',
+                  file=stream, flush=True)
+            print(error, file=stream, flush=True)
+            return True
+        return False
 
-    deadline = time.monotonic() + timeout
-    last_report = ''
-    while time.monotonic() < deadline:
-        try:
-            raw = read_report()
-        except PortalError as error:
-            if error.status != 409:
-                raise
-            raw = b''
-        if raw and raw != baseline:
-            report = decode_report(raw)
-            if name == BIG_PICTURE_NAME:
-                fields = report_fields(report)
-                if (fields.get('probe') != 'native-steam-big-picture' or not fields.get('run_id')
-                        or fields['run_id'] == baseline_run):
-                    report = ''
-            if report.endswith('\n') and report != last_report:
-                last_report = report
-                print(report, end='', flush=True)
-                if name == BIG_PICTURE_NAME:
-                    status = fields.get('status', '')
-                    if status == 'client-running':
-                        print('Steam was running at the observation deadline. Check the Xbox display for Big Picture.')
-                        return report
-                    if status == 'client-exited':
-                        raise ValueError(f"The Steam launcher exited ({fields.get('exit_code', 'unknown')}). "
-                                         'Check the Xbox display for a possible handoff.')
-                if name == PROBE_CONTROL_NAME and re.search(r'^status=control-ready\s*$', report, re.MULTILINE):
-                    return
-                if name == PROBE_STEAM_CORE_NAME and re.search(
-                        r'^status=steam-core-complete\s*$', report, re.MULTILINE):
-                    return report
-                if re.search(r'^exit_code_matches=yes\s*$', report, re.MULTILINE):
-                    if not require_ipc or re.search(r'^ipc=success\s*$', report, re.MULTILINE):
-                        return
-                    if re.search(r'^ipc=failed\s*$', report, re.MULTILINE):
-                        raise ValueError('The signed helper ran, but the named-pipe exchange did not succeed.')
-                if re.search(r'^exit_code_matches=no\s*$', report, re.MULTILINE):
-                    raise ValueError('The probe ran, but the helper did not return its expected exit code.')
-                if re.search(r'^status=.*(?:error|failed)\s*$', report, re.MULTILINE):
-                    raise ValueError('The probe reported a startup or test error above.')
-        time.sleep(0.5)
+    def progress(report):
+        if not json_output:
+            print(report, end='', flush=True)
 
-    if last_report:
-        if require_ipc and re.search(r'^exit_code_matches=yes\s*$', last_report, re.MULTILINE):
-            raise ValueError('The signed helper ran, but no terminal named-pipe result appeared.')
-        raise ValueError('The probe wrote a startup checkpoint but did not finish the test.')
-    raise ValueError(f'No fresh {filename} appeared in LocalState.' +
-                     (' The remote launch also failed.' if launch_error else ''))
+    result = run_case(case, read_report, launch, timeout, progress)
+    if json_output:
+        print(json.dumps({
+            'schema_version': 1, 'case': key, 'package': package, 'report': case.filename,
+            'outcome': result.outcome, 'message': result.message,
+            'checks': dict(case.checks), 'observed': result.evidence(),
+        }, indent=2))
+        if result.outcome != 'passed':
+            raise SystemExit(1)
+    elif result.outcome != 'passed':
+        raise ValueError(result.message)
+    elif key == 'big-picture':
+        print('Steam was running at the observation deadline. Check the Xbox display for Big Picture.')
+    return result.report
 
 
-def report_fields(report):
-    return dict(line.split('=', 1) for line in report.splitlines() if '=' in line)
+def wait_for_probe(portal, name, version, manual, timeout, require_ipc=False, restart=False):
+    key = 'named-pipe' if require_ipc else PACKAGE_CASES[name]
+    report = collect_probe(portal, key, version, manual, timeout, restart)
+    if name in (PROBE_STEAM_CORE_NAME, BIG_PICTURE_NAME):
+        return report
 
 
 def wait_for_checkpoint(portal, app, filename, baseline, timeout, checkpoint):
@@ -943,7 +910,10 @@ def main():
     probe = commands.add_parser('probe', help='launch the installed probe and wait for a fresh report')
     probe.add_argument('--version', help='require a specific installed package version')
     probe.add_argument('--restart', action='store_true', help='stop the selected probe before launching it')
+    probe.add_argument('--json', action='store_true', help='emit one structured probe result')
     variant = probe.add_mutually_exclusive_group()
+    variant.add_argument('--list', action='store_true', help='list registered probe cases without connecting')
+    variant.add_argument('--case', choices=CASES, help='run a named probe case')
     variant.add_argument('--control', dest='probe_name', action='store_const', const=PROBE_CONTROL_NAME,
                          help='watch the clean-registration control')
     variant.add_argument('--graphics-control', dest='probe_name', action='store_const', const=GRAPHICS_CONTROL_NAME,
@@ -1043,8 +1013,17 @@ def main():
         command.add_argument('--manual-launch', action='store_true', help='wait for launch from Xbox Dev Home')
         command.add_argument('--require-ipc', action='store_true', help='require a successful named-pipe exchange')
     args = parser.parse_args()
+    if args.command == 'probe' and args.list:
+        if args.json:
+            print(json.dumps({key: case.description for key, case in CASES.items()}, indent=2))
+        else:
+            for key, case in CASES.items():
+                print(f'{key:16} {case.description}')
+        return
     if args.command == 'deploy' and args.require_ipc and not args.test_probe:
         deploy.error('--require-ipc requires --test-probe')
+    if args.command == 'probe' and args.case and args.require_ipc:
+        probe.error('Use --case named-pipe to require a named-pipe exchange.')
     if args.command == 'probe' and args.require_ipc and args.probe_name != PROBE_NAME:
         probe.error('--require-ipc applies to the main probe')
     if args.command == 'probe' and args.restart and args.manual_launch:
@@ -1150,8 +1129,9 @@ def main():
         run_lifetime(portal, args.version, args.dwell, args.timeout, args.portal_return)
         return
     if args.command == 'probe':
-        wait_for_probe(portal, args.probe_name, args.version, args.manual_launch, args.timeout,
-                       args.require_ipc, restart=args.restart)
+        key = args.case or ('named-pipe' if args.require_ipc else PACKAGE_CASES[args.probe_name])
+        collect_probe(portal, key, args.version, args.manual_launch, args.timeout,
+                      restart=args.restart, json_output=args.json)
         return
     if args.command == 'observe':
         from tools.xbox_diagnostics import observe

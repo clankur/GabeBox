@@ -7,6 +7,9 @@ import struct
 import time
 from urllib.parse import urlencode
 
+from probe.catalog import PROBE_REPORT
+from probe.runner import report_fields as fields
+
 from .measure import FILETIME_EPOCH, HEADER, PRESENT
 
 
@@ -29,7 +32,6 @@ GPU_MAILBOX_NAME = re.compile(r'sdl-host-[0-9]{1,10}-[0-9]{1,20}\.bin')
 LOCAL = r'\LocalState'
 TEMP = r'\TempState'
 PRIMARY_REPORT = 'big-picture-primary-startup.txt'
-PROBE_REPORT = 'probe-report.txt'
 WEBVIEW_REPORT = 'big-picture-webview-report.txt'
 COUNT = re.compile(r'[0-9]{1,20}')
 CHECKPOINT = re.compile(r'[a-z][a-z0-9_.-]{0,62}(?::(?:0x[0-9a-f]{1,8}|[a-z][a-z0-9-]{0,40}))?', re.I)
@@ -63,10 +65,6 @@ FRAME_FIELDS = {
     'sample_render_callbacks', 'sample_source_empty_callbacks', 'sample_present_busy_callbacks',
     'slots_busy', 'pool_waits', 'source_empty_callbacks', 'presentation_busy_callbacks',
 }
-
-
-def fields(report):
-    return dict(line.split('=', 1) for line in report.splitlines() if '=' in line)
 
 
 def numeric(report, key):

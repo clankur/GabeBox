@@ -215,8 +215,13 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
         raise ValueError('The hosted Stardew profile requires sign-in and the built Stardew startup hook.')
     slay_files = ('SlayConsoleDiagnostic.class', 'slay-working-directory.dll', 'slay-sdl-display.dll',
                   'slay-lwjgl-display.jar', 'slay-font-atlas-limit.txt', 'SDL2.dll', 'LICENSE.SDL2')
-    if slay_sdl_host is not None and (not steam_sign_in or not all((slay_sdl_host / name).is_file() for name in slay_files)):
-        raise ValueError('The hosted Slay profile requires sign-in and the built Java and SDL adapters.')
+    if slay_sdl_host is not None:
+        if not steam_sign_in:
+            raise ValueError('The hosted Slay profile requires Steam sign-in.')
+        required = (*slay_files, 'SlayConsoleDiagnostic$1.class')
+        missing = [name for name in required if not (slay_sdl_host / name).is_file()]
+        if missing:
+            raise ValueError('The hosted Slay profile is missing built adapter files: ' + ', '.join(missing))
     with ZipFile(template) as signed:
         manifest = signed.read('AppxManifest.xml')
         if presenter:
@@ -339,7 +344,7 @@ def prepare_layout(template, layout, version, valve_archive, objdump, unicode_ke
             if 'SlayConsoleDiagnostic.class'.encode('utf-16le') not in (layout / 'ProbeNative.dll').read_bytes():
                 raise ValueError('Use the Windows SDK template containing the Slay console diagnostic.')
             subprocess.run(['javac', '--release', '8', '-d', str(layout),
-                            str(ROOT / 'probe/SlayConsoleDiagnostic.java')], check=True)
+                            str(ROOT / 'runtime/lwjgl/SlayConsoleDiagnostic.java')], check=True)
         if stardew_host_trace:
             (layout / 'stardew-host-trace.txt').touch()
         if stardew_startup_diagnostic and not stardew_sdl_host:

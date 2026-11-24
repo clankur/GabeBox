@@ -2,6 +2,8 @@
 
 Use the same Device Portal configuration and verified certificate pin as the deployment CLI. The observer reads an already-installed Steam package and writes one JSON result to standard output. Status checkpoints go to standard error. Open Steam or select Play on the console after the observer prints `waiting-for-startup` or `waiting-for-launch`. Those checkpoints mark the end of the baseline read. For a package update, complete installation separately before starting the observer.
 
+Use the [probe catalog](../probe/README.md) for isolated checks of process creation, IPC, graphics helpers, and Steam DLL loading. A probe launches its selected test package and checks a fresh report. The observer below follows the installed Steam app during normal use.
+
 ## Observe Big Picture startup
 
 ```sh

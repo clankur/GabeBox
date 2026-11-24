@@ -126,6 +126,8 @@ The Series X run of `1.0.221.0` reached save-slot selection and reported control
 Build the hosted adapter with JDK 11 or later and the pinned upstream JARs. Use a fresh output path. The selected virtual window size is embedded in the adapter. The player scales the window to fit the TV and maps input into the same dimensions.
 
 ```sh
+mkdir -p "$runtime_dir"
+javac --release 8 -d "$runtime_dir" runtime/lwjgl/SlayConsoleDiagnostic.java
 python3 runtime/lwjgl/build-lwjgl-sdl.py \
   "$deps/lwjgl-2.9.2-sources.jar" "$deps/lwjgl-2.9.2.jar" "$deps/asm-9.7.1.jar" \
   "$runtime_dir/slay-lwjgl-display.jar" \

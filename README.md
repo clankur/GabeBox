@@ -96,7 +96,7 @@ The builder verifies Valve’s [pinned client manifest](runtime/steam/pins/steam
 
 ## Development
 
-GabeBox follows Proton’s component-based structure. `runtime/` contains the reusable Steam host, Win32 adapters, SDL integration, and native presenter. `profiles/` selects compatibility behavior for specific Steam builds. `ui/` contains sign-in and Big Picture, `build_tools/` assembles packages, and `probe/` and `tools/` contain diagnostics. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1) · [Contributor guidance](AGENTS.md)
+GabeBox follows Proton’s component-based structure. `runtime/` contains the reusable Steam host, Win32 adapters, SDL integration, and native presenter. `profiles/` selects compatibility behavior for specific Steam builds. `ui/` contains sign-in and Big Picture, `build_tools/` assembles packages, `probe/` checks individual capabilities on Xbox, and `tools/` handles deployment and runtime observation. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1) · [Probe catalog](probe/README.md) · [Contributor guidance](AGENTS.md)
 
 Use uv to run the same locked Python lint and test tools as CI. [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
 
