@@ -2,6 +2,7 @@
 function installXboxStoreBrowser(client, host, ownerWindow, observe) {
     const api = client.BrowserView, destroyPopup = api.Destroy;
     const initialPage = 'data:text/html,%3Cbody%3E%3C%2Fbody%3E';
+    const navigationTimeoutMs = 20000;
     const options = ['strName', 'parentPopupBrowserID', 'strInitialURL', 'strUserAgentIdentifier', 'bPreventCloseFromJavascript', 'strVROverlayKey'];
     const keys = new Map([[0, 'enter'], [20, 'up'], [21, 'down'], [22, 'left'], [23, 'right']]);
     let serial = 0, current;
@@ -28,7 +29,34 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
         for (const [key, holders] of record.held) if (holders.size) post(record, 'input', {key, down: false});
         record.held.clear();
     }
+    function clearNavigationDeadline(record) {
+        clearTimeout(record.navigationDeadline);
+        record.navigationDeadline = undefined;
+    }
+    function navigationFailed(record, url, code, message) {
+        clearNavigationDeadline(record);
+        record.step = 0;
+        record.retryUrl = publicURL(url);
+        trace(record, 'failed');
+        // Valve's load-error handler records the error but only its finished
+        // request handler stops the spinner. Failed loads never commit history.
+        if (record.retryUrl) emit(record, 'finished-request', url, '');
+        emit(record, 'load-error', code, url, message);
+    }
+    function waitForNavigation(record, url) {
+        record.requested = url;
+        if (record.navigationDeadline !== undefined) return;
+        record.navigationDeadline = setTimeout(() => {
+            if (current !== record) return;
+            const request = record.request;
+            record.request = 0;
+            trace(record, 'timed-out');
+            try { post(record, 'stop', {request}); }
+            finally { navigationFailed(record, record.requested, -7, 'Steam Store navigation timed out'); }
+        }, navigationTimeoutMs);
+    }
     function close(record, requested) {
+        clearNavigationDeadline(record);
         release(record);
         if (requested) post(record, 'close');
         current = undefined;
@@ -54,6 +82,8 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
         const record = current;
         if (!record || data?.event !== 'store-browser' || data.id !== record.id) return;
         const url = data.url === 'about:blank' || data.url === initialPage ? 'about:blank' : publicURL(data.url);
+        const staleBlank = url === 'about:blank' && publicURL(record.requested) &&
+            (!record.step || record.entries[record.index + record.step] !== url);
         switch (data.kind) {
         case 'initial-document':
             // The native controller inspected its own existing, ready empty
@@ -64,29 +94,39 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
             }
             break;
         case 'start':
-            if (!url) return;
-            if (url !== 'about:blank') trace(record, 'remote-start');
-            record.requested = url;
+            if (!url || data.request !== record.request || staleBlank) return;
+            if (url !== 'about:blank') {
+                trace(record, 'remote-start');
+                waitForNavigation(record, url);
+            } else record.requested = url;
             record.title = '';
             emit(record, 'start-request', url);
             emit(record, 'start-loading', url, true);
             break;
         case 'complete':
-            if (!url || typeof data.success !== 'boolean') return;
+            if (!url || typeof data.success !== 'boolean' || data.request !== record.request || staleBlank) return;
             if (data.success) {
+                clearNavigationDeadline(record);
+                record.retryUrl = undefined;
                 trace(record, url === 'about:blank' ? 'blank-complete' : 'remote-complete');
                 emit(record, 'finished-request', url, record.title);
                 committed(record, url);
             } else {
-                record.step = 0;
-                trace(record, 'failed');
-                emit(record, 'load-error', Number.isInteger(data.code) ? data.code : -1, url, 'Store navigation failed');
+                navigationFailed(record, url, Number.isInteger(data.code) ? data.code : -1, 'Store navigation failed');
             }
             break;
         case 'history':
             if (typeof data.canGoBack !== 'boolean' || typeof data.canGoForward !== 'boolean') return;
             record.back = data.canGoBack; record.forward = data.canGoForward;
             emit(record, 'can-go-back-forward-changed', record.back, record.forward);
+            break;
+        case 'controller-reset':
+            if (data.request !== record.request) return;
+            record.entries.length = 0;
+            record.index = -1;
+            record.step = 0;
+            record.back = record.forward = false;
+            emit(record, 'can-go-back-forward-changed', false, false);
             break;
         case 'title':
             if (typeof data.title === 'string') {
@@ -98,9 +138,9 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
             if (typeof data.value === 'boolean') emit(record, 'focus-changed', data.value);
             break;
         case 'error':
-            trace(record, 'failed');
-            emit(record, 'load-error', Number.isInteger(data.code) ? data.code : -1,
-                record.requested || 'about:blank', 'Store browser unavailable');
+            if (data.request !== record.request) return;
+            navigationFailed(record, record.requested || 'about:blank', Number.isInteger(data.code) ? data.code : -1,
+                'Store browser unavailable');
             break;
         case 'closed': close(record, false); break;
         }
@@ -113,7 +153,8 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
             throw new Error('Unsupported Xbox Store browser');
         if (current) throw new Error('Xbox Store browser already open');
         const record = {id: ++serial, owner, events: new Map(), entries: [], index: -1, step: 0,
-            requested: '', title: '', visible: false, focus: false, held: new Map(), stages: new Set()};
+            requested: '', request: 0, requestSequence: 0, title: '', visible: false, focus: false,
+            held: new Map(), stages: new Set()};
         const view = {
             on(event, callback) {
                 if (current !== record || typeof callback !== 'function') return;
@@ -122,13 +163,18 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
             },
             off(event, callback) { record.events.get(event)?.delete(callback); },
             LoadURL(value) {
+                if (current !== record) return;
                 const url = publicURL(value);
                 if (!url) {
                     emit(record, 'load-error', -1, '', 'Only the public Steam Store is available');
                     return;
                 }
+                clearNavigationDeadline(record);
+                record.request = record.requestSequence = record.requestSequence % 0x7fffffff + 1;
+                record.retryUrl = undefined;
+                waitForNavigation(record, url);
                 trace(record, 'navigate');
-                post(record, 'navigate', {url});
+                post(record, 'navigate', {url, request: record.request});
             },
             SetBounds(x, y, width, height) {
                 const w = owner.innerWidth, h = owner.innerHeight;
@@ -164,7 +210,14 @@ function installXboxStoreBrowser(client, host, ownerWindow, observe) {
             SetWindowStackingOrder() {},
             GoBack() { if (record.back) { record.step = -1; post(record, 'back'); } },
             GoForward() { if (record.forward) { record.step = 1; post(record, 'forward'); } },
-            Reload() { post(record, 'reload'); }
+            Reload() {
+                if (record.retryUrl) view.LoadURL(record.retryUrl);
+                else {
+                    const url = publicURL(record.entries[record.index]);
+                    if (current === record && url) waitForNavigation(record, url);
+                    post(record, 'reload');
+                }
+            }
         };
         current = record;
         record.view = view;
