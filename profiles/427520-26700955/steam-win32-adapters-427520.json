@@ -8,6 +8,7 @@
     "XboxWin32GdiPlus.dll",
     "XboxWin32Input.dll",
     "XboxWin32LoaderTrace.dll",
+    "XboxWin32SteamDiscovery.dll",
     "XboxWin32StorageTrace.dll",
     "XboxWin32Window.dll",
     "XboxWin32XInput910.dll"
@@ -29,6 +30,10 @@
       "IsIconic",
       "IsZoomed",
       "TranslateMessage"
+    ],
+    "XboxWin32SteamDiscovery.dll": [
+      "SteamAPI_RestartAppIfNecessary",
+      "SteamInternal_SteamAPI_Init"
     ]
   }
 }
