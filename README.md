@@ -36,6 +36,8 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 
 Use an **Xbox Series X in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
+Run the commands from the repository root. The [Device Portal CLI](xbox-deploy.py) lives there and reads the adjacent `.env` by default. If you use uv, replace `python3` with `uv run python` in the deployment, build, and test examples. For example, `uv run python xbox-deploy.py --help` lists the Device Portal commands. [uv script runner](https://docs.astral.sh/uv/guides/scripts/)
+
 1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to your Device Portal username.
 2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate shown by Device Portal, then set `XBOX_PORTAL_CERT_SHA256`. The CLI prompts for the Portal password.
 3. Deploy the signed APPX with its matching certificate. Open the installed app in Dev Home, approve the QR code with Steam Guard, and select **Install** or **Play** in your library.
@@ -49,7 +51,7 @@ If the package requires Visual C++ UWP or UWP Desktop frameworks, pass each matc
 
 ## Build from source
 
-The GitHub Actions workflows compile the x64 native components with the Windows SDK. Local assembly uses **Python 3.9+**, **Bash**, **`makemsix`**, **OpenSSL**, **`osslsigncode`**, and **`shasum`**. Run the commands from the repository root and use fresh output directories.
+The GitHub Actions workflows compile the x64 native components with the Windows SDK. Local assembly uses **Python 3.9+**, **Bash**, **`makemsix`**, **OpenSSL**, **`osslsigncode`**, and **`shasum`**. Use fresh output directories.
 
 ### 1. Collect the build inputs
 
