@@ -30,12 +30,13 @@ VERIFIED_BASES = {
 }
 
 
-def release_layout(base, destination, version):
+def release_layout(base, destination, version, *, verified_bases=None):
+    pins = VERIFIED_BASES if verified_bases is None else verified_bases
     with base.open("rb") as source:
         digest = hashlib.sha256()
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
-        source_version = VERIFIED_BASES.get(digest.hexdigest())
+        source_version = pins.get(digest.hexdigest())
         if source_version is None:
             raise ValueError("Use the verified Steam Core FHD base release or its signed recovery package.")
         source.seek(0)

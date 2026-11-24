@@ -173,6 +173,13 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:
                     raise ValueError(f"The {option} option needs an empty marker, source profile and loader trace for AppID {app}.")
                 files[marker] = b""
+        release_marker = f"steam-win32-release-renderer-{app}.txt"
+        if (root / release_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / release_marker).stat().st_size or source_profile is None or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"Renderer release needs a matching hosted build and source fingerprints for AppID {app}.")
+            files[release_marker] = b""
         argument_name = f"steam-win32-arguments-{app}.txt"
         if (root / argument_name).is_file():
             with (root / argument_name).open("rb") as source:

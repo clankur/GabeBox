@@ -274,6 +274,24 @@ The .315 run reached a rooftop and remained active during the controller exercis
 
 The 30-second rooftop controller sample averaged 30.2 FPS from 906 distinct shared GPU presents and zero CPU uploads. The lowest rolling second had 24 frames. The median interval was 33.368 ms, the 95th and 99th percentiles were 50.108 and 50.308 ms, and the longest interval was 100.313 ms. The `python3 -m tools.measure --require-gpu-60` check failed. Outside that sample, the longest gap was 9.593 seconds before the difficulty capture and 5.038 seconds in the first minute after **Start**. These timings establish performance on the partially rendered rooftop.
 
+### World-entry recovery after the runtime restructure
+
+On Xbox Series X, local build `1.0.232.15` opened the **Clearing the Way** world through the current Steam host, verified build `23986256`, and responded to right-stick camera input in run `1795539658063`. The trial used the `.315` recipe, adapters and prepared files, the `.323` controller-lease presenter, and the restored Big Picture renderer handoff. The shell's recorded app usage dropped from 1,534,074,880 to 182,472,704 bytes before the game launch. The hosted A press selected **Continue** with the test pad connected. Enter left the menu open. The world still had missing surfaces and no clearly visible player character.
+
+The 30-second world sample averaged **51.23 FPS** at **1920 × 1080 output** from 1,537 distinct GPU presents and zero CPU uploads. The slowest rolling second had 20 frames and the longest in-scene interval was 233.54 ms. The longest frame gap before the sample was 13.85 seconds. Internal render resolution and avatar movement remain unverified. The sample missed the sustained 60 FPS target.
+
+Reassemble the local trial from the checksum-pinned archives `1.0.232.13` (current Steam host), `1.0.230.315` (world-entry recipe, adapters and prepared assets) and `1.0.230.323` (presenter with a bounded virtual-controller test). The packager verifies these exact local inputs. Keep the prepared assets in local development storage.
+
+```sh
+python3 -m build_tools.prepare_spider_world_recovery \
+  "$current_steam_appx" "$world_entry_appx" "$controller_presenter_appx" \
+  ./spider-world-layout --version "$package_version"
+bash build_tools/package.sh --layout ./spider-world-layout ./spider-world-signed
+(cd ./spider-world-signed && shasum -a 256 -c SHA256SUMS)
+```
+
+Set a version above the installed Steam Core package. Launch from Big Picture **Play**, or include `--autoplay` for a signed one-shot Play trial. The Spider-Man profile requests renderer release before game startup. The shell recreates the signed-in Library when the game exits or launch fails. The in-game Big Picture overlay depends on a resident renderer and is unavailable during this profile’s launch. The new source-built handoff and return path have regression coverage. The newer signed PR layout still needs a separate live Xbox run. [Recovery packager](../build_tools/prepare_spider_world_recovery.py)
+
 ## Reproduce the launch trial
 
 Prepare the mip overlay from the verified Steam installation and a local copy of the reference `asset-preparation/recipes` directory. The standalone tool verifies the original TOC, input assets and generated output against the build and reference fingerprints. It writes a separate `toc` and `local_mip256_hdclosed.dsar` and validates the generated archive after writing. Keep these private, generated files outside the Steam installation. The signed `.284` and `.285` tests map these two paths from the original installation to their equivalent files in the package's `owned-mip-overlay` directory. [Mip preparation tool](../profiles/1817070/23986256/prepare-mip-overlay.py) · [Reference recipes](https://github.com/BBCPrince/UWP-Spider-Launcher/tree/main/asset-preparation/recipes)
