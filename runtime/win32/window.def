@@ -67,3 +67,4 @@ EXPORTS
     GetKeyboardState=XboxGetKeyboardState @65
     GetKeyState=XboxGetKeyState @66
     TranslateMessage=XboxTranslateMessage @67
+    CallWindowProcW=XboxCallWindowProcW @68

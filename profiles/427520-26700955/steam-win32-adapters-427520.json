@@ -23,6 +23,7 @@
       "GetFinalPathNameByHandleW"
     ],
     "XboxWin32Window.dll": [
+      "CallWindowProcW",
       "GetKeyboardState",
       "GetKeyState",
       "IsIconic",

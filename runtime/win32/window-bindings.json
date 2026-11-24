@@ -7,6 +7,7 @@
     "CreateWindowExW": "XboxWin32Window.dll",
     "DestroyWindow": "XboxWin32Window.dll",
     "DefWindowProcW": "XboxWin32Window.dll",
+    "CallWindowProcW": "XboxWin32Window.dll",
     "SetPropW": "XboxWin32Window.dll",
     "GetPropW": "XboxWin32Window.dll",
     "RemovePropW": "XboxWin32Window.dll",

@@ -13,10 +13,15 @@ static BOOL adjusted, suppressDefault, destroyBeforeChange, vetoRestore, restore
 static BOOL sawGeometry, wasIconic, wasZoomed;
 static HWND createdParent;
 static WPARAM helperMessage;
+static BOOL refuseCreation;
 
 static LRESULT CALLBACK OnMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (message == WM_NCCREATE) createdParent = ((const CREATESTRUCTW *)lparam)->hwndParent;
+    if (message == WM_NCCREATE) {
+        createdParent = ((const CREATESTRUCTW *)lparam)->hwndParent;
+        if (refuseCreation) return FALSE;
+    }
     if (message == WM_APP) helperMessage = wparam;
+    if (message == WM_APP + 1) return (LRESULT)wparam + lparam;
     switch (message) {
     case WM_WINDOWPOSCHANGING:
     case WM_WINDOWPOSCHANGED:
@@ -68,7 +73,7 @@ static LRESULT CALLBACK OnMessage(HWND window, UINT message, WPARAM wparam, LPAR
         maximizeOnShow = FALSE;
         ShowWindow(window, SW_MAXIMIZE);
     }
-    return DefWindowProcW(window, message, wparam, lparam);
+    return CallWindowProcW(DefWindowProcW, window, message, wparam, lparam);
 }
 
 static BOOL VerifyMessageWindow(LPCWSTR name, HINSTANCE instance) {
@@ -83,7 +88,17 @@ static BOOL VerifyMessageWindow(LPCWSTR name, HINSTANCE instance) {
     if (!PostMessageW(helper, WM_APP, 42, 0) || !PeekMessageW(&message, helper, WM_APP, WM_APP, PM_REMOVE) ||
             message.hwnd != helper) return FALSE;
     DispatchMessageW(&message);
-    return helperMessage == 42 && DestroyWindow(helper);
+    const WPARAM token = (WPARAM)0x1a33f005dULL;
+    SetLastError(ERROR_RETRY);
+    if (helperMessage != 42 || CallWindowProcW(OnMessage, helper, WM_APP + 1, token, -5) != (LRESULT)token - 5 ||
+            GetLastError() != ERROR_RETRY || !DestroyWindow(helper) ||
+            CallWindowProcW(OnMessage, helper, WM_APP + 1, token, -5) ||
+            GetLastError() != ERROR_INVALID_WINDOW_HANDLE) return FALSE;
+    refuseCreation = TRUE;
+    const HWND refused = CreateWindowExW(0, name, L"Refused message helper", WS_OVERLAPPED,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, HWND_MESSAGE, NULL, instance, NULL);
+    refuseCreation = FALSE;
+    return !refused;
 }
 
 static BOOL Matches(const UINT *expected, UINT count) {

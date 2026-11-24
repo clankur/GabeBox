@@ -686,6 +686,19 @@ LRESULT WINAPI XboxDefWindowProcW(HWND handle, UINT message, WPARAM wparam, LPAR
     return 0;
 }
 
+LRESULT WINAPI XboxCallWindowProcW(WNDPROC procedure, HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LRESULT (WINAPI *Native)(WNDPROC, HWND, UINT, WPARAM, LPARAM);
+        const Native native = (Native)(void *)NativeWindowProcedure("CallWindowProcW");
+        return native ? native(procedure, handle, message, wparam, lparam) : 0;
+    }
+    if (!procedure || !XboxFindWindow(handle)) return 0;
+    // Hosted registration and subclassing return Unicode callback pointers.
+    // Native USER32 cannot look up the private HWND to dispatch them.
+    if (message == WM_NCCREATE) XboxWindowTrace("win32_window_callproc=hosted-nccreate\n");
+    return procedure(handle, message, wparam, lparam);
+}
+
 static BOOL HostedWindowBounds(HWND handle, RECT *area) {
     if (!area) {
         SetLastError(ERROR_INVALID_PARAMETER);

@@ -38,6 +38,7 @@
   },
   "user32.dll": {
     "AdjustWindowRectEx": "XboxWin32Window.dll",
+    "CallWindowProcW": "XboxWin32Window.dll",
     "ClientToScreen": "XboxWin32Window.dll",
     "CreateIconFromResourceEx": "XboxWin32Input.dll",
     "CreateWindowExW": "XboxWin32Window.dll",
