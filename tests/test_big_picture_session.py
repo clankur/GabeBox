@@ -7,13 +7,17 @@ from zipfile import ZipFile
 
 
 MODULE = runpy.run_path(str(Path(__file__).resolve().parents[1] / "build_tools/stage_session.py"))
-stage = MODULE["stage_session_component"]
 MANIFEST = b"""<Package><Identity Name="XboxPortabilityProbe.ChildProcess.SteamCore"
     ProcessorArchitecture="x64" Publisher="CN=Xbox Portability Probe"/>
     <Extensions><Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>
     <Path>ProbeNative.dll</Path><ActivatableClass ActivatableClassId="XboxProbe.Native.ProbeRunner"/>
     </InProcessServer></Extension></Extensions></Package>"""
 METADATA = b"MZ\x00SteamSessionSteamId\x00RunSteamSignIn\x00ResumeSteamSignIn\x00LaunchSteamGame\x00LaunchSteamSdlGame\x00"
+
+
+def stage(layout, artifact, checksum):
+    with MODULE["open_session_artifact"](artifact, checksum) as package:
+        MODULE["stage_session_component"](layout, package)
 
 
 class SessionStageTests(unittest.TestCase):

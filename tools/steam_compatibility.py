@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 from build_tools.paths import ROOT
 from build_tools.prepare_steam_core import coff_imports, parse_import_table
 from build_tools.redirect_pe_imports import PeImage, parse_rules, patch_recipe
+from build_tools.stage_profiles import WIN32_ADAPTERS
 from build_tools.verify_win32_source import read_profile, verify_install
 from tools.measure import reaches_gpu_60
 
@@ -600,6 +601,10 @@ def prepare_dxgi_trial(audit, binary, root, source_profile, output):
         (stage / f"steam-win32-shadow-{app}.xwp").write_bytes(recipe)
         (stage / f"steam-win32-source-{app}.json").write_text(
             json.dumps({build: entries}, separators=(",", ":")), encoding="ascii")
+        adapters = {"XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll"}
+        adapters.update(adapter for symbols in rules.values() for adapter in symbols.values() if adapter in WIN32_ADAPTERS)
+        (stage / f"steam-win32-adapters-{app}.json").write_text(
+            json.dumps({"build_id": build, "required_adapters": sorted(adapters)}, indent=2) + "\n", encoding="ascii")
         (stage / f"steam-win32-dxgi-{app}.txt").touch()
         if companions:
             rows = [f"{PureWindowsPath(path).relative_to(exe.parent).as_posix()}\tsha256:{row['sha256']}\n"

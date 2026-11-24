@@ -1,6 +1,6 @@
 """Stage the native Steam session query from the pinned Windows SDK build."""
+from contextlib import contextmanager
 import hashlib
-from pathlib import Path
 import re
 from xml.etree import ElementTree
 from zipfile import ZipFile
@@ -26,7 +26,15 @@ def verify_registration(manifest):
     raise ValueError("Missing the Steam Core native class registration.")
 
 
-def stage_session_component(layout: Path, artifact: Path, checksum: str):
+def read_package_member(package, name):
+    matches = [info for info in package.infolist() if info.filename.casefold() == name.casefold()]
+    if len(matches) != 1 or matches[0].filename != name or not matches[0].file_size:
+        raise ValueError(f"Missing, empty or ambiguous Steam Core artifact member {name}.")
+    return package.read(matches[0])
+
+
+@contextmanager
+def open_session_artifact(artifact, checksum):
     sums = (artifact / "SHA256SUMS").read_bytes()
     if not re.fullmatch(r"[0-9a-fA-F]{64}", checksum) or hashlib.sha256(sums).hexdigest() != checksum.lower():
         raise ValueError("Unexpected Steam Core native artifact checksums.")
@@ -36,7 +44,6 @@ def stage_session_component(layout: Path, artifact: Path, checksum: str):
     ]
     if len(pins) != 1:
         raise ValueError("Expected one APPX checksum in the Steam Core artifact.")
-    verify_registration((layout / "AppxManifest.xml").read_bytes())
     with (artifact / APPX).open("rb") as stream:
         digest = hashlib.sha256()
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -45,11 +52,14 @@ def stage_session_component(layout: Path, artifact: Path, checksum: str):
             raise ValueError("Unexpected Steam Core native APPX digest.")
         stream.seek(0)
         with ZipFile(stream) as package:
-            for member in (*COMPONENT, "AppxManifest.xml", "AppxSignature.p7x"):
-                if package.namelist().count(member) != 1:
-                    raise ValueError(f"Missing or ambiguous native artifact member {member}.")
-            verify_registration(package.read("AppxManifest.xml"))
-            dll, metadata = (package.read(member) for member in COMPONENT)
+            verify_registration(read_package_member(package, "AppxManifest.xml"))
+            read_package_member(package, "AppxSignature.p7x")
+            yield package
+
+
+def stage_session_component(layout, package):
+    verify_registration((layout / "AppxManifest.xml").read_bytes())
+    dll, metadata = (read_package_member(package, member) for member in COMPONENT)
     if not dll.startswith(b"MZ") or not metadata.startswith(b"MZ"):
         raise ValueError("Invalid Steam Core native component.")
     for name in ("SteamSessionSteamId", "RunSteamSignIn", "ResumeSteamSignIn", "LaunchSteamGame", "LaunchSteamSdlGame"):

@@ -13,18 +13,18 @@ profile_source="$PWD/profiles/1145360-10929685"
 profile=$(mktemp -d)
 (cd "$steam_install" && shasum -a 256 -c "$profile_source/SOURCE-SHA256SUMS") || exit 1
 cp "$profile_source"/steam-win32-*.txt "$profile/"
+cp "$profile_source/steam-win32-adapters-1145360.json" "$profile/"
 python3 -m build_tools.redirect_pe_imports --recipe "$steam_install/x64/EngineWin64s.dll" \
   "$profile_source/engine-bindings.json" "$profile/steam-win32-shadow-1145360.xwp"
 python3 -m build_tools.redirect_pe_imports --recipe "$steam_install/x64/Hades.exe" \
   "$profile_source/launcher-bindings.json" "$profile/steam-win32-shadow-1145360-launcher.xwp"
 ```
 
-Follow the [single-window Big Picture build](big-picture.md#reproduce-the-single-window-series-x-build). Use the Steam Core template, FHD presenter and primary XAML host artifacts built from this checkout. The regular FHD base provides the SDL and Mesa dependencies for the shared hosted package and declares the x64 Visual C++ UWP and UWPDesktop frameworks. Add the following options to the Big Picture packaging command before signing. Set `steam_core_appx` to the APPX in the current x64 Steam Core template artifact.
+Follow the [single-window Big Picture build](big-picture.md#reproduce-the-single-window-series-x-build). Use the Steam Core template, FHD presenter and primary XAML host artifacts built from this checkout. The regular FHD base provides the SDL and Mesa dependencies for the shared hosted package and declares the x64 Visual C++ UWP and UWPDesktop frameworks. Add the following options to the Big Picture packaging command before signing.
 
 ```sh
 --surfaceless-profile 1145360=10929685 \
---win32-trial-profile "1145360=$profile" \
---win32-runtime-template "$steam_core_appx"
+--win32-trial-profile "1145360=$profile"
 ```
 
 Install the signed package and the framework dependencies if needed. Sign in with an account that owns Hades, install it in the Xbox Steam library, and select **Play**. The launcher rechecks the entitlement, installed build and original binary hashes. The signed package contains the runtime adapters and recipes. Game binaries come from Steam on the console, and staging leaves the Steam depot files intact.

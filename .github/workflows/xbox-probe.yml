@@ -199,6 +199,9 @@ jobs:
                 /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
                 "/def:runtime/win32/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects @libraries
             }
+            & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+              /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+              /def:runtime/win32/xinput910.def "/out:$steamLayout/XboxWin32XInput910.dll" "$work/win32-xinput.obj" $lib
             $dxgiObjects = foreach ($source in @('dxgi', 'dxgi-frame')) {
               $object = "$work/win32-$source.obj"
               & "$llvm\clang++.exe" --target=x86_64-pc-windows-msvc -std=c++20 -O2 -ffreestanding `

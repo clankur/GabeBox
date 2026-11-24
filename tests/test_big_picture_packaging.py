@@ -27,6 +27,11 @@ MANIFEST = b"""<Package xmlns="http://schemas.microsoft.com/appx/manifest/founda
 </Package>"""
 
 
+def stage_trials(layout, profiles, template, source_profiles=()):
+    with ZipFile(template) as package:
+        library_builder.stage_win32_trial_profiles(layout, profiles, package, source_profiles)
+
+
 class BigPicturePackageTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -99,6 +104,7 @@ class BigPicturePackageTests(unittest.TestCase):
         session = self.work / "session"
         session.mkdir()
         session_appx = session / SESSION_APPX
+        xinput = "XboxWin32XInput910.dll"
         metadata = (b"MZ\x00SteamSessionSteamId\x00RunSteamSignIn\x00ResumeSteamSignIn\x00LaunchSteamGame\x00"
                     b"LaunchSteamSdlGame\x00SteamLibraryCommand\x00")
         with ZipFile(session_appx, "w") as package:
@@ -106,6 +112,8 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("AppxSignature.p7x", b"signature fixture")
             package.writestr("ProbeNative.dll", b"MZsession")
             package.writestr("XboxProbe.Native.winmd", metadata)
+            for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", xinput):
+                package.writestr(name, b"session artifact adapter")
         sums = f"{hashlib.sha256(session_appx.read_bytes()).hexdigest()}  {SESSION_APPX}\n".encode()
         (session / "SHA256SUMS").write_bytes(sums)
 
@@ -149,6 +157,16 @@ class BigPicturePackageTests(unittest.TestCase):
         license_text = b"SDL license fixture"
         (sdl_artifact / "LICENSE.txt").write_bytes(license_text)
 
+        profile = self.work / "profile"
+        profile.mkdir()
+        app = "1145360"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text("10929685\nHades.exe\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        adapter_manifest = f"steam-win32-adapters-{app}.json"
+        declaration = {"build_id": "10929685", "required_adapters": [xinput]}
+        manifest_path = profile / adapter_manifest
+        trial = [f"{app}={profile}"]
         args = (base, host, self.layout, "1.0.230.1", self.cache, session)
         with patch.object(library_builder, "VERIFIED_BASES", {hashlib.sha256(base.read_bytes()).hexdigest(): "1.0.230.0"}), \
                 patch.object(stage_webview, "SDK_FILES", {name: host_pins[name] for name in stage_webview.SDK_FILES}), \
@@ -159,7 +177,21 @@ class BigPicturePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "artifact checksums"):
                 library_builder.prepare_layout(*args, "0" * 64)
             self.assertEqual(set(self.work.iterdir()), before)
-            library_builder.prepare_layout(*args, hashlib.sha256(sums).hexdigest(), library_inventory=True,
+            checksum = hashlib.sha256(sums).hexdigest()
+            manifest_path.write_text(json.dumps({**declaration, "required_adapters": ["XboxWin32Timer.dll"]}))
+            with self.assertRaisesRegex(ValueError, r"missing required Win32 adapters: XboxWin32Timer\.dll"):
+                library_builder.prepare_layout(*args, checksum, win32_trial_profiles=trial)
+            self.assertEqual(set(self.work.iterdir()), before)
+            manifest_path.write_text(json.dumps({**declaration, "build_id": "1"}))
+            with self.assertRaisesRegex(ValueError, "must match build 10929685"):
+                library_builder.prepare_layout(*args, checksum, win32_trial_profiles=trial)
+            self.assertEqual(set(self.work.iterdir()), before)
+            manifest_path.write_text(json.dumps({**declaration, "required_adapters": ["ProbeNative.dll"]}))
+            with self.assertRaisesRegex(ValueError, "invalid Win32 adapter declaration"):
+                library_builder.prepare_layout(*args, checksum, win32_trial_profiles=trial)
+            self.assertEqual(set(self.work.iterdir()), before)
+            manifest_path.write_text(json.dumps(declaration))
+            library_builder.prepare_layout(*args, checksum, library_inventory=True, win32_trial_profiles=trial,
                                            dwarf_sdl=(sdl_artifact, hashlib.sha256(sdl).hexdigest()),
                                            surfaceless_profiles=["1145360=10929685"])
 
@@ -174,6 +206,9 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertTrue({"XboxProbe.Native.ProbeRunner", "BigPictureView.Native.Renderer",
                          "Microsoft.Web.WebView2.Core.CoreWebView2Environment"} <= classes)
         self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(), metadata)
+        self.assertEqual((self.layout / "ProbeNative.dll").read_bytes(), b"MZsession")
+        self.assertEqual((self.layout / xinput).read_bytes(), b"session artifact adapter")
+        self.assertEqual(json.loads((self.layout / adapter_manifest).read_bytes()), declaration)
         self.assertEqual((self.layout / "steam-sdl-surfaceless-1145360.txt").read_text(), "10929685")
         self.assertTrue((self.layout / "steam-library-inventory.txt").is_file())
         self.assertFalse((self.layout / "AppxBlockMap.xml").exists())
@@ -241,7 +276,6 @@ class BigPicturePackageTests(unittest.TestCase):
             archive.writestr("XboxWin32SteamDiscovery.dll", feature)
             for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll"):
                 archive.writestr(name, b"runtime fixture")
-        stage_trials = library_builder.stage_win32_trial_profiles
         with self.assertRaisesRegex(ValueError, "matching hash-pinned companion"):
             stage_trials(self.layout, [f"{app}={profile}"], template)
         companions.write_text(f"steam_api64.dll\tsha256:{digest}\n")
@@ -276,17 +310,17 @@ class BigPicturePackageTests(unittest.TestCase):
                          "XboxWin32Dxgi.dll", "XboxWin32StorageTrace.dll", "XboxWin32Unity.dll", "XboxWin32Timer.dll",
                          "XboxWin32DisplayConfig.dll"):
                 archive.writestr(name, b"runtime fixture")
-        stage_trials = library_builder.stage_win32_trial_profiles
         stage_trials(self.layout, [f"1145360={profile}"], template)
         self.assertEqual({path.name for path in self.layout.iterdir()},
-                         {"XboxProbe.Native.winmd", "ProbeNative.dll", "XboxWin32Input.dll",
+                         {"XboxProbe.Native.winmd", "XboxWin32Input.dll",
                           "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll", "XboxWin32Timer.dll",
                           marker, recipe, extra, companions})
         self.assertEqual((self.layout / recipe).read_bytes(), (profile / recipe).read_bytes())
-        self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(), b"metadata")
+        self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(),
+                         b"older metadata from the base release")
         with self.assertRaisesRegex(ValueError, "one APPID"):
             stage_trials(self.layout, [f"1145360={profile}"] * 2, template)
-        with self.assertRaisesRegex(ValueError, "x64 Steam Core"):
+        with self.assertRaisesRegex(ValueError, "missing required Win32 adapters"):
             stage_trials(self.layout, [f"1145360={profile}"], self.template)
 
         documents_marker = "steam-win32-documents-1145360.txt"
@@ -295,7 +329,7 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty Documents marker"):
             stage_trials(self.layout, [f"1145360={profile}"], template)
         documents.write_bytes(b"")
-        with self.assertRaisesRegex(ValueError, "template with profile Documents support"):
+        with self.assertRaisesRegex(ValueError, "artifact with profile Documents support"):
             stage_trials(self.layout, [f"1145360={profile}"], template)
         current_template = self.work / "documents-runtime.appx"
         with ZipFile(template) as original, ZipFile(current_template, "w") as updated:
@@ -410,10 +444,7 @@ class BigPicturePackageTests(unittest.TestCase):
         self.layout.mkdir()
         profile = ROOT / "profiles/1817070/source.json"
         template = self.work / "runtime.appx"
-        stage_profiles = library_builder.stage_win32_trial_profiles
         entry = f"1817070={profile}"
-        with self.assertRaisesRegex(ValueError, "runtime template together"):
-            stage_profiles(self.layout, [], None, [entry])
         for native in (b"old", "steam_source_check=".encode("utf-16le")):
             with ZipFile(template, "w") as archive:
                 archive.writestr("AppxManifest.xml", MANIFEST.replace(
@@ -422,16 +453,16 @@ class BigPicturePackageTests(unittest.TestCase):
                 archive.writestr("ProbeNative.dll", native)
             if native == b"old":
                 with self.assertRaisesRegex(ValueError, "source-profile verification"):
-                    stage_profiles(self.layout, [], template, [entry])
+                    stage_trials(self.layout, [], template, [entry])
                 self.assertEqual(list(self.layout.iterdir()), [])
             else:
-                stage_profiles(self.layout, [], template, [entry])
+                stage_trials(self.layout, [], template, [entry])
         staged_name = "steam-win32-source-1817070.json"
         self.assertEqual({path.name for path in self.layout.iterdir()},
-                         {staged_name, "ProbeNative.dll", "XboxProbe.Native.winmd"})
+                         {staged_name})
         self.assertEqual(json.loads((self.layout / staged_name).read_bytes()), json.loads(profile.read_bytes()))
         with self.assertRaisesRegex(ValueError, "one APPID"):
-            stage_profiles(self.layout, [], template, [entry, entry])
+            stage_trials(self.layout, [], template, [entry, entry])
 
     def test_win32_trial_packages_embedded_source_and_companion_fingerprints(self):
         self.layout.mkdir()
@@ -447,7 +478,6 @@ class BigPicturePackageTests(unittest.TestCase):
         pin = "D3D12/D3D12Core.dll\tsha256:" + "a" * 64 + "\n"
         files.write_text(pin)
         template = self.work / "runtime.appx"
-        stage_trials = library_builder.stage_win32_trial_profiles
         base = "steam_source_check=".encode("utf-16le")
         for binary in (base, base + "steam_shadow_companion_hashes=verified".encode("utf-16le")):
             with ZipFile(template, "w") as archive:
@@ -485,7 +515,6 @@ class BigPicturePackageTests(unittest.TestCase):
         pin = "XAudio2_7.dll\tsystem-sha256:" + "a" * 64 + "\n"
         files.write_text(pin)
         template = self.work / "runtime.appx"
-        stage_trials = library_builder.stage_win32_trial_profiles
         profiles = [f"1817070={profile}"]
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         hash_check = "steam_shadow_companion_hashes=verified".encode("utf-16le")

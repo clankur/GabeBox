@@ -59,7 +59,7 @@ The GitHub Actions workflows compile the x64 native components with the Windows 
 | Input | Where it comes from |
 | --- | --- |
 | Verified Steam Core FHD base APPX | The integrated builder accepts the exact regular `1.0.230.0` package or its signed `1.0.231.0` recovery package. Compare the file hash with the [accepted base pins](build_tools/prepare_big_picture_library.py). |
-| `xbox-steam-core-template` | Native Steam session component and runtime template. [Build Xbox probe](https://github.com/clankur/GabeBox/actions/workflows/xbox-probe.yml) |
+| `xbox-steam-core-template` | Checksum-pinned source for the native Steam DLL, WinRT metadata, and Win32 adapters required by the selected profiles. [Build Xbox probe](https://github.com/clankur/GabeBox/actions/workflows/xbox-probe.yml) |
 | `xbox-big-picture-webview-x64` | Big Picture WebView2 host. [WebView2 host workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-big-picture-webview.yml) |
 | `xbox-big-picture-primary-x64` and `xbox-fhd-present-x64` | Primary XAML window and native game presenter for the single-window build. [Primary host workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-big-picture-primary.yml) · [Presenter workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-fhd-present.yml) |
 | Title-specific runtimes and profiles | Match the game’s installed Steam build. The [SDL workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-sdl.yml) publishes versioned SDL builds. The [game launch guide](docs/GAME-LAUNCH.md) lists per-title inputs. |

@@ -1,0 +1,11 @@
+{
+  "build_id": "10929685",
+  "required_adapters": [
+    "XboxWin32CrashReport.dll",
+    "XboxWin32Desktop.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32Input.dll",
+    "XboxWin32LoaderTrace.dll",
+    "XboxWin32Window.dll"
+  ]
+}

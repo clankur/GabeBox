@@ -17,7 +17,7 @@ from build_tools.presenter import stage_native_presenter
 from build_tools.stage_pinned_client import stage_client
 from build_tools.stage_primary import stage_primary
 from build_tools.stage_profiles import stage_legacy_pointer_mode, stage_surfaceless_profiles, stage_win32_trial_profiles
-from build_tools.stage_session import stage_session_component
+from build_tools.stage_session import open_session_artifact, stage_session_component
 from build_tools.stage_webview import add_webview_host
 from tools.artifacts import load_sdl_artifact
 
@@ -88,7 +88,7 @@ def stage_storage_capability(layout):
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
-                   win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False,
+                   win32_trial_profiles=(), migrate_legacy_library=False,
                    early_library_reveal=False, win32_source_profiles=()):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
@@ -118,7 +118,11 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
                 shutil.copyfile(Path(artifact) / "LICENSE.txt", target / "LICENSE.SDL2")
         if presenter_artifact is not None:
             stage_native_presenter(staged, presenter_artifact, presenter_checksum)
-        stage_session_component(staged, session_artifact, session_checksum)
+        stage_legacy_pointer_mode(staged)
+        stage_surfaceless_profiles(staged, surfaceless_profiles)
+        with open_session_artifact(session_artifact, session_checksum) as package:
+            stage_session_component(staged, package)
+            stage_win32_trial_profiles(staged, win32_trial_profiles, package, win32_source_profiles)
         for name in ("xbox-network.js", "xbox-system-mode.js", "steam-signin.js", "steam-signin.css", "steam-game-launch.js", "steam-sdl-host.js",
                      "steam-sdl-native-view.js", "steam-sdl-gamepad.js", "steam-big-picture-broker.js"):
             shutil.copyfile(SIGNIN / name, staged / name)
@@ -144,9 +148,6 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
             stage_primary(staged, primary_xaml, primary_checksum, early_library_reveal)
         if library_inventory:
             (staged / "steam-library-inventory.txt").touch()
-        stage_legacy_pointer_mode(staged)
-        stage_surfaceless_profiles(staged, surfaceless_profiles)
-        stage_win32_trial_profiles(staged, win32_trial_profiles, win32_runtime_template, win32_source_profiles)
         stage_storage_capability(staged)
         if b"SteamLibraryCommand\x00" not in (staged / "XboxProbe.Native.winmd").read_bytes():
             raise ValueError("Use a Steam Core native component built with the Xbox storage interface.")
@@ -182,15 +183,13 @@ def main():
                         help="stage a local import compatibility trial from an audited recipe directory")
     parser.add_argument("--win32-source-profile", action="append", default=[], metavar="APPID=FILE",
                         help="check installed source fingerprints for these builds before Play")
-    parser.add_argument("--win32-runtime-template", type=Path,
-                        help="Steam Core APPX template containing the Win32 trial runtime built for this checkout")
     parser.add_argument("--migrate-legacy-library", action="store_true",
                         help="request a verified one-time move of existing app-local Steam games to Xbox internal storage")
     args = parser.parse_args()
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
-                   args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template,
+                   args.surfaceless_profile, args.win32_trial_profile,
                    args.migrate_legacy_library, args.early_library_reveal, args.win32_source_profile)
 
 
