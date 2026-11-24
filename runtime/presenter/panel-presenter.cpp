@@ -7,8 +7,10 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <algorithm>
 #include <memory>
@@ -50,6 +52,26 @@ std::mutex statusLock;
 void publish(Status value) {
     std::lock_guard guard(statusLock);
     published = value;
+}
+
+void relayPointer(Windows::Foundation::IInspectable const& sender,
+                  Windows::UI::Xaml::Input::PointerRoutedEventArgs const& event,
+                  bool wheel) noexcept {
+    try {
+        const auto target = sender.as<Grid>();
+        const auto width = target.ActualWidth(), height = target.ActualHeight();
+        if (width <= 0 || height <= 0) return;
+        const auto point = event.GetCurrentPoint(target);
+        const auto position = point.Position();
+        const auto props = point.Properties();
+        const LONG buttons = (props.IsLeftButtonPressed() ? SDL_HOST_POINTER_LEFT : 0) |
+            (props.IsRightButtonPressed() ? SDL_HOST_POINTER_RIGHT : 0) |
+            (props.IsMiddleButtonPressed() ? SDL_HOST_POINTER_MIDDLE : 0) |
+            (props.IsXButton1Pressed() ? SDL_HOST_POINTER_X1 : 0) |
+            (props.IsXButton2Pressed() ? SDL_HOST_POINTER_X2 : 0);
+        FhdHostedPointerUpdate(position.X / width, position.Y / height, buttons,
+            wheel ? props.MouseWheelDelta() : 0, wheel && props.IsHorizontalMouseWheel());
+    } catch (...) { /* The view may disappear while a pointer event is being dispatched. */ }
 }
 
 struct Presenter {
@@ -216,11 +238,20 @@ struct Presenter {
         check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, target.put()));
         panel = SwapChainPanel{};
         panel.Name(L"SteamGameSurface");
+        bool routedPointer = false;
         try {
             // SwapChainPanel rejects Background. Its child can receive the pointer.
             Grid pointerTarget;
             pointerTarget.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Color{}));
+            const auto update = [](auto const& sender, auto const& event) { relayPointer(sender, event, false); };
+            pointerTarget.PointerMoved(update);
+            pointerTarget.PointerPressed(update);
+            pointerTarget.PointerReleased(update);
+            pointerTarget.PointerWheelChanged([](auto const& sender, auto const& event) { relayPointer(sender, event, true); });
+            pointerTarget.PointerExited([](auto const&, auto const&) { FhdHostedPointerRelease(TRUE); });
+            pointerTarget.PointerCaptureLost([](auto const&, auto const&) { FhdHostedPointerRelease(FALSE); });
             panel.Children().Append(pointerTarget);
+            routedPointer = true;
         } catch (...) {
             status.pointerTargetError = to_hresult();
         }
@@ -242,6 +273,7 @@ struct Presenter {
         inputMailbox = FhdMediaInputMailbox(status.token, &rumble);
         status.inputError = FhdBeginHostedInput(inputMailbox, rumble, get_abi(window));
         if (SUCCEEDED(status.inputError)) {
+            if (routedPointer) FhdUseRoutedPointer();
             FhdSetHostedInputProfile(nativePad, width, height);
             FhdHostedMenuOnRelease(TRUE);
             status.nativeInput = true;

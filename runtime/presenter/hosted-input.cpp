@@ -78,7 +78,7 @@ PointerUpdate pointerEdges[pointerEdgeCount];
 UINT pointerEdgeRead, pointerEdgeSize;
 double cursorX, cursorY;
 LONG physicalButtons;
-bool padClick, freshPointer, physicalPointer;
+bool padClick, freshPointer, physicalPointer, routedPointer;
 LONG heldVirtual[256];
 SdlHostGamepadState previousPad;
 bool sentPad;
@@ -315,7 +315,8 @@ void mouseEvent(IUnknown *args, bool scrolling) {
     HRESULT hr = method(point, 7, &pos);
     if (SUCCEEDED(hr))
         hr = method(point, 13, &props);
-    LONG buttons = 0, wheel = 0;
+    LONG buttons = 0, delta = 0;
+    BYTE horizontal = 0;
     if (SUCCEEDED(hr) && props) {
         constexpr struct { unsigned property; LONG button; } properties[] = {
             {16, SDL_HOST_POINTER_LEFT}, {17, SDL_HOST_POINTER_RIGHT}, {18, SDL_HOST_POINTER_MIDDLE},
@@ -324,14 +325,8 @@ void mouseEvent(IUnknown *args, bool scrolling) {
             BYTE pressed = 0;
             if (SUCCEEDED(method(props, property.property, &pressed)) && pressed) buttons |= property.button;
         }
-        LONG delta = 0;
-        if (scrolling && SUCCEEDED(method(props, 19, &delta)) && delta) {
-            BYTE horizontal = 0;
-            method(props, 20, &horizontal);
-            delta = static_cast<LONG>(clamp(delta, -32768, 32767));
-            wheel = static_cast<LONG>(static_cast<UINT>(static_cast<USHORT>(delta)) << 16);
-            if (horizontal) wheel |= SDL_HOST_WHEEL_HORIZONTAL;
-        }
+        if (scrolling && FAILED(method(props, 19, &delta))) delta = 0;
+        if (delta && FAILED(method(props, 20, &horizontal))) horizontal = 0;
     }
     if (props)
         props->Release();
@@ -342,11 +337,8 @@ void mouseEvent(IUnknown *args, bool scrolling) {
     if (scale <= 0)
         return;
     // PointerPoint.Position is relative to this view. Exclude letterbox bars.
-    cursorX = clamp((pos.x - (bounds.w - gameW * scale) * .5) / (gameW * scale), 0, 1);
-    cursorY = clamp((pos.y - (bounds.h - gameH * scale) * .5) / (gameH * scale), 0, 1);
-    physicalButtons = buttons;
-    physicalPointer = true;
-    sendPointer(wheel);
+    FhdHostedPointerUpdate((pos.x - (bounds.w - gameW * scale) * .5) / (gameW * scale),
+        (pos.y - (bounds.h - gameH * scale) * .5) / (gameH * scale), buttons, delta, horizontal);
 }
 void requestOverlay() {
     if (!overlay) {
@@ -384,13 +376,11 @@ void event(unsigned type, IUnknown *args) {
     if (!foreground())
         return;
     if (type == CaptureLost || type == PointerExited) {
-        physicalButtons = 0;
-        if (type == PointerExited) physicalPointer = false;
-        sendPointer();
+        if (!routedPointer) FhdHostedPointerRelease(type == PointerExited);
         return;
     }
     if (type == PointerMoved || type == PointerPressed || type == PointerReleased || type == PointerWheelChanged) {
-        mouseEvent(args, type == PointerWheelChanged);
+        if (!routedPointer) mouseEvent(args, type == PointerWheelChanged);
         return;
     }
     UINT key = 0;
@@ -549,6 +539,24 @@ extern "C" void FhdPauseHostedInput() {
     }
 }
 extern "C" void FhdStopHostedRumble() { rumble.Stop(); }
+extern "C" void FhdUseRoutedPointer() { routedPointer = true; }
+extern "C" void FhdHostedPointerUpdate(double x, double y, LONG buttons, LONG wheelDelta, BOOL horizontalWheel) {
+    if (!foreground()) return;
+    cursorX = clamp(x, 0, 1);
+    cursorY = clamp(y, 0, 1);
+    physicalButtons = buttons & SDL_HOST_POINTER_BUTTONS;
+    physicalPointer = true;
+    const auto delta = static_cast<SHORT>(clamp(wheelDelta, -32768, 32767));
+    LONG wheel = static_cast<LONG>(static_cast<UINT>(static_cast<USHORT>(delta)) << 16);
+    if (delta && horizontalWheel) wheel |= SDL_HOST_WHEEL_HORIZONTAL;
+    sendPointer(wheel);
+}
+extern "C" void FhdHostedPointerRelease(BOOL exited) {
+    if (!foreground()) return;
+    physicalButtons = 0;
+    if (exited) physicalPointer = false;
+    sendPointer();
+}
 extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
     menuOnRelease = enabled != FALSE;
 }
@@ -572,6 +580,7 @@ extern "C" void FhdEndHostedInput() {
     mail = nullptr;
     overlay = Playing;
     menuOnRelease = false;
+    routedPointer = false;
     sentPad = false;
 }
 extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, SdlRumbleMailbox *vibration, void *coreWindow) {

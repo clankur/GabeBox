@@ -283,6 +283,17 @@ int main() {
     assert(box.input_pointer & SDL_HOST_POINTER_VISIBLE);
     event(PointerExited, (IUnknown *)&pointerArgs);
     assert(!(box.input_pointer & SDL_HOST_POINTER_VISIBLE));
+    FhdUseRoutedPointer();
+    const LONG beforeRoutedMouse = box.input_serial;
+    event(PointerMoved, (IUnknown *)&pointerArgs);
+    assert(box.input_serial == beforeRoutedMouse);
+    FhdHostedPointerUpdate(.25, .75, SDL_HOST_POINTER_RIGHT, 120, TRUE);
+    assert((box.input_pointer & SDL_HOST_POINTER_MAX) == 1024);
+    assert(box.input_pointer & SDL_HOST_POINTER_VISIBLE);
+    assert(box.input_pointer & SDL_HOST_POINTER_RIGHT);
+    assert((SHORT)((UINT)box.input_keys >> 16) == 120);
+    FhdHostedPointerRelease(TRUE);
+    assert(!(box.input_pointer & (SDL_HOST_POINTER_VISIBLE | SDL_HOST_POINTER_BUTTONS)));
     state = VK_F10;
     event(KeyDown, (IUnknown *)&arg);
     assert(FhdPollHostedInput(&box, &fakeWindow) == 1);
