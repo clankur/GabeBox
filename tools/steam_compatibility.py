@@ -11,7 +11,6 @@ from pathlib import Path, PureWindowsPath
 import re
 import struct
 import subprocess
-import sys
 from tempfile import TemporaryDirectory
 
 

@@ -107,7 +107,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
                 if not profile:
                     continue
                 artifact, digest = profile
-                data = load_sdl(Path(artifact), app_id)
+                data = load_sdl_artifact(Path(artifact), app_id)
                 if hashlib.sha256(data).hexdigest() != digest:
                     raise ValueError(f"SDL runtime differs from its pinned Windows build for {app_id}.")
                 target = staged

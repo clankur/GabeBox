@@ -143,18 +143,29 @@ class BigPicturePackageTests(unittest.TestCase):
         pin["manifest_sha256"] = hashlib.sha256(self.manifest.read_bytes()).hexdigest()
         release.write_text(json.dumps(pin))
 
+        sdl_artifact = self.work / "dwarf-sdl"
+        sdl_artifact.mkdir()
+        sdl = b"SDL fixture"
+        license_text = b"SDL license fixture"
+        (sdl_artifact / "LICENSE.txt").write_bytes(license_text)
+
         args = (base, host, self.layout, "1.0.230.1", self.cache, session)
         with patch.object(library_builder, "VERIFIED_BASES", {hashlib.sha256(base.read_bytes()).hexdigest(): "1.0.230.0"}), \
                 patch.object(stage_webview, "SDK_FILES", {name: host_pins[name] for name in stage_webview.SDK_FILES}), \
                 patch.object(stage_glyphs, "PUBLIC_SHA256", pins["public_all"]), \
-                patch.object(bundle_big_picture, "URL_LIST_SHA256", hashlib.sha256(urls).hexdigest()):
+                patch.object(bundle_big_picture, "URL_LIST_SHA256", hashlib.sha256(urls).hexdigest()), \
+                patch.object(library_builder, "load_sdl_artifact", return_value=sdl) as load_sdl:
             before = set(self.work.iterdir())
             with self.assertRaisesRegex(ValueError, "artifact checksums"):
                 library_builder.prepare_layout(*args, "0" * 64)
             self.assertEqual(set(self.work.iterdir()), before)
             library_builder.prepare_layout(*args, hashlib.sha256(sums).hexdigest(), library_inventory=True,
+                                           dwarf_sdl=(sdl_artifact, hashlib.sha256(sdl).hexdigest()),
                                            surfaceless_profiles=["1145360=10929685"])
 
+        load_sdl.assert_called_once_with(sdl_artifact, 975370)
+        self.assertEqual((self.layout / "DwarfRuntime/SDL2.dll").read_bytes(), sdl)
+        self.assertEqual((self.layout / "DwarfRuntime/LICENSE.SDL2").read_bytes(), license_text)
         result = ElementTree.parse(self.layout / "AppxManifest.xml")
         identity = result.find("{*}Identity")
         self.assertEqual(identity.get("Name"), "XboxPortabilityProbe.ChildProcess.SteamCore")

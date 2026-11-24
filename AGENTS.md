@@ -36,7 +36,7 @@ Keep core Python commands runnable with the standard library. For a standalone r
 | Frame rate, pacing, or GPU transport | Collect native frame timestamps with the observer when the package enables them. Analyze a settled gameplay sample with `python3 -m tools.measure --require-gpu-60`. [Capture and measurement](docs/XBOX-DIAGNOSTICS.md#collect-and-measure) |
 | Library coverage | Enable `python3 -m build_tools.prepare_big_picture_library --library-inventory` and read the exported title list with `python3 -m tools.xbox_deploy report --inventory`. Compare it with build-matched play evidence using the checks below. [Profile packager](build_tools/prepare_big_picture_library.py) · [Launch verification](docs/GAME-LAUNCH.md#verification) |
 
-For local launch and packaging regressions, use `python3 -m unittest discover -s tests` and `node --test tests/*.test.js tests/big-picture-webview/*.test.js` as applicable. See the [launch test workflow](.github/workflows/steam-launch-tests.yml) for native checks.
+For Python changes, run `uv run --locked ruff check` and `uv run --locked python -m pytest`. Use `python3 -m unittest discover -s tests` when working with only the standard library. For JavaScript changes, run `node --test tests/*.test.js tests/big-picture-webview/*.test.js` as applicable. See the [launch test workflow](.github/workflows/steam-launch-tests.yml) for native checks.
 
 ## Verify before counting coverage
 

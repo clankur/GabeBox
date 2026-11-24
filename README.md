@@ -36,7 +36,7 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 
 Use an **Xbox Series X in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
-Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands. If you already use uv, you can run the same command with `uv run python`. [uv script runner](https://docs.astral.sh/uv/guides/scripts/)
+Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands.
 
 1. Set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home, usually `https://<xbox-ip>:11443`. [Microsoft’s Xbox Device Portal example](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/remote-debugging-xbox#attach-devtools-remotely-to-an-xbox-webview2-winui-2-uwp-app)
 2. Run `python3 -m tools.xbox_deploy fingerprint`. Compare the SHA-256 fingerprint with the Portal certificate, then set `XBOX_PORTAL_CERT_SHA256` to the verified fingerprint.
@@ -98,10 +98,15 @@ The builder verifies Valve’s [pinned client manifest](runtime/steam/pins/steam
 
 GabeBox follows Proton’s component-based structure. `runtime/` contains the reusable Steam host, Win32 adapters, SDL integration, and native presenter. `profiles/` selects compatibility behavior for specific Steam builds. `ui/` contains sign-in and Big Picture, `build_tools/` assembles packages, and `probe/` and `tools/` contain diagnostics. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1) · [Contributor guidance](AGENTS.md)
 
+Use uv to run the same locked Python lint and test tools as CI. [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
+
 ```sh
-python3 -m unittest discover -s tests
+uv run --locked ruff check
+uv run --locked python -m pytest
 node --test tests/*.test.js tests/big-picture-webview/*.test.js
 ```
+
+The Python commands under Setup and Build use only the standard library. You can also run the Python tests with `python3 -m unittest discover -s tests`.
 
 When reporting a game issue, include the Steam AppID and build, GabeBox package version, Xbox model and OS build, and the first visible or logged failure. The [diagnostic guide](docs/XBOX-DIAGNOSTICS.md) covers launch, input, render, and frame traces. The [research archive](analysis/steam-client-audit.md) records how the original Steam client was inspected and adapted.
 
