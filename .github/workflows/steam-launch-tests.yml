@@ -2,9 +2,9 @@ name: Test Steam game launch
 
 on:
   push:
-    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'xbox-deploy.py', '.github/workflows/steam-launch-tests.yml']
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', '.github/workflows/steam-launch-tests.yml']
   pull_request:
-    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'xbox-deploy.py', '.github/workflows/steam-launch-tests.yml']
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', '.github/workflows/steam-launch-tests.yml']
 
 permissions:
   contents: read

@@ -18,9 +18,9 @@ gh run download "$run_id" --name xbox-probe-windows-sdk --dir "$trial_dir/probe"
 gh run download "$run_id" --name xbox-probe-fresh-identity --dir "$trial_dir/control"
 (cd "$trial_dir/probe" && shasum -a 256 -c SHA256SUMS)
 (cd "$trial_dir/control" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/control/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/probe/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
 ```
 
@@ -31,8 +31,8 @@ The control installs as **Packaged process startup control** beside the main pac
 For another run of the installed build, use `probe` without uploading again. Omit `--control` to launch **Packaged process test**. Use `--manual-launch` only when reproducing a TV-only launch symptom or recovering from a remote launch error. Start the watcher before launching from Dev Home so it can record the existing file as its baseline.
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" probe --control --timeout 30
-python3 xbox-deploy.py --env-file "$xbox_env" probe --version 1.0.9.0 --timeout 30
+python3 -m tools.xbox_deploy --env-file "$xbox_env" probe --control --timeout 30
+python3 -m tools.xbox_deploy --env-file "$xbox_env" probe --version 1.0.9.0 --timeout 30
 ```
 
 Substitute the installed version in those commands. `--manual-launch` also works with `deploy --test-probe`. The HTML report includes a timestamp as `run_id` so two runs with the same result still produce distinct reports.
@@ -44,9 +44,9 @@ Use the signed `xbox-probe-lifetime` and `xbox-probe-fresh-identity` artifacts f
 ```sh
 gh run download "$run_id" --name xbox-probe-lifetime --dir "$trial_dir/lifetime"
 (cd "$trial_dir/lifetime" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/lifetime/PackagedProcessProbe-x64.appx"
-python3 xbox-deploy.py --env-file "$xbox_env" lifetime --version 1.0.12.0 --dwell 15 --timeout 25
+python3 -m tools.xbox_deploy --env-file "$xbox_env" lifetime --version 1.0.12.0 --dwell 15 --timeout 25
 ```
 
 Install the matching control using the earlier command. The CLI starts the lifetime app, waits for a pending helper request in `lifetime-report.txt`, then switches to the control and requires its fresh visibility report. After the dwell, it checks that the transaction is still pending and requests a return to the lifetime app. The CLI uploads the control’s current run ID to its LocalState. That app requests the lifetime package’s registered URI and records a diagnostic in `protocol-return.txt` if the return fails. Use `--portal-return` to reproduce Device Portal’s app launcher path. The finish path writes a new challenge to the original pipe handle. The signed helper encodes the challenge and its startup token in its exit code, which the parent verifies on the original process handle. The CLI also compares the two reports’ run, parent, helper, and channel identifiers. Its process inventory checks show whether the original PIDs were listed before switching, at the control’s first visible report, and before returning. Capture the complete CLI output with the build run and dwell duration.
@@ -95,6 +95,6 @@ The last available checkpoint shows how far execution got. The HTML also display
 - `1.0.11.0` opened a pending pipe transaction, and the control reported foreground visibility. The Xbox process inventory still listed both original PIDs after 15 seconds away. The Portal’s app launcher returned with new parent, helper, and channel IDs on both trials. Its Resume action returned HTTP 500 with `Element not found` in a separate trial. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44858820731)
 - `1.0.12.0` used the control’s registered-protocol return to complete the same pipe transaction after 15 and 25 seconds away. Runs `1795230363213` and `1795230419817` preserved the run, parent, helper, and channel IDs and reported both `observed_suspending=yes` and `observed_resuming=yes`. The challenge-derived helper exit codes were `0x5100C1E8` and `0x5100EEEF`. The main package from the same build also returned `0x000051A7` and `ipc=success`. [Build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44859225111)
 
-Run `python3 xbox-deploy.py probe --version 1.0.10.0 --require-ipc` to repeat the hardware check. Requiring IPC makes the CLI wait for a terminal pipe result even if a partial read contains the process-only result. That command checks the immediate exchange in one package. Use the lifetime command above to test what happens across a foreground switch.
+Run `python3 -m tools.xbox_deploy probe --version 1.0.10.0 --require-ipc` to repeat the hardware check. Requiring IPC makes the CLI wait for a terminal pipe result even if a partial read contains the process-only result. That command checks the immediate exchange in one package. Use the lifetime command above to test what happens across a foreground switch.
 
 If the exact failure in the old executable host needs to be identified, debug the archived `1.0.5.0` package from Visual Studio on the Series X. Break first at `wWinMain`, then at the activation callback and `RunDiagnostic`. Record the first HRESULT from the runtime or storage call and preserve the exact tested APPX. [Debug an installed UWP package](https://learn.microsoft.com/en-us/visualstudio/debugger/debug-installed-app-package?view=visualstudio)

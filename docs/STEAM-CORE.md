@@ -17,10 +17,10 @@ gh run download "$run_id" --name xbox-steam-core-template --dir "$trial_dir/temp
 (cd "$trial_dir/template" && shasum -a 256 -c SHA256SUMS)
 template="$trial_dir/template/PackagedProcessProbe-x64.appx"
 
-python3 xbox-deploy.py --env-file "$xbox_env" deploy "$template" --test-probe --timeout 30
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy "$template" --test-probe --timeout 30
 python3 -m build_tools.prepare_steam_core "$template" "$trial_dir/control" --version 1.0.20.0
 bash build_tools/package.sh --layout "$trial_dir/control" "$trial_dir/control-package"
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/control-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
 
 curl -fsSL \
@@ -30,9 +30,9 @@ python3 -m build_tools.prepare_steam_core "$template" "$trial_dir/core" --versio
   --valve-archive "$trial_dir/bins_win64.zip" --objdump "$objdump_path"
 bash build_tools/package.sh --layout "$trial_dir/core" "$trial_dir/core-package"
 (cd "$trial_dir/core-package" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/core-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 30
-python3 xbox-deploy.py --env-file "$xbox_env" probe --steam-core --version 1.0.21.0 --timeout 30
+python3 -m tools.xbox_deploy --env-file "$xbox_env" probe --steam-core --version 1.0.21.0 --timeout 30
 ```
 
 Choose package versions above the template and anything already installed under the Steam Core identity. The terminal line `status=steam-core-complete` means the CLI collected the experiment. Check `control_load`, `steam_core`, and `create_interface` to determine what loaded. The system import inventory is generated locally from the three unchanged PE files. The probe uses the process’s normal DLL loader and resolves system exports by name or ordinal after the primary load attempt. It records system-module errors separately from missing exports. [Packaged library loading](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-loadpackagedlibrary) · [GetProcAddress](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getprocaddress)
@@ -46,9 +46,9 @@ python3 -m build_tools.prepare_steam_core "$template" "$trial_dir/unicode" --ver
   --valve-archive "$trial_dir/bins_win64.zip" --objdump "$objdump_path" --unicode-keyboard
 bash build_tools/package.sh --layout "$trial_dir/unicode" "$trial_dir/unicode-package"
 (cd "$trial_dir/unicode-package" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/unicode-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 40
-python3 xbox-deploy.py --env-file "$xbox_env" probe --steam-core --version 1.0.26.0 --timeout 40
+python3 -m tools.xbox_deploy --env-file "$xbox_env" probe --steam-core --version 1.0.26.0 --timeout 40
 ```
 
 The opt-in flag changes one byte of the local, hash-verified `steamclient64.dll` so that the verified keyboard call sites bind to `MapVirtualKeyExW`. The script checks that the resulting import inventory differs only at that symbol. Both supporting DLLs retain their original bytes. The original Valve archive remains intact. The derived DLL’s original Authenticode signature no longer validates. The local APPX uses the same Developer Mode package signing and deployment flow as the controls, and the CI artifact still contains only the owned template.
@@ -73,7 +73,7 @@ python3 -m build_tools.prepare_steam_core "$template" "$trial_dir/signin" --vers
   --unicode-keyboard --steam-sign-in
 bash build_tools/package.sh --layout "$trial_dir/signin" "$trial_dir/signin-package"
 (cd "$trial_dir/signin-package" && shasum -a 256 -c SHA256SUMS)
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/signin-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 245
 ```
 
@@ -96,7 +96,7 @@ Game rows load Steam's public small capsule artwork as they approach the viewpor
 Read the library's aggregate artwork counters after the visible rows have loaded. `art_run_id` identifies the app process, and `art_active=0` marks a settled batch. A fresh app restart lets you compare `art_network_requests` with `art_disk_hits` on the same library viewport.
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.72.0 --artwork
+python3 -m tools.xbox_deploy --env-file "$xbox_env" report --version 1.0.72.0 --artwork
 ```
 
 On Series X, the `1.0.72.0` library rendered 134 games. The opening viewport displayed eight capsules from eight network requests, with no more than three artwork loads active at once. After a CLI restart, the same eight images came from disk with zero artwork requests. Both starts restored the saved Steam session. [SDK template](https://github.com/clankur/steam-xbox-devmode/actions/runs/44872841753)
@@ -106,7 +106,7 @@ On Series X, version `1.0.70.0` restored the saved Steam session after the CLI u
 Read an existing report without restarting the app or interrupting the session.
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.38.0
+python3 -m tools.xbox_deploy --env-file "$xbox_env" report --version 1.0.38.0
 ```
 
 ## Direct Steam Cloud research
@@ -121,14 +121,14 @@ The adapter uses SteamClient023's generic getter and the image-pinned unified-me
 
 The `1.0.223.0` Series X build authenticated with its saved Steam session and downloaded and verified 67 Slay the Spire files. A `1.0.224.0` run placed all 67 files in an isolated copy of the same save-folder layout and verified that an existing test file survived and was backed up. One earlier transfer returned an HTTP error and a fresh run succeeded. Both fixtures leave the real game folders untouched. [Xbox SDK build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44925402014)
 
-The app maps Slay the Spire's cloud paths to the verified install's `preferences` and `saves` directories. It prepares the new directories before moving any active files. If a restore is interrupted, the launcher uses the journal to recover the previous files before starting the game. Use `xbox-deploy.py report --version VERSION --steam-cloud` to read the latest status. For a one-time verification package, add an empty `steam-cloud-preview.txt` to the local layout before signing. It fetches and verifies the files and restores them into temporary app storage. [Mega Crit save folders](https://steamcommunity.com/app/646570/discussions/0/1743353164094689674/#c1771511442697212245)
+The app maps Slay the Spire's cloud paths to the verified install's `preferences` and `saves` directories. It prepares the new directories before moving any active files. If a restore is interrupted, the launcher uses the journal to recover the previous files before starting the game. Use `python3 -m tools.xbox_deploy report --version VERSION --steam-cloud` to read the latest status. For a one-time verification package, add an empty `steam-cloud-preview.txt` to the local layout before signing. It fetches and verifies the files and restores them into temporary app storage. [Mega Crit save folders](https://steamcommunity.com/app/646570/discussions/0/1743353164094689674/#c1771511442697212245)
 
 ## Test an owned game download
 
 Deploy a download-enabled build through the same CLI and approve Steam Guard. In the library, select a small owned game and choose **Download**. The client rechecks the account, app type and Steam license. It submits the request to Steam’s app manager using the library registered at `LocalState/SteamLibrary`.
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.40.0 --download
+python3 -m tools.xbox_deploy --env-file "$xbox_env" report --version 1.0.40.0 --download
 ```
 
 The app writes `steam-download-report.txt` when Steam changes state. `queued` records acceptance by Steam. `downloading` and `staging` reflect the app manager’s active title and install flags. `installed` requires Steam’s fully installed state and a reported install directory inside the app’s library. After an unsuccessful run, keep the last download report and check whether the library folder or any files appeared in Device Portal. The report records numeric state and error codes without exposing the selected title or account. [Steam depots](https://partner.steamgames.com/doc/store/application/depots) · [Device Portal file listing](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#get-files)
@@ -142,7 +142,7 @@ When the selected title is paused, pressing **Download** submits the normal inst
 The CLI can inspect the title’s manifest and optionally the header of its Windows executable. It reads only the app's Steam library and samples the executable in memory without starting it. A PE machine type identifies the executable architecture. It does not validate the game’s dependencies or its platform support. [Microsoft PE format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" inspect-game --version 1.0.46.0 \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" inspect-game --version 1.0.46.0 \
   --app-id 646570 --executable jre/bin/javaw.exe
 ```
 
@@ -161,15 +161,15 @@ python3 -m build_tools.prepare_steam_core "$template" "$trial_dir/launch" --vers
   --valve-archive "$trial_dir/bins_win64.zip" --objdump "$objdump_path" \
   --unicode-keyboard --steam-sign-in --launch-app-id 105600
 bash build_tools/package.sh --layout "$trial_dir/launch" "$trial_dir/launch-package"
-python3 xbox-deploy.py --env-file "$xbox_env" deploy \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" deploy \
   "$trial_dir/launch-package/PackagedProcessProbe-x64.appx" --test-probe --timeout 310
-python3 xbox-deploy.py --env-file "$xbox_env" report --version 1.0.44.0
+python3 -m tools.xbox_deploy --env-file "$xbox_env" report --version 1.0.44.0
 ```
 
 Add `--repeat-launch` when preparing an explicit `--launch-app-id` test package to run the same licensed launch check after each fresh app start. Once the current test ends, restart the installed probe and wait for a new report through Device Portal. A saved Steam session allows the test to repeat without a new QR approval. [Device Portal app controls](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#stop-a-modern-app)
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" probe --steam-core --version 1.0.68.0 --restart --timeout 150
+python3 -m tools.xbox_deploy --env-file "$xbox_env" probe --steam-core --version 1.0.68.0 --restart --timeout 150
 ```
 
 Add `--install-before-launch` to a local `--launch-app-id` package to try the normal Steam download when the game has no complete manifest in the Xbox app library. The `report --download` command follows the install, and the launch report records its final checkpoint as `steam_launch_install`. A completed install continues to Play through Steam’s usual license and prerequisite checks. Keep the app in the foreground and allow enough CLI wait time for the selected download.
@@ -182,7 +182,7 @@ Use the optional `--library-inventory` flag when preparing a local sign-in test 
 
 The `1.0.76.0` Series X run provided 134 games for comparison. Dwarf Fortress was selected for its x64 Windows requirement and 500 MB published storage minimum. Package `1.0.78.0` submitted its install, then Steam paused with state `514`, update result `11`, and no transfer or installed executable. The app measured 29,909,069,824 bytes available. The temporary console inventory was removed after candidate selection. [Windows SDK build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44874202315) · [Dwarf Fortress system requirements](https://store.steampowered.com/app/975370/Dwarf_Fortress/#app_sysreq)
 
-For a local test of the Microsoft x64 desktop C++ runtime, download the official `Microsoft.VCLibs.x64.14.00.Desktop.appx`. Pass it to `prepare-steam-core.py --vclibs-framework` and supply the same original signed APPX to `xbox-deploy.py deploy --dependency`. The prepare step checks the framework identity, architecture and DLL filenames. Xbox validates the dependency during installation. [Microsoft’s deployment instructions and download](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
+For a local test of the Microsoft x64 desktop C++ runtime, download the official `Microsoft.VCLibs.x64.14.00.Desktop.appx`. Pass it to `prepare-steam-core.py --vclibs-framework` and supply the same original signed APPX to `python3 -m tools.xbox_deploy deploy --dependency`. The prepare step checks the framework identity, architecture and DLL filenames. Xbox validates the dependency during installation. [Microsoft’s deployment instructions and download](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
 
 The console accepted version `1.0.84.0` with framework version `14.0.33321.0`. Steam restored the saved session, reused the installed game and accepted Play. The captured process exited with `0xC0000139` (entry point missing) before a ready window. The change in error narrowed the loader investigation. [Microsoft’s NTSTATUS reference](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55)
 
@@ -199,7 +199,7 @@ Use the same SDL2 source workflow for games with this loader dependency. It prod
 Prepare the selected game's signed diagnostic with `--repeat-launch` and run it with its stock DLL first. Then pass the extracted workflow artifact to the same CLI. For example, the following command runs the Stardew profile on an already installed diagnostic package.
 
 ```sh
-python3 xbox-deploy.py --env-file "$xbox_env" sdl-trial \
+python3 -m tools.xbox_deploy --env-file "$xbox_env" sdl-trial \
   --version "$version" --app-id 413150 --artifact "$sdl_artifact" --backup-dir "$trial_dir"
 ```
 

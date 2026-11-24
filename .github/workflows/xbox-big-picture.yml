@@ -16,7 +16,6 @@ on:
       - 'ui/big-picture-webview/**'
       - 'ui/signin/**'
       - 'probe/big-picture-webview/**'
-      - 'xbox-deploy.py'
       - 'tests/big-picture-launch.test.js'
       - 'tests/test_big_picture_*.py'
   pull_request:
@@ -33,7 +32,6 @@ on:
       - 'ui/big-picture-webview/**'
       - 'ui/signin/**'
       - 'probe/big-picture-webview/**'
-      - 'xbox-deploy.py'
       - 'tests/big-picture-launch.test.js'
       - 'tests/test_big_picture_*.py'
 

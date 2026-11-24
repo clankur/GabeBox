@@ -1,9 +1,6 @@
-import runpy
 import unittest
-from pathlib import Path
 
-
-summary = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'xbox-deploy.py'))['slay_console_summary']
+from tools.xbox_deploy import slay_console_summary as summary
 
 
 class SlayConsoleTests(unittest.TestCase):

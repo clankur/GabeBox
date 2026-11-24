@@ -54,7 +54,7 @@ SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SH
 def load_settings(config_path=None):
     settings = {}
     if config_path is None:
-        config_path = Path(__file__).with_name('.env')
+        config_path = Path(__file__).resolve().parents[1] / '.env'
     elif not config_path.is_file():
         raise ValueError(f'Environment file not found: {config_path}')
     if config_path.is_file():
@@ -101,7 +101,9 @@ class DevicePortal:
             if not hmac.compare_digest(actual, self.fingerprint):
                 raise ValueError(f'Xbox portal certificate changed. Observed SHA-256: {actual}')
 
-            request_headers = dict(headers or {}, Authorization=self.authorization)
+            request_headers = dict(headers or {})
+            if self.authorization:
+                request_headers['Authorization'] = self.authorization
             if self.csrf_token:
                 request_headers['Cookie'] = f'CSRF-Token={self.csrf_token}'
             if method == 'GET':
@@ -116,7 +118,9 @@ class DevicePortal:
                     if token is not None:
                         self.csrf_token = token.value
             if response.status == 401:
-                raise ValueError('Xbox Device Portal rejected the username or password.')
+                if self.authorization:
+                    raise ValueError('Xbox Device Portal rejected the username or password.')
+                raise ValueError('Xbox Device Portal requires authentication. Set XBOX_PORTAL_USERNAME.')
             accepted_statuses = (200, 202, 204) if method == 'POST' else (200, 204)
             if method == 'GET' and 'Range' in request_headers:
                 accepted_statuses += (206,)
@@ -1108,7 +1112,8 @@ def main():
     if not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
         raise ValueError('Set XBOX_PORTAL_CERT_SHA256 to the verified portal TLS fingerprint.')
     username = settings.get('XBOX_PORTAL_USERNAME', '')
-    if not username or ':' in username:
+    password = settings.get('XBOX_PORTAL_PASSWORD', '')
+    if ':' in username or (password and not username):
         raise ValueError('Set XBOX_PORTAL_USERNAME to your Device Portal username.')
 
     if args.command == 'deploy':
@@ -1135,12 +1140,12 @@ def main():
 
     if not hmac.compare_digest(portal.request(), fingerprint):
         raise ValueError('Xbox portal certificate does not match XBOX_PORTAL_CERT_SHA256.')
-    password = settings.get('XBOX_PORTAL_PASSWORD')
-    if not password:
-        if not sys.stdin.isatty():
-            raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
-        password = getpass.getpass('Xbox Device Portal password: ')
-    portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
+    if username:
+        if not password:
+            if not sys.stdin.isatty():
+                raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
+            password = getpass.getpass('Xbox Device Portal password: ')
+        portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
     if args.command == 'lifetime':
         run_lifetime(portal, args.version, args.dwell, args.timeout, args.portal_return)
         return

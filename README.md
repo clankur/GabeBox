@@ -36,14 +36,15 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 
 Use an **Xbox Series X in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
-Run the commands from the repository root. The [Device Portal CLI](xbox-deploy.py) lives there and reads the adjacent `.env` by default. If you use uv, replace `python3` with `uv run python` in the deployment, build, and test examples. For example, `uv run python xbox-deploy.py --help` lists the Device Portal commands. [uv script runner](https://docs.astral.sh/uv/guides/scripts/)
+Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands. If you already use uv, you can run the same command with `uv run python`. [uv script runner](https://docs.astral.sh/uv/guides/scripts/)
 
-1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to your Device Portal username.
-2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate shown by Device Portal, then set `XBOX_PORTAL_CERT_SHA256`. The CLI prompts for the Portal password.
-3. Deploy the signed APPX with its matching certificate. Open the installed app in Dev Home, approve the QR code with Steam Guard, and select **Install** or **Play** in your library.
+1. Set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home, usually `https://<xbox-ip>:11443`. [Microsoft’s Xbox Device Portal example](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/remote-debugging-xbox#attach-devtools-remotely-to-an-xbox-webview2-winui-2-uwp-app)
+2. Run `python3 -m tools.xbox_deploy fingerprint`. Compare the SHA-256 fingerprint with the Portal certificate, then set `XBOX_PORTAL_CERT_SHA256` to the verified fingerprint.
+3. If your Portal uses authentication, set `XBOX_PORTAL_USERNAME`. The CLI prompts for the password unless you supply `XBOX_PORTAL_PASSWORD`. For a Portal that accepts unauthenticated connections, leave both credential variables unset.
+4. Deploy the signed APPX with its matching certificate. Open the installed app in Dev Home, approve the QR code with Steam Guard, and select **Install** or **Play** in your library.
 
 ```sh
-python3 xbox-deploy.py deploy ./gabe-signed/PackagedProcessProbe-x64.appx \
+python3 -m tools.xbox_deploy deploy ./gabe-signed/PackagedProcessProbe-x64.appx \
   --certificate ./gabe-signed/PackagedProcessProbe.cer
 ```
 
@@ -103,3 +104,5 @@ node --test tests/*.test.js tests/big-picture-webview/*.test.js
 ```
 
 When reporting a game issue, include the Steam AppID and build, GabeBox package version, Xbox model and OS build, and the first visible or logged failure. The [diagnostic guide](docs/XBOX-DIAGNOSTICS.md) covers launch, input, render, and frame traces. The [research archive](analysis/steam-client-audit.md) records how the original Steam client was inspected and adapted.
+
+The standalone [Steam client emulation experiment](analysis/leaf-test/REPORT.md#reproduction) uses uv with its own dependency lockfile.

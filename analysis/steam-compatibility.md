@@ -50,7 +50,7 @@ Control `1.0.0.15` loaded the signed EOS library with its original imports and t
 Export the owned game list with `--library-inventory` on a signed test package and `report --inventory` after Steam sign-in. Supply the audits for the current game builds and a JSON array of actual play trials. Each trial supplies `id`, `build_id`, `target`, an `evidence` reference, and a `checks` object with the keys `gameplay`, `controller`, `audio`, `save-reload` and `return-to-library`. A check is true after it is observed. A download, process, title screen or import-only test leaves the game unverified.
 
 ```sh
-python3 xbox-deploy.py report --version "$app_version" --inventory > steam-library.json
+python3 -m tools.xbox_deploy report --version "$app_version" --inventory > steam-library.json
 python3 -m tools.steam_compatibility coverage steam-library.json --target "$console_and_runtime" \
   --audit hades-directx.json --audit hades-vulkan.json --evidence play-trials.json
 ```
@@ -84,10 +84,10 @@ The graphics control installs under a separate app identity. It links an origina
 bash probe/graphics-runtime-control/build.sh "$windows_app_lib" "$mesa_layout" \
   "$sdk_template" "$control_version" "$build_dir"
 bash build_tools/package.sh --layout --sign-child "$build_dir/package" "$signed_dir"
-python3 xbox-deploy.py deploy "$signed_dir/PackagedProcessProbe-x64.appx" --test-probe
+python3 -m tools.xbox_deploy deploy "$signed_dir/PackagedProcessProbe-x64.appx" --test-probe
 ```
 
-Use `xbox-deploy.py probe --graphics-control --version "$control_version"` to run another trial. In the draw control, exits `0x6101` through `0x6109` describe the first failed check, from the module source through pixel validation. In the load control, the high word `0x6201` through `0x6204` identifies zlib, Gallium, EGL or OpenGL and the low word carries its Win32 error. Both controls return `0x51A7` on their own success condition.
+Use `python3 -m tools.xbox_deploy probe --graphics-control --version "$control_version"` to run another trial. In the draw control, exits `0x6101` through `0x6109` describe the first failed check, from the module source through pixel validation. In the load control, the high word `0x6201` through `0x6204` identifies zlib, Gallium, EGL or OpenGL and the low word carries its Win32 error. Both controls return `0x51A7` on their own success condition.
 
 On Series X, control `1.0.0.4` loaded all four packaged libraries. Control `1.0.0.5` resolved static imports and created the EGL context, then reported `0x6106` when pbuffer creation failed. Control `1.0.0.6` used surfaceless EGL and an offscreen framebuffer. Its statically imported OpenGL calls cleared the framebuffer and read back the expected magenta pixel. Device Portal recorded child exit `0x51A7` and the separate IPC control passed. The draw was offscreen and verifies the desktop GL ABI and context on Xbox.
 

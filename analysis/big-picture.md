@@ -30,14 +30,14 @@ Download `xbox-big-picture-webview-x64` and `xbox-big-picture-template` from thi
 ```sh
 python3 -m build_tools.prepare_big_picture /path/to/BigPictureTemplate-x64.appx ./webview-layout --webview-host /path/to/xbox-big-picture-webview-x64 --version 1.0.0.3
 bash build_tools/package.sh --layout ./webview-layout ./webview-signed
-python3 xbox-deploy.py deploy ./webview-signed/SteamBigPicture-x64.appx --certificate ./webview-signed/SteamBigPicture.cer
+python3 -m tools.xbox_deploy deploy ./webview-signed/SteamBigPicture-x64.appx --certificate ./webview-signed/SteamBigPicture.cer
 ```
 
 Open **Steam Big Picture** in Dev Home, then read the two reports. The first checks WinRT activation. The second records navigation, script startup and display of the gamepad window.
 
 ```sh
-python3 xbox-deploy.py report --big-picture-activation --version 1.0.0.3
-python3 xbox-deploy.py report --big-picture-webview --version 1.0.0.3
+python3 -m tools.xbox_deploy report --big-picture-activation --version 1.0.0.3
+python3 -m tools.xbox_deploy report --big-picture-webview --version 1.0.0.3
 ```
 
 ### Build the compatibility layer for the signed-in FHD app
@@ -64,8 +64,8 @@ python3 -m build_tools.prepare_big_picture_library /path/to/regular/PackagedProc
   --presenter-checksum ddaea77306d6ff8bece0c7af6067bdc4aeaae5b856b89c735194f3a820a4d1f4 \
   --archive-cache /path/to/valve-archives
 bash build_tools/package.sh --layout ./integrated-layout ./integrated-signed
-python3 xbox-deploy.py deploy ./integrated-signed/PackagedProcessProbe-x64.appx --certificate ./integrated-signed/PackagedProcessProbe.cer
-python3 xbox-deploy.py report --steam-core-webview --version 1.0.230.24
+python3 -m tools.xbox_deploy deploy ./integrated-signed/PackagedProcessProbe-x64.appx --certificate ./integrated-signed/PackagedProcessProbe.cer
+python3 -m tools.xbox_deploy report --steam-core-webview --version 1.0.230.24
 ```
 
 The integrated package uses the existing Steam Core identity and its installed games. Open Steam Core in Xbox Dev Home, then run the report command. Each cold start produces a new `run_id`. Save the original Xbox Device Portal screenshot at the Library and retain the run ID with it. During a game, `game_frame_sample` and `game_frame_latest_sample` record the first and latest complete foreground intervals. The Xbox media sink can deliver frame notifications faster than the TV refreshes on this build. For a picture of the decoded game video, place an empty `big-picture-capture-game.request` in the package’s `LocalState` folder while the game is in front. Match the new `big-picture-game-video.png` to the same run, AppID and `game_frame_media_capture` receipt. The TV and video-element captures measure different stages. [Verification criteria and results](big-picture-reliability.md)
@@ -123,11 +123,11 @@ The signed game presenter draws the running game's SDL frames into a 1920×1080 
 After configuring Device Portal, deploy and launch the signed package. [Device Portal setup](../README.md#setup)
 
 ```sh
-python3 xbox-deploy.py deploy ./big-picture-signed/SteamBigPicture-x64.appx --certificate ./big-picture-signed/SteamBigPicture.cer --test-probe --timeout 60
-python3 xbox-deploy.py report --big-picture --version 1.0.0.0
+python3 -m tools.xbox_deploy deploy ./big-picture-signed/SteamBigPicture-x64.appx --certificate ./big-picture-signed/SteamBigPicture.cer --test-probe --timeout 60
+python3 -m tools.xbox_deploy report --big-picture --version 1.0.0.0
 ```
 
-The package opens a minimal packaged start page to activate the native launcher through the same Windows Web Application host that ran on the Series X in earlier tests. The launcher starts `ValveClient\steam.exe -gamepadui` with `ValveClient` as its working directory. It records the result in `LocalState/big-picture-report.txt`. Use `python3 xbox-deploy.py probe --big-picture --restart --timeout 60` for a fresh run. [Xbox activation history](../probe/DEVELOPMENT.md#observed-baseline)
+The package opens a minimal packaged start page to activate the native launcher through the same Windows Web Application host that ran on the Series X in earlier tests. The launcher starts `ValveClient\steam.exe -gamepadui` with `ValveClient` as its working directory. It records the result in `LocalState/big-picture-report.txt`. Use `python3 -m tools.xbox_deploy probe --big-picture --restart --timeout 60` for a fresh run. [Xbox activation history](../probe/DEVELOPMENT.md#observed-baseline)
 
 | Observation | What it establishes |
 | --- | --- |

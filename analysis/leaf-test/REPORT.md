@@ -12,7 +12,7 @@ This experiment establishes behavior for the tested inputs to one public utility
 
 ## Reproduction
 
-Use the Windows `bins_win64` archive pinned in the [release inventory](../../runtime/steam/pins/valve-release.json). Install Python packages `unicorn==2.1.4` and `pefile` in your test environment. Run these commands in this directory with Clang and a host C compiler available.
+Use the Windows `bins_win64` archive pinned in the [release inventory](../../runtime/steam/pins/valve-release.json). The emulation runner uses `uv` to install the versions recorded in the [script lockfile](emulate_vstdlib_leaf.py.lock). Run these commands in this directory with Clang and a host C compiler available.
 
 ```sh
 ./run-emulation.sh /path/to/the/pinned/bins_win64.zip

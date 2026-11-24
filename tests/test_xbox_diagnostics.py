@@ -1,6 +1,5 @@
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
-import importlib.util
 import io
 import json
 from pathlib import Path
@@ -11,10 +10,9 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from tools import xbox_diagnostics as diagnostics
+from tools import xbox_deploy as cli, xbox_diagnostics as diagnostics
 
 
-ROOT = Path(__file__).resolve().parents[1]
 APP = {'PackageFullName': 'XboxPortabilityProbe.ChildProcess.SteamCore_1.2.3.4_x64__example'}
 EPOCH_MS = 1_700_000_000_000
 APP_ID = 42
@@ -730,9 +728,6 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(records, ['asset shell-request-enter'])
 
     def test_export_game_inputs_publishes_only_after_hash_and_manifest_checks(self):
-        spec = importlib.util.spec_from_file_location('xbox_deploy_cli', ROOT / 'xbox-deploy.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         manifest = (b'"AppState" { "appid" "42" "buildid" "123" "StateFlags" "4" '
                     b""" "installdir" "Example's Game" "InstalledDepots" { "12" { "buildid" "456" } } }""")
         payload = b'The user-owned fixture payload' * 2048
@@ -757,11 +752,11 @@ class ObserverTests(unittest.TestCase):
             profile.write_text(json.dumps({'123': [{'path': 'x64/game.exe', 'size': len(payload),
                                                     'sha256': hashlib.sha256(payload).hexdigest()}]}))
             output = root / 'good'
-            inputs = (APP, APP_ID, 'DevelopmentFiles', module.DEVELOPER_STEAMAPPS_PATH, manifest, profile)
+            inputs = (APP, APP_ID, 'DevelopmentFiles', cli.DEVELOPER_STEAMAPPS_PATH, manifest, profile)
             with redirect_stdout(io.StringIO()):
-                module.export_game_inputs(Portal(payload), *inputs, output)
+                cli.export_game_inputs(Portal(payload), *inputs, output)
             self.assertEqual((output / 'x64/game.exe').read_bytes(), payload)
-            self.assertEqual(requests[0][1]['path'], [module.DEVELOPER_STEAMAPPS_PATH + r"\common\Example's Game\x64"])
+            self.assertEqual(requests[0][1]['path'], [cli.DEVELOPER_STEAMAPPS_PATH + r"\common\Example's Game\x64"])
             self.assertTrue(all(method == 'GET' for method, _ in requests))
             for bad_portal, message in (
                 (Portal(payload[:-1]), 'Incomplete Xbox file'),
@@ -771,13 +766,10 @@ class ObserverTests(unittest.TestCase):
             ):
                 bad = root / 'bad'
                 with self.assertRaisesRegex(ValueError, message):
-                    module.export_game_inputs(bad_portal, *inputs, bad)
+                    cli.export_game_inputs(bad_portal, *inputs, bad)
                 self.assertFalse(bad.exists())
 
     def test_standard_cli_reuses_pinned_setup_and_get_only_requests(self):
-        spec = importlib.util.spec_from_file_location('xbox_deploy_cli', ROOT / 'xbox-deploy.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         launch = EPOCH_MS + 1
         fingerprint = '1' * 64
         requests = []
@@ -831,15 +823,15 @@ class ObserverTests(unittest.TestCase):
                     return 200, bmp()
                 return 200, b''
 
-        command = ['xbox-deploy.py', 'observe', '--version', '1.2.3.4', '--app-id', str(APP_ID),
+        command = ['xbox_deploy.py', 'observe', '--version', '1.2.3.4', '--app-id', str(APP_ID),
                    '--run-id', str(launch), '--frame-seconds', '0']
         settings = dict(XBOX_PORTAL_URL='https://xbox.invalid', XBOX_PORTAL_USERNAME='test_user',
                         XBOX_PORTAL_PASSWORD='test_secret', XBOX_PORTAL_CERT_SHA256=fingerprint)
         output, errors = io.StringIO(), io.StringIO()
-        with (patch.object(module, 'DevicePortal', Portal),
-              patch.object(module, 'load_settings', return_value=settings),
+        with (patch.object(cli, 'DevicePortal', Portal),
+              patch.object(cli, 'load_settings', return_value=settings),
               patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
-            module.main()
+            cli.main()
         self.assertEqual(json.loads(output.getvalue())['outcome'], 'frame-observed')
         self.assertEqual(errors.getvalue().strip(), 'attaching-to-launch')
         self.assertEqual(requests[0], None)
@@ -848,12 +840,12 @@ class ObserverTests(unittest.TestCase):
 
         requests.clear()
         output, errors = io.StringIO(), io.StringIO()
-        command = ['xbox-deploy.py', 'inspect-input', '--version', '1.2.3.4', '--app-id', str(APP_ID),
+        command = ['xbox_deploy.py', 'inspect-input', '--version', '1.2.3.4', '--app-id', str(APP_ID),
                    '--run-id', str(launch)]
-        with (patch.object(module, 'DevicePortal', Portal),
-              patch.object(module, 'load_settings', return_value=settings),
+        with (patch.object(cli, 'DevicePortal', Portal),
+              patch.object(cli, 'load_settings', return_value=settings),
               patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
-            module.main()
+            cli.main()
         result = json.loads(output.getvalue())
         self.assertEqual(requests, [None] + ['GET'] * 7)
         self.assertEqual(result['activity']['gamepad'], 'insufficient-samples')
@@ -867,12 +859,12 @@ class ObserverTests(unittest.TestCase):
 
         requests.clear()
         output, errors = io.StringIO(), io.StringIO()
-        command = ['xbox-deploy.py', 'inspect-loader', '--version', '1.2.3.4', '--app-id', str(APP_ID),
+        command = ['xbox_deploy.py', 'inspect-loader', '--version', '1.2.3.4', '--app-id', str(APP_ID),
                    '--run-id', str(launch)]
-        with (patch.object(module, 'DevicePortal', Portal),
-              patch.object(module, 'load_settings', return_value=settings),
+        with (patch.object(cli, 'DevicePortal', Portal),
+              patch.object(cli, 'load_settings', return_value=settings),
               patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
-            module.main()
+            cli.main()
         self.assertEqual(requests, [None, 'GET', 'GET', 'GET', 'GET', 'GET', 'GET'])
         self.assertEqual(json.loads(output.getvalue())['loader_trace']['events']['boot-wait']['count'], 1)
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
@@ -880,12 +872,12 @@ class ObserverTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / 'render'
-            command = ['xbox-deploy.py', 'inspect-render', '--version', '1.2.3.4', '--app-id', str(APP_ID),
+            command = ['xbox_deploy.py', 'inspect-render', '--version', '1.2.3.4', '--app-id', str(APP_ID),
                        '--run-id', str(launch), '--output', str(destination)]
-            with (patch.object(module, 'DevicePortal', Portal),
-                  patch.object(module, 'load_settings', return_value=settings),
+            with (patch.object(cli, 'DevicePortal', Portal),
+                  patch.object(cli, 'load_settings', return_value=settings),
                   patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
-                module.main()
+                cli.main()
             result = json.loads(output.getvalue())
             self.assertEqual(result['gpu_mailbox']['state'], 'published')
             self.assertEqual(result['gpu_mailbox']['producer_sequence'], 25)
@@ -897,9 +889,6 @@ class ObserverTests(unittest.TestCase):
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
 
     def test_host_input_sampling_distinguishes_activity_pending_ack_and_menu(self):
-        spec = importlib.util.spec_from_file_location('xbox_deploy_cli', ROOT / 'xbox-deploy.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         launch = EPOCH_MS + 1
 
         class Portal:
@@ -943,7 +932,7 @@ class ObserverTests(unittest.TestCase):
 
         args = options(run_id=launch, seconds=1.5, panel_menu=True)
         fake = Portal()
-        result = module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        result = cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         self.assertEqual(result['activity'], {'gamepad': 'host-activity', 'pointer': 'host-idle'})
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
                          ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
@@ -955,15 +944,15 @@ class ObserverTests(unittest.TestCase):
         fake = Portal()
         fake.bad_range = True
         with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
-            module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+            cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         fake = Portal()
         fake.wrong_offset = True
         with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
-            module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+            cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         fake = Portal()
         fake.changes_launch = True
         with tempfile.TemporaryDirectory() as directory:
             args.output = Path(directory) / 'input'
             with self.assertRaisesRegex(ValueError, 'changed during input sampling'):
-                module.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+                cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
             self.assertFalse(args.output.exists())

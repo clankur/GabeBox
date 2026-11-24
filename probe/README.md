@@ -8,13 +8,13 @@ Version `1.0.10.0` also verifies a request and reply over one same-package named
 
 ## Test on a Series X in Developer Mode
 
-Copy `.env.example` to `.env` and set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username. Run `python3 xbox-deploy.py fingerprint`, compare it with the browser’s TLS certificate fingerprint for the portal, and set `XBOX_PORTAL_CERT_SHA256`. Python 3.9 or later prompts for the Device Portal password. For noninteractive use, set `XBOX_PORTAL_PASSWORD` in the Git-ignored `.env` and restrict it with `chmod 600 .env`.
+Configure the Device Portal HTTPS address and certificate fingerprint using the [setup guide](../README.md#setup). Supply a Portal username and password if your console has Portal authentication enabled.
 
 Download the `xbox-probe-windows-sdk` artifact for the commit you want to test and verify `SHA256SUMS`. Use the signed APPX from that artifact with the CLI.
 
 ```sh
-python3 xbox-deploy.py deploy /path/to/PackagedProcessProbe-x64.appx --test-probe
-python3 xbox-deploy.py probe --version 1.0.10.0 --require-ipc
+python3 -m tools.xbox_deploy deploy /path/to/PackagedProcessProbe-x64.appx --test-probe
+python3 -m tools.xbox_deploy probe --version 1.0.10.0 --require-ipc
 ```
 
 Use `--certificate path/to/publisher.cer` if the portal requests the package-signing certificate. The CLI verifies the installed version, launches the app, and waits for a fresh report. If needed, read `probe-report.txt` manually in Device Portal under **File explorer → LocalAppData → Packaged process test → LocalState**. [Device Portal app deployment API](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/device-portal-api-core#app-deployment)

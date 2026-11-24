@@ -5,7 +5,7 @@ Use the same Device Portal configuration and verified certificate pin as the dep
 ## Observe Big Picture startup
 
 ```sh
-python3 xbox-deploy.py observe --version "$version" --startup --output startup-run
+python3 -m tools.xbox_deploy observe --version "$version" --startup --output startup-run
 ```
 
 The observer waits for both the native sign-in run and the WebView run to change. The result includes the UI checkpoint, game count and startup timings when the package reports them. `setup-ready` records the setup surface. `gamepad-ready` records native gamepad readiness.
@@ -13,8 +13,8 @@ The observer waits for both the native sign-in run and the WebView run to change
 ## Inspect an active Steam install
 
 ```sh
-python3 xbox-deploy.py report --version "$version" --download
-python3 xbox-deploy.py inspect-game --version "$version" --app-id "$steam_app_id"
+python3 -m tools.xbox_deploy report --version "$version" --download
+python3 -m tools.xbox_deploy inspect-game --version "$version" --app-id "$steam_app_id"
 ```
 
 The download report identifies its counter source in `steam_download_measurement`. For `steam`, the bundled client supplies live download and staging counters for the active AppID. A rate needs consecutive live samples with comparable totals. The report keeps the on-disk manifest values under `steam_download_manifest_bytes_*` when both sources are available.
@@ -24,11 +24,11 @@ Steam can update title-specific depot records while its on-disk manifest still s
 ## Observe a game launch
 
 ```sh
-python3 xbox-deploy.py observe --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy observe --version "$version" --app-id "$steam_app_id" \
     --frame-seconds 40 --timeout 180 --output game-run
 ```
 
-Use `--image-name "$game_exe_basename"` to also follow the game's Device Portal process listing. For an already-started session, pass the exact `--run-id` shown as `steam_launch_run_id` by `xbox-deploy.py report --version "$version"`. For a fresh observation with no baseline run ID, the observer uses the local clock to screen out stale reports. Keep the computer and console clocks in sync for that case.
+Use `--image-name "$game_exe_basename"` to also follow the game's Device Portal process listing. For an already-started session, pass the exact `--run-id` shown as `steam_launch_run_id` by `python3 -m tools.xbox_deploy report --version "$version"`. For a fresh observation with no baseline run ID, the observer uses the local clock to screen out stale reports. Keep the computer and console clocks in sync for that case.
 
 The deadline covers observation of the selected run. The JSON `outcome` distinguishes a first hosted frame, a process exit, a launch failure, or a timeout. The CLI exits with a nonzero status for an observation timeout or an argument, connection, or portal error. Terminal game outcomes are carried in JSON. `frame-observed` records a presentation milestone, which can include a black startup frame. Use the game on the console to verify input, audio, save behavior and return to the Library.
 
@@ -37,7 +37,7 @@ The deadline covers observation of the selected run. The JSON `outcome` distingu
 Use a short sequence of loader records from the diagnostic build under test. Keep the initial GPU submission as one checkpoint and use a later engine event for the transition you want to verify.
 
 ```sh
-python3 xbox-deploy.py observe --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy observe --version "$version" --app-id "$steam_app_id" \
     --image-name "$game_exe_basename" --timeout 180 --checkpoint-timeout 20 \
     --require-checkpoint 'dxgi gpu-frame-submitted' \
     --require-checkpoint "8:$game_ready_checkpoint" \
@@ -55,14 +55,14 @@ The result reports the checkpoints reached, the trace source, and the next expec
 Use the AppID and `steam_launch_run_id` from the current hosted launch. Take one snapshot to inspect the connection bit, button mask, six SDL gamepad axes, pointer and gamepad serials and acknowledgments, and keyboard readiness.
 
 ```sh
-python3 xbox-deploy.py inspect-input --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam_app_id" \
     --run-id "$launch_run_id"
 ```
 
 When `sampling-host-input` appears, hold a controller button or move a stick, then release before the sample ends. Hold each input long enough to span a poll.
 
 ```sh
-python3 xbox-deploy.py inspect-input --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam_app_id" \
     --run-id "$launch_run_id" --seconds 10 --panel-menu --output input-check
 ```
 
@@ -75,7 +75,7 @@ python3 xbox-deploy.py inspect-input --version "$version" --app-id "$steam_app_i
 Use the AppID and `run_id` from the game observation while that launch is current.
 
 ```sh
-python3 xbox-deploy.py inspect-render --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy inspect-render --version "$version" --app-id "$steam_app_id" \
     --run-id "$launch_run_id" --output render-check
 ```
 
@@ -88,7 +88,7 @@ With `--output`, the command saves filtered metadata to `observation.json` and c
 For a game that reports `steam_shadow_stage=verified-local-copy`, use the AppID and exact `steam_launch_run_id` from the same package version.
 
 ```sh
-python3 xbox-deploy.py inspect-loader --version "$version" --app-id "$steam_app_id" \
+python3 -m tools.xbox_deploy inspect-loader --version "$version" --app-id "$steam_app_id" \
     --run-id "$launch_run_id" --output loader-check
 ```
 
