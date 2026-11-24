@@ -89,6 +89,26 @@ python3 -m tools.xbox_deploy probe --case mouse-source --version "$version" --ti
 
 Move, click, and scroll with the physical mouse for 25 seconds after the control opens and leave the controller idle. The hosted app counts `MouseDevice.MouseMoved` callbacks and browser pointer events separately. If no nonzero relative delta arrives in the first 10 seconds and the host exposes a CoreWindow, it also tries pointer capture. The report includes document visibility, reported mouse capabilities, relative callbacks and deltas, browser event counts, and the available activation and capture results. The CLI passes when it observes `relative_motion=observed`. Browser events and hosted game delivery are separate results. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
 
+## Standalone Xbox mouse capture
+
+Build [native-app.cpp](mouse-source/native-app.cpp) as an x64 C++20 UWP executable with the Windows SDK C++/WinRT projection. Link it as a Windows subsystem AppContainer executable against `WindowsApp.lib`. The layout uses its own package identity and has no Steam dependencies or account requirements.
+
+```sh
+python3 -m build_tools.prepare_mouse_capture "$executable" "$version" "$layout"
+bash build_tools/package.sh --layout "$layout" "$signed"
+python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
+python3 -m tools.xbox_deploy probe --case native-mouse-ready --version "$version" --restart --json
+python3 -m tools.xbox_deploy report --version "$version" --native-mouse-capture
+```
+
+Readiness requires a fresh run with `visible=1` and `registered=0x3f`. For a physical test, leave the controller idle, move the mouse, hold the left button inside the teal target, drag outside, release, and scroll. Record the `mouse-capture.txt` counters before and after the gesture and match `start_tick`. A successful XAML capture increments `xaml_accepted` and `verified_pointer_in_capture_list`. The same pointer moving outside the target while held advances `same_pointer_moves_outside`. `mouse_present=1` reports the view's mouse capability. Use the relative and CoreWindow counters in the standalone app's `LocalState/fhd-mouse-source.txt` to check whether this run received input. [XAML pointer capture contract](https://learn.microsoft.com/en-us/uwp/api/windows.ui.xaml.uielement.capturepointer)
+
+Build with `prepare_mouse_capture --controller-control` for a separate run using Xbox controller pointer emulation. Hold A over the target and use the analog stick to cross its edge before releasing. Record this run with its controller input source. [Xbox controller pointer emulation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
+
+For per-device mouse diagnostics, build the standalone executable with `MOUSE_PROBE_GAMEINPUT_V0` defined. Add `native/include/v0` from the pinned Microsoft.GameInput `4.1.315` package to the compiler include path. The v0 header SHA-256 is `4bda852f78a43f715837c1d97af7cf78fa14aa35dba4e755d305985364bf1196`. The probe loads the console's system `gameinput.dll`, takes an initial device snapshot on the worker, and records movement, buttons, and wheel changes for each device while the view stays foreground. Reconnect the physical mouse before starting a fresh run when checking enumeration. Read the device report with `python3 -m tools.xbox_deploy report --version "$version" --native-mouse-devices`. [Microsoft.GameInput package](https://www.nuget.org/packages/Microsoft.GameInput/4.1.315) · [GameInput devices](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-devices)
+
+Add `MOUSE_PROBE_GAMEINPUT_VERSIONS` and the same package's `native/include` directory to query the console runtime for v1 through v4 and count sampled timestamp changes. For the isolated packaged-runtime experiment, also define `MOUSE_PROBE_GAMEINPUT_REDIST` and stage the package's `native/bin/xbox/GameInputRedist.dll` beside the test executable with its license and notice files. The Xbox DLL SHA-256 is `470720a88107b1fdada5af232718385feae32e0453b09f68718f285276aea760`. This build uses the typed v4 API on the packaged DLL, with independent load, factory, and first-reading checkpoints. [Xbox runtime requirements](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-xbox)
+
 ## Native game panel mouse capture
 
 Add an empty `fhd-mouse-source.txt` to the root of a test APPX layout containing the matching native presenter DLL and WinRT metadata. Install the signed build and open a hosted game through Big Picture. Leave the controller idle, move the physical mouse over the game, press and hold the left button while moving, release, and scroll.

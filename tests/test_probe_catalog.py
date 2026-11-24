@@ -53,6 +53,22 @@ class ProbeRunnerTests(unittest.TestCase):
                 self.assertEqual(result.outcome, outcome)
                 self.assertEqual(result.evidence()['steam_error'], '0x0000007E')
 
+    def test_native_mouse_readiness_waits_for_a_fresh_foreground_report(self):
+        def report(run_id, status, visible):
+            return (f'probe=native-mouse-capture\nrun_id={run_id}\nstatus={status}\n'
+                    f'visible={visible}\nregistered=0x3f\n')
+
+        stale = report('1', 'mouse-capture-ready', '1')
+        start = report('2', 'listening', '0')
+        ready = report('2', 'mouse-capture-ready', '1')
+        read = Mock(side_effect=[stale, stale, start, ready])
+        progress = Mock()
+        with patch('probe.runner.time.sleep'):
+            result = run_case(CASES['native-mouse-ready'], read, lambda: False, 20, progress)
+        self.assertEqual(result.outcome, 'passed')
+        self.assertEqual(result.evidence()['run_id'], '2')
+        self.assertEqual([call.args[0] for call in progress.call_args_list], [start, ready])
+
     def test_json_result_records_the_selected_case_and_failure(self):
         portal = Mock()
         last = process_report('2', 'exit_code_matches=yes\nipc=failed\nipc_stage=reply')

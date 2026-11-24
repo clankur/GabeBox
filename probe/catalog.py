@@ -8,9 +8,13 @@ PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
 GRAPHICS_CONTROL_NAME = PROBE_NAME + '.GraphicsControl'
 PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
+NATIVE_MOUSE_PROBE_NAME = 'XboxPortabilityProbe.NativeMouseSource'
 PROBE_REPORT = 'probe-report.txt'
 BIG_PICTURE_REPORT = 'big-picture-report.txt'
 WEBVIEW_REPORT = 'big-picture-webview-report.txt'
+NATIVE_MOUSE_CAPTURE_REPORT = 'mouse-capture.txt'
+NATIVE_MOUSE_DEVICE_REPORT = 'mouse-gameinput.txt'
+NATIVE_MOUSE_STARTUP_REPORT = 'mouse-startup.txt'
 
 CHILD_EXIT = (('exit_code_matches', 'yes'),)
 PIPE_EXCHANGE = CHILD_EXIT + (('ipc', 'success'),)
@@ -70,6 +74,13 @@ CASES = {
         'Detect nonzero relative mouse motion in the foreground CoreWindow.',
         (('relative_motion', 'observed'),), report_kind='uwp-mouse-source',
         require_run_id=True, terminal_status='mouse-sample-complete',
+    ),
+    'native-mouse-ready': ProbeCase(
+        NATIVE_MOUSE_PROBE_NAME, 'Native Xbox Mouse Probe',
+        'Verify the standalone XAML app registered native mouse events and reached the foreground.',
+        (('status', 'mouse-capture-ready'), ('visible', '1'), ('registered', '0x3f')),
+        filename=NATIVE_MOUSE_STARTUP_REPORT, report_kind='native-mouse-capture', require_run_id=True,
+        terminal_status='mouse-capture-ready',
     ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',

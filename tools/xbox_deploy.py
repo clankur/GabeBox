@@ -23,6 +23,7 @@ from zipfile import BadZipFile, ZipFile
 
 from probe.catalog import (
     BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
+    NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT, NATIVE_MOUSE_PROBE_NAME, NATIVE_MOUSE_STARTUP_REPORT,
     PROBE_CONTROL_NAME, PROBE_NAME, PROBE_REPORT, PROBE_STEAM_CORE_NAME, WEBVIEW_REPORT,
 )
 from probe.runner import report_fields, run_case
@@ -33,6 +34,7 @@ from tools.device_portal import PACKAGE_API, DevicePortal, PortalError
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
 ACTIVATION_REPORT = 'big-picture-activation.txt'
 BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
+NATIVE_MOUSE_REPORTS = {NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT}
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 LIFETIME_REPORT = 'lifetime-report.txt'
@@ -923,6 +925,10 @@ def main():
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
     report_variant.add_argument('--mouse-source', dest='report_file', action='store_const',
                                 const='fhd-mouse-source.txt', help='read the opted-in foreground native mouse probe')
+    report_variant.add_argument('--native-mouse-capture', dest='report_file', action='store_const',
+                                const=NATIVE_MOUSE_CAPTURE_REPORT, help='read the standalone XAML mouse capture counters')
+    report_variant.add_argument('--native-mouse-devices', dest='report_file', action='store_const',
+                                const=NATIVE_MOUSE_DEVICE_REPORT, help='read the standalone GameInput mouse samples')
     report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     observe_command = commands.add_parser('observe', help='watch Steam startup or a game launch without controlling the Xbox')
@@ -1152,7 +1158,10 @@ def main():
         print(json.dumps(result, indent=2))
         return
     if args.command == 'report':
-        name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
+        if args.report_file in NATIVE_MOUSE_REPORTS:
+            name = NATIVE_MOUSE_PROBE_NAME
+        else:
+            name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
         if args.report_file == 'steam-core-webview':
             args.report_file = WEBVIEW_REPORT
         app = find_installed_probe(portal, name, args.version)
@@ -1205,6 +1214,10 @@ def main():
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
+        if args.report_file in NATIVE_MOUSE_REPORTS:
+            run = re.search(r'^run_id=([0-9]{1,20})(?:[ \t]|\r?$)', report, re.MULTILINE)
+            if run and run[1] != report_fields(read_probe_report(portal, app, NATIVE_MOUSE_STARTUP_REPORT)).get('run_id'):
+                raise ValueError('The standalone mouse report does not match the current probe run. Try again.')
         if args.sdl_frame is not None:
             read_sdl_frame(portal, app, report, args.sdl_frame)
         print(report, end='')
