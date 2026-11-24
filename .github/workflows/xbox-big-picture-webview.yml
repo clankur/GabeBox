@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: ['feature/native-steam-big-picture']
-    paths:
+    paths: &component_paths
       - 'ui/big-picture-webview/**'
       - 'tests/big-picture-webview/**'
       - '.github/workflows/xbox-big-picture-webview.yml'
+
+  pull_request:
+    paths: *component_paths
 
 permissions:
   contents: read
@@ -57,6 +60,7 @@ jobs:
             "/I$work/projection" "/I$kits/Include/$kit/cppwinrt" "/Fo$work/renderer.obj" "/Fe$out/BigPictureView.Native.dll" `
             "$src/renderer.cpp" WindowsApp.lib uuid.lib /link /APPCONTAINER /SUBSYSTEM:WINDOWS,10.00 "/IMPLIB:$work/renderer.lib" `
             /EXPORT:DllGetActivationFactory=GetBigPictureViewFactory /EXPORT:DllCanUnloadNow=CanUnloadBigPictureView
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { return }
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
@@ -66,6 +70,7 @@ jobs:
             } | Set-Content -Encoding ascii "$out/SHA256SUMS"
           } finally { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" }
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: xbox-big-picture-webview-x64
           path: ${{ runner.temp }}/big-picture-webview/artifact/
