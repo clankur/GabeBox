@@ -6,7 +6,6 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -43,6 +42,7 @@ struct Status {
     UINT64 menuChords = 0;
     bool nativeInput = false;
     HRESULT inputError = S_OK;
+    HRESULT pointerTargetError = S_OK;
     HRESULT error = S_OK;
 };
 Status published;
@@ -216,7 +216,14 @@ struct Presenter {
         check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, target.put()));
         panel = SwapChainPanel{};
         panel.Name(L"SteamGameSurface");
-        panel.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Colors::Transparent()));
+        try {
+            // SwapChainPanel rejects Background. Its child can receive the pointer.
+            Grid pointerTarget;
+            pointerTarget.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Color{}));
+            panel.Children().Append(pointerTarget);
+        } catch (...) {
+            status.pointerTargetError = to_hresult();
+        }
         panel.HorizontalAlignment(HorizontalAlignment::Center);
         panel.VerticalAlignment(VerticalAlignment::Center);
         fit();
@@ -351,6 +358,7 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"native_input", s.nativeInput); field(L"native_menu_requests", s.menuRequests);
         field(L"native_menu_chords", s.menuChords);
         if (FAILED(s.inputError)) field(L"native_input_hresult", static_cast<uint32_t>(s.inputError));
+        if (FAILED(s.pointerTargetError)) field(L"pointer_target_hresult", static_cast<uint32_t>(s.pointerTargetError));
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);
     } catch (...) { return winrt::to_hresult(); }
