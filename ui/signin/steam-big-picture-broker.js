@@ -23,14 +23,59 @@ var steamBigPictureBroker = (function () {
         function active() {
             try { return !!identity().steamId; } catch (_) { return false; }
         }
+        function supportsCloudBackup(game) {
+            return typeof session.cloudBackup === "function" && typeof session.supportsCloudBackup === "function" &&
+                session.supportsCloudBackup(game.id);
+        }
+        function supportsCloudRestore(game) {
+            return typeof session.cloudRestore === "function" && typeof session.supportsCloudRestore === "function" &&
+                session.supportsCloudRestore(game.id);
+        }
         function library() {
             if (!active()) return Promise.reject(new Error("signed-out"));
             return Promise.resolve(session.installedGames()).then(function (installed) {
                 if (!active()) throw new Error("signed-out");
                 return session.games.map(function (game) {
                     var local = installed.has(game.id);
-                    return { id: game.id, name: game.name, installed: local, canPlay: local };
+                    var row = { id: game.id, name: game.name, installed: local, canPlay: local };
+                    if (local && supportsCloudBackup(game)) {
+                        row.cloudBackup = true;
+                        if (supportsCloudRestore(game)) row.cloudRestore = true;
+                    }
+                    return row;
                 });
+            });
+        }
+        function cloudAction(appId, action) {
+            if (!active()) return Promise.resolve("signed-out");
+            if (typeof appId !== "number" || appId !== Math.floor(appId) || appId < 1 || appId > 0xffffff)
+                return Promise.resolve("invalid-app");
+            var game = session.games.find(function (entry) { return entry.id === appId; });
+            if (!game) return Promise.resolve("not-owned");
+            function supported() {
+                return supportsCloudBackup(game) && (action !== "restore" || supportsCloudRestore(game));
+            }
+            if (!supported()) return Promise.resolve("unsupported");
+            var writing = action !== "status";
+            if (writing) {
+                if (acting || session.busy()) return Promise.resolve("busy");
+                acting = true;
+            }
+            return Promise.resolve().then(function () {
+                if (!active()) return false;
+                return session.isInstalled(game);
+            }).then(function (installed) {
+                if (!active()) return "signed-out";
+                if (!installed) return "not-installed";
+                if (writing && session.busy()) return "busy";
+                if (!supported()) return "unsupported";
+                return action === "restore" ? session.cloudRestore(appId) : session.cloudBackup(appId, writing);
+            }).then(function (result) {
+                if (writing) acting = false;
+                return active() ? result : "signed-out";
+            }, function () {
+                if (writing) acting = false;
+                return "failed";
             });
         }
         function action(appId, install, handoff, progress) {
@@ -94,6 +139,11 @@ var steamBigPictureBroker = (function () {
         }
         return {
             storage: storage,
+            cloudBackup: function (appId, download) {
+                if (typeof download !== "boolean") return Promise.resolve("invalid-app");
+                return cloudAction(appId, download ? "download" : "status");
+            },
+            cloudRestore: function (appId) { return cloudAction(appId, "restore"); },
             session: function () { return Promise.resolve().then(identity); },
             library: library,
             signOut: function () {

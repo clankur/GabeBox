@@ -113,7 +113,7 @@
         function show(to, from) {
             return switchView(to, from);
         }
-        var playingApp = 0, presented = false, returnToGame, quitGame;
+        var playingApp = 0, presented = false, returnToGame, quitGame, raising;
         function recordGameFrame(appId, stage, stats) {
             if (failed || !playing || appId !== playingApp || typeof stats !== "string" ||
                 (stage !== "first" && stage !== "sample" && stage !== "fallback" && stage !== "media" &&
@@ -196,7 +196,7 @@
             }).catch(fail);
         }
         function showForGame(appId, from, restore, requestExit) {
-            if (!played(appId) || !from || typeof restore !== "function")
+            if (raising || !played(appId) || !from || typeof restore !== "function")
                 return Promise.resolve(false);
             returnToGame = restore; quitGame = requestExit;
             return showValve(from).then(function () {
@@ -214,22 +214,34 @@
             });
         }
         function raiseGame(appId) {
-            if (!visible || !played(appId) || !returnToGame) return Promise.resolve("unavailable");
+            if (raising || !visible || !played(appId) || !returnToGame) return Promise.resolve("unavailable");
             var restore = returnToGame;
-            returnToGame = null;
-            return Promise.resolve().then(function () { return restore(viewId); }).then(function (shown) {
-                if (!shown || !played(appId)) return "unavailable";
-                visible = false;
+            raising = Promise.resolve().then(function () { return restore(viewId); }).then(function (shown) {
+                if (shown) visible = false;
+                if (!played(appId)) return "unavailable";
+                if (!shown) {
+                    record("game-resume-declined");
+                    return "unavailable";
+                }
+                returnToGame = quitGame = null;
                 setGameForeground(true);
                 sampleMemory("resume_game"); gameEvent(false); record("game-switch-to-game");
                 return "presented";
             }, function () {
-                if (played(appId)) returnToGame = restore;
+                if (played(appId)) record("game-resume-failed");
                 return "failed";
+            }).then(function (result) {
+                raising = null;
+                return result;
+            }, function (error) {
+                raising = null;
+                throw error;
             });
+            return raising;
         }
         function played(appId) { return !failed && playing && presented && appId === playingApp; }
         function playGame(appId) {
+            if (raising) return Promise.resolve("busy");
             if (playing) {
                 if (!played(appId) || !returnToGame) return "busy";
                 return broker.session().then(function (user) { return user && user.steamId ? raiseGame(appId) : "signed-out"; });
@@ -271,7 +283,7 @@
             var returning = playing;
             playing = presented = false;
             playingApp = 0; returnToGame = quitGame = null;
-            return showValve(mainId).then(function () {
+            return Promise.resolve(raising).then(function () { return showValve(mainId); }).then(function () {
                 if (returning && !playing && !failed) {
                     sampleMemory("return"); gameEvent(false); return record("game-returned-to-steam");
                 }
@@ -389,12 +401,26 @@
                 record(last, true);
                 return;
             }
+            if (request.method === "startup-cloud-local-fallback" && [1, 3, 4].indexOf(request.namespace) >= 0) {
+                markStartup("cloud_local_namespace_" + request.namespace);
+                record(last, true);
+                return;
+            }
             var id = request.id, appId = request.appId;
             if (typeof id !== "number" || !isFinite(id) || id <= 0 || id > 0x7fffffff || id % 1) return;
             if (!broker) return respond(id, false, "signed-out");
             var action;
             if (request.method === "library") action = function () { return broker.library(); };
             else if (request.method === "session") action = function () { return broker.session(); };
+            else if (request.method === "cloud-backup-status" || request.method === "cloud-backup-download" ||
+                     request.method === "cloud-backup-restore") {
+                if (!settled || !visible || playing || !Number.isInteger(appId) || appId < 1 || appId > 0xffffff)
+                    return respond(id, false, "unavailable");
+                action = function () {
+                    return request.method === "cloud-backup-restore" ? broker.cloudRestore(appId) :
+                        broker.cloudBackup(appId, request.method === "cloud-backup-download");
+                };
+            }
             else if (request.method === "storage-list") action = function () { return broker.storage("list", ""); };
             else if (request.method === "storage-select" || request.method === "storage-move") {
                 if (!settled || !visible || playing) return respond(id, false, "unavailable");
@@ -438,7 +464,7 @@
                     return broker.session().then(function (user) {
                         if (!user || !user.steamId) return "signed-out";
                         if (request.method === "resume-game") return raiseGame(appId);
-                        if (!visible || !played(appId) || !quitGame) return "unavailable";
+                        if (raising || !visible || !played(appId) || !quitGame) return "unavailable";
                         if (!quitGame()) return "unavailable";
                         quitGame = null;
                         record("game-quit-requested");
@@ -622,6 +648,11 @@
         }).catch(fail);
         if (!broker) ready.catch(function () {});
         session = {broker: broker, replaceable: function () { return !!broker && !playing; }, finish: finish,
+            catalogChanged: function () {
+                if (failed) return;
+                if (host) host.reply(JSON.stringify({event: "xbox-catalog-changed"}));
+                record(last, true);
+            },
             resume: resume, showForGame: showForGame, playConfiguredTrial: playConfiguredTrial,
             sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
             ready: broker ? ready : startup};
@@ -630,6 +661,7 @@
     window.steamBigPictureHost = {
         open: open,
         switchView: switchView,
+        catalogChanged: function () { if (session) session.catalogChanged(); },
         recordGameFrame: function (appId, stage, stats) { if (session) session.recordGameFrame(appId, stage, stats); },
         samplePresenter: function (stage) {
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);

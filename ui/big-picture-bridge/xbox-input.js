@@ -6,7 +6,7 @@ function installXboxInput(client, gamepads, storeBrowser) {
     let keyboardActive = false;
     // W3C standard buttons A, B, X, Y, bumpers, triggers, View, Menu and stick clicks.
     const buttonCodes = [0, 1, 2, 3, 30, 31, 28, 29, 35, 36, 25, 41];
-    let analogEnabled = false, unboundSignature, deviceSignature, timer, timerWindow, stopped = false;
+    let analogEnabled = false, unboundSignature, deviceSignature, devices, timer, timerWindow, stopped = false;
     const denied = new WeakSet();
 
     function dispatch(listeners, ...args) {
@@ -102,11 +102,8 @@ function installXboxInput(client, gamepads, storeBrowser) {
     }
     function read(view) {
         const pads = gamepads.read(view);
-        const inventory = JSON.stringify(pads.map(pad => [pad.index, pad.id, pad.mapping]));
-        if (inventory !== deviceSignature) {
-            if (deviceSignature !== undefined) notifyXboxControllerListChanged?.();
-            deviceSignature = inventory;
-        }
+        const inventory = pads.map(pad => [pad.index, pad.id, pad.mapping]);
+        const signature = JSON.stringify(inventory);
         const mapped = new Set();
         const unmapped = [];
         for (const pad of pads) {
@@ -123,10 +120,20 @@ function installXboxInput(client, gamepads, storeBrowser) {
             release(index, state);
             states.delete(index);
         }
-        const signature = JSON.stringify(unmapped);
-        if (signature !== unboundSignature) {
-            unboundSignature = signature;
+        const unboundDevices = JSON.stringify(unmapped);
+        if (unboundDevices !== unboundSignature) {
+            unboundSignature = unboundDevices;
             dispatch(unbound, unmapped);
+        }
+        if (signature !== deviceSignature) {
+            const previous = devices;
+            devices = inventory;
+            deviceSignature = signature;
+            if (previous) {
+                const removed = previous.filter(([index, name, mapping]) =>
+                    !inventory.some(([slot, id, mode]) => index === slot && name === id && mapping === mode));
+                notifyXboxControllerListChanged?.(removed.map(([index]) => index));
+            }
         }
     }
     function releaseAll() {
@@ -169,6 +176,12 @@ function installXboxInput(client, gamepads, storeBrowser) {
         schedule();
         return {unregister() { listeners.delete(callback); }};
     }
+    function registerConfigListener(callback) {
+        if (typeof callback !== 'function') throw new TypeError('Expected a Steam Input configuration listener');
+        // Valve registers these events before its controller inventory query.
+        // The Xbox host has no Steam configuration event producer yet.
+        return {unregister() {}};
+    }
 
     const seed = typeof xboxNativeWindow === 'undefined' ? undefined : xboxNativeWindow;
     let keyboardPresent = seed?.keyboardPresent;
@@ -187,6 +200,17 @@ function installXboxInput(client, gamepads, storeBrowser) {
         RegisterForUnboundControllerListChanges: callback => listen(unbound, callback),
         RegisterForControllerInputMessages: callback => listen(digital, callback),
         RegisterForControllerAnalogInputMessages: callback => listen(analog, callback),
+        RegisterForControllerConfigInfoMessages: registerConfigListener,
+        RegisterForControllerConfigCloudStateChanges: registerConfigListener,
+        RegisterForControllerCommandMessages: registerConfigListener,
+        RegisterForRemotePlayConfigChanges: registerConfigListener,
+        RegisterForShowControllerLayoutPreviewMessages: registerConfigListener,
+        RegisterForConfigSelectionChanges: registerConfigListener,
+        async GetConfigForAppAndController() {
+            // The configurator catches rejection and marks the selected layout
+            // unavailable. A physical pad alone does not establish its layout.
+            throw new Error('Steam Input configuration is unavailable on this Xbox runtime');
+        },
         EnableControllerAnalogInputMessages(enabled) { analogEnabled = !!enabled; },
         RegisterForKeyboardDeviceChanges(callback) {
             if (typeof callback !== 'function') throw new TypeError('Expected a keyboard listener');

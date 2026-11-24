@@ -91,7 +91,7 @@
     border-color: #ffd087;
     color: #29171d;
 }
-#library #cloud-saves, #library #cloud-saves-open {
+#library #cloud-saves, #library #cloud-saves-open, #library #cloud-backup {
     display: block;
     max-width: 100%;
     margin-top: .7em;
@@ -104,7 +104,7 @@
     font-size: .82em;
 }
 #cloud-saves-panel p { margin: .7em 0; }
-#cloud-saves-status:empty { margin: 0; }
+#cloud-saves-status:empty, #cloud-backup-summary:empty { margin: 0; }
 #library .download-status { color: #e8d9df; }
 @media (max-width: 1090px) {
     #library-list button { flex-basis: 48%; width: 48%; }

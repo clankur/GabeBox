@@ -186,13 +186,13 @@ inline winrt::hstring Result(std::wstring_view status, std::int32_t steamResult 
 // The caller supplies an empty, private app-local staging folder and owns cleanup.
 // No cloud URL, request context, or account identifier leaves this component.
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamCloudFiles(
-        std::uint32_t app, winrt::Windows::Storage::StorageFolder stage) {
+        std::uint32_t app, std::uint64_t account, winrt::Windows::Storage::StorageFolder stage) {
     using namespace steam_cloud;
     using namespace winrt::Windows::Data::Json;
     using namespace winrt::Windows::Storage;
     using namespace winrt::Windows::Web::Http::Filters;
 
-    if (!app || !stage) co_return Result(L"invalid-request");
+    if (!app || !account || !stage) co_return Result(L"invalid-request");
     try {
         winrt::apartment_context caller;
         ListCall call;
@@ -200,7 +200,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
         {
             std::lock_guard lock(steamSessionMutex);
             auto session = liveSteamSession;
-            if (!session || !session->OwnsSession()) co_return Result(L"session-unavailable");
+            if (!session || account != session->accountId || !session->OwnsSession())
+                co_return Result(L"session-unavailable");
             if (session->downloadApp || session->launchCall) co_return Result(L"busy");
             if (std::find(session->games.begin(), session->games.end(), app) == session->games.end()) {
                 co_return Result(L"not-owned");
@@ -248,6 +249,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StageSteamClo
         case ManifestResult::ready: break;
         }
         if (candidates.empty()) co_return Result(L"empty");
+
+        std::uint64_t required = 0;
+        for (const auto& candidate : candidates) required += candidate.bytes;
+        ULARGE_INTEGER available{};
+        if (GetDiskFreeSpaceExW(stage.Path().c_str(), &available, nullptr, nullptr) && available.QuadPart < required)
+            co_return Result(L"storage-error");
 
         HttpBaseProtocolFilter filter;
         filter.AllowAutoRedirect(false);

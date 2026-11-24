@@ -397,13 +397,17 @@ inline std::wstring OpenLibrary(Drive drive, std::wstring_view localState) {
     return root;
 }
 
-inline std::optional<DownloadProgress> ReadDownloadProgress(std::wstring_view library, std::uint32_t id) {
+inline std::optional<Manifest> ReadAppManifest(std::wstring_view library, std::uint32_t id) {
     using namespace storage_detail;
     const auto apps = Child(library, L"steamapps");
     if (!Exists(library, true) || !Exists(apps, true)) return std::nullopt;
     const auto path = Child(apps, ManifestName(id));
     if (!Exists(path, false)) return std::nullopt;
-    const auto manifest = ParseManifest(ReadManifest(path), id);
+    return ParseManifest(ReadManifest(path), id);
+}
+
+inline std::optional<DownloadProgress> ReadDownloadProgress(std::wstring_view library, std::uint32_t id) {
+    const auto manifest = ReadAppManifest(library, id);
     return manifest ? std::optional(manifest->download) : std::nullopt;
 }
 

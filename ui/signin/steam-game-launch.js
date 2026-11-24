@@ -36,5 +36,20 @@ var steamGameLaunch = (function () {
         return { appId: +config[1], repeat: !!config[2], install: !!config[3] };
     }
 
-    return { forGame: forGame, parseTrial: parseTrial };
+    function parsePrerequisiteRestart(args) {
+        var request = /^steam-prerequisite-play ([1-9][0-9]{16,19}) ([1-9][0-9]{0,7}) ([1-9][0-9]{0,15})$/.exec(args);
+        if (!request || +request[2] > 0xffffff || !Number.isSafeInteger(+request[3]) ||
+                (request[1].length === 20 && request[1] > "18446744073709551615")) return null;
+        return { account: request[1], appId: +request[2], runId: request[3] };
+    }
+
+    function prerequisiteRestartArgs(result, account, appId, runId) {
+        if (!/^steam_launch=prerequisite-restart-required\r?$/m.test(result) ||
+                !/^steam_launch_redistributables_manifest=complete\r?$/m.test(result)) return "";
+        var args = "steam-prerequisite-play " + account + " " + appId + " " + runId;
+        return parsePrerequisiteRestart(args) ? args : "";
+    }
+
+    return { forGame: forGame, parseTrial: parseTrial, parsePrerequisiteRestart: parsePrerequisiteRestart,
+        prerequisiteRestartArgs: prerequisiteRestartArgs };
 }());

@@ -405,13 +405,15 @@ DelayImport {
         def measurement(version, mode):
             trace = measure["HEADER"].pack(0x31444846, version, 60000, measure["FILETIME_EPOCH"], 0)
             trace += b"".join(measure["PRESENT"].pack(i * 1000, i, i, mode) for i in range(count + 1))
-            return measure["summarize"](trace, 0, None, 30)
+            return measure["summarize"](trace, 0, None, 30, internal_resolution="1920x1080", output_resolution="1920x1080")
 
         checks = dict.fromkeys(compat["CHECKS"], True)
         trial = {"id": 1, "target": "series-x", "build_id": "7", "evidence": "test trial", "checks": checks,
                  "performance_scene": "gameplay"}
         for performance, verified in ((measurement(2, 2), 1), (measurement(2, 1), 0), (measurement(1, 2), 0),
-                                      ({**measurement(2, 2), "min_rolling_1s_fps": 30}, 0)):
+                                      ({**measurement(2, 2), "min_rolling_1s_fps": 30}, 0),
+                                      ({**measurement(2, 2), "internal_resolution": "1280x720"}, 0),
+                                      ({**measurement(2, 2), "output_resolution": None}, 0)):
             with self.subTest(performance=performance):
                 self.assertEqual(performance["presented"], count)
                 result = compat["coverage"]({1: "Game"}, "series-x", [], [{**trial, "performance": performance}],

@@ -10,10 +10,18 @@ function installXboxNotifications(runtime) {
     defaults.SetDefaultHandlerRegistry(registry);
     // Valve's native navigation provider invalidates its controller list on
     // this empty notification and requests a fresh typed inventory.
-    const spec = runtime(744).f_.NotifyControllerListChangedHandler;
-    notifyXboxControllerListChanged = () => {
-        const event = runtime(98237).w.Init(spec.request, runtime(98089).bSr);
+    const services = runtime(744).f_;
+    const {w: Message, lI: Header} = runtime(98237);
+    const {pV: Packet} = runtime(98890);
+    function dispatch(spec, index) {
+        const event = Message.Init(spec.request, runtime(98089).bSr);
         event.Hdr().set_target_job_name(spec.name);
-        registry.DispatchMsgToHandlers(event);
+        if (index !== undefined) event.Body().set_controller_index(index);
+        // The registry reconstructs the typed body from the packet for each listener.
+        registry.DispatchMsgToHandlers(Header.InitHeaderFromPacket(new Packet(event.Serialize())));
+    }
+    notifyXboxControllerListChanged = removed => {
+        for (const index of removed) dispatch(services.NotifyControllerDisconnectedHandler, index);
+        dispatch(services.NotifyControllerListChangedHandler);
     };
 }

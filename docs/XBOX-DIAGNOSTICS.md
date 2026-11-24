@@ -115,11 +115,12 @@ The inspector reads up to 1 MiB of the live trace and marks `truncated` when mor
 
 The native launch and exit reports retain up to 24 KiB of complete allowlisted records from the last 28 KiB of the loader trace. The observer can also read up to 1 MiB from the matching live staging directory and retains up to 128 recent distinct records. After a named child exit, the observer allows up to three seconds within its existing deadline for the terminal trace to appear.
 
-For a 60 FPS comparison, use the same scene and settings on both builds. Record the UTC start time of a settled gameplay segment, continue playing through the sample, and feed the collected native trace to the existing analyzer.
+For a 60 FPS comparison, use the same scene and settings on both builds. Record the UTC start time of a settled gameplay segment, continue playing through the sample, and feed the native trace to the analyzer. Supply the dimensions observed for the game renderer and the Xbox display output. Measure each independently for the same scene.
 
 ```sh
 python3 -m tools.measure game-run/fhd-present-times.bin \
-    --start-utc "$scene_start_utc" --duration 30 --require-gpu-60
+    --start-utc "$scene_start_utc" --duration 30 --require-gpu-60 \
+    --internal-resolution "$internal_resolution" --output-resolution "$output_resolution"
 ```
 
 See the [native presentation measurement guide](GAME-LAUNCH.md#native-fullscreen-presentation) for the hardware and cadence checks.

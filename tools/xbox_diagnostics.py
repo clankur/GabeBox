@@ -78,7 +78,7 @@ def select_fields(report, match, value_pattern):
 
 def startup_snapshot(probe, browser):
     native = select_fields(probe, lambda key: re.fullmatch(r'steam_(?:native_startup_[a-z_]{1,48}_ms|'
-                            r'library_(?:named|visible|unnamed_[a-z_]{1,40}|count))', key), COUNT)
+                            r'library_(?:named|visible|unnamed_[a-z_]{1,40}|count|pending_metadata))', key), COUNT)
     web = select_fields(browser, {'status', 'valve_startup', 'valve_surface',
                                   'startup_movie_override_js'}.__contains__, CHECKPOINT)
     web.update(select_fields(browser, {'owned_games_served'}.__contains__, COUNT))

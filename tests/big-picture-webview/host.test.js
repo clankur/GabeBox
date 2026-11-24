@@ -289,6 +289,15 @@ test("cached account timing reports shell milestones while keeping early Play un
     assert.match(app.reports.at(-1), /\bbrowser_gamepad_window_created:5100,shell_library_selected:5100\b/);
     assert.doesNotMatch(app.reports.at(-1), /shell_gamepad_ready:/);
 
+    timing.mark("catalog_enriched");
+    app.shell.catalogChanged();
+    assert.deepEqual(app.replies.at(-1), {event: "xbox-catalog-changed"});
+    app.incoming.push(JSON.stringify({method: "startup-cloud-local-fallback", namespace: 3}),
+        JSON.stringify({method: "startup-cloud-local-fallback", namespace: 2}));
+    await app.advance("gamepad-window-created");
+    assert.match(app.reports.at(-1), /catalog_enriched:5100,cloud_local_namespace_3:5100/);
+    assert.doesNotMatch(app.reports.at(-1), /cloud_local_namespace_2/);
+
     elapsed = 5300;
     await app.advance("warmup-gamepad-layout");
     elapsed = 5500;
@@ -610,6 +619,60 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     assert.equal(await app.shell.showForGame(1145360, 90, restore), false);
 });
 
+test("a declined or rejected Resume preserves the running game's next attempt", async () => {
+    const appId = 42, app = fixture({hostedApps: [appId]});
+    const ready = app.start({async play(_id, handoff) { await handoff(); return "presented"; }});
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    app.incoming.push(JSON.stringify({method: "play", id: 1, appId}));
+    await app.advance("gamepad-ready");
+    let attempts = 0;
+    assert.equal(await app.shell.showForGame(appId, 90, async view => {
+        assert.equal(view, 10);
+        attempts++;
+        if (attempts === 1) return false;
+        if (attempts === 2) throw new Error("Presenter failed to switch");
+        return true;
+    }), true);
+    for (const [id, result] of [[2, "unavailable"], [3, "failed"], [4, "presented"]]) {
+        app.incoming.push(JSON.stringify({method: "resume-game", id, appId}));
+        await app.advance("gamepad-ready");
+        assert.deepEqual(app.replies.find(reply => reply.id === id), {id, result});
+    }
+    const foreground = app.replies.filter(e => 'nativeGameForeground' in e).map(e => e.nativeGameForeground);
+    assert.deepEqual(foreground, [true, false, true]);
+    const milestones = app.reports.at(-1).split('\r\n').filter(stage => /^game-(resume-|switch-to-game)/.test(stage));
+    assert.deepEqual(milestones, ["game-resume-declined", "game-resume-failed", "game-switch-to-game"]);
+});
+
+test("an exit during a pending Resume restores the library after the handoff settles", async () => {
+    const appId = 42, app = fixture({hostedApps: [appId]});
+    const ready = app.start({async play(_id, handoff) { await handoff(); return "presented"; }});
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    const send = (method, id) => app.incoming.push(JSON.stringify({method, id, appId}));
+    send("play", 1);
+    await app.advance("gamepad-ready");
+    let complete, attempts = 0;
+    const switching = new Promise(resolve => { complete = resolve; });
+    assert.equal(await app.shell.showForGame(appId, 90, () => { attempts++; return switching; }), true);
+    send("resume-game", 2);
+    send("resume-game", 3);
+    await app.advance("gamepad-ready");
+    assert.equal(attempts, 1);
+    assert.deepEqual(app.replies.find(reply => reply.id === 3), {id: 3, result: "unavailable"});
+    const returning = app.shell.resume(appId);
+    complete(true);
+    await returning;
+    await drain();
+    assert.deepEqual(app.replies.find(reply => reply.id === 2), {id: 2, result: "unavailable"});
+    assert.deepEqual(app.switches.at(-1), [10, 3]);
+    assert.deepEqual(app.replies.filter(e => e.event === "xbox-game").map(e => [e.appId,e.overlay]),
+        [[appId,false],[appId,true],[0,false]]);
+});
+
 test("a configured launch waits for Valve, uses the owned Play path, and keeps the explicit game exit", async () => {
     const app = fixture({hostedApps: [2868840]});
     const brokerContext = {};
@@ -687,4 +750,36 @@ test("the foreground Valve library relays authorized native install milestones w
     await drain();
     assert(app.replies.some(reply => reply.id === 12 && reply.result === "installed"));
     assert.deepEqual(app.switches, switches);
+});
+
+test("only ready foreground Big Picture requests a game-scoped Cloud backup", async () => {
+    const app = fixture();
+    const calls = [];
+    const started = app.start({
+        cloudBackup(id, download) {
+            calls.push([id, download]);
+            return download ? "snapshot:67" : "snapshots:2";
+        },
+        cloudRestore(id) {
+            calls.push([id, "restore"]);
+            return "restored:67";
+        }
+    });
+    await drain();
+    app.incoming.push('{"method":"cloud-backup-status","id":1,"appId":646570}');
+    await app.advance("gamepad-window-created");
+    assert.deepEqual(calls, []);
+    await app.advance("gamepad-ready");
+    await started;
+    app.incoming.push('{"method":"cloud-backup-status","id":2,"appId":646570}',
+        '{"method":"cloud-backup-download","id":3,"appId":646570}',
+        '{"method":"cloud-backup-download","id":4,"appId":"646570"}',
+        '{"method":"cloud-backup-upload","id":5,"appId":646570}',
+        '{"method":"cloud-backup-restore","id":6,"appId":646570}');
+    await app.advance("gamepad-ready");
+    assert.deepEqual(calls, [[646570, false], [646570, true], [646570, "restore"]]);
+    assert(app.replies.some(reply => reply.id === 2 && reply.result === "snapshots:2"));
+    assert(app.replies.some(reply => reply.id === 3 && reply.result === "snapshot:67"));
+    assert(app.replies.some(reply => reply.id === 6 && reply.result === "restored:67"));
+    for (const id of [1, 4, 5]) assert(app.replies.some(reply => reply.id === id && reply.error === "unavailable"));
 });
