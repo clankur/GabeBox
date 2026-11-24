@@ -6,7 +6,15 @@ GabeBox aims to bring Valve’s controller-friendly Big Picture interface to Xbo
 
 The goal is to make the same **Install** and **Play** flow work across the Steam catalog and sustain 60 FPS at native 1080p where the game supports it. Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. The results below are from Series X testing. Series S verification is still open.
 
-[Releases](#releases) · [What works](#what-works) · [Setup](#setup) · [Build from source](#build-from-source) · [Open issues](#open-issues)
+[Requirements](#requirements) · [Releases](#releases) · [What works](#what-works) · [Setup](#setup) · [Build from source](#build-from-source) · [Open issues](#open-issues)
+
+## Requirements
+
+- **Xbox Series X or Series S** in Developer Mode with Device Portal enabled and an Xbox profile signed in. [Activate Developer Mode](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/devkit-activation)
+- **Steam account** that owns the games you want to play, with Steam Guard in the Steam Mobile app to approve the QR sign-in.
+- **Internet access and free space** on the Xbox for Steam sign-in and game downloads. Check available space on the game’s install volume.
+- **Deployment computer** that can reach the Xbox’s HTTPS Device Portal, with Python 3.9 or newer and a checkout of this repository for the deployment CLI.
+- **Signed GabeBox APPX** with its matching publisher certificate and any x64 framework packages required by that build. [Build from source](#build-from-source)
 
 ## Releases
 
@@ -33,8 +41,6 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 | **X-COM: UFO Defense** | The earlier Steam Core library launched the owned DOS edition and rendered its intro. In-game controller input and persistent saves remain open. [DOS runtime test](https://github.com/clankur/GabeBox/issues/44) |
 
 ## Setup
-
-Use an **Xbox Series X or Series S in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
 Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands.
 
