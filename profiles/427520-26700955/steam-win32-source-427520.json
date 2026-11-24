@@ -1,0 +1,14 @@
+{
+  "26700955": [
+    {
+      "path": "bin/x64/factorio.exe",
+      "size": 49770448,
+      "sha256": "20c20155b86b68ba718810b08d2d7d0e071177bbc266331a518acbf8871c613d"
+    },
+    {
+      "path": "bin/x64/steam_api64.dll",
+      "size": 319128,
+      "sha256": "e6d9bafb9a41e42fba7b21553db49f8719027af3f0deb23ff86cfc44d60e776d"
+    }
+  ]
+}

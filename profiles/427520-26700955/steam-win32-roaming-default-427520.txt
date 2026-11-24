@@ -1,0 +1,3 @@
+Factorio/config/config.ini
+[input]
+input-method=GameController
