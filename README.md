@@ -2,62 +2,102 @@
 
 **Turn your Xbox into a GabeCube.**
 
-GabeBox brings Valve’s Big Picture UI to Xbox Series X in Developer Mode. It opens in Xbox WebView2 after Steam QR sign-in. On Series X, builds `.21` and `.22` each opened the populated Library on three consecutive cold application starts. The compatibility layer connects Valve’s Play, Resume and Exit controls to the Xbox game presenter. The release ledger tracks whether each title appears, sustains 1920×1080 playback and returns to the Library through those controls. [Big Picture setup and controls](analysis/big-picture.md) · [Per-build Series X verification](analysis/big-picture-reliability.md)
+GabeBox brings Valve’s controller-friendly Big Picture interface to Xbox Series X in Developer Mode. Sign in with Steam Guard to see your own Steam library. Steam checks ownership and downloads the games you select. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
 
-The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/GabeBox/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
+The goal is to make the same **Install** and **Play** flow work across the Steam catalog and sustain 60 FPS at native 1080p where the game supports it. Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. Start with the verified results below to see how far each title has progressed.
 
-## Repository layout
+[Releases](#releases) · [What works](#what-works) · [Setup](#setup) · [Build from source](#build-from-source) · [Open issues](#open-issues)
 
-The component map follows Valve's Proton 11.0 tree at revision `1f089f56`. Proton builds compatibility components independently and assembles their outputs for Steam. This project applies that pattern to the Xbox runtime and APPX package. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1)
+## Releases
 
-| Area | Responsibility | Upstream reference |
-| --- | --- | --- |
-| [`runtime/`](runtime) | Steam host, Win32 adapters, SDL, native presentation, and hosted game runtimes. Shared protocol headers live in `runtime/shared/`. | [Wine, DXVK, and vkd3d-proton components](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/.gitmodules) · [Steam helper](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/steam_helper) |
-| [`build_tools/`](build_tools) | Verify inputs, assemble APPX layouts, and sign packages. Windows SDK workflows build the native components. | [Root build](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/Makefile) · [Distribution assembly](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/Makefile.in) |
-| [`profiles/`](profiles) | Select compatibility behavior for verified Steam game builds. | [Runtime options and title overrides](https://github.com/ValveSoftware/Proton/blob/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/README.md#runtime-config-options) |
-| [`ui/`](ui), [`probe/`](probe), [`tools/`](tools), [`tests/`](tests) | Xbox sign-in and Big Picture hosts, console controls, host-side diagnostics, and automated tests. | Xbox-specific integration. |
-| [`docs/`](docs), [`analysis/`](analysis) | Operator runbooks and recorded compatibility evidence. | [Proton debugging and controller guides](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1/docs) |
+| Release | What you get |
+| --- | --- |
+| [Big Picture 1.0.230.37](https://github.com/clankur/GabeBox/releases/tag/big-picture-v1.0.230.37) | Latest tagged Big Picture source release. Its Series X test reached the signed-in Library and launched Slay the Spire to its title screen. |
+| [Packaged process probe 0.1.0](https://github.com/clankur/GabeBox/releases/tag/process-probe-v0.1.0) | Diagnostic prerelease. The release notes link to the signed APPX, certificate, and checksums for testing whether the Xbox can start a packaged child process. |
+
+The Big Picture tag provides source archives. The locally signed Steam APPX uses Valve’s pinned files and is assembled separately. Later development builds and title trials are recorded in the hardware notes. [All releases](https://github.com/clankur/GabeBox/releases) · [Series X test ledger](analysis/big-picture-reliability.md)
+
+## What works
+
+On Series X, the tagged Big Picture build restored a Steam session, displayed the owned and installed libraries, and showed Home and the Wi-Fi indicator. A later development build installed an owned game from Big Picture’s **Install** button and switched the detail page to **Play** when Steam finished downloading it. [Tagged build evidence](analysis/big-picture-reliability.md#build-1023037) · [Install and Downloads evidence](analysis/big-picture.md#steam-machine-experience-on-series-x)
+
+The Steam Core prototype also verified a Slay the Spire cloud-save restore with a backup of the existing save folders. [Cloud-save test](docs/STEAM-CORE.md#direct-steam-cloud-research)
+
+| Game | Observed on Xbox Series X |
+| --- | --- |
+| **Slay the Spire** | Big Picture **Play** reached the title screen on `1.0.230.37`. A separate hosted trial reached Act 1 combat and averaged 59.97 FPS at 1920 × 1080 over 30 seconds using shared GPU textures. [Release test](analysis/big-picture-reliability.md#build-1023037) · [Gameplay measurement](docs/GAME-LAUNCH.md#native-fullscreen-presentation) |
+| **Stardew Valley** | Big Picture reached the title menu on an earlier build. A separate hosted trial averaged 59.97 FPS at 1920 × 1080 during outdoor farm movement using shared GPU textures. [Launch ledger](analysis/big-picture-reliability.md#game-launches-and-returns) · [Gameplay measurement](docs/GAME-LAUNCH.md#native-fullscreen-presentation) |
+| **Dwarf Fortress** | Reached the title menu with controller-driven pointer input. One Big Picture trial kept the same game process alive through a Library visit and **Resume**. A separate title-screen test averaged 49.97 FPS with the default 50 FPS graphics cap. [Resume test](analysis/big-picture-reliability.md#game-launches-and-returns) · [Pointer setup](docs/GAME-LAUNCH.md#play-dwarf-fortress-in-the-steam-library) |
+| **Hades** | The x64 DirectX build supports controller gameplay with its build-matched profile. A 30-second 1080p shared-GPU sample averaged 56.03 FPS with visible hitches. [Hades profile and results](analysis/hades-compatibility.md) |
+| **Marvel’s Spider-Man Remastered** | An experimental profile reached a partially rendered rooftop and responded to right-stick camera input. The 1080p backbuffer presented at 30.2 FPS over 30 seconds. Complete rendering and playable movement are still open. [Spider-Man trial](analysis/spider-man-compatibility.md) |
+| **X-COM: UFO Defense** | The earlier Steam Core library launched the owned DOS edition and rendered its intro. In-game controller input and persistent saves remain open. [DOS runtime test](https://github.com/clankur/GabeBox/issues/44) |
 
 ## Setup
 
-You’ll need an Xbox Series X in Developer Mode, an Xbox profile signed in on the console, and Xbox Device Portal enabled. Run the commands from the repository root on a computer that can reach the console. The deployment CLI requires Python 3.9 or later.
+Use an **Xbox Series X in Developer Mode** with Xbox Device Portal enabled, a signed-in Xbox profile, and a computer that can reach the console. You’ll need Python 3.9 or newer for the deployment CLI, Steam Guard for sign-in, and a Steam account that owns the game you want to test.
 
-1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address in Dev Home and `XBOX_PORTAL_USERNAME` to the Device Portal username.
-2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate presented by Device Portal in your browser, then set `XBOX_PORTAL_CERT_SHA256` in `.env`. The CLI prompts for your Device Portal password.
-3. Build the `xbox-big-picture-template` from this branch, then prepare a signed local package with Valve’s client archives. The Big Picture guide includes the build commands, Device Portal launch command and expected startup reports. [Build and verify the Big Picture package](analysis/big-picture.md#build-the-native-big-picture-package)
+1. Copy `.env.example` to `.env`. Set `XBOX_PORTAL_URL` to the HTTPS address shown in Dev Home and `XBOX_PORTAL_USERNAME` to your Device Portal username.
+2. Run `python3 xbox-deploy.py fingerprint`. Compare the SHA-256 fingerprint with the certificate shown by Device Portal, then set `XBOX_PORTAL_CERT_SHA256`. The CLI prompts for the Portal password.
+3. Deploy the signed APPX with its matching certificate. Open the installed app in Dev Home, approve the QR code with Steam Guard, and select **Install** or **Play** in your library.
 
-To run the original packaged-process diagnostic, follow its separate deployment instructions. [Probe setup and report fields](probe/README.md)
+```sh
+python3 xbox-deploy.py deploy ./gabe-signed/PackagedProcessProbe-x64.appx \
+  --certificate ./gabe-signed/PackagedProcessProbe.cer
+```
 
-Use the read-only observer to collect Big Picture startup checkpoints, game launch reports, and native frame traces through Device Portal. [Xbox runtime diagnostics](docs/XBOX-DIAGNOSTICS.md)
+If the package requires Visual C++ UWP or UWP Desktop frameworks, pass each matching x64 APPX with a separate `--dependency` argument. The standalone [process probe](probe/README.md) can verify Dev Mode deployment before you assemble the Steam package.
 
-### Play Hades on Xbox Series X
+## Build from source
 
-The signed Hades profile runs the Steam x64 DirectX build through Big Picture. Controller gameplay works on Series X. Expect intermittent stutter in the current build. [Hades setup and hardware results](analysis/hades-compatibility.md)
+The GitHub Actions workflows compile the x64 native components with the Windows SDK. Local assembly uses **Python 3.9+**, **Bash**, **`makemsix`**, **OpenSSL**, **`osslsigncode`**, and **`shasum`**. Run the commands from the repository root and use fresh output directories.
 
-### Try the earlier Steam Core prototype
+### 1. Collect the build inputs
 
-Download the `xbox-steam-core-template` artifact from the **Build Xbox probe** run for your checkout. Local packaging requires LLVM objdump, `makemsix`, OpenSSL, and `osslsigncode`. Follow the Steam setup guide to add the hash-pinned Valve files and sign the APPX. Prepare the build with `--unicode-keyboard --steam-sign-in`, then approve the on-screen code in Steam Mobile. [Build runs](https://github.com/clankur/GabeBox/actions/workflows/xbox-probe.yml) · [Steam setup guide](docs/STEAM-CORE.md)
+| Input | Where it comes from |
+| --- | --- |
+| Verified Steam Core FHD base APPX | The integrated builder accepts the exact regular `1.0.230.0` package or its signed `1.0.231.0` recovery package. Compare the file hash with the [accepted base pins](build_tools/prepare_big_picture_library.py). |
+| `xbox-steam-core-template` | Native Steam session component and runtime template. [Build Xbox probe](https://github.com/clankur/GabeBox/actions/workflows/xbox-probe.yml) |
+| `xbox-big-picture-webview-x64` | Big Picture WebView2 host. [WebView2 host workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-big-picture-webview.yml) |
+| `xbox-big-picture-primary-x64` and `xbox-fhd-present-x64` | Primary XAML window and native game presenter for the single-window build. [Primary host workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-big-picture-primary.yml) · [Presenter workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-fhd-present.yml) |
+| Title-specific runtimes and profiles | Match the game’s installed Steam build. The [SDL workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-sdl.yml) publishes versioned SDL builds. The [game launch guide](docs/GAME-LAUNCH.md) lists per-title inputs. |
 
-To try the DOS runtime, also pass `--xcom-dos-runtime` with the pinned upstream archive when preparing the template. Sign in using a Steam account that owns X-COM: UFO Defense, then select **Download** and **Play** in the library. [X-COM setup](docs/STEAM-CORE.md#play-the-steam-dos-edition-of-x-com)
+Use workflow artifacts from the same source revision where possible and verify their `SHA256SUMS`. The base APPX is a separate input from the release source archive and the Steam Core CI template. If you’re starting without the pinned base, you can build the [packaged process probe](probe/DEVELOPMENT.md) or assemble the [Steam Core prototype](docs/STEAM-CORE.md#run-the-on-console-sign-in) using the CI template.
 
-## Verified features
+### 2. Assemble and sign
 
-- **Console diagnostics.** The deployment CLI installs signed packages through Device Portal and reads fresh reports. The baseline probe verified same-package process startup and named-pipe communication. [Console probe](probe/README.md)
-- **Steam sign-in and library.** Prototype builds verified Steam Guard QR approval, optional session reuse across an app upgrade, a searchable games-only library, controller navigation, and artwork caching. [Steam library setup and results](https://github.com/clankur/GabeBox/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#run-the-on-console-sign-in)
-- **Downloads and launch diagnostics.** Steam installed owned games into app-local storage. The prototype submits standard Steam Play requests, supports per-title launch options, and records startup checkpoints and process exits. [Download tests](https://github.com/clankur/GabeBox/blob/547182a15be15939762c8f7ead8bbac236ab88ae/probe/STEAM-CORE.md#test-an-owned-game-download) · [Launch verification](https://github.com/clankur/GabeBox/pull/47)
-- **Fullscreen play.** The shared SDL player has displayed Slay the Spire, Dwarf Fortress, and Stardew Valley on Series X. Each title requires its version-matched runtime. [Player setup and console results](docs/GAME-LAUNCH.md)
-- **Slay the Spire cloud saves.** From an installed game, select **Cloud saves** and then **Download and use saves**. The client verifies the downloaded files and backs up the existing save folders before replacement. [Restore setup and scope](docs/STEAM-CORE.md#direct-steam-cloud-research)
-- **X-COM: UFO Defense.** On a Series X, the prototype checked Steam ownership and installation, then ran the installed DOS game in its packaged runtime and rendered frames from the original intro. [Series X results](https://github.com/clankur/GabeBox/issues/44)
+Set `FHD_BASE` to the verified base APPX and `WEBVIEW`, `SESSION`, `PRIMARY`, and `PRESENTER` to the extracted artifact directories. Set the three `*_PIN` variables to the independently recorded SHA-256 digests of their respective `SHA256SUMS` files. Set `PACKAGE_VERSION` to a four-part version higher than the base and the installed build under the same package identity.
 
-## Missing features and planned work
+```sh
+python3 -m build_tools.prepare_big_picture_library \
+  "$FHD_BASE" "$WEBVIEW" ./gabe-layout --version "$PACKAGE_VERSION" \
+  --session-artifact "$SESSION" --session-checksum "$SESSION_PIN" \
+  --primary-xaml "$PRIMARY" --primary-checksum "$PRIMARY_PIN" \
+  --presenter-artifact "$PRESENTER" --presenter-checksum "$PRESENTER_PIN"
 
-- Expand local Windows game support using shared runtime components and measure playability across the owned Steam library. The current work tracks Hades frame pacing and startup blockers for Slay the Spire 2 and Halo MCC. [Compatibility work and verification](analysis/steam-compatibility.md)
+bash build_tools/package.sh --layout ./gabe-layout ./gabe-signed
+(cd ./gabe-signed && shasum -a 256 -c SHA256SUMS)
+```
 
-- Verify in-game Xbox controller input for X-COM and add persistent saves that survive an app restart. [X-COM follow-up](https://github.com/clankur/GabeBox/issues/44)
-- Fix game-path resolution after the first shared prerequisite install and refresh the competing AppID when the Steam download queue changes. [Prerequisite path](https://github.com/clankur/GabeBox/issues/54) · [Download queue reporting](https://github.com/clankur/GabeBox/issues/55)
-- Investigate Windows game startup and graphics blockers. Use controlled renderer tests and title-by-title launch checks for the other Windows games under test. [Current compatibility issues](https://github.com/clankur/GabeBox/issues) · [ANGLE experiment](https://github.com/clankur/GabeBox/pull/53) · [Win32 experiment plan](https://github.com/clankur/GabeBox/pull/51)
-- Repeat the library and X-COM acceptance tests on a single build from `main`.
+The builder verifies Valve’s [pinned client manifest](runtime/steam/pins/steam_client_win64.manifest) and the archive bytes it stages. Pass `--archive-cache /path/to/cache` to use a local copy. Add the title’s runtime flags before signing. For exact input hashes and examples, see the [single-window build recipe](analysis/big-picture.md#reproduce-the-single-window-series-x-build) and the [Hades build-matched profile](analysis/hades-compatibility.md#prepare-the-build-matched-profile).
 
-## Research archive
+## Open issues
 
-The original Steam client audit, import measurements, porting analysis, and reproduction commands are in the [historical audit](analysis/steam-client-audit.md). See the [probe development guide](probe/DEVELOPMENT.md) for the Xbox diagnostic build and deployment workflow.
+| Area | What’s still open |
+| --- | --- |
+| **Windows game compatibility** | Broader startup and gameplay support, including Factorio and later Unity, Godot, and DirectX titles. Spider-Man needs complete world rendering and a verified gameplay cycle. [Compatibility investigations](analysis/steam-compatibility.md) · [Factorio #43](https://github.com/clankur/GabeBox/issues/43) · [Spider-Man #67](https://github.com/clankur/GabeBox/issues/67) |
+| **Store, overlay, and Steam Input** | The tagged release reached the Store loading screen. Reliable storefront rendering, complete Play → overlay → Resume → Exit cycles, and Steam-owned controller remapping need more console verification. [Big Picture ledger](analysis/big-picture-reliability.md) · [Steam Input design](analysis/steam-input.md) |
+| **Downloads and storage** | Refresh the correct active download when the queue changes and resolve installed game paths after shared prerequisites finish. [Game paths #54](https://github.com/clankur/GabeBox/issues/54) · [Download queue #55](https://github.com/clankur/GabeBox/issues/55) |
+| **Saves and performance** | Extend Steam Cloud support, verify save and reload per game, and work toward sustained 60 FPS at native 1080p during gameplay. [Steam Cloud #56](https://github.com/clankur/GabeBox/issues/56) · [Frame measurement](docs/XBOX-DIAGNOSTICS.md#collect-and-measure) |
+
+[Browse all open issues](https://github.com/clankur/GabeBox/issues?q=is%3Aissue+is%3Aopen)
+
+## Development
+
+GabeBox follows Proton’s component-based structure. `runtime/` contains the reusable Steam host, Win32 adapters, SDL integration, and native presenter. `profiles/` selects compatibility behavior for specific Steam builds. `ui/` contains sign-in and Big Picture, `build_tools/` assembles packages, and `probe/` and `tools/` contain diagnostics. [Proton source tree](https://github.com/ValveSoftware/Proton/tree/1f089f5610a882c8bfcb4b58a3c86ee88bb4b9f1) · [Contributor guidance](AGENTS.md)
+
+```sh
+python3 -m unittest discover -s tests
+node --test tests/*.test.js tests/big-picture-webview/*.test.js
+```
+
+When reporting a game issue, include the Steam AppID and build, GabeBox package version, Xbox model and OS build, and the first visible or logged failure. The [diagnostic guide](docs/XBOX-DIAGNOSTICS.md) covers launch, input, render, and frame traces. The [research archive](analysis/steam-client-audit.md) records how the original Steam client was inspected and adapted.
