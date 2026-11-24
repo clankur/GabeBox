@@ -242,11 +242,12 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const steamLibrary = {tryGetItemAsync: () => Operation.resolve(manifests)};
         const localFolder = {createFileAsync: name => Operation.resolve({name}), tryGetItemAsync: () =>
             Operation.resolve(firstManifest ? steamLibrary : null)};
-        let installPolls = 0;
+        let installPolls = 0, sessionLookups = 0;
+        const qrRequests = [];
         const restartRequests = [], downloadReports = [];
         const globals = {
             window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
-            setTimeout, clearTimeout,
+            setTimeout, clearTimeout, btoa,
             Promise: Operation, steamBigPictureBroker: context.steamBigPictureBroker, libraryArt: {schedule() {}},
             Windows: {
                 ApplicationModel: { Package: { current: { id: {fullName: packageId}, installedLocation: {
@@ -261,6 +262,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                     deviceFamily: outcome === "missing" ? "Windows.Desktop" : "Windows.Xbox"
                 } } } },
                 Storage: {
+                    Streams: { UnicodeEncoding: {utf8: 0} },
                     ApplicationData: { current: { localFolder, localSettings: {values: {
                         hasKey: key => settings.has(key),
                         lookup: key => settings.get(key),
@@ -280,7 +282,18 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                                 file === marker ? "12" : "status=steam-library-rendering\r\n")
                     }
                 },
-                Web: { Http: { Filters: { HttpBaseProtocolFilter: class {} }, HttpClient: class { close() {} } } }
+                Foundation: { Uri: class { constructor(url) { this.url = url; } } },
+                Web: { Http: {
+                    Filters: { HttpBaseProtocolFilter: class {} },
+                    HttpStringContent: class { close() {} },
+                    HttpClient: class {
+                        close() {}
+                        postAsync(uri) {
+                            qrRequests.push(uri.url);
+                            return Operation.reject(Error("offline QR control"));
+                        }
+                    }
+                } }
             },
             XboxProbe: { Native: { ProbeRunner: {
                 steamSessionSteamId: () => activeOwner,
@@ -290,6 +303,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                         "steam_launch=prerequisite-restart-required\r\n");
                 },
                 resumeSteamSignIn() {
+                    ++sessionLookups;
                     assert(!earlyCatalog, "Use the native progressive restore for Big Picture");
                     if (outcome === "native-unavailable") {
                         throw Object.assign(Error("local activation details"), {number: 0x80040154 | 0});
@@ -346,25 +360,30 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         // must already use focus navigation, even when no session is restored.
         assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");
         const qr = elements.get("signin");
-        if (outcome === "missing") {
-            assert.equal(rootAttributes["data-steam-controller-ui"], undefined);
-            assert.equal(qr.click, undefined);
-        } else {
-            assert.equal(rootAttributes["data-steam-controller-ui"], "true");
-            for (const detail of [0, 1, 2]) {
-                const event = {detail, preventDefault() { this.prevented = true; },
-                    stopImmediatePropagation() { this.stopped = true; }};
-                qr.click(event);
-                assert.equal(!!event.prevented, detail > 0);
-                assert.equal(!!event.stopped, detail > 0);
-            }
-        }
+        assert.equal(qr.click, undefined);
         await new Promise(resolve => setImmediate(resolve));
         if (outcome === "native-unavailable") {
             assert.match(latestReport, /steam_session_restore=unavailable\r\nsteam_session_restore_hresult=0x80040154/);
             assert.doesNotMatch(latestReport, /steam_qr_challenge|local activation details/);
             assert.match(document.getElementById("status").textContent, /runtime could not open/);
             assert.deepEqual(calls, []);
+            const retry = elements.get("retry");
+            retry.tagName = "BUTTON";
+            assert.equal(retry.hidden, false);
+            retry.click({detail: 1});
+            retry.click({detail: 2});
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(sessionLookups, 1);
+            assert.equal(qrRequests.length, 1);
+            assert.match(qrRequests[0], /\/BeginAuthSessionViaQR\//);
+            assert.match(latestReport, /steam_qr_challenge=failed/);
+            const press = {target: retry, keyCode: 195, preventDefault() { this.defaultPrevented = true; }};
+            qr.keydown({...press, repeat: true});
+            qr.keydown(press);
+            assert.equal(press.defaultPrevented, true);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(sessionLookups, 1);
+            assert.equal(qrRequests.length, 2);
             continue;
         }
         assert.equal(document.getElementById("signin").hidden, true);
