@@ -1,6 +1,8 @@
 {
   "dxgi.dll": {
-    "CreateDXGIFactory1": "XboxWin32Dxgi.dll"
+    "CreateDXGIFactory": "XboxWin32Dxgi.dll",
+    "CreateDXGIFactory1": "XboxWin32Dxgi.dll",
+    "CreateDXGIFactory2": "XboxWin32Dxgi.dll"
   },
   "d3dcompiler_47.dll": {
     "D3DReflect": "XboxWin32Dxgi.dll",

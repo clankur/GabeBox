@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include "../steam-handoff-control.h"
+#include "loader-trace-output.h"
 
 static const WCHAR steamKeyPath[] = L"Software\\Valve\\Steam\\ActiveProcess";
 static WCHAR sdkPath[1024], hivePath[1024];
@@ -45,7 +46,7 @@ DWORD SteamHandoffDiscovery(void) {
     return status;
 }
 
-static DWORD InitSteamSdk(DWORD *report, BOOL retain) {
+static DWORD InitSteamSdk(DWORD *report, void *context) {
     typedef int (__cdecl *Init)(char *);
     typedef void (__cdecl *Shutdown)(void);
     typedef void *(__cdecl *GetUser)(void);
@@ -73,7 +74,7 @@ static DWORD InitSteamSdk(DWORD *report, BOOL retain) {
                 *report |= STEAM_HANDOFF_SDK_LOGGED_ON;
                 if (getId(user) == ReadNumber(L"XBOX_STEAM_HANDOFF_ACCOUNT")) *report |= STEAM_HANDOFF_SDK_MATCHED;
             }
-            keep = retain && (*report & STEAM_HANDOFF_SDK_MATCHED);
+            keep = context && (*report & STEAM_HANDOFF_SDK_MATCHED);
             if (!keep) shutdown();
         }
     }
@@ -81,7 +82,10 @@ static DWORD InitSteamSdk(DWORD *report, BOOL retain) {
     return code;
 }
 
-static DWORD SteamSdkControl(HMODULE client, BOOL retain) {
+typedef DWORD (*DiscoveryAction)(DWORD *report, void *context);
+
+static DWORD WithSteamDiscovery(HMODULE client, LPCWSTR privateHive, DWORD *report,
+        DiscoveryAction action, void *context, DWORD *cleanupStatus) {
     typedef LSTATUS (WINAPI *LoadHive)(LPCWSTR, PHKEY, REGSAM, DWORD, DWORD);
     typedef LSTATUS (WINAPI *CreateKey)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
                                        const SECURITY_ATTRIBUTES *, PHKEY, LPDWORD);
@@ -89,14 +93,12 @@ static DWORD SteamSdkControl(HMODULE client, BOOL retain) {
     typedef LSTATUS (WINAPI *OverrideKey)(HKEY, HKEY);
     typedef LSTATUS (WINAPI *CloseKey)(HKEY);
 
-    DWORD report = STEAM_HANDOFF_SDK_REPORT;
     WCHAR clientPath[1024];
     DWORD pathLength = client ? GetModuleFileNameW(client, clientPath, ARRAYSIZE(clientPath)) : 0;
     DWORD pid = (DWORD)ReadNumber(L"XBOX_STEAM_HANDOFF_PID");
-    if (!pathLength || pathLength >= ARRAYSIZE(clientPath) || !pid ||
-            !ReadSetting(L"XBOX_STEAM_HANDOFF_HIVE", hivePath, ARRAYSIZE(hivePath))) return report | ERROR_INVALID_DATA;
+    if (!pathLength || pathLength >= ARRAYSIZE(clientPath) || !pid || !*privateHive) return ERROR_INVALID_DATA;
     HMODULE registry = LoadLibraryExW(L"advapi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!registry) return report | (GetLastError() & 0xffffu);
+    if (!registry) return GetLastError();
     LoadHive loadHive = (LoadHive)(void *)GetProcAddress(registry, "RegLoadAppKeyW");
     CreateKey createKey = (CreateKey)(void *)GetProcAddress(registry, "RegCreateKeyExW");
     SetValue setValue = (SetValue)(void *)GetProcAddress(registry, "RegSetValueExW");
@@ -105,9 +107,9 @@ static DWORD SteamSdkControl(HMODULE client, BOOL retain) {
     DWORD status = ERROR_PROC_NOT_FOUND;
     if (loadHive && createKey && setValue && overrideKey && closeKey) {
         HKEY root = NULL, key = NULL;
-        status = loadHive(hivePath, &root, KEY_READ | KEY_WRITE, REG_PROCESS_APPKEY, 0);
+        status = loadHive(privateHive, &root, KEY_READ | KEY_WRITE, REG_PROCESS_APPKEY, 0);
         if (status == ERROR_SUCCESS) {
-            report |= STEAM_HANDOFF_SDK_HIVE;
+            *report |= STEAM_HANDOFF_SDK_HIVE;
             status = createKey(root, steamKeyPath, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &key, NULL);
             if (status == ERROR_SUCCESS) {
                 status = setValue(key, L"SteamClientDll64", 0, REG_SZ, (const BYTE *)clientPath,
@@ -119,23 +121,154 @@ static DWORD SteamSdkControl(HMODULE client, BOOL retain) {
             if (status == ERROR_SUCCESS) {
                 status = SteamHandoffDiscovery();
                 if (status == ERROR_SUCCESS) {
-                    report |= STEAM_HANDOFF_SDK_DISCOVERY;
-                    status = InitSteamSdk(&report, retain);
+                    *report |= STEAM_HANDOFF_SDK_DISCOVERY;
+                    status = action(report, context);
                 }
-                overrideKey(HKEY_CURRENT_USER, NULL);
+                const DWORD restored = overrideKey(HKEY_CURRENT_USER, NULL);
+                if (cleanupStatus) *cleanupStatus = restored;
             }
             closeKey(root);
         }
     }
     FreeLibrary(registry);
-    return report | (status & 0xffffu);
+    return status;
 }
 
 DWORD WINAPI XboxSteamInitialize(BOOL retain) {
-    if (!ReadSetting(L"XBOX_STEAM_HANDOFF_SDK", sdkPath, ARRAYSIZE(sdkPath)))
+    if (!ReadSetting(L"XBOX_STEAM_HANDOFF_SDK", sdkPath, ARRAYSIZE(sdkPath)) ||
+            !ReadSetting(L"XBOX_STEAM_HANDOFF_HIVE", hivePath, ARRAYSIZE(hivePath)))
         return STEAM_HANDOFF_SDK_REPORT | ERROR_INVALID_DATA;
+    DWORD report = STEAM_HANDOFF_SDK_REPORT;
     HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-    DWORD result = SteamSdkControl(client, retain);
+    DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL);
     if (client) FreeLibrary(client);
-    return result;
+    return report | (result & 0xffffu);
+}
+
+enum LegacyOperation { LegacyInit, LegacyIsRunning, LegacyRestart };
+typedef struct LegacyCall {
+    enum LegacyOperation operation;
+    HMODULE sdk;
+    FARPROC entry;
+    DWORD app;
+    DWORD lastError;
+    bool called;
+    bool result;
+} LegacyCall;
+
+static SRWLOCK legacyLock = SRWLOCK_INIT;
+static volatile LONG legacyTraceEvents[3];
+
+static bool MatchLegacyAccount(HMODULE sdk) {
+    typedef void *(__cdecl *GetUser)(void);
+    typedef bool (__cdecl *IsLoggedOn)(void *);
+    typedef ULONGLONG (__cdecl *GetSteamId)(void *);
+    GetUser getUser = (GetUser)(void *)GetProcAddress(sdk, "SteamAPI_SteamUser_v023");
+    IsLoggedOn loggedOn = (IsLoggedOn)(void *)GetProcAddress(sdk, "SteamAPI_ISteamUser_BLoggedOn");
+    GetSteamId getId = (GetSteamId)(void *)GetProcAddress(sdk, "SteamAPI_ISteamUser_GetSteamID");
+    ULONGLONG expected = ReadNumber(L"XBOX_STEAM_HANDOFF_ACCOUNT");
+    void *user = getUser ? getUser() : NULL;
+    return expected && user && loggedOn && getId && loggedOn(user) && getId(user) == expected;
+}
+
+static DWORD CallLegacySdk(DWORD *report, void *context) {
+    typedef bool (__cdecl *Query)(void);
+    typedef bool (__cdecl *Restart)(DWORD);
+    typedef void (__cdecl *Shutdown)(void);
+    LegacyCall *call = context;
+    SetLastError(call->lastError);
+    call->result = call->operation == LegacyRestart ? ((Restart)(void *)call->entry)(call->app) :
+        ((Query)(void *)call->entry)();
+    call->lastError = GetLastError();
+    call->called = true;
+    if (call->operation == LegacyInit && call->result) {
+        *report |= STEAM_HANDOFF_SDK_INITIALIZED;
+        if (MatchLegacyAccount(call->sdk)) {
+            *report |= STEAM_HANDOFF_SDK_MATCHED;
+        } else {
+            Shutdown shutdown = (Shutdown)(void *)GetProcAddress(call->sdk, "SteamAPI_Shutdown");
+            if (shutdown) shutdown();
+            call->result = false;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+static char *TraceError(char *out, const char *prefix, DWORD error) {
+    static const char digits[] = "0123456789ABCDEF";
+    while (*prefix) *out++ = *prefix++;
+    for (int digit = 7; digit >= 0; --digit) *out++ = digits[(error >> (4 * digit)) & 15u];
+    return out;
+}
+
+static void TraceLegacyResult(char const *name, DWORD report, LegacyCall const *call,
+        DWORD discovery, DWORD cleanup) {
+    if (InterlockedIncrement(&legacyTraceEvents[call->operation]) > 4) return;
+    char line[180];
+    char *out = line;
+    const char *parts[] = {"asset steam-legacy-", name, call->called ? (call->result ? "=true" : "=false") : "=unavailable",
+        report & STEAM_HANDOFF_SDK_DISCOVERY ? " discovery=private" : " discovery=default",
+        report & STEAM_HANDOFF_SDK_MATCHED ? " account=matched" :
+            report & STEAM_HANDOFF_SDK_INITIALIZED ? " account=unverified" : ""};
+    for (unsigned i = 0; i < ARRAYSIZE(parts); ++i)
+        for (const char *part = parts[i]; *part; ++part) *out++ = *part;
+    if (discovery) out = TraceError(out, " discovery-error=0x", discovery);
+    if (cleanup) out = TraceError(out, " cleanup-error=0x", cleanup);
+    if (!call->called) out = TraceError(out, " sdk-error=0x", call->lastError);
+    *out++ = '\r';
+    *out++ = '\n';
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static bool InvokeLegacy(enum LegacyOperation operation, DWORD app, const char *symbol, const char *trace) {
+    const DWORD before = GetLastError();
+    WCHAR enabled[2];
+    if (!ReadSetting(L"XBOX_STEAM_HANDOFF_LEGACY", enabled, ARRAYSIZE(enabled)) || enabled[0] != L'1') {
+        SetLastError(ERROR_INVALID_DATA);
+        return false;
+    }
+
+    AcquireSRWLockExclusive(&legacyLock);
+    LegacyCall call = {0};
+    call.operation = operation;
+    call.app = app;
+    call.lastError = ERROR_INVALID_DATA;
+    DWORD report = 0;
+    DWORD discovery = 0;
+    DWORD cleanup = 0;
+    if (ReadSetting(L"XBOX_STEAM_HANDOFF_SDK", sdkPath, ARRAYSIZE(sdkPath)) &&
+            ReadSetting(L"XBOX_STEAM_HANDOFF_HIVE", hivePath, ARRAYSIZE(hivePath))) {
+        // The host verifies this private, staged image. Resolve only its already-loaded copy.
+        WCHAR actual[1024];
+        call.sdk = GetModuleHandleW(L"steam_api64.dll");
+        DWORD length = call.sdk ? GetModuleFileNameW(call.sdk, actual, ARRAYSIZE(actual)) : 0;
+        if (length && length < ARRAYSIZE(actual) &&
+                CompareStringOrdinal(sdkPath, -1, actual, -1, TRUE) == CSTR_EQUAL) {
+            call.entry = GetProcAddress(call.sdk, symbol);
+            call.lastError = call.entry ? before : GetLastError();
+            if (call.entry) {
+                HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
+                discovery = WithSteamDiscovery(client, hivePath, &report, CallLegacySdk, &call, &cleanup);
+                // If discovery is unavailable, preserve the original SDK's decision.
+                if (!call.called) CallLegacySdk(&report, &call);
+                if (client) FreeLibrary(client);
+            }
+        }
+    }
+    TraceLegacyResult(trace, report, &call, discovery, cleanup);
+    ReleaseSRWLockExclusive(&legacyLock);
+    SetLastError(call.lastError);
+    return call.result;
+}
+
+bool __cdecl XboxLegacySteamInit(void) {
+    return InvokeLegacy(LegacyInit, 0, "SteamAPI_Init", "init");
+}
+
+bool __cdecl XboxLegacySteamIsRunning(void) {
+    return InvokeLegacy(LegacyIsRunning, 0, "SteamAPI_IsSteamRunning", "is-running");
+}
+
+bool __cdecl XboxLegacySteamRestart(DWORD app) {
+    return InvokeLegacy(LegacyRestart, app, "SteamAPI_RestartAppIfNecessary", "restart");
 }

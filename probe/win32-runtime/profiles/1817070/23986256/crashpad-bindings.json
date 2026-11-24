@@ -1,0 +1,8 @@
+{
+  "kernel32.dll": {
+    "CreateNamedPipeW": "XboxWin32LoaderTrace.dll",
+    "CreateFileW": "XboxWin32LoaderTrace.dll",
+    "WaitNamedPipeW": "XboxWin32LoaderTrace.dll",
+    "CreateProcessW": "XboxWin32LoaderTrace.dll"
+  }
+}

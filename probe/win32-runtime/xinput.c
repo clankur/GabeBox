@@ -10,11 +10,13 @@
 
 typedef DWORD (WINAPI *GetState)(DWORD, XINPUT_STATE *);
 typedef DWORD (WINAPI *GetCapabilities)(DWORD, DWORD, XINPUT_CAPABILITIES *);
+typedef DWORD (WINAPI *SetState)(DWORD, XINPUT_VIBRATION *);
 static INIT_ONCE configured = INIT_ONCE_STATIC_INIT;
 static SRWLOCK stateLock = SRWLOCK_INIT;
 static SdlHostMailbox *mailbox;
 static GetState nativeGetState;
 static GetCapabilities nativeGetCapabilities;
+static SetState nativeSetState;
 static XINPUT_STATE latest;
 static BOOL connected;
 static volatile LONG slotObserved;
@@ -33,6 +35,7 @@ static BOOL CALLBACK OpenController(PINIT_ONCE once, PVOID parameter, PVOID *con
         if (system) {
             nativeGetState = (GetState)(void *)GetProcAddress(system, "XInputGetState");
             nativeGetCapabilities = (GetCapabilities)(void *)GetProcAddress(system, "XInputGetCapabilities");
+            nativeSetState = (SetState)(void *)GetProcAddress(system, "XInputSetState");
         }
         return TRUE;
     }
@@ -146,5 +149,26 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
          255, 255, 32767, 32767, 32767, 32767},
         {0, 0}
     };
+    return ERROR_SUCCESS;
+}
+
+DWORD WINAPI XboxXInputSetState(DWORD index, XINPUT_VIBRATION *vibration) {
+    if (!vibration || index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+    ConfigureController();
+    if (nativeSetState) return nativeSetState(index, vibration);
+    if (index || !mailbox || SdlHostLoad(&mailbox->quit) ||
+            !(SdlHostLoad(&mailbox->gamepad.buttons) & SDL_HOST_PAD_CONNECTED)) return ERROR_DEVICE_NOT_CONNECTED;
+    // The hosted capabilities advertise zero motor speeds until the host supports vibration.
+    return vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
+}
+
+DWORD WINAPI XboxXInputGetDSoundAudioDeviceGuids(DWORD index, GUID *render, GUID *capture) {
+    if (!render || !capture) return ERROR_BAD_ARGUMENTS;
+    XINPUT_CAPABILITIES capabilities;
+    const DWORD result = XboxXInputGetCapabilities(index, XINPUT_FLAG_GAMEPAD, &capabilities);
+    if (result != ERROR_SUCCESS) return result;
+    // Modern Windows also reports no legacy DirectSound devices through this API.
+    *render = (GUID){0};
+    *capture = (GUID){0};
     return ERROR_SUCCESS;
 }

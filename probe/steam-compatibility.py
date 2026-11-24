@@ -5,18 +5,23 @@ import argparse
 from collections import defaultdict, deque
 import hashlib
 import json
+import mmap
+import os
 from pathlib import Path, PureWindowsPath
 import re
 import runpy
 import struct
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 
+PROBE = Path(__file__).resolve().parent
 PRIORITY_BINARIES = {
     1145360: ("x64/Hades.exe", "x64/EngineWin64s.dll"),
     976730: ("mcclauncher.exe", "MCC/Binaries/Win64/MCC-Win64-Shipping.exe"),
     2868840: ("SlayTheSpire2.exe",),
+    1817070: ("Spider-Man.exe", "D3D12/D3D12Core.dll"),
 }
 UNITY_COMPANIONS = (
     "UnityPlayer.dll",
@@ -47,6 +52,18 @@ CAPABILITIES = {
     "xinput": XINPUT_MODULES,
     "directinput": {"dinput.dll", "dinput8.dll"},
     "raw-input": {"user32.dll!GetRawInputDeviceList", "user32.dll!RegisterRawInputDevices"},
+}
+NAMESPACE_CAPABILITIES = {
+    "named-pipe-apis": {f"{name}{suffix}" for name in ("CreateNamedPipe", "WaitNamedPipe", "CallNamedPipe")
+                       for suffix in ("A", "W")},
+    "named-synchronization-apis": {
+        name
+        for kind in ("Event", "Mutex", "Semaphore", "WaitableTimer")
+        for suffix in ("A", "W")
+        for name in (f"Create{kind}{suffix}", f"Create{kind}Ex{suffix}", f"Open{kind}{suffix}")
+    },
+    "file-mapping-apis": {"CreateFileMappingA", "CreateFileMappingW", "CreateFileMappingFromApp",
+                          "OpenFileMappingA", "OpenFileMappingW", "OpenFileMappingFromApp"},
 }
 CHECKS = ("gameplay", "controller", "audio", "save-reload", "return-to-library")
 ACF_TOKEN = re.compile(r'\s+|//[^\r\n]*|"(?:[^"\\]|\\.)*"|[{}]')
@@ -84,6 +101,10 @@ def installed_manifest(path, identifier):
         raise ValueError("Expected a regular Steam manifest in steamapps.")
     with path.open("rb") as source:
         raw = source.read(1024 * 1024 + 1)
+    return parse_installed_manifest(raw, identifier)
+
+
+def parse_installed_manifest(raw, identifier):
     if len(raw) > 1024 * 1024:
         raise ValueError("Steam manifest exceeds 1 MiB.")
     text = raw.decode("utf-8-sig")
@@ -290,13 +311,13 @@ def pe_headers(objdump, binary):
     return architecture.get(machine[1], machine[1]), output
 
 
-def objdump_inspector(objdump):
-    parse_import_table = runpy.run_path(str(Path(__file__).with_name("prepare-steam-core.py")))["parse_import_table"]
+def objdump_inspector(objdump, readobj=None):
+    helpers = runpy.run_path(str(Path(__file__).with_name("prepare-steam-core.py")))
 
     def inspect(binary):
         architecture, output = pe_headers(objdump, binary)
         directory = re.search(r"^Entry 1\s+([0-9a-f]+)\s+[0-9a-f]+\s+Import Directory", output, re.M | re.I)
-        imports = parse_import_table(output)
+        imports = helpers["parse_import_table"](output)
         if not imports and (not directory or int(directory[1], 16)):
             raise ValueError(f"Could not inspect the PE import table of {binary.name}.")
         delay = re.search(r"^Entry d\s+([0-9a-f]+)\s+[0-9a-f]+\s+Delay Import Directory", output, re.M | re.I)
@@ -304,15 +325,17 @@ def objdump_inspector(objdump):
             digest = hashlib.sha256()
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
-        # llvm-objdump identifies a delay-import directory. REA reads its edges.
+        # llvm-objdump identifies the delay-import directory but does not list its edges.
         delay_imports = {} if delay and not int(delay[1], 16) else None
+        if delay_imports is None and readobj:
+            _, delay_imports = helpers["coff_imports"](readobj, binary)
         return architecture, digest.hexdigest(), imports or {}, delay_imports
 
     return inspect
 
 
-def pe_inspector(objdump, rea):
-    llvm = objdump_inspector(objdump)
+def pe_inspector(objdump, rea, readobj=None):
+    llvm = objdump_inspector(objdump, readobj)
     if rea:
         return lambda binary: rea_imports(rea, binary, llvm)
     return llvm
@@ -393,12 +416,18 @@ def audit_install(identifier, build, root, binaries, inspect, import_results):
     imported = set().union(*(details["imports"].keys() | (details["delay_imports"] or {}).keys()
                              for details in modules.values()))
     imported.update(Path(relative).name.casefold() for relative in modules)
-    imported.update(f"{module}!{symbol}"
-                    for details in modules.values() for table in (details["imports"], details["delay_imports"] or {})
-                    for module, symbols in table.items() for symbol in symbols)
+    system_symbols = set()
+    for details in modules.values():
+        for table in (details["imports"], details["delay_imports"] or {}):
+            for module, symbols in table.items():
+                imported.update(f"{module}!{symbol}" for symbol in symbols)
+                if module in {"kernel32.dll", "kernelbase.dll"} or module.startswith("api-ms-win-core-"):
+                    system_symbols.update(symbols)
+    capabilities = [name for name, imports in CAPABILITIES.items() if imports & imported]
+    capabilities.extend(name for name, symbols in NAMESPACE_CAPABILITIES.items() if symbols & system_symbols)
     return {
         "id": identifier, "build_id": build, "modules": modules, "external_imports": sorted(external),
-        "capabilities": [name for name, imports in CAPABILITIES.items() if imports & imported],
+        "capabilities": capabilities,
         "observed_missing_system_imports": sorted(blockers),
         "observed_missing_delay_imports": sorted(delay_blockers),
     }
@@ -465,8 +494,9 @@ def plan_bindings(audit, binary, registry, runtime_aliases=None, host_xinput=Fal
             bindings = dict.fromkeys(symbols, target)
         else:
             available = registry.get(library, {})
+            whole_module = library in missing and set(symbols) <= available.keys()
             bindings = {symbol: available[symbol] for symbol in symbols
-                        if symbol in available and f"{library}!{symbol}" in missing}
+                        if symbol in available and (whole_module or f"{library}!{symbol}" in missing)}
         if host_xinput and library in XINPUT_MODULES:
             for symbol in ("XInputGetState", "XInputGetCapabilities"):
                 if symbol in symbols:
@@ -474,6 +504,116 @@ def plan_bindings(audit, binary, registry, runtime_aliases=None, host_xinput=Fal
         if bindings:
             selected[library] = bindings
     return selected
+
+
+def prepare_dxgi_trial(audit, binary, root, source_profile, output):
+    """Build recipe metadata for the existing hosted DXGI launch path."""
+    app, build = app_id(audit["id"]), audit["build_id"]
+    if app > 0xffffff:
+        raise ValueError("The Xbox trial requires a Steam AppID that fits a game ID.")
+    root = root.resolve(strict=True)
+    output = output.resolve()
+    if output == root or root in output.parents:
+        raise ValueError("Write the trial profile outside the Steam installation.")
+    if output.exists():
+        raise FileExistsError(f"Use a new trial profile directory: {output}.")
+
+    verification = runpy.run_path(str(PROBE / "verify-win32-source.py"))
+    entries = verification["read_profile"](source_profile).get(build)
+    if entries is None:
+        raise ValueError(f"The source profile does not support Steam build {build}.")
+    pinned = {row["path"]: row for row in entries}
+    binary = binary_paths([binary])[0]
+    image = audit["modules"][binary]
+    exe = PureWindowsPath(binary)
+    if (not re.fullmatch(r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.exe", exe.name)
+            or binary not in pinned or pinned[binary]["sha256"] != image["sha256"]):
+        raise ValueError("The source profile must pin the audited Windows executable.")
+    verify_install = verification["verify_install"]
+    verify_install(root, entries)
+    signed_hash = image["sha256"] if image.get("authenticode_table") else None
+    runtime = PROBE / "win32-runtime"
+    registry = read_json(runtime / "bindings.json")
+    graphics = read_json(runtime / "dxgi-bindings.json")
+    dxgi = graphics.pop("dxgi.dll")
+    for module, symbols in graphics.items():
+        registry.setdefault(module, {}).update(symbols)
+    rules = plan_bindings(audit, binary, registry, host_xinput=True,
+                          signed_source_sha256=signed_hash)
+    window = read_json(runtime / "window-bindings.json")["user32.dll"]
+    trace = dict.fromkeys(("GetModuleFileNameW", "GetProcAddress", "LoadLibraryA", "LoadLibraryW", "LoadLibraryExW"),
+                         "XboxWin32LoaderTrace.dll")
+    for module, imports in image["imports"].items():
+        if module in image["bundled"]:
+            continue
+        available = {"dxgi.dll": dxgi, "user32.dll": window, "kernel32.dll": trace}.get(module, {})
+        if module.startswith("api-ms-win-core-libraryloader-"):
+            available = trace
+        selected = {symbol: available[symbol] for symbol in imports if symbol in available}
+        if selected:
+            rules.setdefault(module, {}).update(selected)
+    if not rules.get("dxgi.dll") or "CreateWindowExW" not in rules.get("user32.dll", {}):
+        raise ValueError("The executable needs static DXGI factory and CreateWindowExW imports for an automatic hosted trial.")
+
+    companions = {}
+    queue = deque(image["bundled"].values())
+    queue.extend(path for path in pinned if path.lower().endswith(".dll") and
+                 PureWindowsPath(path).is_relative_to(exe.parent))
+    while queue:
+        name = binary_paths([queue.popleft()])[0]
+        if name in companions:
+            continue
+        relative = PureWindowsPath(name)
+        if relative.suffix.lower() != ".dll" or not relative.is_relative_to(exe.parent):
+            raise ValueError(f"The hosted trial cannot stage {name} beside {binary}.")
+        dependency = audit["modules"].get(name)
+        if dependency:
+            if dependency["architecture"] != "amd64":
+                raise ValueError(f"Expected an AMD64 companion: {name}.")
+            queue.extend(dependency["bundled"].values())
+        fingerprint = pinned.get(name)
+        if fingerprint is None:
+            if dependency is None:
+                raise ValueError(f"Audit or pin the companion before staging it: {name}.")
+            size = under_root(root, root / name).stat().st_size
+            fingerprint = {"path": name, "sha256": dependency["sha256"], "size": size}
+            verify_install(root, [fingerprint])
+        elif dependency and fingerprint["sha256"] != dependency["sha256"]:
+            raise ValueError(f"The audit disagrees with the source fingerprint for {name}.")
+        companions[name] = fingerprint
+
+    patch = runpy.run_path(str(PROBE / "redirect-pe-imports.py"))
+    with under_root(root, root / binary).open("rb") as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as content:
+        if hashlib.sha256(content).hexdigest() != pinned[binary]["sha256"]:
+            raise ValueError("The executable changed after verification.")
+        pe = patch["PeImage"](content, allow_signed_source=signed_hash is not None)
+        recipe = patch["patch_recipe"](content, *pe.redirect(patch["parse_rules"](rules)),
+                                       signed_source_sha256=signed_hash)
+    original_path = any("GetModuleFileNameW" in symbols for symbols in rules.values())
+    uses_loader = any({"LoadLibraryA", "LoadLibraryW", "LoadLibraryExW"} & symbols.keys() for symbols in rules.values())
+    with TemporaryDirectory(dir=output.parent) as temporary:
+        stage = Path(temporary) / "profile"
+        stage.mkdir()
+        source_dir = "" if exe.parent == PureWindowsPath(".") else exe.parent.as_posix()
+        (stage / f"steam-win32-shadow-{app}.txt").write_text(
+            f"{build}\n{exe.name}\n\n\n\n{source_dir}\nloader-trace\n", encoding="ascii")
+        (stage / f"steam-win32-shadow-{app}.xwp").write_bytes(recipe)
+        (stage / f"steam-win32-source-{app}.json").write_text(
+            json.dumps({build: entries}, separators=(",", ":")), encoding="ascii")
+        (stage / f"steam-win32-dxgi-{app}.txt").touch()
+        if companions:
+            rows = [f"{PureWindowsPath(path).relative_to(exe.parent).as_posix()}\tsha256:{row['sha256']}\n"
+                    for path, row in sorted(companions.items())]
+            (stage / f"steam-win32-files-{app}.txt").write_text("".join(rows), encoding="utf-8")
+        if original_path or uses_loader and companions:
+            (stage / f"steam-win32-original-executable-{app}.txt").touch()
+        if uses_loader and companions:
+            (stage / f"steam-win32-dynamic-companions-{app}.txt").touch()
+        if output.exists():
+            raise FileExistsError(f"Use a new trial profile directory: {output}.")
+        os.rename(stage, output)
+    return {"app_id": app, "build_id": build, "profile": str(output),
+            "bindings": rules, "companions": sorted(companions)}
 
 
 def inspect_runtime_aliases(aliases, objdump):
@@ -539,6 +679,7 @@ def main():
     scan.add_argument("--binary", action="append", metavar="RELATIVE_PATH",
                       help="executable or dynamically loaded DLL, repeat as needed")
     scan.add_argument("--objdump", default="llvm-objdump")
+    scan.add_argument("--readobj", help="path to LLVM readobj for enumerating delayed imports")
     scan.add_argument("--rea", metavar="PATH", help="use REA for delay imports, with LLVM fallback for oversized files")
     scan.add_argument("--xbox-import-report", type=Path, action="append", default=[],
                       help="AMD64 Xbox import control report, repeat for the same runtime")
@@ -551,6 +692,7 @@ def main():
     batch.add_argument("--entrypoints", type=Path,
                        help="JSON object mapping Steam AppIDs to relative executable or engine paths")
     batch.add_argument("--objdump", default="llvm-objdump")
+    batch.add_argument("--readobj", help="path to LLVM readobj for enumerating delayed imports")
     batch.add_argument("--rea", metavar="PATH", help="use REA for delay imports, with LLVM fallback for oversized files")
     batch.add_argument("--xbox-import-report", type=Path, action="append", default=[],
                        help="match AMD64 imports against console observations and rank shared blockers")
@@ -565,6 +707,12 @@ def main():
     bindings.add_argument("--signed-source-sha256", metavar="SHA256",
                           help="allow bindings for a hash-pinned signed source in a local staging recipe")
     bindings.add_argument("--objdump", default="llvm-objdump")
+    trial = commands.add_parser("prepare-dxgi-trial", help="build a hosted trial profile from a pinned installation and import audit")
+    trial.add_argument("audit", type=Path)
+    trial.add_argument("binary", metavar="RELATIVE_EXE")
+    trial.add_argument("--install-dir", type=Path, required=True)
+    trial.add_argument("--source-profile", type=Path, required=True)
+    trial.add_argument("--output", type=Path, required=True, help="new profile directory outside the installation")
     report = commands.add_parser("coverage", help="count trials against an exported Steam inventory")
     report.add_argument("inventory", type=Path)
     report.add_argument("--target", required=True, help="identifier for the exact console and runtime configuration")
@@ -581,7 +729,8 @@ def main():
             if not binaries or not re.fullmatch(r"[0-9]+", args.build_id):
                 raise ValueError("Supply the numeric Steam build ID and the relative game binary path(s).")
             result = audit_install(args.app_id, args.build_id, args.install_dir, binary_paths(binaries),
-                                   pe_inspector(args.objdump, args.rea), xbox_import_results(args.xbox_import_report))
+                                   pe_inspector(args.objdump, args.rea, args.readobj),
+                                   xbox_import_results(args.xbox_import_report))
             if args.runtime_dll:
                 result["runtime_candidates"] = compare_runtime(result["modules"], args.runtime_dll, args.objdump)
         elif args.command == "scan-library":
@@ -596,11 +745,14 @@ def main():
                 entries[identifier] = binary_paths(values)
             observations = xbox_import_results(args.xbox_import_report) if args.xbox_import_report else None
             result = scan_library(library(args.inventory), args.steamapps, entries,
-                                  pe_inspector(args.objdump, args.rea), observations)
+                                  pe_inspector(args.objdump, args.rea, args.readobj), observations)
         elif args.command == "bindings":
             aliases = inspect_runtime_aliases(args.runtime_alias, args.objdump)
             result = plan_bindings(read_json(args.audit), args.binary, read_json(args.registry), aliases,
                                    args.host_xinput, args.signed_source_sha256)
+        elif args.command == "prepare-dxgi-trial":
+            result = prepare_dxgi_trial(read_json(args.audit), args.binary, args.install_dir, args.source_profile,
+                                        args.output)
         else:
             audits = [read_json(path) for path in args.audit]
             installed_builds = defaultdict(set)
@@ -620,7 +772,7 @@ def main():
             except (ValueError, AttributeError):
                 pass
         parser.exit(1, f"Error: PE inspection failed ({detail or f'exit {error.returncode}'}).\n")
-    except (ValueError, OSError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired) as error:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, struct.error, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"Error: {error}\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

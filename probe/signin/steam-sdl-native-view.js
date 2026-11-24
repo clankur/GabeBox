@@ -29,6 +29,7 @@
     // Count unique successful swaps only during one continuous foreground interval.
     function openPanel(host, path, events, nativePad, screen, mainId) {
         var owner = ++activeSession, closed = false, opened = false, covered = false, shown = false;
+        var nativeInput = false, menuRequests = 0, covering;
         var timer, stopped, sampleStart, sampleWindow = 0, started = performance.now(), nextReport = 0;
         function resetSample() { sampleStart = null; }
         function reportError(error) {
@@ -59,6 +60,12 @@
                 var stats = host.panelStatus(), now = performance.now();
                 var error = /^error=([0-9]+)\r?$/m.exec(stats);
                 if (error && +error[1]) { fail({code: Number(error[1])}); return; }
+                nativeInput = /^native_input=1\r?$/m.test(stats);
+                var request = /^native_menu_requests=([0-9]{1,15})\r?$/m.exec(stats);
+                if (nativeInput && request && +request[1] > menuRequests) {
+                    menuRequests = +request[1];
+                    if (!covered && /^visible=1\r?$/m.test(stats)) events.menu(mainId);
+                }
                 if (events.mediaProgress && now >= nextReport) {
                     nextReport = now + 5000;
                     events.mediaProgress(stats);
@@ -90,6 +97,7 @@
         queuePanel(function () {
             if (!closed) return Promise.resolve(host.openPanel(path, nativePad !== false)).then(function () {
                 opened = true;
+                if (!closed) nativeInput = /^native_input=1\r?$/m.test(host.panelStatus());
             });
         }).then(function () {
             if (closed) return;
@@ -103,11 +111,13 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         }).catch(fail);
-        return {primary: true, close: close, cover: function () {
-            if (closed || covered) return;
+        return {primary: true, ownsInput: function () { return !closed && (!opened || nativeInput); }, close: close, cover: function () {
+            if (closed || covered) return covering;
             covered = true;
             resetSample();
-            queuePanel(function () { if (!closed) return host.setPanelVisible(false); }).catch(fail);
+            covering = queuePanel(function () { if (!closed) return host.setPanelVisible(false); })
+                .then(function () { return !closed; }, function (error) { fail(error); return false; });
+            return covering;
         }, resume: function (fromView) {
             if (closed || owner !== activeSession) return Promise.resolve(false);
             return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)

@@ -6,6 +6,9 @@
 int _fltused;
 
 static unsigned int lifecycle;
+static unsigned int activated, deactivated;
+static unsigned int nonclientActivated, nonclientDeactivated;
+static HWND activationRedirect;
 
 static BOOL CALLBACK OnMonitor(HMONITOR monitor, HDC dc, RECT *bounds, LPARAM data) {
     if (dc || !monitor || bounds->right <= 0 || bounds->bottom <= 0) return FALSE;
@@ -25,6 +28,21 @@ static LRESULT CALLBACK OnMessage(HWND window, UINT message, WPARAM wparam, LPAR
         break;
     case WM_SIZE:
         if (LOWORD(lparam) == 80 && HIWORD(lparam) == 48) lifecycle |= 4;
+        break;
+    case WM_ACTIVATEAPP:
+        if (wparam) ++activated;
+        else ++deactivated;
+        break;
+    case WM_NCACTIVATE:
+        if (wparam) ++nonclientActivated;
+        else ++nonclientDeactivated;
+        break;
+    case WM_ACTIVATE:
+        if (LOWORD(wparam) == WA_INACTIVE && activationRedirect) {
+            HWND next = activationRedirect;
+            activationRedirect = NULL;
+            SetForegroundWindow(next);
+        }
         break;
     case WM_DESTROY:
         lifecycle |= 8;
@@ -53,10 +71,27 @@ static unsigned int TryGraphics(void) {
     DispatchMessageW(&event);
     if (!PostMessageW(window, WM_APP, 7, 42) || !PeekMessageA(&event, window, WM_APP, WM_APP, PM_REMOVE)) return 0x6e03;
     DispatchMessageA(&event);
+    if (!SetWindowPos(window, NULL, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE) ||
+            !IsWindowVisible(window) || activated || deactivated || nonclientActivated || nonclientDeactivated) return 0x6e12;
     ShowWindow(window, SW_SHOW);
+    ShowWindow(window, SW_SHOW);
+    if (activated != 1 || deactivated || nonclientActivated != 1 || nonclientDeactivated ||
+            GetActiveWindow() != window) return 0x6e13;
     RECT area;
     if (lifecycle != 3 || !IsWindowVisible(window) || !GetClientRect(window, &area) || area.right != 64 ||
             !GetWindowRect(window, &area) || area.left != 4 || area.top != 8) return 0x6e04;
+    POINT point = {-6, -10};
+    SetLastError(ERROR_RETRY);
+    if (!ClientToScreen(window, &point) || point.x != -2 || point.y != -2 ||
+            !ScreenToClient(window, &point) || point.x != -6 || point.y != -10 ||
+            GetLastError() != ERROR_RETRY) return 0x6e17;
+    const UINT moveFlags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    if (!SetWindowPos(window, NULL, -12, 23, 0, 0, moveFlags) ||
+            !ClientToScreen(window, &point) || point.x != -18 || point.y != 13 ||
+            !SetWindowPos(window, NULL, 4, 8, 0, 0, moveFlags)) return 0x6e18;
+    point = (POINT){MAXLONG, 3};
+    if (ClientToScreen(window, &point) || GetLastError() != ERROR_ARITHMETIC_OVERFLOW ||
+            point.x != MAXLONG || point.y != 3) return 0x6e19;
     const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     HMONITOR enumerated = NULL;
     MONITORINFOEXW wide;
@@ -114,9 +149,19 @@ static unsigned int TryGraphics(void) {
     glReadPixels(79, 47, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     if (glGetError() || pixel[0] != 255 || pixel[1] != 0 || pixel[2] != 255 || pixel[3] != 255 ||
             !SwapBuffers(dc)) return 0x6e0c;
-    if (!makeCurrent(NULL, NULL) || !destroy(modern) || !ReleaseDC(window, dc) ||
-            !DestroyWindow(window) || lifecycle != 15 ||
+    if (!makeCurrent(NULL, NULL) || !destroy(modern) || !ReleaseDC(window, dc)) return 0x6e0d;
+    HWND next = CreateWindowExW(0, windowClass.lpszClassName, L"Second graphics window", 0,
+        4, 8, 64, 64, NULL, NULL, NULL, NULL);
+    if (!next) return 0x6e15;
+    ShowWindow(next, SW_SHOWNA);
+    activationRedirect = next;
+    if (!DestroyWindow(window) || activationRedirect || activated != 1 || deactivated ||
+            GetForegroundWindow() != next || GetActiveWindow() != next) return 0x6e16;
+    if (ScreenToClient(window, &point) || GetLastError() != ERROR_INVALID_WINDOW_HANDLE ||
+            point.x != MAXLONG || point.y != 3) return 0x6e1a;
+    if (!DestroyWindow(next) || lifecycle != 15 ||
             !UnregisterClassW(windowClass.lpszClassName, image)) return 0x6e0d;
+    if (activated != 1 || deactivated != 1 || nonclientActivated != 2 || nonclientDeactivated != 2) return 0x6e14;
     return PROBE_EXPECTED_CHILD_EXIT;
 }
 

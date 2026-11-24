@@ -22,7 +22,11 @@ PATCH_HEADER = struct.Struct("<8sQII32s")
 PATCH_MAGIC = b"XWPEV1\r\n"
 TRIMMED_PATCH_HEADER = struct.Struct("<8sQQII32s")
 TRIMMED_PATCH_MAGIC = b"XWPEV2\r\n"
+OVERLAY_PATCH_HEADER = struct.Struct("<8sQQIII32s")
+OVERLAY_PATCH_MAGIC = b"XWPEV3\r\n"
+OVERLAY_ENTRY = struct.Struct("<QI")
 MAX_PATCH_BYTES = 1024 * 1024
+MAX_OVERLAY_PATCH_BYTES = 16 * MAX_PATCH_BYTES
 WINDOW_CLASS_IMPORTS = {"RegisterClassW", "RegisterClassExW", "UnregisterClassW"}
 NONZERO = re.compile(rb"[^\x00]")
 DWARF_SECTIONS = frozenset({
@@ -386,7 +390,8 @@ class PeImage:
         return header, bytes(section_file - retained_prefix), data + bytes(raw_size - len(data)), retained_prefix
 
 
-def patch_recipe(image, header, padding, section, retained_prefix, *, signed_source_sha256=None):
+def patch_recipe(image, header, padding, section, retained_prefix, *,
+                 signed_source_sha256=None, overlays=()):
     trailer_size = len(padding) + len(section)
     trimmed = retained_prefix != len(image)
     metadata = TRIMMED_PATCH_HEADER if trimmed else PATCH_HEADER
@@ -398,16 +403,34 @@ def patch_recipe(image, header, padding, section, retained_prefix, *, signed_sou
     if signed_source_sha256 is not None and digest.hex() != signed_source_sha256:
         raise ValueError("The signed source does not match the requested SHA-256.")
     identity = (len(header), trailer_size, digest)
+    if overlays:
+        prefix = OVERLAY_PATCH_HEADER.pack(
+            OVERLAY_PATCH_MAGIC, len(image), retained_prefix, len(header), trailer_size, len(overlays), digest)
+        entries = bytearray()
+        last = len(header)
+        for offset, replacement in sorted(overlays, key=lambda entry: entry[0]):
+            length = len(replacement)
+            if offset < last or not length or offset + length > retained_prefix:
+                raise ValueError("Invalid or overlapping compatibility overlay.")
+            if len(entries) + OVERLAY_ENTRY.size + length > MAX_OVERLAY_PATCH_BYTES - (
+                    len(prefix) + len(header) + trailer_size):
+                raise ValueError("The compatibility overlay exceeds the package recipe size limit.")
+            entries.extend(OVERLAY_ENTRY.pack(offset, length))
+            entries.extend(replacement)
+            last = offset + length
+        return prefix + header + padding + section + entries
     prefix = (metadata.pack(TRIMMED_PATCH_MAGIC, len(image), retained_prefix, *identity) if trimmed else
               metadata.pack(PATCH_MAGIC, len(image), *identity))
     return prefix + header + padding + section
 
 
 def validate_patch_recipe(recipe):
-    if not PATCH_HEADER.size < len(recipe) <= MAX_PATCH_BYTES:
-        raise ValueError("Invalid compatibility recipe size.")
     magic = recipe[:8]
+    budget = MAX_OVERLAY_PATCH_BYTES if magic == OVERLAY_PATCH_MAGIC else MAX_PATCH_BYTES
+    if not PATCH_HEADER.size < len(recipe) <= budget:
+        raise ValueError("Invalid compatibility recipe size.")
     metadata = PATCH_HEADER
+    count = 0
     if magic == PATCH_MAGIC:
         _, source_size, header_size, tail_size, _ = metadata.unpack_from(recipe)
         retained_prefix = source_size
@@ -416,12 +439,55 @@ def validate_patch_recipe(recipe):
         _, source_size, retained_prefix, header_size, tail_size, _ = metadata.unpack_from(recipe)
         if retained_prefix >= source_size:
             raise ValueError("Invalid compatibility recipe retained range.")
+    elif magic == OVERLAY_PATCH_MAGIC and len(recipe) > OVERLAY_PATCH_HEADER.size:
+        metadata = OVERLAY_PATCH_HEADER
+        _, source_size, retained_prefix, header_size, tail_size, count, _ = metadata.unpack_from(recipe)
+        if not count or retained_prefix > source_size:
+            raise ValueError("Invalid compatibility overlay header.")
     else:
         raise ValueError("Invalid compatibility recipe format.")
+    cursor = metadata.size + header_size + tail_size
     if (not 64 <= header_size <= retained_prefix or not tail_size
             or retained_prefix + tail_size > 0xFFFFFFFFFFFFFFFF
-            or metadata.size + header_size + tail_size != len(recipe)):
+            or cursor > len(recipe) or (not count and cursor != len(recipe))):
         raise ValueError("Invalid compatibility recipe header.")
+    end = header_size
+    for _ in range(count):
+        if len(recipe) - cursor < OVERLAY_ENTRY.size:
+            raise ValueError("Truncated compatibility overlay.")
+        offset, length = OVERLAY_ENTRY.unpack_from(recipe, cursor)
+        cursor += OVERLAY_ENTRY.size
+        if offset < end or not length or offset + length > retained_prefix or length > len(recipe) - cursor:
+            raise ValueError("Invalid or overlapping compatibility overlay.")
+        end = offset + length
+        cursor += length
+    if cursor != len(recipe):
+        raise ValueError("Unexpected trailing compatibility overlay bytes.")
+
+
+def read_overlays(manifest, source):
+    entries = json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Supply a nonempty list of compatibility overlay ranges.")
+    overlays = []
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"offset", "expected_sha256", "replacement"}:
+            raise ValueError("Invalid compatibility overlay range.")
+        offset, checksum, filename = (entry[key] for key in ("offset", "expected_sha256", "replacement"))
+        if (type(offset) is not int or not 0 <= offset < len(source)
+                or not isinstance(checksum, str) or not re.fullmatch(r"[a-f0-9]{64}", checksum)
+                or not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9]+", filename)):
+            raise ValueError("Invalid compatibility overlay offset, hash or filename.")
+        with (manifest.parent / filename).open("rb") as replacement:
+            data = replacement.read(MAX_OVERLAY_PATCH_BYTES - total + 1)
+        total += len(data)
+        if not data or total > MAX_OVERLAY_PATCH_BYTES or offset + len(data) > len(source):
+            raise ValueError("Invalid compatibility overlay range size.")
+        if hashlib.sha256(source[offset:offset + len(data)]).hexdigest() != checksum:
+            raise ValueError(f"Compatibility overlay source differs at offset {offset}.")
+        overlays.append((offset, data))
+    return overlays
 
 
 def main():
@@ -436,7 +502,11 @@ def main():
                      help="omit a verified trailing DWARF mapping while keeping the full original file in the recipe")
     cli.add_argument("--trim-dwarf", action="store_true",
                      help="omit a verified trailing DWARF mapping and its on-disk debug bytes")
+    cli.add_argument("--overlays", type=Path,
+                     help="read hash-matched, same-length PE range replacements from a JSON manifest")
     args = cli.parse_args()
+    if args.overlays is not None and not args.recipe:
+        cli.error("--overlays requires --recipe")
     if args.signed_source_sha256 is not None:
         args.signed_source_sha256 = args.signed_source_sha256.lower()
         if not args.recipe or not re.fullmatch(r"[0-9a-f]{64}", args.signed_source_sha256):
@@ -450,7 +520,9 @@ def main():
                 candidate_image = bytes(image) if args.signed_source_sha256 is not None else image
                 parts = PeImage(candidate_image, allow_signed_source=args.signed_source_sha256 is not None).redirect(
                     rules, omit_dwarf_mapping=args.omit_dwarf_mapping, trim_dwarf=args.trim_dwarf)
-                recipe = (patch_recipe(candidate_image, *parts, signed_source_sha256=args.signed_source_sha256)
+                overlays = read_overlays(args.overlays, candidate_image) if args.overlays else ()
+                recipe = (patch_recipe(candidate_image, *parts, signed_source_sha256=args.signed_source_sha256,
+                                       overlays=overlays)
                           if args.recipe else None)
             with tempfile.TemporaryDirectory(dir=args.output.parent) as stage:
                 candidate = Path(stage) / "candidate"

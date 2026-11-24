@@ -12,9 +12,11 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import ssl
-from struct import unpack_from
+from struct import Struct, unpack_from
 import sys
+from tempfile import TemporaryDirectory
 import time
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
@@ -90,7 +92,7 @@ class DevicePortal:
         self.authorization = None
         self.csrf_token = None
 
-    def request(self, method=None, path=None, body=None, headers=None, read_limit=None):
+    def request(self, method=None, path=None, body=None, headers=None, read_limit=None, receive=None):
         connection = http.client.HTTPSConnection(self.host, self.port, timeout=30,
                                                 context=self.context)
         try:
@@ -116,15 +118,17 @@ class DevicePortal:
                     token = SimpleCookie(value).get('CSRF-Token')
                     if token is not None:
                         self.csrf_token = token.value
-            data = response.read(read_limit)
             if response.status == 401:
                 raise ValueError('Xbox Device Portal rejected the username or password.')
             accepted_statuses = (200, 202, 204) if method == 'POST' else (200, 204)
+            if method == 'GET' and 'Range' in request_headers:
+                accepted_statuses += (206,)
             if response.status not in accepted_statuses:
+                data = response.read(min(read_limit, 4096) if read_limit is not None else 4096)
                 details = data.decode('utf-8', errors='replace')[:1000].strip()
                 raise PortalError(response.status,
                                   f'{method} {path} returned HTTP {response.status}. {details}'.strip(), details)
-            return response.status, data
+            return response.status, receive(response) if receive is not None else response.read(read_limit)
         finally:
             connection.close()
 
@@ -238,18 +242,120 @@ def slay_console_summary(raw):
     return '\n'.join(result + slay_exception_types(text))
 
 
-def read_game_file(portal, package, folder, filename, limit, *, knownfolder='LocalAppData'):
+def game_file_url(package, folder, filename, knownfolder):
     parameters = {'knownfolderid': knownfolder, 'path': folder, 'filename': filename}
     if knownfolder == 'LocalAppData':
         parameters['packagefullname'] = package['PackageFullName']
-    query = urlencode(parameters)
+    return '/api/filesystem/apps/file?' + urlencode(parameters)
+
+
+def read_game_file(portal, package, folder, filename, limit, *, knownfolder='LocalAppData'):
     try:
-        _, data = portal.request('GET', '/api/filesystem/apps/file?' + query, read_limit=limit)
+        _, data = portal.request('GET', game_file_url(package, folder, filename, knownfolder), read_limit=limit)
     except PortalError as error:
         if error.status == 404:
             return None
         raise
     return data
+
+
+# SdlHostMailbox contains two input headers separated by the CPU frame pixels.
+SDL_INPUT_MAGIC = 0x53444C31
+SDL_INPUT_HEADER = Struct('<9I')
+SDL_INPUT_GAMEPAD = Struct('<II6iII')
+SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
+SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
+
+
+def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
+    from probe.xbox_diagnostics import (GPU_MAILBOX_NAME, LOCAL, diagnostic_reader, matching_probe,
+                                        save_observation)
+
+    blob, launch_report = diagnostic_reader(portal, app, read_game_file, decode_report, PortalError)
+    first = launch_report()
+    if not matching_probe(first, args.run_id, args.app_id):
+        raise ValueError('The current Steam launch does not match the requested AppID and run ID.')
+    if first.get('steam_sdl_host') == 'exited' or first.get('steam_launch_process_exit'):
+        raise ValueError('The selected game process exited and its input mailbox is no longer available.')
+    mailbox = first.get('steam_sdl_mailbox', '')
+    if not GPU_MAILBOX_NAME.fullmatch(mailbox):
+        raise ValueError('The current launch does not have a valid hosted SDL mailbox.')
+    url = game_file_url(app, LOCAL, mailbox, 'LocalAppData')
+
+    def read_range(offset, length):
+        end = offset + length - 1
+
+        def receive(response):
+            return response.getheader('Content-Range', ''), response.read(length + 1)
+
+        status, (returned_range, raw) = portal.request('GET', url, headers={'Range': f'bytes={offset}-{end}'},
+                                                       receive=receive)
+        if status != 206 or len(raw) != length or not re.fullmatch(rf'bytes {offset}-{end}/(?:\d+|\*)', returned_range):
+            raise ValueError('Xbox Device Portal did not return the exact requested SDL mailbox range.')
+        return raw
+
+    def channel(serial, ack, confirmed):
+        if serial & 1 or serial != confirmed:
+            return {'state': 'updating', 'serial': serial, 'ack': ack}
+        state = 'host-idle' if not serial and not ack else 'acknowledged' if serial == ack else 'unacknowledged'
+        return {'state': state, 'serial': serial, 'ack': ack}
+
+    def panel_trace():
+        raw = blob('fhd-panel-input.txt', 4096)
+        if raw is None or len(raw) > 4096:
+            return None
+        complete, _, _ = raw.rpartition(b'\n')
+        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_MARKERS)
+
+    panel_before = panel_trace() if args.panel_menu else None
+    samples = []
+    if args.seconds and progress:
+        progress('sampling-host-input')
+    start = clock()
+    while True:
+        head = SDL_INPUT_HEADER.unpack(read_range(0, SDL_INPUT_HEADER.size))
+        pad = SDL_INPUT_GAMEPAD.unpack(read_range(SDL_INPUT_GAMEPAD_OFFSET, SDL_INPUT_GAMEPAD.size))
+        pointer_confirmed, = unpack_from('<I', read_range(5 * 4, 4))
+        pad_confirmed, = unpack_from('<I', read_range(SDL_INPUT_GAMEPAD_OFFSET, 4))
+        if head[0] != SDL_INPUT_MAGIC or head[8] not in (0, 1) or pad[9] not in (0, 1):
+            raise ValueError('The hosted SDL input mailbox does not match the expected protocol.')
+        pointer = channel(head[5], head[6], pointer_confirmed)
+        gamepad = channel(pad[0], pad[8], pad_confirmed)
+        if gamepad['state'] != 'updating':
+            if pad[1] & ~0x17FFF or any(not -32768 <= axis <= 32767 for axis in pad[2:8]):
+                raise ValueError('The hosted SDL gamepad state does not match the expected protocol.')
+            gamepad.update(connected=bool(pad[1] & 0x10000), buttons=f'0x{pad[1]:08x}', axes=pad[2:8])
+        elapsed = clock() - start
+        samples.append({'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
+                        'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])})
+        if elapsed >= args.seconds or head[8]:
+            break
+        pause(min(0.5, args.seconds - elapsed))
+
+    panel_after = panel_trace() if args.panel_menu else None
+    last = launch_report()
+    if (not matching_probe(last, args.run_id, args.app_id)
+            or any(first.get(key) != last.get(key) for key in ('run_id', 'steam_sdl_mailbox'))):
+        raise ValueError('The Steam launch changed during input sampling. No samples were saved.')
+
+    result = {'version': args.version, 'mode': 'input', 'app_id': args.app_id, 'run_id': args.run_id,
+              'activity': {}, 'samples': samples}
+    for name in ('gamepad', 'pointer'):
+        stable = [sample[name]['serial'] for sample in samples if sample[name]['state'] != 'updating']
+        result['activity'][name] = ('insufficient-samples' if len(stable) < 2 else
+                                    'host-activity' if len(set(stable)) > 1 else 'host-idle')
+    if args.panel_menu:
+        menu = {'scope': 'package', 'state': 'unavailable'}
+        if panel_after is not None:
+            names = ('panel_ready', 'chord_held', 'menu_request')
+            menu.update(state='observed', counts=dict(zip(names, map(panel_after.count, SDL_INPUT_PANEL_MARKERS))))
+            if panel_before is not None and args.seconds and panel_after[:len(panel_before)] == panel_before:
+                added = panel_after[len(panel_before):]
+                menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
+        result['panel_menu'] = menu
+    if args.output:
+        save_observation(args.output, result, {})
+    return result
 
 
 def stardew_host_summary(raw):
@@ -318,19 +424,19 @@ def sdl_frame_stem(report):
 
 
 def read_sdl_frame(portal, app, report, destination):
+    from probe.xbox_diagnostics import BMP_LIMIT, bmp_frame_dimensions
+
     stem = sdl_frame_stem(report)
-    data = read_game_file(portal, app, r'\LocalState', stem + '.bmp', 4096 * 4096 * 4 + 1024)
-    if not data or len(data) < 54 or data[:2] != b'BM':
+    data = read_game_file(portal, app, r'\LocalState', stem + '.bmp', BMP_LIMIT + 1)
+    if not data:
         raise ValueError('The latest SDL trial has no captured BMP frame.')
-    size, offset = unpack_from('<I4xI', data, 2)
-    width, height, planes, bits = unpack_from('<iiHH', data, 18)
-    stride = (width * bits + 31) // 32 * 4
-    if (size != len(data) or not 54 <= offset < size or not 1 <= width <= 4096 or not 1 <= abs(height) <= 4096
-            or planes != 1 or bits not in (24, 32) or size - offset < stride * abs(height)):
+    dimensions = bmp_frame_dimensions(data)
+    if dimensions is None:
         raise ValueError('The SDL frame was incomplete or had an unexpected bitmap layout.')
+    width, height = dimensions
     with destination.open('xb') as output:
         output.write(data)
-    print(f'Saved SDL frame ({width} by {abs(height)}) to {destination}.')
+    print(f'Saved SDL frame ({width} by {height}) to {destination}.')
 
 
 def wait_for_sdl_frame(portal, package, destination, timeout):
@@ -413,10 +519,64 @@ def xbox_executable_requirement(summary):
     return 'unknown'
 
 
-def inspect_game(portal, package, app_id, executable):
+GAME_PATH_COMPONENT = re.compile(r"[\w -][\w .()'’\-]*(?<![ .])")
+
+
+def export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, profile, output):
+    helpers = Path(__file__).resolve().parent / 'probe'
+    parse = runpy.run_path(str(helpers / 'steam-compatibility.py'))['parse_installed_manifest']
+    read_profile = runpy.run_path(str(helpers / 'verify-win32-source.py'))['read_profile']
+    if output.exists() or output.is_symlink() or not output.parent.is_dir():
+        raise ValueError('Use a new export directory under an existing parent.')
+    build, install, state = parse(raw, app_id)
+    if state != '4':
+        raise ValueError('Steam must show a completed install before exporting game inputs.')
+    if not GAME_PATH_COMPONENT.fullmatch(install):
+        raise ValueError('The Steam manifest has no usable local install folder.')
+    entries = read_profile(profile).get(build)
+    if entries is None:
+        raise ValueError(f'The source profile does not support installed Steam build {build}.')
+
+    with TemporaryDirectory(dir=output.parent) as temporary:
+        stage = Path(temporary) / 'inputs'
+        stage.mkdir(mode=0o700)
+        for row in entries:
+            parts = row['path'].split('/')
+            folder = '\\'.join((steamapps, 'common', install, *parts[:-1]))
+            target = stage.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
+            size = row['size']
+
+            def receive(response):
+                remaining = size
+                with target.open('xb') as destination:
+                    while remaining:
+                        chunk = response.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError(f'Incomplete Xbox file: {row["path"]}.')
+                        remaining -= len(chunk)
+                        digest.update(chunk)
+                        destination.write(chunk)
+                    if response.read(1) or digest.hexdigest() != row['sha256']:
+                        raise ValueError(f'Xbox source fingerprint mismatch: {row["path"]}.')
+
+            portal.request('GET', game_file_url(package, folder, parts[-1], knownfolder), receive=receive)
+        fresh = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf',
+                               1024 * 1024 + 1, knownfolder=knownfolder)
+        if fresh is None or parse(fresh, app_id) != (build, install, state):
+            raise ValueError('The Xbox Steam installation changed during the export.')
+        if output.exists() or output.is_symlink():
+            raise FileExistsError(f'Export directory already exists: {output}.')
+        os.rename(stage, output)
+    print(f'Exported {len(entries)} verified inputs for Steam build {build} to {output}.')
+
+
+def inspect_game(portal, package, app_id, executable, source_profile=None, export_inputs=None):
     libraries = (('D', 'DevelopmentFiles', DEVELOPER_STEAMAPPS_PATH), ('local', 'LocalAppData', STEAMAPPS_PATH))
+    manifest_limit = 1024 * 1024 + 1 if export_inputs is not None else 65536
     for drive, knownfolder, steamapps in libraries:
-        raw = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf', 65536, knownfolder=knownfolder)
+        raw = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf', manifest_limit, knownfolder=knownfolder)
         if raw is not None:
             break
     else:
@@ -428,14 +588,15 @@ def inspect_game(portal, package, app_id, executable):
         match = re.search(rf'^[ \t]*"{field}"[ \t]+"([0-9]+)"', manifest, re.MULTILINE | re.IGNORECASE)
         if match:
             print(f'{field}={match[1]}')
+    if export_inputs is not None:
+        export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, source_profile, export_inputs)
     if executable is None:
         return
     install = re.search(r'^[ \t]*"installdir"[ \t]+"([^"\r\n]+)"', manifest, re.MULTILINE | re.IGNORECASE)
-    valid_component = r'[\w -][\w .()\-]*(?<![ .])'
-    if not install or not re.fullmatch(valid_component, install[1]):
+    if not install or not GAME_PATH_COMPONENT.fullmatch(install[1]):
         raise ValueError('The Steam manifest has no usable local install folder.')
     parts = executable.replace('\\', '/').split('/')
-    if not parts[-1].lower().endswith('.exe') or any(not re.fullmatch(valid_component, p) for p in parts):
+    if not parts[-1].lower().endswith('.exe') or any(not GAME_PATH_COMPONENT.fullmatch(p) for p in parts):
         raise ValueError('Use an .exe path relative to the game folder, such as jre/bin/javaw.exe.')
 
     candidates = (('installed', ('common', install[1])), ('staging', ('downloading', str(app_id))))
@@ -898,12 +1059,36 @@ def main():
     observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
     observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
     observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
+    observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='[SECONDS:]TRACE',
+                                 help='require this loader record or prefix in sequence, optionally with its own deadline')
+    observe_command.add_argument('--fail-on-checkpoint', action='append', default=[], metavar='TRACE',
+                                 help='fail immediately when this loader record or prefix appears')
+    observe_command.add_argument('--watch-checkpoint', action='append', default=[], metavar='TRACE',
+                                 help='include the last matching record in the result without extending the deadline')
+    observe_command.add_argument('--checkpoint-timeout', type=int, metavar='SECONDS',
+                                 help='seconds to wait per required checkpoint after the game starts (default 20)')
     observe_command.add_argument('--output', type=Path, help='save filtered observations and available run artifacts to a new directory')
     observe_command.add_argument('--bootstrap-frame', action='store_true', help='save the startup BMP when available; requires --output')
+    inspections = {
+        'inspect-render': commands.add_parser('inspect-render', help='read GPU mailbox state and optional screenshots for an existing launch'),
+        'inspect-loader': commands.add_parser('inspect-loader', help='read the filtered live loader trace for an existing launch'),
+        'inspect-input': commands.add_parser('inspect-input', help='sample hosted game input without controlling the Xbox'),
+    }
+    for inspection in inspections.values():
+        inspection.add_argument('--version', required=True, help='installed Steam package version')
+        inspection.add_argument('--app-id', type=int, required=True, help='Steam AppID of the existing launch')
+        inspection.add_argument('--run-id', type=int, required=True, help='exact steam_launch_run_id of the existing launch')
+        inspection.add_argument('--output', type=Path, help='save inspection metadata and available artifacts to a new directory')
+    inspections['inspect-input'].add_argument('--seconds', type=int, default=0,
+                                             help='sample duration, 0 for one snapshot (default 0, maximum 30)')
+    inspections['inspect-input'].add_argument('--panel-menu', action='store_true',
+                                             help='read optional package-level panel and menu checkpoints')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
     game.add_argument('--executable', help='relative .exe path within the game folder')
+    game.add_argument('--source-profile', type=Path, help='trusted Win32 fingerprint file for exporting owned inputs')
+    game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -934,24 +1119,54 @@ def main():
         probe.error('--restart uses a CLI launch and cannot be combined with --manual-launch')
     if args.command == 'report' and args.report_file in BIG_PICTURE_REPORTS and args.sdl_frame:
         report_command.error('--sdl-frame applies to a Steam Core game trial')
-    if args.command == 'observe':
+    if args.command == 'observe' or args.command in inspections:
+        diagnostic_command = observe_command if args.command == 'observe' else inspections[args.command]
         if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', args.version) or any(
                 int(part) > 65535 for part in args.version.split('.')):
-            observe_command.error('--version must be a four-part package version')
+            diagnostic_command.error('--version must be a four-part package version')
         if args.app_id is not None and not 1 <= args.app_id <= 0xFFFFFFFF:
-            observe_command.error('--app-id must be a positive Steam AppID')
+            diagnostic_command.error('--app-id must be a positive Steam AppID')
         if args.run_id is not None and not (args.app_id and 1 <= args.run_id < 10 ** 20):
-            observe_command.error('--run-id requires --app-id and a positive launch ID')
+            diagnostic_command.error('--run-id requires --app-id and a positive launch ID')
+        if args.output and (args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir()):
+            diagnostic_command.error('--output must name a new directory under an existing parent')
+    if args.command == 'inspect-input' and not 0 <= args.seconds <= 30:
+        inspections[args.command].error('--seconds must be between 0 and 30')
+    if args.command == 'observe':
         if args.image_name and not (args.app_id and re.fullmatch(r'[a-z0-9_. -]{1,100}\.exe', args.image_name, re.I)):
             observe_command.error('--image-name requires --app-id and an executable basename')
         if args.bootstrap_frame and not (args.output and args.app_id):
             observe_command.error('--bootstrap-frame requires --output and --app-id')
         if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
             observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
-        if args.output and (args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir()):
-            observe_command.error('--output must name a new directory under an existing parent')
-    if args.command == 'inspect-game' and not 0 < args.app_id <= 0xFFFFFFFF:
-        game.error('--app-id must be a positive Steam AppID')
+        if (args.fail_on_checkpoint or args.watch_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
+            observe_command.error('--fail-on-checkpoint, --watch-checkpoint and --checkpoint-timeout require --require-checkpoint')
+        args.checkpoint_timeouts = []
+        if args.require_checkpoint:
+            from probe.xbox_diagnostics import valid_checkpoint_pattern
+
+            if not args.app_id:
+                observe_command.error('--require-checkpoint requires --app-id')
+            if args.checkpoint_timeout is None:
+                args.checkpoint_timeout = 20
+            if not 1 <= args.checkpoint_timeout <= 900:
+                observe_command.error('--checkpoint-timeout must be between 1 and 900 seconds')
+            for index, checkpoint in enumerate(args.require_checkpoint):
+                seconds, separator, trace = checkpoint.partition(':')
+                if separator:
+                    if not re.fullmatch(r'[0-9]{1,3}', seconds) or not 1 <= int(seconds) <= 900:
+                        observe_command.error('A required checkpoint deadline must be between 1 and 900 seconds')
+                    args.require_checkpoint[index] = trace
+                args.checkpoint_timeouts.append(int(seconds) if separator else args.checkpoint_timeout)
+            for checkpoints in (args.require_checkpoint, args.fail_on_checkpoint, args.watch_checkpoint):
+                if (len(checkpoints) > 8 or len(set(checkpoints)) != len(checkpoints)
+                        or not all(map(valid_checkpoint_pattern, checkpoints))):
+                    observe_command.error('Use up to eight distinct loader record prefixes per checkpoint option. Use key=* to match a field value.')
+    if args.command == 'inspect-game':
+        if not 0 < args.app_id <= 0xFFFFFFFF:
+            game.error('--app-id must be a positive Steam AppID')
+        if (args.source_profile is None) != (args.export_inputs is None):
+            game.error('Use --source-profile and --export-inputs together')
 
     if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
         sdl.error('--frame-timeout must be between 1 and 120 seconds')
@@ -1017,8 +1232,28 @@ def main():
         except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
             raise ValueError('Xbox Device Portal returned an invalid observation response.') from None
         print(json.dumps(result, indent=2))
-        if result['outcome'] == 'observation-timeout':
+        if (result['outcome'] == 'observation-timeout'
+                or (args.require_checkpoint and result['outcome'] != 'checkpoints-observed')):
             raise SystemExit(1)
+        return
+    if args.command in inspections:
+        from probe.xbox_diagnostics import collect_live_loader, collect_render_state
+
+        target = {'inspect-render': 'render state', 'inspect-loader': 'the live loader trace',
+                  'inspect-input': 'hosted input'}[args.command]
+        try:
+            app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+            if args.command == 'inspect-input':
+                result = inspect_host_input(args, portal, app,
+                                            progress=lambda stage: print(stage, file=sys.stderr, flush=True))
+            else:
+                collector = collect_render_state if args.command == 'inspect-render' else collect_live_loader
+                result = collector(args, portal, app, read_game_file, decode_report, PortalError)
+        except PortalError as error:
+            raise ValueError(f'Xbox Device Portal returned HTTP {error.status} while inspecting {target}.') from None
+        except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+            raise ValueError(f'Xbox Device Portal returned an invalid response while inspecting {target}.') from None
+        print(json.dumps(result, indent=2))
         return
     if args.command == 'report':
         name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
@@ -1079,7 +1314,7 @@ def main():
         return
     if args.command == 'inspect-game':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        inspect_game(portal, app, args.app_id, args.executable)
+        inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)

@@ -46,3 +46,8 @@ EXPORTS
     GetForegroundWindow=XboxGetForegroundWindow @44
     SetFocus=XboxSetFocus @45
     SetForegroundWindow=XboxSetForegroundWindow @46
+    GetActiveWindow=XboxGetActiveWindow @47
+    ClientToScreen=XboxClientToScreen @48
+    ScreenToClient=XboxScreenToClient @49
+    GetCursorPos=XboxGetCursorPos @50
+    GetPhysicalCursorPos=XboxGetPhysicalCursorPos @51

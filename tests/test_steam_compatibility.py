@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import runpy
@@ -6,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from zipfile import ZipFile
 
 
 compat = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "steam-compatibility.py"))
@@ -13,6 +15,47 @@ measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "fh
 
 
 class SteamCompatibilityTests(unittest.TestCase):
+    def test_readobj_preserves_delayed_symbols_and_ordinals(self):
+        ordinary = """fixture.exe: file format coff-x86-64
+Magic 020b
+Entry d 00001000 00000080 Delay Import Directory
+The Import Tables:
+    DLL Name: KERNEL32.dll
+      1 GetLastError
+"""
+        delayed = """Format: COFF-x86-64
+Import {
+  Name: KERNEL32.dll
+  Symbol: GetLastError (1)
+}
+DelayImport {
+  Name: Version.dll
+  Import {
+    Symbol: GetFileVersionInfoW (2)
+  }
+  Import {
+    Symbol:  (2521)
+  }
+}
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "fixture.exe"
+            binary.write_bytes(b"mocked PE")
+            with patch.object(subprocess, "run", side_effect=[Mock(stdout=ordinary), Mock(stdout=delayed)]):
+                machine, _, imports, delay_imports = compat["pe_inspector"]("objdump", None, "readobj")(binary)
+        self.assertEqual(machine, "amd64")
+        self.assertEqual(imports, {"kernel32.dll": {"GetLastError"}})
+        self.assertEqual(delay_imports, {"version.dll": {"GetFileVersionInfoW", "#2521"}})
+
+    def test_missing_module_uses_registry_only_when_all_imports_have_bindings(self):
+        registry = {"uxtheme.dll": {"EnableThemeDialogTexture": "XboxWin32Desktop.dll"}}
+        audit = {"observed_missing_system_imports": ["uxtheme.dll"], "modules": {"fixture.exe": {
+            "architecture": "amd64", "imports": {"uxtheme.dll": ["EnableThemeDialogTexture"]},
+        }}}
+        self.assertEqual(compat["plan_bindings"](audit, "fixture.exe", registry), registry)
+        audit["modules"]["fixture.exe"]["imports"]["uxtheme.dll"].append("OpenThemeData")
+        self.assertEqual(compat["plan_bindings"](audit, "fixture.exe", registry), {})
+
     def test_library_scan_isolates_incomplete_ambiguous_and_escaped_installs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -126,6 +169,82 @@ class SteamCompatibilityTests(unittest.TestCase):
             result = compat["scan_library"]({1: "Game"}, [apps], {}, inspect)
             self.assertEqual(result["games"][0]["status"], "entrypoints-needed")
 
+    def test_dxgi_trial_stages_metadata_for_a_pinned_executable_and_companions(self):
+        fixture = runpy.run_path(str(Path(__file__).with_name("test_pe_import_redirect.py")))["fixture"]
+        image = fixture()
+        # Two load-time import descriptors within the fixture's existing section.
+        struct.pack_into("<II", image, 0x98 + 120, 0x1000, 60)
+        for index, (module, symbol) in enumerate((("dxgi.dll", "CreateDXGIFactory2"),
+                                                   ("user32.dll", "CreateWindowExW"))):
+            start = 0x300 + 0x80 * index
+            rva = 0x1000 + start - 0x200
+            struct.pack_into("<IIIII", image, 0x200 + index * 20, rva, 0, 0, rva + 0x20, rva + 0x10)
+            for offset in (start, start + 0x10):
+                struct.pack_into("<QQ", image, offset, rva + 0x40, 0)
+            name = module.encode() + b"\0"
+            image[start + 0x20:start + 0x20 + len(name)] = name
+            function = b"\0\0" + symbol.encode() + b"\0"
+            image[start + 0x40:start + 0x40 + len(function)] = function
+        struct.pack_into("<IIIII", image, 0x228, 0, 0, 0, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            root = work / "install"
+            core = root / "D3D12" / "D3D12Core.dll"
+            core.parent.mkdir(parents=True)
+            core.write_bytes(b"fixture graphics runtime")
+            game = root / "Example.exe"
+            game.write_bytes(image)
+            fingerprints = [{"path": file.relative_to(root).as_posix(), "size": file.stat().st_size,
+                             "sha256": hashlib.sha256(file.read_bytes()).hexdigest()} for file in (game, core)]
+            profile = work / "source.json"
+            profile.write_text(json.dumps({"123": fingerprints}))
+            audit = {"id": 1817070, "build_id": "123", "observed_missing_system_imports": [],
+                     "modules": {game.name: {"architecture": "amd64", "sha256": fingerprints[0]["sha256"],
+                                              "bundled": {}, "imports": {"dxgi.dll": ["CreateDXGIFactory2"],
+                                                                         "user32.dll": ["CreateWindowExW"]}}}}
+            output = work / "trial"
+            result = compat["prepare_dxgi_trial"](audit, game.name, root, profile, output)
+            self.assertEqual(result["bindings"]["dxgi.dll"], {"CreateDXGIFactory2": "XboxWin32Dxgi.dll"})
+            self.assertEqual(result["companions"], ["D3D12/D3D12Core.dll"])
+            self.assertEqual((output / "steam-win32-files-1817070.txt").read_text(),
+                             f"D3D12/D3D12Core.dll\tsha256:{fingerprints[1]['sha256']}\n")
+            self.assertEqual((output / "steam-win32-shadow-1817070.txt").read_text().splitlines(),
+                             ["123", "Example.exe", "", "", "", "", "loader-trace"])
+            self.assertFalse((output / "Example.exe").exists())
+            self.assertEqual(game.read_bytes(), image)
+
+            packager = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe/prepare-big-picture-library.py"))
+            layout = work / "layout"
+            layout.mkdir()
+            (layout / "steam-signin.html").write_text(
+                '<script id="steam-sdl-profiles" data-apps="975370" src="steam-sdl-host.js"></script>')
+            for name in ("SDL2.dll", "opengl32.dll", "libEGL.dll", "dxil.dll", "Fhd.Native.winmd"):
+                (layout / name).touch()
+            template = work / "runtime.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml",
+                                 '<Package><Identity Name="XboxPortabilityProbe.ChildProcess.SteamCore" '
+                                 'ProcessorArchitecture="x64"/></Package>')
+                archive.writestr("ProbeNative.dll", "steam_source_check= steam_shadow_companion_hashes=verified".encode("utf-16le"))
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll",
+                             "XboxWin32Window.dll", "XboxWin32Dxgi.dll", "XboxWin32LoaderTrace.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            packager["stage_surfaceless_profiles"](layout, ["1817070=123"])
+            packager["stage_win32_trial_profiles"](layout, [f"1817070={output}"], template)
+            self.assertIn('data-apps="975370 1817070"', (layout / "steam-signin.html").read_text())
+            self.assertEqual((layout / "steam-sdl-surfaceless-1817070.txt").read_text(), "123")
+            self.assertTrue((layout / "XboxWin32Dxgi.dll").is_file())
+            self.assertTrue((layout / "steam-win32-dxgi-1817070.txt").is_file())
+            self.assertEqual((layout / "steam-win32-shadow-1817070.xwp").read_bytes(),
+                             (output / "steam-win32-shadow-1817070.xwp").read_bytes())
+            self.assertFalse((layout / "Example.exe").exists())
+            self.assertFalse((layout / "D3D12").exists())
+
+            core.write_bytes(b"x" + core.read_bytes()[1:])
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                compat["prepare_dxgi_trial"](audit, game.name, root, profile, work / "bad-trial")
+            self.assertFalse((work / "bad-trial").exists())
+
     def test_bindings_include_only_observed_missing_imports_on_the_selected_image(self):
         audit = {"modules": {
             "game.exe": {"architecture": "amd64", "imports": {"ole32.dll": ["SetErrorInfo", "GetErrorInfo"]}},
@@ -228,8 +347,10 @@ class SteamCompatibilityTests(unittest.TestCase):
             imports = {
                 "game.exe": ({"engine.dll": {"Boot"}, "user32.dll": {"RegisterClassExW"}}, {"user32.dll": {"GetDC"}}),
                 "Engine.dll": ({"opengl32.dll": {"glGetString"}, "d3d11.dll": {"D3D11CreateDevice"},
-                                "mscoree.dll": {"_CorDllMain"}, "xinput9_1_0.dll": {"XInputGetState"}},
-                               {"user32.dll": {"CreateWindowExW", "RegisterRawInputDevices"}}),
+                                "mscoree.dll": {"_CorDllMain"}, "xinput9_1_0.dll": {"XInputGetState"},
+                                "kernel32.dll": {"CreateNamedPipeW", "OpenFileMappingW"}},
+                               {"user32.dll": {"CreateWindowExW", "RegisterRawInputDevices"},
+                                "api-ms-win-core-synch-l1-2-0.dll": {"CreateEventExW"}}),
                 "steam_api64.dll": ({}, {}),
             }
 
@@ -244,6 +365,8 @@ class SteamCompatibilityTests(unittest.TestCase):
             self.assertIn("direct3d-11", result["capabilities"])
             self.assertTrue({"desktop-window-registration", "desktop-window-creation",
                              "legacy-clr-loader", "steamworks", "xinput", "raw-input"}.issubset(result["capabilities"]))
+            self.assertTrue({"named-pipe-apis", "named-synchronization-apis",
+                             "file-mapping-apis"}.issubset(result["capabilities"]))
             self.assertNotIn("engine.dll", result["external_imports"])
 
     def test_inventory_coverage_requires_matching_build_and_full_play_checks(self):

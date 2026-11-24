@@ -1,0 +1,86 @@
+{
+  "14752622": [
+    {
+      "path": "Spider-Man.exe",
+      "size": 121920952,
+      "sha256": "9154e4e7bedbc5704da75ed1a362286bfc287d4cab5168c4ce6d22da18f94db1"
+    },
+    {
+      "path": "asset_archive/toc",
+      "size": 10707618,
+      "sha256": "58e571cf1e54e08b18db4e8effb3f964eded1ddaa3e4feebd72f88fbbc066da1"
+    },
+    {
+      "path": "D3D12/D3D12Core.dll",
+      "size": 5247408,
+      "sha256": "08b07b09a7f5d4b49ba4b6bd7675abdefe970032ca1779dc7a37b976c61387b0"
+    },
+    {
+      "path": "XAudio2_7.dll",
+      "size": 518488,
+      "sha256": "f8636ccc37bbfc84107992b60e4226eb7237417112267ed64b08f72983ac4314"
+    },
+    {
+      "path": "bink2w64.dll",
+      "size": 391360,
+      "sha256": "32d7512f0c872cd3c1b5ad5606fb772c97c26cea3e2d6cb720c2f4c2a928afd0"
+    },
+    {
+      "path": "amd_fidelityfx_dx12.dll",
+      "size": 6472920,
+      "sha256": "6ecd112072f921682120619e7e222427211d11025603d2a007341ea495b3474c"
+    },
+    {
+      "path": "crs-client.dll",
+      "size": 400384,
+      "sha256": "2c32f92818cbed7cd1205bc07c4f76a7be9c8be3199fdaef9138f8ea75b47f84"
+    },
+    {
+      "path": "gattaca.dll",
+      "size": 262144,
+      "sha256": "f6c0f89fee7c7e69e49620fe4d2695fbf2f4d4455cde0e817b6670ae4000af31"
+    }
+  ],
+  "23986256": [
+    {
+      "path": "Spider-Man.exe",
+      "size": 121901008,
+      "sha256": "e297d4d94f1ffe4febf289745e79e7b6fa233a788e7a00f480fc77c55db81ad1"
+    },
+    {
+      "path": "asset_archive/toc",
+      "size": 10707618,
+      "sha256": "58e571cf1e54e08b18db4e8effb3f964eded1ddaa3e4feebd72f88fbbc066da1"
+    },
+    {
+      "path": "D3D12/D3D12Core.dll",
+      "size": 5247408,
+      "sha256": "08b07b09a7f5d4b49ba4b6bd7675abdefe970032ca1779dc7a37b976c61387b0"
+    },
+    {
+      "path": "XAudio2_7.dll",
+      "size": 518488,
+      "sha256": "f8636ccc37bbfc84107992b60e4226eb7237417112267ed64b08f72983ac4314"
+    },
+    {
+      "path": "bink2w64.dll",
+      "size": 391360,
+      "sha256": "32d7512f0c872cd3c1b5ad5606fb772c97c26cea3e2d6cb720c2f4c2a928afd0"
+    },
+    {
+      "path": "amd_fidelityfx_dx12.dll",
+      "size": 6675664,
+      "sha256": "12a5081257ec95b0b53ad51b4a87fb3c03f97fe0bbb59f9496968f8d50ef93a6"
+    },
+    {
+      "path": "crs-client.dll",
+      "size": 479400,
+      "sha256": "3436f313213dc9cbc22329401e0b1e427c135b22a9c55b1bd3725a31c0dbe464"
+    },
+    {
+      "path": "gattaca.dll",
+      "size": 262144,
+      "sha256": "56086c1885acfd6d0ea99b732ec06e86cd8150709b916d9027711e49417dbc8f"
+    }
+  ]
+}

@@ -173,6 +173,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const steamLibrary = {tryGetItemAsync: () => Operation.resolve(manifests)};
         const localFolder = {createFileAsync: name => Operation.resolve({name}), tryGetItemAsync: () =>
             Operation.resolve(firstManifest ? steamLibrary : null)};
+        let installPolls = 0;
         const globals = {
             window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
             setTimeout, clearTimeout,
@@ -216,9 +217,16 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 },
                 queueSteamDownload: appId => {
                     assert.equal(appId, 12);
-                    firstManifest = {name: "appmanifest_12.acf"};
-                    return Operation.resolve("installed:4\r\nsteam_download_bytes_downloaded=2048\r\n" +
+                    return Operation.resolve("downloading:1290\r\nsteam_download_measurement=unavailable\r\n" +
+                        "steam_download_depot_activity=observed\r\nsteam_download_bytes_downloaded=0\r\n" +
                         "steam_download_bytes_to_download=2048\r\n");
+                },
+                steamDownloadStatus: () => {
+                    if (installPolls++ === 0) return "downloading:1290\r\nsteam_download_measurement=steam\r\n" +
+                        "steam_download_bytes_downloaded=1024\r\nsteam_download_bytes_to_download=2048\r\n" +
+                        "steam_download_network_bytes_per_second=512\r\nsteam_download_disk_bytes_per_second=0\r\n";
+                    firstManifest = {name: "appmanifest_12.acf"};
+                    return "installed:4\r\nsteam_download_measurement=unavailable\r\n";
                 }
             } } }
         };
@@ -300,10 +308,14 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             assert.deepEqual(inventory, [{id: 12, name: "A"}]);
             assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[{ id: 12, name: "A", installed: false, canPlay: false }]]);
             const stages = [];
+            globals.setTimeout = callback => setTimeout(callback, 0);
             assert.equal(await activeBroker.install(12, (stage, progress) => {
                 stages.push(progress ? [stage, {...progress}] : [stage]);
             }), "installed");
-            assert.deepEqual(stages, [["starting"], ["installed", {downloaded: 2048, downloadTotal: 2048}]]);
+            const measured = {measurement: "steam", downloaded: 1024, downloadTotal: 2048,
+                networkBytesPerSecond: 512, diskBytesPerSecond: 0};
+            assert.deepEqual(stages, [["starting"], ["downloading", {measurement: "unavailable", depotActivity: true}],
+                ["downloading", measured], ["installed", measured]]);
             assert.equal((await activeBroker.library())[0].installed, true);
             assert.equal(await activeBroker.install(12), "already-installed");
             globals.navigator.gamepadInputEmulation = "mouse";

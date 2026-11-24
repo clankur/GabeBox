@@ -2,6 +2,7 @@
 """Add the WebView2 Big Picture library to the verified Series X FHD release."""
 import argparse
 import hashlib
+import json
 from pathlib import Path, PureWindowsPath
 import re
 import runpy
@@ -84,20 +85,37 @@ def stage_surfaceless_profiles(layout, profiles):
     page.write_bytes(original[:match.start(2)] + " ".join([*existing, *pairs]).encode("ascii") + original[match.end(2):])
 
 
-def stage_win32_trial_profiles(layout, profiles, runtime):
-    if not profiles and runtime is None:
+def stage_win32_trial_profiles(layout, profiles, runtime, source_profiles=()):
+    if not (profiles or source_profiles) and runtime is None:
         return
-    if not profiles or runtime is None:
-        raise ValueError("Supply the Win32 trial profiles and their Win32 runtime template together.")
+    if not (profiles or source_profiles) or runtime is None:
+        raise ValueError("Supply the Win32 profiles and their Win32 runtime template together.")
     validate_recipe = runpy.run_path(str(PROBE / "redirect-pe-imports.py"))["validate_patch_recipe"]
+    read_profile = runpy.run_path(str(PROBE / "verify-win32-source.py"))["read_profile"]
     files = {}
+
+    def stage_source_profile(name, path):
+        if name in files:
+            raise ValueError("Use one APPID=FILE or profile-directory source fingerprint list per Win32 title.")
+        builds = read_profile(path)
+        files[name] = json.dumps(builds, separators=(",", ":")).encode("ascii")
+
+    for entry in source_profiles:
+        app, separator, path = entry.partition("=")
+        if not separator or not path or not re.fullmatch(r"[1-9][0-9]{0,7}", app) or int(app) > 0xffffff:
+            raise ValueError("Use one APPID=FILE entry per Win32 source profile.")
+        stage_source_profile(f"steam-win32-source-{app}.json", Path(path))
     trace = False
     desktop_gl = False
     unity_host = False
     crash_reports = False
     steam_sdk = False
+    legacy_steam_sdk = False
     desktop_dxgi = False
+    desktop_documents = False
     storage_trace = False
+    hashed_companions = False
+    system_companions = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -107,6 +125,9 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         profile_name = f"steam-win32-shadow-{app}.txt"
         recipe_name = f"steam-win32-shadow-{app}.xwp"
         companion_name = f"steam-win32-files-{app}.txt"
+        source_name = f"steam-win32-source-{app}.json"
+        if (root / source_name).is_file():
+            stage_source_profile(source_name, root / source_name)
         profile = (root / profile_name).read_bytes()
         fields = profile.decode("ascii").splitlines()
         if (not 2 <= len(fields) <= 8 or not re.fullmatch(r"[1-9][0-9]{0,19}", fields[0])
@@ -124,6 +145,9 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             if (fields[7] != "accessibility=disabled" or fields[2:4] != ["opengl3", "godot"]
                     or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
                 raise ValueError(f"The accessibility option needs a matching hosted OpenGL profile for AppID {app}.")
+        source_profile = files.get(source_name)
+        if source_profile is not None and fields[0] not in json.loads(source_profile):
+            raise ValueError(f"The Win32 source profile does not include the trial build for AppID {app}.")
         trace |= fields[6:7] == ["loader-trace"]
         desktop_gl |= fields[2:3] == ["opengl3"]
         recipe = (root / recipe_name).read_bytes()
@@ -135,6 +159,12 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                 raise ValueError(f"The storage marker requires an empty file and a loader trace for AppID {app}.")
             files[storage_marker] = b""
             storage_trace = True
+        for option in ("d3d12-default-adapter", "streamline-unavailable"):
+            marker = f"steam-win32-{option}-{app}.txt"
+            if (root / marker).is_file():
+                if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:
+                    raise ValueError(f"The {option} option needs an empty marker, source profile and loader trace for AppID {app}.")
+                files[marker] = b""
         argument_name = f"steam-win32-arguments-{app}.txt"
         if (root / argument_name).is_file():
             with (root / argument_name).open("rb") as source:
@@ -155,6 +185,12 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                 raise ValueError(f"The DXGI marker requires the game's default native renderer for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
+        documents_marker = f"steam-win32-documents-{app}.txt"
+        if (root / documents_marker).is_file():
+            if (root / documents_marker).stat().st_size:
+                raise ValueError(f"Expected an empty Documents marker for AppID {app}.")
+            files[documents_marker] = b""
+            desktop_documents = True
         for option in ("working-directory", "original-executable", "dynamic-companions"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
@@ -188,6 +224,18 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             unity_host = True
         sdk_marker = f"steam-win32-steam-sdk-{app}.txt"
         sdk_profile = root / sdk_marker
+        legacy_sdk_marker = f"steam-win32-steam-legacy-sdk-{app}.txt"
+        legacy_sdk_profile = root / legacy_sdk_marker
+        legacy_sdk_hash = None
+        if legacy_sdk_profile.is_file():
+            with legacy_sdk_profile.open("rb") as source:
+                raw = source.read(67)
+            legacy_sdk_hash = raw.rstrip(b"\r\n")
+            if (len(raw) > 66 or not re.fullmatch(rb"[0-9a-f]{64}", legacy_sdk_hash) or sdk_profile.is_file()
+                    or source_profile is None or fields[6:7] != ["loader-trace"] or not companions.is_file()):
+                raise ValueError(f"The legacy Steam SDK needs a hash, matching source profile, companion list and loader trace for AppID {app}.")
+            files[legacy_sdk_marker] = legacy_sdk_hash
+            legacy_steam_sdk = True
         sdk_relative = None
         if sdk_profile.is_file():
             if sdk_profile.stat().st_size > 512 or fields[2:4] != ["opengl3", "godot"] or not companions.is_file():
@@ -204,13 +252,30 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             if companions.stat().st_size > 65536:
                 raise ValueError(f"Win32 trial companion list is too large for AppID {app}.")
             data = companions.read_bytes()
-            rows = data.decode("utf-8-sig").splitlines()
-            if sdk_relative is not None and sdk_relative not in rows:
-                raise ValueError(f"The Steam SDK must appear as an unchanged companion for AppID {app}.")
-            if unity and sum(row.partition("\t")[0] == "UnityPlayer.dll" for row in rows) != 1:
-                raise ValueError(f"UnityPlayer.dll must appear once as a companion for AppID {app}.")
+            rows = data.decode("utf-8-sig").split("\n")
+            if rows[-1] == "":
+                rows.pop()
+            if len(rows) > 1024:
+                raise ValueError(f"Too many Win32 companions for AppID {app}.")
+            companions_by_name = {}
+            system_companion_chars = 0
             for row in rows:
-                image, tab, key = row.partition("\t")
+                image, tab, key = row.removesuffix("\r").partition("\t")
+                if (len(image.encode("utf-16-le")) > 520 or image.casefold() in companions_by_name
+                        or any(not part or len(part.encode("utf-16-le")) > 510 or part.endswith((".", " "))
+                               or re.search(r'[<>:"\\|?*\x00-\x1f]', part) or PureWindowsPath(part).is_reserved()
+                               for part in image.split("/"))):
+                    raise ValueError(f"Invalid or duplicate companion path for AppID {app}: {image!r}.")
+                companions_by_name[image.casefold()] = key
+                if tab and re.fullmatch(r"(?:system-)?sha256:[0-9a-f]{64}", key):
+                    hashed_companions = True
+                    if key.startswith("system-"):
+                        system_companion_chars += len(image) + 1
+                        if (not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,95}\.dll", image)
+                                or system_companion_chars >= 1024 or not trace):
+                            raise ValueError(f"A system companion needs a top-level DLL and loader trace for AppID {app}.")
+                        system_companions = True
+                    continue
                 if not tab:
                     continue
                 if not image.endswith((".exe", ".dll")) or not re.fullmatch(r"[a-z0-9-]{1,24}", key):
@@ -220,6 +285,14 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                     extra = (root / name).read_bytes()
                     validate_recipe(extra)
                     files[name] = extra
+            if sdk_relative is not None:
+                sdk_key = companions_by_name.get(sdk_relative.casefold())
+                if sdk_key is None or sdk_key and not sdk_key.startswith("sha256:"):
+                    raise ValueError(f"The Steam SDK must appear as an unchanged companion for AppID {app}.")
+            if legacy_sdk_hash is not None and companions_by_name.get("steam_api64.dll") != "sha256:" + legacy_sdk_hash.decode("ascii"):
+                raise ValueError(f"The legacy Steam SDK must appear as a matching hash-pinned companion for AppID {app}.")
+            if unity and "unityplayer.dll" not in companions_by_name:
+                raise ValueError(f"UnityPlayer.dll must appear once as a companion for AppID {app}.")
             files[companion_name] = data
 
     with ZipFile(runtime) as package:
@@ -227,8 +300,22 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         if (identity is None or identity.get("Name") != "XboxPortabilityProbe.ChildProcess.SteamCore"
                 or identity.get("ProcessorArchitecture") != "x64"):
             raise ValueError("Use an x64 Steam Core runtime template built for this checkout.")
-        for name in ("ProbeNative.dll", "XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+        for name in ("ProbeNative.dll", "XboxProbe.Native.winmd"):
             files[name] = package.read(name)
+        if any(name.startswith("steam-win32-source-") for name in files) and (
+                "steam_source_check=".encode("utf-16le") not in files["ProbeNative.dll"]):
+            raise ValueError("Use a Win32 runtime template with source-profile verification.")
+        if hashed_companions and "steam_shadow_companion_hashes=verified".encode("utf-16le") not in files["ProbeNative.dll"]:
+            raise ValueError("Use a Win32 runtime template with companion fingerprint verification.")
+        if profiles:
+            for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                files[name] = package.read(name)
+            if "XboxWin32XInput910.dll" in package.namelist():
+                files["XboxWin32XInput910.dll"] = package.read("XboxWin32XInput910.dll")
+        if desktop_documents:
+            variable = "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
+            if any(variable not in files[name] for name in ("ProbeNative.dll", "XboxWin32Desktop.dll")):
+                raise ValueError("Use a Win32 runtime template with profile Documents support.")
         if "XboxWin32Timer.dll" in package.namelist():
             files["XboxWin32Timer.dll"] = package.read("XboxWin32Timer.dll")
         if desktop_gl or desktop_dxgi:
@@ -241,10 +328,18 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                 files["XboxWin32DisplayConfig.dll"] = package.read("XboxWin32DisplayConfig.dll")
         if crash_reports:
             files["XboxWin32CrashReport.dll"] = package.read("XboxWin32CrashReport.dll")
-        if steam_sdk:
+        if steam_sdk or legacy_steam_sdk:
             files["XboxWin32SteamDiscovery.dll"] = package.read("XboxWin32SteamDiscovery.dll")
+        if legacy_steam_sdk:
+            variable = "XBOX_STEAM_HANDOFF_LEGACY\0".encode("utf-16le")
+            if any(variable not in files[name] for name in ("ProbeNative.dll", "XboxWin32SteamDiscovery.dll")):
+                raise ValueError("Use a Win32 runtime template with legacy Steam SDK support.")
         if trace:
             files["XboxWin32LoaderTrace.dll"] = package.read("XboxWin32LoaderTrace.dll")
+        if system_companions:
+            variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
+            if any(variable not in files[name] for name in ("ProbeNative.dll", "XboxWin32LoaderTrace.dll")):
+                raise ValueError("Use a Win32 runtime template with verified system companion support.")
         if storage_trace:
             files["XboxWin32StorageTrace.dll"] = package.read("XboxWin32StorageTrace.dll")
     for name, data in files.items():
@@ -277,7 +372,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
                    win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False,
-                   early_library_reveal=False):
+                   early_library_reveal=False, win32_source_profiles=()):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if early_library_reveal and primary_xaml is None:
@@ -336,7 +431,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         if library_inventory:
             (staged / "steam-library-inventory.txt").touch()
         stage_surfaceless_profiles(staged, surfaceless_profiles)
-        stage_win32_trial_profiles(staged, win32_trial_profiles, win32_runtime_template)
+        stage_win32_trial_profiles(staged, win32_trial_profiles, win32_runtime_template, win32_source_profiles)
         stage_storage_capability(staged)
         if b"SteamLibraryCommand\x00" not in (staged / "XboxProbe.Native.winmd").read_bytes():
             raise ValueError("Use a Steam Core native component built with the Xbox storage interface.")
@@ -370,6 +465,8 @@ if __name__ == "__main__":
                         help="opt a verified Steam build into the shared SDL and Mesa presenter")
     parser.add_argument("--win32-trial-profile", action="append", default=[], metavar="APPID=DIRECTORY",
                         help="stage a local import compatibility trial from an audited recipe directory")
+    parser.add_argument("--win32-source-profile", action="append", default=[], metavar="APPID=FILE",
+                        help="check installed source fingerprints for these builds before Play")
     parser.add_argument("--win32-runtime-template", type=Path,
                         help="Steam Core APPX template containing the Win32 trial runtime built for this checkout")
     parser.add_argument("--migrate-legacy-library", action="store_true",
@@ -379,4 +476,4 @@ if __name__ == "__main__":
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
                    args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template,
-                   args.migrate_legacy_library, args.early_library_reveal)
+                   args.migrate_legacy_library, args.early_library_reveal, args.win32_source_profile)

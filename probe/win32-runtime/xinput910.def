@@ -1,0 +1,6 @@
+LIBRARY XboxWin32XInput910.dll
+EXPORTS
+    XInputGetCapabilities=XboxXInputGetCapabilities
+    XInputGetDSoundAudioDeviceGuids=XboxXInputGetDSoundAudioDeviceGuids
+    XInputGetState=XboxXInputGetState
+    XInputSetState=XboxXInputSetState

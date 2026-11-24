@@ -107,11 +107,28 @@ BOOL WINAPI XboxEnumDisplayMonitors(HDC dc, const RECT *clip, MONITORENUMPROC ca
 }
 
 static BOOL MonitorInfo(HMONITOR monitor, MONITORINFO *info) {
-    if (monitor != XBOX_MONITOR || !info || info->cbSize < sizeof(*info)) {
+    if (!monitor || !info || info->cbSize < sizeof(*info)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    info->rcMonitor = XboxDesktopBounds();
+    RECT bounds;
+    if (monitor == XBOX_MONITOR) {
+        bounds = XboxDesktopBounds();
+    } else {
+        // Native DXGI enumerates outputs even when the game uses a hosted
+        // window. Translate only a monitor identity verified by that factory.
+        typedef BOOL (WINAPI *GetOutputMonitorRect)(HMONITOR, RECT *);
+        const HMODULE dxgi = GetModuleHandleW(L"XboxWin32Dxgi.dll");
+        const GetOutputMonitorRect query = dxgi ?
+            (GetOutputMonitorRect)(void *)GetProcAddress(dxgi, "XboxGetOutputMonitorRect") : NULL;
+        if (!query || !query(monitor, &bounds)) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+            bounds = XboxDesktopBounds();
+    }
+    info->rcMonitor = bounds;
     info->rcWork = info->rcMonitor;
     info->dwFlags = MONITORINFOF_PRIMARY;
     return TRUE;

@@ -1,4 +1,6 @@
 LIBRARY XboxWin32Desktop.dll
 EXPORTS
+    EnableThemeDialogTexture=XboxEnableThemeDialogTexture
     XboxILCreateFromPathA @189 NONAME
     PlaySoundA=XboxPlaySoundA
+    SHGetFolderPathW=XboxSHGetFolderPathW

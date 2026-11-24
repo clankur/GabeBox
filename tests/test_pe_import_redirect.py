@@ -157,6 +157,32 @@ class PeImportRedirectTests(unittest.TestCase):
         self.assertEqual(recipe[metadata.size:metadata.size + header_size] + image[header_size:]
                          + recipe[metadata.size + header_size:], header + image[len(header):] + padding + section)
 
+    def test_overlay_recipe_keeps_the_original_digest_and_bounds_each_replacement(self):
+        image = bytes(fixture())
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        parts = tool["PeImage"](image).redirect(rules)
+        header, padding, section, retained = parts
+        first = len(header)
+        replacements = [(first + 6, b"second"), (first, b"first")]
+        recipe = tool["patch_recipe"](image, *parts, overlays=replacements)
+        tool["validate_patch_recipe"](recipe)
+        metadata = tool["OVERLAY_PATCH_HEADER"]
+        entry = tool["OVERLAY_ENTRY"]
+        trailer = padding + section
+        self.assertEqual(metadata.unpack_from(recipe), (
+            b"XWPEV3\r\n", len(image), retained, len(header), len(trailer), 2, hashlib.sha256(image).digest(),
+        ))
+        cursor = metadata.size + len(header) + len(trailer)
+        self.assertEqual(recipe[cursor:], entry.pack(first, 5) + b"first" + entry.pack(first + 6, 6) + b"second")
+
+        malformed = bytearray(recipe)
+        struct.pack_into("<Q", malformed, cursor + entry.size + 5, first + 4)
+        for candidate in (malformed, recipe[:-1], recipe + b"\0"):
+            with self.assertRaisesRegex(ValueError, "overlay"):
+                tool["validate_patch_recipe"](candidate)
+        with self.assertRaisesRegex(ValueError, "overlay"):
+            tool["patch_recipe"](image, *parts, overlays=[(retained - 1, b"too long")])
+
     def test_dwarf_omission_compacts_only_the_opt_in_mapped_section_table(self):
         image = bytes(dwarf_fixture())
         rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})

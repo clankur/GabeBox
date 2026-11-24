@@ -339,6 +339,11 @@
                 message = " is on disk, but Steam could not reopen its install.";
             }
             if (result.indexOf("steam_launch=client-rejected\r\n") >= 0) message = " could not start in Steam.";
+            if (result.indexOf("steam_launch=source-check-failed\r\n") >= 0) {
+                message = result.indexOf("steam_source_check=build-mismatch\r\n") >= 0 ?
+                    " has a Steam build this compatibility profile does not recognize." :
+                    " could not pass the compatibility file check.";
+            }
             if (result.indexOf("steam_launch=save-recovery-error\r\n") >= 0) message = " needs save recovery before it can start.";
             if (/steam_launch=(?:dependency-install-rejected|dependency-install-incomplete)\r\n/.test(result) ||
                     result.indexOf("steam_launch_client_reason=dependency-not-ready\r\n") >= 0) {
@@ -422,6 +427,8 @@
                     return "window-ready";
                 }
                 restore();
+                if (/^steam_source_check=build-mismatch\r?$/m.test(result)) return "unsupported-build";
+                if (/^steam_launch=source-check-failed\r?$/m.test(result)) return "source-file-check-failed";
                 if (/^steam_launch=no-license\r?$/m.test(result)) return "not-owned";
                 if (/^steam_launch=not-installed\r?$/m.test(result)) return "not-installed";
                 if (/^steam_launch=busy\r?$/m.test(result)) return "busy";
@@ -695,13 +702,18 @@
     function downloadProgress(checkpoint, previous) {
         var fields = {
             bytes_downloaded: "downloaded", bytes_to_download: "downloadTotal",
-            bytes_staged: "staged", bytes_to_stage: "stagingTotal"
+            bytes_staged: "staged", bytes_to_stage: "stagingTotal",
+            network_bytes_per_second: "networkBytesPerSecond", disk_bytes_per_second: "diskBytesPerSecond"
         };
-        var counts = Object.assign({}, previous);
-        var lines = /^steam_download_(bytes_downloaded|bytes_to_download|bytes_staged|bytes_to_stage)=(\d+)\r?$/gm;
+        var measurement = /^steam_download_measurement=(steam|manifest|unavailable)\r?$/m.exec(checkpoint);
+        var counts = measurement ? {measurement: measurement[1]} : Object.assign({}, previous);
+        if (/^steam_download_depot_activity=observed\r?$/m.test(checkpoint)) counts.depotActivity = true;
+        var lines = /^steam_download_(\w+)=(\d+)\r?$/gm;
         for (var match; (match = lines.exec(checkpoint));) {
+            if (!Object.prototype.hasOwnProperty.call(fields, match[1])) continue;
+            if (counts.measurement === "unavailable" && match[1].indexOf("bytes_") === 0) continue;
             var value = Number(match[2]);
-            if (Number.isSafeInteger(value) && value > 0) counts[fields[match[1]]] = value;
+            if (Number.isSafeInteger(value)) counts[fields[match[1]]] = value;
         }
         return Object.keys(counts).length ? counts : undefined;
     }
@@ -717,9 +729,14 @@
             stage === "paused" || stage === "downloading" || stage === "staging";
         if (checkpoint !== job.last) {
             job.last = checkpoint;
-            job.counts = downloadProgress(checkpoint, job.counts);
+            var counts = downloadProgress(checkpoint, job.counts);
+            if (stage !== "installed" || !counts || counts.measurement !== "unavailable") job.counts = counts;
             if (job.progress && (active || stage === "installed")) job.progress(stage, job.counts);
             var message = downloadMessages[stage] || "Steam could not start or track the download";
+            if ((stage === "downloading" || stage === "staging") && job.counts && job.counts.measurement === "unavailable") {
+                message = job.counts.depotActivity ? "Steam is processing depot files. Byte progress is temporarily unavailable" :
+                    "Waiting for Steam to report byte progress";
+            }
             downloadStatus.textContent = job.entry.name + " · " + message;
             if (job.file) {
                 var report = job.prefix + "steam_download=" + stage + "\r\n";

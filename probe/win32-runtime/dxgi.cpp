@@ -1,4 +1,4 @@
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <appmodel.h>
 #include <new>
@@ -9,6 +9,8 @@ extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
     LPCWSTR, DWORD, DWORD, DWORD, LPCREATEFILE2_EXTENDED_PARAMETERS);
 
 namespace {
+
+using Microsoft::WRL::ComPtr;
 
 bool SameInterface(REFIID first, REFIID second) {
     if (first.Data1 != second.Data1 || first.Data2 != second.Data2 || first.Data3 != second.Data3) return false;
@@ -179,8 +181,12 @@ public:
     }
 };
 
-class HostedSwapChain final : public IDXGISwapChain1 {
+class HostedSwapChain final : public IDXGISwapChain4 {
     IDXGISwapChain1* native_;
+    ComPtr<IDXGISwapChain2> native2_;
+    ComPtr<IDXGISwapChain3> native3_;
+    ComPtr<IDXGISwapChain4> native4_;
+    ComPtr<ID3D12CommandQueue> queue_;
     IDXGIFactory2* factory_;
     HWND window_;
     volatile LONG references_ = 1;
@@ -228,7 +234,7 @@ class HostedSwapChain final : public IDXGISwapChain1 {
 
     void Publish(UINT interval, UINT flags) {
         if (flags & DXGI_PRESENT_TEST) return;
-        const HRESULT code = publisher_.Publish(native_);
+        const HRESULT code = publisher_.Publish(native_, queue_ ? native3_->GetCurrentBackBufferIndex() : 0);
         cadence_.Record(code, publisher_.IsActive(), interval, flags);
         if (code == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
             using RequestClose = void (WINAPI *)(HWND);
@@ -239,8 +245,20 @@ class HostedSwapChain final : public IDXGISwapChain1 {
             Trace("gpu-frame-submitted", code);
             tracedFrame_ = true;
         } else if (FAILED(code) && !tracedError_) {
-            Trace("gpu-frame-error", code);
             tracedError_ = true;
+            if (const char* stage = publisher_.FailureStage()) Trace(stage, code);
+            if (code == DXGI_ERROR_DEVICE_REMOVED && queue_) {
+                const DWORD error = GetLastError();
+                ComPtr<ID3D12Device> device;
+                const HRESULT queried = queue_->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
+                if (SUCCEEDED(queried))
+                    Trace("gpu-frame-device-removed-reason", device->GetDeviceRemovedReason());
+                else
+                    Trace("gpu-frame-device-query", queried);
+                device.Reset();
+                SetLastError(error);
+            }
+            Trace("gpu-frame-error", code);
         }
     }
 
@@ -289,9 +307,13 @@ class HostedSwapChain final : public IDXGISwapChain1 {
     }
 
 public:
-    HostedSwapChain(IDXGISwapChain1* native, IDXGIFactory2* factory, HWND window)
-        : native_(native), factory_(factory), window_(window) {
+    HostedSwapChain(IDXGISwapChain1* native, IDXGISwapChain3* native3, ID3D12CommandQueue* queue,
+            IDXGIFactory2* factory, HWND window)
+        : native_(native), native3_(native3), queue_(queue), factory_(factory), window_(window) {
         const DWORD error = GetLastError();
+        native_->QueryInterface(IID_PPV_ARGS(&native2_));
+        native_->QueryInterface(IID_PPV_ARGS(&native4_));
+        publisher_.SetQueue(queue);
         if (HasPackageMarker(L"\\fhd-measure.txt")) {
             paceBeforePublish_ = HasPackageMarker(L"\\fhd-paced-publish.txt");
             use5994_ = HasPackageMarker(L"\\fhd-refresh-5994.txt");
@@ -306,8 +328,11 @@ public:
         *out = nullptr;
         if (!SameInterface(iid, __uuidof(IUnknown)) && !SameInterface(iid, __uuidof(IDXGIObject)) &&
                 !SameInterface(iid, __uuidof(IDXGIDeviceSubObject)) && !SameInterface(iid, __uuidof(IDXGISwapChain)) &&
-                !SameInterface(iid, __uuidof(IDXGISwapChain1))) return E_NOINTERFACE;
-        *out = static_cast<IDXGISwapChain1*>(this);
+                !SameInterface(iid, __uuidof(IDXGISwapChain1)) &&
+                !(native2_ && SameInterface(iid, __uuidof(IDXGISwapChain2))) &&
+                !(native3_ && SameInterface(iid, __uuidof(IDXGISwapChain3))) &&
+                !(native4_ && SameInterface(iid, __uuidof(IDXGISwapChain4)))) return E_NOINTERFACE;
+        *out = static_cast<IDXGISwapChain4*>(this);
         AddRef();
         return S_OK;
     }
@@ -316,10 +341,11 @@ public:
         const LONG count = InterlockedDecrement(&references_);
         if (!count) {
             cadence_.Flush();
-            publisher_.Reset();
-            native_->Release();
-            factory_->Release();
+            auto* native = native_;
+            auto* factory = factory_;
             this->~HostedSwapChain();
+            native->Release();
+            factory->Release();
             HeapFree(GetProcessHeap(), 0, this);
         }
         return count;
@@ -360,11 +386,16 @@ public:
         if ((!width || !height) && !VirtualClientRect(window_, area)) return DXGI_ERROR_INVALID_CALL;
         if (!width) width = area.right - area.left;
         if (!height) height = area.bottom - area.top;
-        if (count == 1) count = 2;
+        if (count == 1) {
+            if (queue_) return DXGI_ERROR_INVALID_CALL;
+            count = 2;
+        }
         AcquireSRWLockExclusive(&lock_);
-        publisher_.Reset();
-        clock_.interval = 0;
-        const HRESULT code = native_->ResizeBuffers(count, width, height, format, flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+        HRESULT code = publisher_.Reset();
+        if (SUCCEEDED(code)) {
+            clock_.interval = 0;
+            code = native_->ResizeBuffers(count, width, height, format, flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+        }
         ReleaseSRWLockExclusive(&lock_);
         return code;
     }
@@ -393,12 +424,70 @@ public:
     HRESULT STDMETHODCALLTYPE GetBackgroundColor(DXGI_RGBA* out) override { return native_->GetBackgroundColor(out); }
     HRESULT STDMETHODCALLTYPE SetRotation(DXGI_MODE_ROTATION rotation) override { return native_->SetRotation(rotation); }
     HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION* out) override { return native_->GetRotation(out); }
+    HRESULT STDMETHODCALLTYPE SetSourceSize(UINT width, UINT height) override { return native2_->SetSourceSize(width, height); }
+    HRESULT STDMETHODCALLTYPE GetSourceSize(UINT* width, UINT* height) override { return native2_->GetSourceSize(width, height); }
+    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT latency) override { return native2_->SetMaximumFrameLatency(latency); }
+    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT* latency) override { return native2_->GetMaximumFrameLatency(latency); }
+    HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override { return native2_->GetFrameLatencyWaitableObject(); }
+    HRESULT STDMETHODCALLTYPE SetMatrixTransform(const DXGI_MATRIX_3X2_F* matrix) override {
+        return native2_->SetMatrixTransform(matrix);
+    }
+    HRESULT STDMETHODCALLTYPE GetMatrixTransform(DXGI_MATRIX_3X2_F* matrix) override {
+        return native2_->GetMatrixTransform(matrix);
+    }
+    UINT STDMETHODCALLTYPE GetCurrentBackBufferIndex() override { return native3_->GetCurrentBackBufferIndex(); }
+    HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE space, UINT* flags) override {
+        return native3_->CheckColorSpaceSupport(space, flags);
+    }
+    HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE space) override { return native3_->SetColorSpace1(space); }
+    HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE type, UINT size, void* metadata) override {
+        return native4_->SetHDRMetaData(type, size, metadata);
+    }
+    HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags,
+            const UINT* nodeMasks, IUnknown* const* queues) override {
+        if (queue_ && count == 1) return DXGI_ERROR_INVALID_CALL;
+        if (queue_ && queues) {
+            DXGI_SWAP_CHAIN_DESC1 desc{};
+            const auto result = native_->GetDesc1(&desc);
+            if (FAILED(result)) return result;
+            const UINT buffers = count ? count : desc.BufferCount;
+            if (buffers > DXGI_MAX_SWAP_CHAIN_BUFFERS) return DXGI_ERROR_INVALID_CALL;
+            ComPtr<IUnknown> presentQueue;
+            if (FAILED(queue_.As(&presentQueue))) return E_NOINTERFACE;
+            for (UINT index = 0; index < buffers; ++index) {
+                ComPtr<IUnknown> bufferQueue;
+                if (!queues[index] || FAILED(queues[index]->QueryInterface(IID_PPV_ARGS(&bufferQueue))))
+                    return DXGI_ERROR_INVALID_CALL;
+                if (bufferQueue.Get() != presentQueue.Get()) return DXGI_ERROR_UNSUPPORTED;
+            }
+        }
+        RECT area{};
+        if ((!width || !height) && !VirtualClientRect(window_, area)) return DXGI_ERROR_INVALID_CALL;
+        if (!width) width = area.right - area.left;
+        if (!height) height = area.bottom - area.top;
+        AcquireSRWLockExclusive(&lock_);
+        HRESULT code = publisher_.Reset();
+        if (SUCCEEDED(code)) {
+            clock_.interval = 0;
+            code = native3_->ResizeBuffers1(count, width, height, format,
+                flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH, nodeMasks, queues);
+        }
+        ReleaseSRWLockExclusive(&lock_);
+        return code;
+    }
 };
 
-class Factory final : public IDXGIFactory2 {
+class Factory final : public IDXGIFactory6 {
     IDXGIFactory2* native_;
     volatile LONG references_ = 1;
     void* volatile associatedWindow_ = nullptr;
+
+    template<class Interface, class Call>
+    HRESULT WithNative(Call call) {
+        ComPtr<Interface> version;
+        const auto code = native_->QueryInterface(IID_PPV_ARGS(&version));
+        return SUCCEEDED(code) ? call(version.Get()) : code;
+    }
 
     HRESULT CreateVirtualChain(IUnknown* device, HWND window, RECT area, DXGI_SWAP_CHAIN_DESC1 desc, IDXGISwapChain1** out) {
         if (!out) return E_POINTER;
@@ -407,21 +496,34 @@ class Factory final : public IDXGIFactory2 {
                 area.right <= area.left || area.bottom <= area.top) return DXGI_ERROR_INVALID_CALL;
         if (!desc.Width) desc.Width = area.right - area.left;
         if (!desc.Height) desc.Height = area.bottom - area.top;
+        ComPtr<ID3D12CommandQueue> queue;
+        device->QueryInterface(IID_PPV_ARGS(&queue));
+        if (queue && (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT || desc.BufferCount < 2))
+            return DXGI_ERROR_INVALID_CALL;
         if (desc.BufferCount < 2) desc.BufferCount = 2;
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         desc.Flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
         IDXGISwapChain1* native = nullptr;
-        const HRESULT code = native_->CreateSwapChainForComposition(device, &desc, nullptr, &native);
+        HRESULT code = native_->CreateSwapChainForComposition(device, &desc, nullptr, &native);
         Trace("composition-swap-chain", code);
         if (FAILED(code)) return code;
+        ComPtr<IDXGISwapChain3> native3;
+        code = native->QueryInterface(IID_PPV_ARGS(&native3));
+        if (queue) {
+            Trace("d3d12-swap-chain3", code);
+            if (FAILED(code)) {
+                native->Release();
+                return code;
+            }
+        }
         void* storage = HeapAlloc(GetProcessHeap(), 0, sizeof(HostedSwapChain));
         if (!storage) {
             native->Release();
             return E_OUTOFMEMORY;
         }
-        *out = new (storage) HostedSwapChain(native, this, window);
+        *out = new (storage) HostedSwapChain(native, native3.Get(), queue.Get(), this, window);
         return S_OK;
     }
 
@@ -433,8 +535,15 @@ public:
         *out = nullptr;
         if (!SameInterface(iid, __uuidof(IUnknown)) && !SameInterface(iid, __uuidof(IDXGIObject)) &&
                 !SameInterface(iid, __uuidof(IDXGIFactory)) && !SameInterface(iid, __uuidof(IDXGIFactory1)) &&
-                !SameInterface(iid, __uuidof(IDXGIFactory2))) return E_NOINTERFACE;
-        *out = static_cast<IDXGIFactory2*>(this);
+                !SameInterface(iid, __uuidof(IDXGIFactory2))) {
+            if (!SameInterface(iid, __uuidof(IDXGIFactory3)) && !SameInterface(iid, __uuidof(IDXGIFactory4)) &&
+                    !SameInterface(iid, __uuidof(IDXGIFactory5)) && !SameInterface(iid, __uuidof(IDXGIFactory6)))
+                return E_NOINTERFACE;
+            ComPtr<IUnknown> version;
+            const auto code = native_->QueryInterface(iid, reinterpret_cast<void**>(version.GetAddressOf()));
+            if (FAILED(code)) return code;
+        }
+        *out = static_cast<IDXGIFactory6*>(this);
         AddRef();
         return S_OK;
     }
@@ -538,15 +647,47 @@ public:
             IDXGIOutput* restrictTo, IDXGISwapChain1** out) override {
         return native_->CreateSwapChainForComposition(device, desc, restrictTo, out);
     }
+    UINT STDMETHODCALLTYPE GetCreationFlags() override {
+        ComPtr<IDXGIFactory3> native3;
+        return SUCCEEDED(native_->QueryInterface(IID_PPV_ARGS(&native3))) ? native3->GetCreationFlags() : 0;
+    }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByLuid(LUID luid, REFIID iid, void** out) override {
+        return WithNative<IDXGIFactory4>([&](auto* native) { return native->EnumAdapterByLuid(luid, iid, out); });
+    }
+    HRESULT STDMETHODCALLTYPE EnumWarpAdapter(REFIID iid, void** out) override {
+        return WithNative<IDXGIFactory4>([&](auto* native) { return native->EnumWarpAdapter(iid, out); });
+    }
+    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(DXGI_FEATURE feature, void* data, UINT size) override {
+        return WithNative<IDXGIFactory5>([&](auto* native) { return native->CheckFeatureSupport(feature, data, size); });
+    }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByGpuPreference(UINT index, DXGI_GPU_PREFERENCE preference,
+            REFIID iid, void** out) override {
+        return WithNative<IDXGIFactory6>([&](auto* native) {
+            return native->EnumAdapterByGpuPreference(index, preference, iid, out);
+        });
+    }
 };
 
-} // namespace
+enum class FactoryEntry { Legacy, Version1, Version2 };
 
-extern "C" HRESULT WINAPI XboxCreateDXGIFactory1(REFIID iid, void** out) {
+HRESULT CreateFactory(FactoryEntry entry, UINT flags, REFIID iid, void** out) {
     if (!out) return E_POINTER;
     *out = nullptr;
     IDXGIFactory2* native = nullptr;
-    HRESULT code = CreateDXGIFactory1(IID_PPV_ARGS(&native));
+    HRESULT code;
+    if (entry == FactoryEntry::Legacy) {
+        using CreateLegacy = HRESULT (WINAPI *)(REFIID, void**);
+        const auto module = GetModuleHandleW(L"dxgi.dll");
+        const auto create = module ? reinterpret_cast<CreateLegacy>(GetProcAddress(module, "CreateDXGIFactory")) : nullptr;
+        if (!create) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+        ComPtr<IDXGIFactory> legacy;
+        code = create(IID_PPV_ARGS(&legacy));
+        if (SUCCEEDED(code)) code = legacy->QueryInterface(IID_PPV_ARGS(&native));
+    } else if (entry == FactoryEntry::Version1) {
+        code = CreateDXGIFactory1(IID_PPV_ARGS(&native));
+    } else {
+        code = CreateDXGIFactory2(flags, IID_PPV_ARGS(&native));
+    }
     if (FAILED(code)) return code;
     void* storage = HeapAlloc(GetProcessHeap(), 0, sizeof(Factory));
     if (!storage) {
@@ -558,6 +699,39 @@ extern "C" HRESULT WINAPI XboxCreateDXGIFactory1(REFIID iid, void** out) {
     adapter->Release();
     Trace("factory", code);
     return code;
+}
+
+} // namespace
+
+extern "C" HRESULT WINAPI XboxCreateDXGIFactory(REFIID iid, void** out) {
+    return CreateFactory(FactoryEntry::Legacy, 0, iid, out);
+}
+
+extern "C" HRESULT WINAPI XboxCreateDXGIFactory1(REFIID iid, void** out) {
+    return CreateFactory(FactoryEntry::Version1, 0, iid, out);
+}
+
+extern "C" HRESULT WINAPI XboxCreateDXGIFactory2(UINT flags, REFIID iid, void** out) {
+    return CreateFactory(FactoryEntry::Version2, flags, iid, out);
+}
+
+extern "C" BOOL WINAPI XboxGetOutputMonitorRect(HMONITOR monitor, RECT* area) {
+    if (!monitor || !area) return FALSE;
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return FALSE;
+    for (UINT adapterIndex = 0;; ++adapterIndex) {
+        ComPtr<IDXGIAdapter1> adapter;
+        if (FAILED(factory->EnumAdapters1(adapterIndex, &adapter))) return FALSE;
+        for (UINT outputIndex = 0;; ++outputIndex) {
+            ComPtr<IDXGIOutput> output;
+            if (FAILED(adapter->EnumOutputs(outputIndex, &output))) break;
+            DXGI_OUTPUT_DESC desc{};
+            if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor) {
+                *area = desc.DesktopCoordinates;
+                return TRUE;
+            }
+        }
+    }
 }
 
 extern "C" HRESULT WINAPI XboxD3DReflect(LPCVOID bytecode, SIZE_T size, REFIID iid, void** out) {

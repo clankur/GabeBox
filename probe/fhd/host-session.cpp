@@ -150,6 +150,12 @@ extern "C" void FhdReleaseMedia(LONG token) {
     }
     ReleaseSRWLockExclusive(&stateLock);
 }
+extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG token) {
+    AcquireSRWLockShared(&stateLock);
+    auto mailbox = token && mediaToken == token ? box : nullptr;
+    ReleaseSRWLockShared(&stateLock);
+    return mailbox;
+}
 extern "C" void FhdMediaSequences(LONG token, UINT64& cpu, UINT64& gpu) {
     AcquireSRWLockShared(&stateLock);
     if (token && mediaToken == token && box && receiver) {

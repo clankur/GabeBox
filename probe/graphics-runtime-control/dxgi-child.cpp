@@ -7,6 +7,7 @@
 #ifdef PROBE_DXGI_EXCHANGE
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 #include "../sdl-host-protocol.h"
 #include "../sdl-gpu-protocol.h"
 extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
@@ -26,7 +27,27 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPA
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-static HRESULT CreateDesktopChain(ID3D11Device* device, IDXGISwapChain1** out, DXGI_SWAP_CHAIN_DESC1 description) {
+struct DesktopChainRequest {
+    IDXGIFactory2* factory;
+    IUnknown* device;
+    HWND window;
+    DXGI_SWAP_CHAIN_DESC1 description;
+    IDXGISwapChain1** chain;
+    HRESULT result;
+};
+
+static void CALLBACK CreateDesktopChainOnWorker(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) {
+    auto& request = *static_cast<DesktopChainRequest*>(context);
+    auto result = request.factory->MakeWindowAssociation(request.window, DXGI_MWA_NO_ALT_ENTER);
+    HWND associated = nullptr;
+    if (SUCCEEDED(result)) result = request.factory->GetWindowAssociation(&associated);
+    if (SUCCEEDED(result) && associated != request.window) result = E_FAIL;
+    if (SUCCEEDED(result)) result = request.factory->CreateSwapChainForHwnd(
+        request.device, request.window, &request.description, nullptr, nullptr, request.chain);
+    request.result = result;
+}
+
+static HRESULT CreateDesktopChain(IUnknown* device, IDXGISwapChain1** out, DXGI_SWAP_CHAIN_DESC1 description) {
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     const WNDCLASSW windowClass{0, WindowProc, 0, 0, instance, nullptr, nullptr, nullptr, nullptr, L"DxgiWindowControl"};
     if (!RegisterClassW(&windowClass)) return HRESULT_FROM_WIN32(GetLastError());
@@ -36,21 +57,29 @@ static HRESULT CreateDesktopChain(ID3D11Device* device, IDXGISwapChain1** out, D
 
     ComPtr<IDXGIFactory1> base;
     ComPtr<IDXGIFactory2> factory;
+#ifdef PROBE_DXGI_D3D12
+    HRESULT error = CreateDXGIFactory2(0, IID_PPV_ARGS(&base));
+#else
     HRESULT error = CreateDXGIFactory1(IID_PPV_ARGS(&base));
+#endif
     if (SUCCEEDED(error)) error = base.As(&factory);
     ComPtr<IUnknown> baseIdentity, factoryIdentity;
     if (SUCCEEDED(error)) error = base.As(&baseIdentity);
     if (SUCCEEDED(error)) error = factory.As(&factoryIdentity);
     if (SUCCEEDED(error) && baseIdentity.Get() != factoryIdentity.Get()) return E_NOINTERFACE;
-    if (SUCCEEDED(error)) error = factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
-    HWND associated = nullptr;
-    if (SUCCEEDED(error)) error = factory->GetWindowAssociation(&associated);
-    if (SUCCEEDED(error) && associated != window) return E_FAIL;
+    if (FAILED(error)) return error;
     description.Width = description.Height = 0;
+#ifndef PROBE_DXGI_D3D12
     description.BufferCount = 1;
     description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    if (SUCCEEDED(error)) error = factory->CreateSwapChainForHwnd(device, window, &description, nullptr, nullptr, out);
-    return error;
+#endif
+    DesktopChainRequest request{factory.Get(), device, window, description, out, E_FAIL};
+    const PTP_WORK work = CreateThreadpoolWork(CreateDesktopChainOnWorker, &request, nullptr);
+    if (!work) return HRESULT_FROM_WIN32(GetLastError());
+    SubmitThreadpoolWork(work);
+    WaitForThreadpoolWorkCallbacks(work, FALSE);
+    CloseThreadpoolWork(work);
+    return request.result;
 }
 #endif
 
@@ -102,10 +131,13 @@ struct ExchangeControl {
         return Create(path, gpuFile, gpu, SDL_GPU_MAGIC);
     }
 
-    HRESULT Receive(IDXGIAdapter* adapter, ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D** texture) {
+    HRESULT Receive(IDXGIAdapter* adapter, ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D** texture,
+            UINT size = 64, UINT64 sequence = 1, ID3D11Fence** done = nullptr) {
+        const auto slot = static_cast<unsigned>((sequence - 1) % SDL_GPU_SLOTS);
         if (SdlHostLoad(&base->frame_sequence) != 1 || SdlHostLoad(&base->frame_state) != SDL_HOST_EMPTY ||
                 SdlHostLoad(&gpu->generation) <= 0 || !SdlHostLoad(&gpu->gpu_active) || gpu->flip_y ||
-                gpu->width != 64 || gpu->height != 64 || InterlockedCompareExchange64(&gpu->sequence[0], 0, 0) != 1)
+                gpu->width != size || gpu->height != size ||
+                InterlockedCompareExchange64(&gpu->sequence[slot], 0, 0) != static_cast<LONG64>(sequence))
             return E_FAIL;
         ComPtr<ID3D12Device> lookup;
         ComPtr<ID3D11Device5> modern;
@@ -115,15 +147,157 @@ struct ExchangeControl {
         if (SUCCEEDED(code)) code = device->QueryInterface(IID_PPV_ARGS(&modern));
         if (SUCCEEDED(code)) code = context->QueryInterface(IID_PPV_ARGS(&queue));
         HANDLE handle = nullptr;
-        if (SUCCEEDED(code)) code = lookup->OpenSharedHandleByName(gpu->names[0][0], GENERIC_ALL, &handle);
+        if (SUCCEEDED(code)) code = lookup->OpenSharedHandleByName(gpu->names[slot][0], GENERIC_ALL, &handle);
         if (SUCCEEDED(code)) { code = modern->OpenSharedResource1(handle, IID_PPV_ARGS(texture)); CloseHandle(handle); }
-        if (SUCCEEDED(code)) code = lookup->OpenSharedHandleByName(gpu->names[0][1], GENERIC_ALL, &handle);
+        if (SUCCEEDED(code)) code = lookup->OpenSharedHandleByName(gpu->names[slot][1], GENERIC_ALL, &handle);
         if (SUCCEEDED(code)) { code = modern->OpenSharedFence(handle, IID_PPV_ARGS(&ready)); CloseHandle(handle); }
-        return FAILED(code) ? code : queue->Wait(ready.Get(), 1);
+        if (SUCCEEDED(code) && done) {
+            code = lookup->OpenSharedHandleByName(gpu->names[slot][2], GENERIC_ALL, &handle);
+            if (SUCCEEDED(code)) { code = modern->OpenSharedFence(handle, IID_PPV_ARGS(done)); CloseHandle(handle); }
+        }
+        return FAILED(code) ? code : queue->Wait(ready.Get(), sequence);
     }
 };
 #endif
 
+#ifdef PROBE_DXGI_D3D12
+static HRESULT RenderFrame(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* commands,
+        ID3D12CommandAllocator* allocator, D3D12_CPU_DESCRIPTOR_HANDLE target, ID3D12Resource* buffer, bool cyan) {
+    HRESULT error = allocator->Reset();
+    if (SUCCEEDED(error)) error = commands->Reset(allocator, nullptr);
+    if (FAILED(error)) return error;
+    device->CreateRenderTargetView(buffer, nullptr, target);
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {buffer, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET};
+    commands->ResourceBarrier(1, &barrier);
+    const float color[4]{cyan ? 0.0f : 1.0f, cyan ? 1.0f : 0.0f, 1.0f, 1.0f};
+    commands->ClearRenderTargetView(target, color, 0, nullptr);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    commands->ResourceBarrier(1, &barrier);
+    error = commands->Close();
+    if (SUCCEEDED(error)) {
+        ID3D12CommandList* lists[] = {commands};
+        queue->ExecuteCommandLists(ARRAYSIZE(lists), lists);
+    }
+    return error;
+}
+
+static HRESULT CheckSharedPixel(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture,
+        ID3D11Fence* done, UINT64 sequence, bool cyan) {
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> readback;
+    HRESULT error = device->CreateTexture2D(&desc, nullptr, &readback);
+    if (FAILED(error)) return error;
+    context->CopyResource(readback.Get(), texture);
+    D3D11_MAPPED_SUBRESOURCE pixels{};
+    error = context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &pixels);
+    if (FAILED(error)) return error;
+    const auto* pixel = static_cast<const unsigned char*>(pixels.pData);
+    const bool correct = pixel[0] == 255 && pixel[1] == (cyan ? 255 : 0) &&
+        pixel[2] == (cyan ? 0 : 255) && pixel[3] == 255;
+    context->Unmap(readback.Get(), 0);
+    if (!correct) return E_FAIL;
+    ComPtr<ID3D11DeviceContext4> modern;
+    error = context->QueryInterface(IID_PPV_ARGS(&modern));
+    if (SUCCEEDED(error)) error = modern->Signal(done, sequence);
+    if (FAILED(error)) return error;
+    modern->Flush();
+    const auto deadline = GetTickCount64() + 1000;
+    for (;;) {
+        const auto completed = done->GetCompletedValue();
+        if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+        if (completed >= sequence) return S_OK;
+        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        SleepEx(1, FALSE);
+    }
+}
+
+static unsigned int VerifyFrame() {
+    ComPtr<ID3D11Device> consumer;
+    ComPtr<ID3D11DeviceContext> context;
+    HRESULT error = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &consumer, nullptr, &context);
+    if (FAILED(error)) return Failure(1, error);
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    error = consumer.As(&dxgi);
+    if (SUCCEEDED(error)) error = dxgi->GetAdapter(&adapter);
+    if (FAILED(error)) return Failure(2, error);
+    ComPtr<ID3D12Device> device;
+    error = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    if (FAILED(error)) return Failure(11, error);
+    D3D12_COMMAND_QUEUE_DESC queueDesc{};
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> commands;
+    ComPtr<ID3D12DescriptorHeap> heap;
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    heapDesc.NumDescriptors = 1;
+    error = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
+    if (SUCCEEDED(error)) error = device->CreateCommandAllocator(queueDesc.Type, IID_PPV_ARGS(&allocator));
+    if (SUCCEEDED(error)) error = device->CreateCommandList(0, queueDesc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&commands));
+    if (SUCCEEDED(error)) error = commands->Close();
+    if (SUCCEEDED(error)) error = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&heap));
+    if (FAILED(error)) return Failure(12, error);
+    const auto target = heap->GetCPUDescriptorHandleForHeapStart();
+
+    ExchangeControl exchange;
+    error = exchange.Open();
+    if (FAILED(error)) return Failure(8, error);
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    ComPtr<IDXGISwapChain1> base;
+    ComPtr<IDXGISwapChain3> chain;
+    error = CreateDesktopChain(queue.Get(), &base, desc);
+    if (SUCCEEDED(error)) error = base.As(&chain);
+    if (FAILED(error)) return Failure(3, error);
+    UINT size = 64;
+    constexpr UINT noBuffer = ~0u;
+    UINT previousBuffer = noBuffer;
+    const UINT64 resizeAfter = SDL_GPU_SLOTS + 1;
+    for (UINT64 sequence = 1; sequence <= resizeAfter + 2; ++sequence) {
+        if (sequence == resizeAfter + 1) {
+            size = 80;
+            const UINT nodeMasks[] = {1, 1};
+            IUnknown* queues[] = {queue.Get(), queue.Get()};
+            error = chain->ResizeBuffers1(2, size, size, desc.Format, 0, nodeMasks, queues);
+            if (FAILED(error)) return Failure(15, error);
+            previousBuffer = noBuffer;
+        }
+        const UINT currentBuffer = chain->GetCurrentBackBufferIndex();
+        if (currentBuffer >= desc.BufferCount || currentBuffer == previousBuffer) return Failure(13, E_FAIL);
+        previousBuffer = currentBuffer;
+        ComPtr<ID3D12Resource> buffer;
+        error = chain->GetBuffer(currentBuffer, IID_PPV_ARGS(&buffer));
+        const bool cyan = (sequence & 1) != 0;
+        if (SUCCEEDED(error)) error = RenderFrame(device.Get(), queue.Get(), commands.Get(), allocator.Get(),
+            target, buffer.Get(), cyan);
+        if (FAILED(error)) return Failure(13, error);
+        error = chain->Present(0, 0);
+        if (FAILED(error)) return Failure(9, error);
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11Fence> done;
+        error = exchange.Receive(adapter.Get(), consumer.Get(), context.Get(), &texture, size, sequence, &done);
+        if (FAILED(error)) return Failure(10, error);
+        error = CheckSharedPixel(consumer.Get(), context.Get(), texture.Get(), done.Get(), sequence, cyan);
+        if (FAILED(error)) return Failure(14, error);
+    }
+    return PROBE_EXPECTED_CHILD_EXIT;
+}
+#else
 static unsigned int VerifyFrame() {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -208,6 +382,7 @@ static unsigned int VerifyFrame() {
     context->Unmap(copy.Get(), 0);
     return cyan ? PROBE_EXPECTED_CHILD_EXIT : Failure(7, E_FAIL);
 }
+#endif
 
 extern "C" void WINAPI ChildEntry() {
     ExitProcess(VerifyFrame());

@@ -8,6 +8,9 @@
     "GetPointerPenInfo": "XboxWin32Input.dll",
     "MapVirtualKeyExA": "XboxWin32Input.dll"
   },
+  "uxtheme.dll": {
+    "EnableThemeDialogTexture": "XboxWin32Desktop.dll"
+  },
   "winmm.dll": {
     "timeKillEvent": "XboxWin32Timer.dll",
     "timeSetEvent": "XboxWin32Timer.dll"

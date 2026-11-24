@@ -765,21 +765,48 @@ async function checkDownloads(page, popup) {
     await popup.getByText(/^install$/i).first().click();
     await page.waitForFunction(() => typeof fixtureFinishInstall === 'function');
     await page.evaluate(appId => hostEvent({event: 'xbox-install', appId, stage: 'downloading',
-        progress: {downloaded: 8 * 1024 ** 2, downloadTotal: 32 * 1024 ** 2}}), installAppId);
+        progress: {measurement: 'unavailable', depotActivity: true, downloaded: 0, downloadTotal: 55806040976}}), installAppId);
     await menuItem('Downloads');
     const game = popup.getByText('Fixture B', {exact: true}).first();
     await game.waitFor({state: 'visible', timeout: 12000});
-    assert.deepEqual(await page.evaluate(() => {
+    const unknown = popup.getByText('Steam is processing depot files. Byte progress is temporarily unavailable.', {exact: true});
+    await unknown.waitFor({state: 'visible', timeout: 5000});
+    const stats = popup.locator('._vrwj4IQ-vqMravrbJb64');
+    assert.equal(await stats.isVisible(), false);
+    await menuItem('Library');
+    await unknown.waitFor({state: 'detached', timeout: 5000});
+    await menuItem('Downloads');
+    await unknown.waitFor({state: 'visible', timeout: 5000});
+    assert.equal(await game.isVisible(), true);
+    assert.equal(await stats.isVisible(), false);
+    async function transferStatus() { return page.evaluate(() => {
         let runtime;
-        webpackChunksteamui.push([['fixture-download-state'], {}, value => { runtime = value; }]);
+        webpackChunksteamui.push([['fixture-download-state-' + crypto.randomUUID()], {}, value => { runtime = value; }]);
         const store = runtime(55426).hj;
         const overview = store.LocalDownloadOverview;
         const bytes = overview.progress[runtime(94601).tgE.k_EAppUpdateProgress_Download];
         return {queue: store.QueuedTransfers.map(item => item.appid), appId: overview.update_appid,
             state: overview.update_state, percent: overview.overall_percent_complete,
-            downloaded: bytes.bytes_in_progress, total: bytes.bytes_total};
-    }), {queue: [installAppId], appId: installAppId, state: 'Downloading', percent: 25,
-        downloaded: 8 * 1024 ** 2, total: 32 * 1024 ** 2});
+            downloaded: bytes.bytes_in_progress, total: bytes.bytes_total,
+            network: overview.update_network_bytes_per_second, peak: overview.update_peak_network_bytes_per_second};
+    }); }
+    assert.deepEqual(await transferStatus(), {queue: [installAppId], appId: installAppId, state: 'Downloading',
+        percent: 0, downloaded: 0, total: 0, network: 0, peak: 0});
+    await page.evaluate(appId => hostEvent({event: 'xbox-install', appId, stage: 'downloading',
+        progress: {measurement: 'steam', depotActivity: true, downloaded: 0, downloadTotal: 32 * 1024 ** 2,
+            networkBytesPerSecond: 0, diskBytesPerSecond: 0}}), installAppId);
+    const working = popup.getByText('Steam is processing depot files. Byte counters have not advanced.', {exact: true});
+    await working.waitFor({state: 'visible', timeout: 5000});
+    assert.deepEqual(await transferStatus(), {queue: [installAppId], appId: installAppId, state: 'Downloading',
+        percent: 0, downloaded: 0, total: 32 * 1024 ** 2, network: 0, peak: 0});
+    await page.evaluate(appId => hostEvent({event: 'xbox-install', appId, stage: 'downloading',
+        progress: {measurement: 'steam', downloaded: 8 * 1024 ** 2, downloadTotal: 32 * 1024 ** 2,
+            networkBytesPerSecond: 8 * 1024 ** 2, diskBytesPerSecond: 0}}), installAppId);
+    await working.waitFor({state: 'detached', timeout: 5000});
+    assert.equal(await stats.isVisible(), true);
+    assert.match(await stats.innerText(), /8\.4 MB\/s/);
+    assert.deepEqual(await transferStatus(), {queue: [installAppId], appId: installAppId, state: 'Downloading', percent: 25,
+        downloaded: 8 * 1024 ** 2, total: 32 * 1024 ** 2, network: 8 * 1024 ** 2, peak: 8 * 1024 ** 2});
     await page.evaluate(() => fixtureFinishInstall('installed'));
     await page.waitForFunction(appId => {
         let runtime;
@@ -788,7 +815,7 @@ async function checkDownloads(page, popup) {
         return store.CompletedTransfers.some(item => item.appid === appId) && store.QueuedTransfers.length === 0;
     }, installAppId);
     assert.equal(await game.isVisible(), true);
-    console.log('Valve Downloads opened empty, showed Spider-Man byte progress, and moved the finished install to Completed.');
+    console.log('Valve Downloads kept Spider-Man active during unknown progress, showed the measured rate, and moved the finished install to Completed.');
 }
 
 async function readSeen(page) {
