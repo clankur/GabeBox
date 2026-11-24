@@ -6,6 +6,7 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -215,7 +216,7 @@ struct Presenter {
         check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, target.put()));
         panel = SwapChainPanel{};
         panel.Name(L"SteamGameSurface");
-        panel.IsHitTestVisible(false);
+        panel.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Colors::Transparent()));
         panel.HorizontalAlignment(HorizontalAlignment::Center);
         panel.VerticalAlignment(VerticalAlignment::Center);
         fit();

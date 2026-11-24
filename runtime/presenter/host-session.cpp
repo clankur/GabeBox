@@ -38,7 +38,8 @@ volatile LONG sharedMode=0, nativePad=1;
 volatile LONG pointerSample=-1, pointerSerial, pointerAck, pointerEvents, pointerForeground;
 void samplePointer() {
 #ifdef FHD_NATIVE_INPUT
-    pointerSample=nativePad || !box ? -1 : SdlHostLoad(&box->input_pointer);
+    const LONG point = box ? SdlHostLoad(&box->input_pointer) : -1;
+    pointerSample = point >= 0 && (!nativePad || (point & SDL_HOST_POINTER_VISIBLE)) ? point : -1;
     if (pointerSample >= 0) {
         pointerSerial=SdlHostLoad(&box->input_serial);
         pointerAck=SdlHostLoad(&box->input_ack);
@@ -100,7 +101,8 @@ HRESULT attach(const WCHAR *path,bool create) {
 LONG mediaToken;
 HRESULT drawMailbox(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
                     bool nativeGamepad, UINT64 &sequence, bool &gpu) {
-    const LONG pointer = nativeGamepad ? -1 : SdlHostLoad(&box->input_pointer);
+    const LONG point = SdlHostLoad(&box->input_pointer);
+    const LONG pointer = !nativeGamepad || (point & SDL_HOST_POINTER_VISIBLE) ? point : -1;
     HRESULT hr = receiver->Draw(device, ctx, target, 1920, 1080, sequence, pointer);
     gpuStage = receiver->Stage();
     gpu = hr == S_OK;

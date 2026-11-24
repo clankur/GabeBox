@@ -53,7 +53,7 @@ static BOOL hostPointerConfigured;
 static LONG hostPointerSerial;
 static HWND hostPointerWindow;
 static POINT hostPointerScreen;
-static BOOL hostPointerDown;
+static UINT hostPointerButtons;
 
 #define HOSTED_WINDOW_STATE (WS_MINIMIZE | WS_MAXIMIZE)
 #define KEEP_HOSTED_WINDOW_STATE ((DWORD)-1)
@@ -1093,6 +1093,7 @@ static void PollHostedPointer(void) {
     if (!mailbox || SdlHostLoad(&mailbox->quit)) return;
     const LONG serial = SdlHostLoad(&mailbox->input_serial);
     const UINT pointer = (UINT)SdlHostLoad(&mailbox->input_pointer);
+    const UINT keys = (UINT)SdlHostLoad(&mailbox->input_keys);
     if (!serial || (serial & 1) || serial != SdlHostLoad(&mailbox->input_serial) ||
             (handle == hostPointerWindow && serial == hostPointerSerial)) return;
     RECT bounds;
@@ -1103,23 +1104,45 @@ static void PollHostedPointer(void) {
     const LONG x = (LONG)(((pointer & SDL_HOST_POINTER_MAX) * (width - 1) + 2047) / SDL_HOST_POINTER_MAX);
     const LONG y = (LONG)((((pointer >> 12) & SDL_HOST_POINTER_MAX) * (height - 1) + 2047) / SDL_HOST_POINTER_MAX);
     const POINT screen = {bounds.left + x, bounds.top + y};
-    const BOOL down = (pointer & (1u << 24)) != 0;
+    static const struct { UINT mask, flag, down, up, xbutton; } bindings[] = {
+        {SDL_HOST_POINTER_LEFT, MK_LBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, 0},
+        {SDL_HOST_POINTER_RIGHT, MK_RBUTTON, WM_RBUTTONDOWN, WM_RBUTTONUP, 0},
+        {SDL_HOST_POINTER_MIDDLE, MK_MBUTTON, WM_MBUTTONDOWN, WM_MBUTTONUP, 0},
+        {SDL_HOST_POINTER_X1, MK_XBUTTON1, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1},
+        {SDL_HOST_POINTER_X2, MK_XBUTTON2, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON2}
+    };
+    const UINT pressed = pointer & SDL_HOST_POINTER_BUTTONS;
+    const UINT changed = pressed ^ (handle == hostPointerWindow ? hostPointerButtons : 0);
+    const SHORT wheel = serial != hostPointerSerial ? (SHORT)(keys >> 16) : 0;
     const BOOL moved = handle != hostPointerWindow || screen.x != hostPointerScreen.x || screen.y != hostPointerScreen.y;
-    const BOOL clicked = down != (handle == hostPointerWindow && hostPointerDown);
-    const UINT count = moved + clicked;
+    UINT count = moved + (wheel != 0);
+    WPARAM buttons = ((hostedKeys[VK_SHIFT] & 0x80) ? MK_SHIFT : 0) |
+        ((hostedKeys[VK_CONTROL] & 0x80) ? MK_CONTROL : 0);
+    for (UINT i = 0; i < ARRAYSIZE(bindings); ++i) {
+        if (changed & bindings[i].mask) ++count;
+        if (pressed & bindings[i].mask) buttons |= bindings[i].flag;
+    }
     if (count > MESSAGE_COUNT - messageCount) return;
     const LPARAM position = MAKELPARAM(x, y);
-    const WPARAM buttons = down ? MK_LBUTTON : 0;
     const DWORD time = GetTickCount();
     if (moved) messages[messageCount++] = (HostedMessage){{handle, WM_MOUSEMOVE, buttons, position, time, screen}, 0, 0, FALSE};
-    if (clicked) messages[messageCount++] = (HostedMessage){{handle, down ? WM_LBUTTONDOWN : WM_LBUTTONUP,
-        buttons, position, time, screen}, 0, 0, FALSE};
+    for (UINT i = 0; i < ARRAYSIZE(bindings); ++i) {
+        if (!(changed & bindings[i].mask)) continue;
+        const UINT message = (pressed & bindings[i].mask) ? bindings[i].down : bindings[i].up;
+        messages[messageCount++] = (HostedMessage){{handle, message, MAKEWPARAM(buttons, bindings[i].xbutton),
+            position, time, screen}, 0, 0, FALSE};
+    }
+    if (wheel) {
+        const UINT message = (keys & SDL_HOST_WHEEL_HORIZONTAL) ? WM_MOUSEHWHEEL : WM_MOUSEWHEEL;
+        messages[messageCount++] = (HostedMessage){{handle, message, MAKEWPARAM(buttons, wheel),
+            MAKELPARAM(screen.x, screen.y), time, screen}, 0, 0, FALSE};
+    }
     AcquireSRWLockExclusive(&windowGeometryLock);
     hostPointerScreen = screen;
     hostPointerWindow = handle;
     ReleaseSRWLockExclusive(&windowGeometryLock);
     hostPointerSerial = serial;
-    hostPointerDown = down;
+    hostPointerButtons = pressed;
     InterlockedExchangeAdd(&mailbox->input_events, count);
     InterlockedExchange(&mailbox->input_ack, serial);
 }

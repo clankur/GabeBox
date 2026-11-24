@@ -31,7 +31,8 @@ static Reading physical;
 static UINT state;
 static Rect gameBounds = {0, 0, 1920, 1080};
 static Point where = {0, 0};
-static BYTE left;
+static BYTE left, right, horizontalWheel;
+static LONG wheelDelta;
 static Obj fakePoint, fakeProps;
 static HRESULT getBounds(void *, Rect *r) {
     *r = gameBounds;
@@ -43,6 +44,22 @@ static HRESULT getPosition(void *, Point *r) {
 }
 static HRESULT getLeft(void *, BYTE *r) {
     *r = left;
+    return S_OK;
+}
+static HRESULT getRight(void *, BYTE *r) {
+    *r = right;
+    return S_OK;
+}
+static HRESULT getOtherMouseButton(void *, BYTE *r) {
+    *r = 0;
+    return S_OK;
+}
+static HRESULT getWheelDelta(void *, LONG *r) {
+    *r = wheelDelta;
+    return S_OK;
+}
+static HRESULT getWheelDirection(void *, BYTE *r) {
+    *r = horizontalWheel;
     return S_OK;
 }
 static HRESULT getPoint(void *, IUnknown **r) {
@@ -215,13 +232,17 @@ int main() {
     event(KeyDown, (IUnknown *)&arg);
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     assert(box.keyboard.entries[3].scan == 41);
-    void *pointMethods[14] = {}, *propsMethods[17] = {}, *pointerMethods[8] = {};
+    void *pointMethods[14] = {}, *propsMethods[27] = {}, *pointerMethods[8] = {};
     pointMethods[2] = (void *)ref;
     propsMethods[2] = (void *)ref;
     pointerMethods[6] = (void *)getPoint;
     pointMethods[7] = (void *)getPosition;
     pointMethods[13] = (void *)getProps;
     propsMethods[16] = (void *)getLeft;
+    propsMethods[17] = (void *)getRight;
+    propsMethods[18] = propsMethods[25] = propsMethods[26] = (void *)getOtherMouseButton;
+    propsMethods[19] = (void *)getWheelDelta;
+    propsMethods[20] = (void *)getWheelDirection;
     fakePoint = {pointMethods};
     fakeProps = {propsMethods};
     Obj pointerArgs = {pointerMethods};
@@ -234,6 +255,21 @@ int main() {
            (box.input_pointer >> 24) == 1);
     event(CaptureLost, (IUnknown *)&pointerArgs);
     assert((box.input_pointer >> 24) == 0);
+    left = 0;
+    right = 1;
+    event(PointerPressed, (IUnknown *)&pointerArgs);
+    assert(box.input_pointer & SDL_HOST_POINTER_RIGHT);
+    wheelDelta = -120;
+    horizontalWheel = 1;
+    event(PointerWheelChanged, (IUnknown *)&pointerArgs);
+    assert((SHORT)((UINT)box.input_keys >> 16) == -120);
+    assert(box.input_keys & SDL_HOST_WHEEL_HORIZONTAL);
+    const LONG firstWheel = box.input_serial;
+    event(PointerWheelChanged, (IUnknown *)&pointerArgs);
+    assert(box.input_serial == firstWheel + 2);
+    right = 0;
+    event(PointerReleased, (IUnknown *)&pointerArgs);
+    assert(!(box.input_pointer & SDL_HOST_POINTER_RIGHT) && !box.input_keys);
     physical.buttons = 0;
     FhdPollHostedInput(&box, &fakeWindow);
     physical.buttons = 4;
@@ -242,6 +278,11 @@ int main() {
     FhdPollHostedInput(&box, &fakeWindow);
     assert((box.input_pointer >> 24) == 1 && (box.input_pointer & 4095) > 0);
     FhdSetHostedInputProfile(TRUE, 1920, 1080);
+    assert(!(box.input_pointer & SDL_HOST_POINTER_VISIBLE));
+    event(PointerMoved, (IUnknown *)&pointerArgs);
+    assert(box.input_pointer & SDL_HOST_POINTER_VISIBLE);
+    event(PointerExited, (IUnknown *)&pointerArgs);
+    assert(!(box.input_pointer & SDL_HOST_POINTER_VISIBLE));
     state = VK_F10;
     event(KeyDown, (IUnknown *)&arg);
     assert(FhdPollHostedInput(&box, &fakeWindow) == 1);

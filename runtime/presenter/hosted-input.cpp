@@ -19,9 +19,11 @@ enum WindowMethod {
     KeyDown = 34,
     KeyUp = 36,
     CaptureLost = 38,
+    PointerExited = 42,
     PointerMoved = 44,
     PointerPressed = 46,
     PointerReleased = 48,
+    PointerWheelChanged = 52,
     VisibilityChanged = 56
 };
 template <class... Args> HRESULT method(IUnknown *obj, unsigned slot, Args... args) {
@@ -70,12 +72,13 @@ DWORD lastTime;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
 constexpr UINT pointerEdgeCount = 32;
-constexpr LONG pointerPressed = 1 << 24;
+struct PointerUpdate { LONG position, wheel; };
 LONG wantedPointer, wantedKeys, pendingPointerSerial;
-LONG pointerEdges[pointerEdgeCount];
+PointerUpdate pointerEdges[pointerEdgeCount];
 UINT pointerEdgeRead, pointerEdgeSize;
 double cursorX, cursorY;
-bool physicalClick, padClick, freshPointer;
+LONG physicalButtons;
+bool padClick, freshPointer, physicalPointer;
 LONG heldVirtual[256];
 SdlHostGamepadState previousPad;
 bool sentPad;
@@ -95,12 +98,12 @@ void setPad(SdlHostGamepadState const &pad) {
     previousPad = pad;
     sentPad = true;
 }
-LONG pointer(LONG pos, LONG keys) {
-    if (!alive() || (pos == mouse && keys == legacyKeys))
+LONG pointer(LONG pos, LONG keys, LONG wheel = 0) {
+    if (!alive() || (!wheel && pos == mouse && keys == legacyKeys))
         return 0;
     InterlockedIncrement(&mail->input_serial);
     InterlockedExchange(&mail->input_pointer, pos);
-    InterlockedExchange(&mail->input_keys, keys);
+    InterlockedExchange(&mail->input_keys, keys | wheel);
     const LONG serial = InterlockedIncrement(&mail->input_serial);
     mouse = pos;
     legacyKeys = keys;
@@ -110,7 +113,8 @@ void publishPanelPointer() {
     if (!alive() || (pendingPointerSerial && SdlHostLoad(&mail->input_ack) != pendingPointerSerial)) return;
     pendingPointerSerial = 0;
     if (pointerEdgeSize) {
-        pendingPointerSerial = pointer(pointerEdges[pointerEdgeRead], wantedKeys);
+        const auto update = pointerEdges[pointerEdgeRead];
+        pendingPointerSerial = pointer(update.position, wantedKeys, update.wheel);
         pointerEdgeRead = (pointerEdgeRead + 1) % pointerEdgeCount;
         --pointerEdgeSize;
     } else {
@@ -140,7 +144,8 @@ void neutral() {
         key = 0;
     highSurrogate = 0;
     padClick = false;
-    physicalClick = false;
+    physicalButtons = 0;
+    physicalPointer = false;
     blockChord = true;
     chordPending = false;
 }
@@ -274,10 +279,11 @@ UINT scanFor(UINT vk, KeyStatus s) {
     }
 }
 double clamp(double value, double lo, double hi) { return value < lo ? lo : value > hi ? hi : value; }
-void sendPointer() {
+void sendPointer(LONG wheel = 0) {
     LONG pos = (LONG)(clamp(cursorX, 0, 1) * 4095 + .5) | ((LONG)(clamp(cursorY, 0, 1) * 4095 + .5) << 12);
-    if (physicalClick || padClick || (!keyboard() && heldVirtual[VK_RETURN]))
-        pos |= 1 << 24;
+    pos |= physicalButtons;
+    if (padClick || (!keyboard() && heldVirtual[VK_RETURN])) pos |= SDL_HOST_POINTER_LEFT;
+    if (nativePad && physicalPointer) pos |= SDL_HOST_POINTER_VISIBLE;
     LONG keys = 0;
     if (!keyboard()) {
         if (heldVirtual[VK_ESCAPE])
@@ -288,30 +294,45 @@ void sendPointer() {
     if (!nativePad && (previousPad.buttons & 2))
         keys |= 32;
     if (!menuOnRelease) {
-        pointer(pos, keys);
+        pointer(pos, keys, wheel);
         return;
     }
-    if ((pos ^ wantedPointer) & pointerPressed) {
+    if (wheel || ((pos ^ wantedPointer) & SDL_HOST_POINTER_BUTTONS)) {
         if (pointerEdgeSize == pointerEdgeCount) --pointerEdgeSize;
-        pointerEdges[(pointerEdgeRead + pointerEdgeSize) % pointerEdgeCount] = pos;
+        pointerEdges[(pointerEdgeRead + pointerEdgeSize) % pointerEdgeCount] = {pos, wheel};
         ++pointerEdgeSize;
     }
     wantedPointer = pos;
     wantedKeys = keys;
     publishPanelPointer();
 }
-void mouseEvent(IUnknown *args) {
+void mouseEvent(IUnknown *args, bool scrolling) {
     IUnknown *point = nullptr, *props = nullptr;
     Point pos = {};
     Rect bounds = {};
-    BYTE left = 0;
     if (FAILED(method(args, 6, &point)) || !point)
         return;
     HRESULT hr = method(point, 7, &pos);
     if (SUCCEEDED(hr))
         hr = method(point, 13, &props);
-    if (SUCCEEDED(hr) && props)
-        hr = method(props, 16, &left);
+    LONG buttons = 0, wheel = 0;
+    if (SUCCEEDED(hr) && props) {
+        constexpr struct { unsigned property; LONG button; } properties[] = {
+            {16, SDL_HOST_POINTER_LEFT}, {17, SDL_HOST_POINTER_RIGHT}, {18, SDL_HOST_POINTER_MIDDLE},
+            {25, SDL_HOST_POINTER_X1}, {26, SDL_HOST_POINTER_X2}};
+        for (const auto &property : properties) {
+            BYTE pressed = 0;
+            if (SUCCEEDED(method(props, property.property, &pressed)) && pressed) buttons |= property.button;
+        }
+        LONG delta = 0;
+        if (scrolling && SUCCEEDED(method(props, 19, &delta)) && delta) {
+            BYTE horizontal = 0;
+            method(props, 20, &horizontal);
+            delta = static_cast<LONG>(clamp(delta, -32768, 32767));
+            wheel = static_cast<LONG>(static_cast<UINT>(static_cast<USHORT>(delta)) << 16);
+            if (horizontal) wheel |= SDL_HOST_WHEEL_HORIZONTAL;
+        }
+    }
     if (props)
         props->Release();
     point->Release();
@@ -323,8 +344,9 @@ void mouseEvent(IUnknown *args) {
     // PointerPoint.Position is relative to this view. Exclude letterbox bars.
     cursorX = clamp((pos.x - (bounds.w - gameW * scale) * .5) / (gameW * scale), 0, 1);
     cursorY = clamp((pos.y - (bounds.h - gameH * scale) * .5) / (gameH * scale), 0, 1);
-    physicalClick = left != 0;
-    sendPointer();
+    physicalButtons = buttons;
+    physicalPointer = true;
+    sendPointer(wheel);
 }
 void requestOverlay() {
     if (!overlay) {
@@ -361,13 +383,14 @@ void event(unsigned type, IUnknown *args) {
     }
     if (!foreground())
         return;
-    if (type == CaptureLost) {
-        physicalClick = false;
+    if (type == CaptureLost || type == PointerExited) {
+        physicalButtons = 0;
+        if (type == PointerExited) physicalPointer = false;
         sendPointer();
         return;
     }
-    if (type == PointerMoved || type == PointerPressed || type == PointerReleased) {
-        mouseEvent(args);
+    if (type == PointerMoved || type == PointerPressed || type == PointerReleased || type == PointerWheelChanged) {
+        mouseEvent(args, type == PointerWheelChanged);
         return;
     }
     UINT key = 0;
@@ -449,6 +472,8 @@ Handler handlers[] = {{&events, &handlerWindowActivatedEventArgs, Activated},
                       {&events, &handlerPointerEventArgs, PointerMoved},
                       {&events, &handlerPointerEventArgs, PointerPressed},
                       {&events, &handlerPointerEventArgs, PointerReleased},
+                      {&events, &handlerPointerEventArgs, PointerWheelChanged},
+                      {&events, &handlerPointerEventArgs, PointerExited},
                       {&events, &handlerPointerEventArgs, CaptureLost}};
 LONG axis(double value) {
     value = clamp(value, -1, 1); // JS Math.round uses floor(x + .5), including ties on negatives.
