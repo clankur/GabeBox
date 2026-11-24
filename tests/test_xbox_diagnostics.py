@@ -131,14 +131,16 @@ class ObserverTests(unittest.TestCase):
             {diagnostics.PROBE_REPORT: probe(), diagnostics.WEBVIEW_REPORT: browser(OLD_BROWSER)},
             {diagnostics.PROBE_REPORT: probe(run=EPOCH_MS + 1), diagnostics.WEBVIEW_REPORT: browser(OLD_BROWSER)},
             {diagnostics.PROBE_REPORT: PortalError(409), diagnostics.WEBVIEW_REPORT: browser(NEW_BROWSER)},
-            {diagnostics.PROBE_REPORT: probe(run=EPOCH_MS + 1, extra='steam_native_startup_title_metadata_ms=136\r\n'),
+            {diagnostics.PROBE_REPORT: probe(run=EPOCH_MS + 1, extra='steam_native_startup_title_metadata_ms=136\r\n'
+                                            'steam_library_pending_metadata=14\r\n'),
              diagnostics.WEBVIEW_REPORT: browser(NEW_BROWSER)},
         ])
         result = fixture.observe(options(startup=True, app_id=None))
         self.assertEqual(fixture.now, 3)
         self.assertEqual(result['outcome'], 'gamepad-ready')
         self.assertEqual(result['run_id'], EPOCH_MS + 1)
-        self.assertEqual(result['probe'], {'steam_native_startup_title_metadata_ms': '136'})
+        self.assertEqual(result['probe'], {'steam_native_startup_title_metadata_ms': '136',
+                                          'steam_library_pending_metadata': '14'})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertEqual(result['webview']['owned_games_served'], '33')
         self.assertEqual(result['webview']['startup_elapsed_ms'], 'shell_gamepad_ready:42')

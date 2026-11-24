@@ -10,6 +10,13 @@
         return operation;
     }
 
+    function restoreSteamAfterResumeFailure(steamView, gameView) {
+        var steam = window.steamBigPictureHost;
+        if (!steam || !steamView || steamView === gameView) return Promise.resolve(false);
+        return Promise.resolve().then(function () { return steam.switchView(steamView, gameView); })
+            .then(function () { return false; }, function () { return false; });
+    }
+
     function panelCounters(stats) {
         var counters = {};
         stats.replace(/^(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=([0-9]{1,16})\r?$/gm,
@@ -120,7 +127,9 @@
             return covering;
         }, resume: function (fromView) {
             if (closed || owner !== activeSession) return Promise.resolve(false);
-            return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)
+            return Promise.resolve().then(function () {
+                if (fromView) return window.steamBigPictureHost.switchView(mainId, fromView);
+            })
                 .then(function () {
                     if (closed || owner !== activeSession) return false;
                     return queuePanel(function () {
@@ -131,7 +140,17 @@
                         resetSample();
                         return true;
                     });
-                }).catch(function (error) { fail(error); return false; });
+                }).catch(function (error) {
+                    if (!fromView) { fail(error); return false; }
+                    if (closed || owner !== activeSession) return false;
+                    reportError(error);
+                    return queuePanel(function () {
+                        if (!closed && owner === activeSession) return host.setPanelVisible(false);
+                    }).catch(reportError).then(function () {
+                        if (closed || owner !== activeSession) return false;
+                        return restoreSteamAfterResumeFailure(fromView, mainId);
+                    });
+                });
         }};
     }
 
@@ -275,13 +294,21 @@
         }
         function resume(fromView) {
             if (closed || owner !== activeSession) return Promise.resolve(false);
-            return Promise.resolve(fromView ? window.steamBigPictureHost.switchView(mainId, fromView) : undefined)
+            return Promise.resolve().then(function () {
+                if (fromView) return window.steamBigPictureHost.switchView(mainId, fromView);
+            })
                 .then(function () {
                     if (closed || owner !== activeSession) return false;
-                    covered = false;
-                    resetSample();
-                    if (sameWindow && !video.paused) return true;
-                    return Promise.resolve(video.play()).then(function () { return !closed; });
+                    return Promise.resolve(sameWindow && !video.paused ? undefined : video.play()).then(function () {
+                        if (closed || owner !== activeSession) return false;
+                        covered = false;
+                        resetSample();
+                        return true;
+                    });
+                }).catch(function (error) {
+                    if (!fromView) { failed(error); return false; }
+                    if (closed || owner !== activeSession) return false;
+                    return restoreSteamAfterResumeFailure(fromView, mainId);
                 });
         }
         try {
@@ -371,10 +398,6 @@
         function resume(fromView) {
             if (!id || closed) return Promise.resolve(false);
             if (switching) return pendingShow;
-            if (overlayOpen) {
-                try { host.start(); } catch (_) { failed(); return Promise.resolve(false); }
-                overlayOpen = false;
-            }
             switching = true;
             function switchToGame() {
                 if (!closed) return switcher.switchAsync(id, fromView || mainId);
@@ -382,7 +405,7 @@
             var steam = window.steamBigPictureHost;
             if (steam && steam.samplePresenter) steam.samplePresenter("presenter_created");
             if (activated && steam && steam.switchView) {
-                pendingShow = steam.switchView(id, fromView || mainId);
+                pendingShow = Promise.resolve().then(function () { return steam.switchView(id, fromView || mainId); });
             } else pendingShow = Promise.resolve().then(function () {
                 // Register a newly created game view with the Xbox shell before
                 // switching to it, as in the verified fullscreen FHD presenter.
@@ -392,9 +415,22 @@
                 switching = false;
                 shown = !closed;
                 activated = activated || shown;
+                if (shown && overlayOpen) {
+                    try { host.start(); } catch (_) { failed(); return false; }
+                    overlayOpen = false;
+                }
                 if (shown && steam && steam.samplePresenter) steam.samplePresenter("presenter_foreground");
                 return shown;
-            }, function () { failed(); return false; });
+            }, function () {
+                if (activated && fromView && !closed) {
+                    return restoreSteamAfterResumeFailure(fromView, id).then(function () {
+                        switching = false;
+                        return false;
+                    });
+                }
+                failed();
+                return false;
+            });
             return pendingShow;
         }
         function poll() {

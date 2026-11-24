@@ -47,3 +47,11 @@ class StallDiagnosisTests(unittest.TestCase):
         log = self.stall.replace('lock=1052', 'lock=1045')
         with self.assertRaisesRegex(ValueError, 'Inconsistent producer stall timestamps'):
             measure['diagnose_stalls'](self.frames, 0, None, 1, log)
+
+    def test_preserves_observed_resolution_and_separates_pre_scene_stalls(self):
+        frames = trace([(1200, 1, 2), (2200, 2, 2), (3000, 3, 2), (3300, 4, 2), (4000, 5, 2)])
+        report = measure['summarize'](frames, 2, None, 1, internal_resolution='1280x720', output_resolution='1920x1080')
+        self.assertEqual(report['internal_resolution'], '1280x720')
+        self.assertEqual(report['output_resolution'], '1920x1080')
+        self.assertEqual(report['startup'], {'trace_start_to_first_present_ms': 200, 'pre_scene_worst_frame_interval_ms': 1000})
+        self.assertEqual(report['worst_ms'], 300)

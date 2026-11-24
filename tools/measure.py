@@ -13,6 +13,7 @@ import struct
 HEADER = struct.Struct('<IIQQQ')
 PRESENT = struct.Struct('<QQII')
 FILETIME_EPOCH = 116444736000000000
+NATIVE_1080P = '1920x1080'
 PRODUCER_STALL = re.compile(
     r'^(?:steam_shadow_loader=)?dxgi stall qpc=([0-9]{1,20}) enter=([0-9]{1,20}) lock=([0-9]{1,20}) '
     r'split=([0-9]{1,20}) present=([0-9]{1,20}) end=([0-9]{1,20}) prepace=([01])\r?$',
@@ -33,6 +34,18 @@ def reaches_gpu_60(sample):
             and type(rolling) is int and rolling >= 57)
 
 
+def reaches_native_1080p(sample):
+    return (reaches_gpu_60(sample) and sample.get('internal_resolution') == NATIVE_1080P
+            and sample.get('output_resolution') == NATIVE_1080P)
+
+
+def resolution(value):
+    match = re.fullmatch(r'([1-9][0-9]{0,4})[xX]([1-9][0-9]{0,4})', value)
+    if not match:
+        raise argparse.ArgumentTypeError('Use WIDTHxHEIGHT in pixels, for example 1920x1080.')
+    return 'x'.join(match.groups())
+
+
 def presentation_window(trace, start, utc, duration):
     if len(trace) < HEADER.size:
         raise ValueError('Missing trace header.')
@@ -47,7 +60,7 @@ def presentation_window(trace, start, utc, duration):
     if not math.isfinite(start) or not math.isfinite(duration) or start < 0 or duration < 1:
         raise ValueError('Use a nonnegative start and a duration of at least one second.')
     rows = list(PRESENT.iter_unpack(trace[HEADER.size:]))
-    if not rows or any(a[0] > b[0] or a[2] + 1 != b[2] for a, b in zip(rows, rows[1:])):
+    if not rows or rows[0][0] < anchor or any(a[0] > b[0] or a[2] + 1 != b[2] for a, b in zip(rows, rows[1:])):
         raise ValueError('Missing or inconsistent presentation records.')
     begin = anchor + round(start * frequency)
     end = begin + round(duration * frequency)
@@ -62,11 +75,16 @@ def presentation_window(trace, start, utc, duration):
     # the same producer sequence must never count twice in succession.
     if any(a[3] == b[3] and a[1] == b[1] for a, b in zip(selected, selected[1:])):
         raise ValueError('The same source frame was submitted twice.')
-    return version, frequency, anchor, begin, end, epoch + start, selected, modes
+    before_scene = max((b[0] - a[0] for a, b in zip(rows, rows[1:]) if b[0] <= begin), default=None)
+    startup = {
+        'trace_start_to_first_present_ms': round((rows[0][0] - anchor) * 1000 / frequency, 3),
+        'pre_scene_worst_frame_interval_ms': round(before_scene * 1000 / frequency, 3) if before_scene is not None else None,
+    }
+    return version, frequency, anchor, begin, end, epoch + start, selected, modes, startup
 
 
-def summarize(trace, start, utc, duration):
-    version, frequency, _, begin, end, time_utc, selected, modes = presentation_window(trace, start, utc, duration)
+def summarize(trace, start, utc, duration, *, internal_resolution=None, output_resolution=None):
+    version, frequency, _, begin, end, time_utc, selected, modes, startup = presentation_window(trace, start, utc, duration)
     times = [row[0] for row in selected]
 
     # A rolling count can drop when a frame leaves its one-second window.
@@ -86,7 +104,9 @@ def summarize(trace, start, utc, duration):
               'p99_ms': percentile(.99), 'worst_ms': percentile(1),
               'intervals_over_33_33ms': sum(gap > 1000 / 30 for gap in intervals),
               'cpu_presented': modes[1], 'shared_texture_presented': modes[2],
-              'hardware_adapter_verified': version == 2 and bool(times) and modes[2] == len(times)}
+              'hardware_adapter_verified': version == 2 and bool(times) and modes[2] == len(times),
+              'internal_resolution': internal_resolution, 'output_resolution': output_resolution,
+              'startup': startup}
     result['gpu_60fps'] = reaches_gpu_60(result)
     return result
 
@@ -103,7 +123,7 @@ def producer_stall_stages(log):
 
 
 def diagnose_stalls(trace, start, utc, duration, producer_log=None):
-    _, frequency, anchor, _, _, _, frames, _ = presentation_window(trace, start, utc, duration)
+    _, frequency, anchor, _, _, _, frames, _, _ = presentation_window(trace, start, utc, duration)
     producer = list(producer_stall_stages(producer_log)) if producer_log is not None else []
     long_gaps = [(right[0] - left[0], left, right) for left, right in zip(frames, frames[1:])
                  if (right[0] - left[0]) * 30 > frequency]
@@ -131,13 +151,16 @@ def main():
     origin.add_argument('--start-utc', type=lambda s: datetime.fromisoformat(s.replace('Z', '+00:00')))
     origin.add_argument('--start-offset-s', type=float, default=0)
     parser.add_argument('--duration', type=float, default=30)
+    parser.add_argument('--internal-resolution', type=resolution, help='observed game render resolution, WIDTHxHEIGHT')
+    parser.add_argument('--output-resolution', type=resolution, help='observed Xbox display output resolution, WIDTHxHEIGHT')
     parser.add_argument('--require-gpu-60', action='store_true', help='require sustained 60 fps on the verified hardware adapter')
     parser.add_argument('--diagnose-stalls', action='store_true', help='include source sequence changes at the longest presenter gaps')
     parser.add_argument('--producer-log', type=Path, help='correlate DXGI timings from the same Xbox run’s loader trace or saved report')
     args = parser.parse_args()
     try:
         trace = args.trace.read_bytes()
-        result = summarize(trace, args.start_offset_s, args.start_utc, args.duration)
+        result = summarize(trace, args.start_offset_s, args.start_utc, args.duration,
+                           internal_resolution=args.internal_resolution, output_resolution=args.output_resolution)
         if args.diagnose_stalls or args.producer_log:
             log = None
             if args.producer_log:

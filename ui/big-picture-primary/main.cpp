@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Web.h>
@@ -240,12 +241,23 @@ struct SteamApplication : ApplicationT<SteamApplication>
         }
     }
 
-    void OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEventArgs const&)
+    void OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEventArgs const& event)
     {
         checkpoint("launched");
         try {
             auto window = Window::Current();
             if (!window.Content()) {
+                try {
+                    using Windows::ApplicationModel::Activation::ApplicationExecutionState;
+                    auto settings = Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+                    const hstring key{L"steamPrerequisitePlayActivation"};
+                    if (settings.HasKey(key)) settings.Remove(key);
+                    const auto arguments = event.Arguments();
+                    if (event.PreviousExecutionState() == ApplicationExecutionState::Terminated &&
+                            arguments.size() <= 80 && std::wstring_view(arguments).starts_with(L"steam-prerequisite-play ")) {
+                        settings.Insert(key, box_value(arguments));
+                    }
+                } catch (...) { checkpoint("prerequisite-activation-error", to_hresult()); }
                 if (traceLifecycle) {
                     try {
                         auto coreWindow = window.CoreWindow();

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 
-from build_tools.paths import ROOT, STEAM_PINS
+from build_tools.paths import ROOT, SIGNIN, STEAM_PINS
 
 
 SOURCE = ROOT / "ui/big-picture-bridge"
@@ -14,7 +14,7 @@ URL_LIST_SHA256 = "3958c79099dc94ee99c3a5dc841cb70530013c68656649e5c96fc931c5c71
 MODULES = (
     "xbox-gamepads.js", "xbox-controller-service.js", "xbox-notifications.js", "xbox-game-actions.js", "xbox-installs.js", "xbox-downloads.js", "xbox-user.js", "xbox-gamepad-surface.js", "xbox-window.js", "xbox-browser-view.js", "xbox-store-browser.js", "xbox-input.js",
     "xbox-lifecycle.js", "xbox-network.js", "xbox-messaging.js", "xbox-core-startup.js", "xbox-services.js",
-    "xbox-cloud-cache.js", "xbox-settings.js", "xbox-storage.js", "xbox-startup-movie.js", "xbox-startup-timing.js",
+    "xbox-cloud-cache.js", "xbox-cloud-backup.js", "xbox-settings.js", "xbox-storage.js", "xbox-startup-movie.js", "xbox-startup-timing.js",
     "xbox-url-roots.js", "xbox-url.js", "bridge.js",
 )
 
@@ -60,6 +60,7 @@ def bundle(url_list, movie_probe_assets=None, profile_startup_services=False, lo
     profile = "const xboxProfileStartupServices = " + json.dumps(profile_startup_services) + ";"
     cloud_reads = "const xboxLocalCloudCacheReads = " + json.dumps(local_cloud_cache_reads) + ";"
     return "\n".join(["(() => {", "'use strict';", version, definitions, movie_probe, profile, cloud_reads,
+                      (SIGNIN / "steam-cloud.js").read_text(),
                       *((SOURCE / name).read_text() for name in MODULES), "})();", ""])
 
 

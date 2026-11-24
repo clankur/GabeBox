@@ -12,23 +12,32 @@
     const listeners = new Set();
     const detailListeners = new Set();
     let requestId = crypto.getRandomValues(new Uint32Array(1))[0] & 0x3fffffff;
-    let runtime, installCloudCacheReads;
+    let runtime, cloudCache;
     let updating;
     let refreshAgain = false;
     let activeApp = 0;
     let controlsApp = 0;
     let focusStore;
+    let cloudBackupApps = new Map();
+    const localCloudConfig = xboxLocalCloudCacheReads && typeof xboxNativeWindow !== 'undefined' &&
+        xboxNativeWindow.deviceFamily === 'Windows.Xbox';
     // Capture the release's serializer without replacing its entry, routes or modules.
     (window.webpackChunksteamui ||= []).push([['xbox-app-overview'], {}, require => {
         runtime = require;
-        if (xboxLocalCloudCacheReads && typeof xboxNativeWindow !== 'undefined' &&
-            xboxNativeWindow.deviceFamily === 'Windows.Xbox') {
+        if (xboxSteamReleaseVersion === 1794536281) {
+            // sp.js registers the app-actions module in chunk 3714. Run
+            // after registration and before the awaited import executes it.
+            require.O(undefined, [3714], () => {
+                installXboxCloudBackup(require, send, appId => !activeApp && cloudBackupApps.get(appId));
+            }, 1);
+        }
+        if (localCloudConfig) {
             // The pinned library entry defers on chunk 41. Run this callback
             // before its entry so the store's first data request uses the cache.
             require.O(undefined, [41], () => {
                 try {
                     const module = require(83957);
-                    installCloudCacheReads?.(module.__esModule ? module.default : module);
+                    cloudCache?.installLocalReads(module.__esModule ? module.default : module);
                 } catch (_) {}
             }, -1);
         }
@@ -36,6 +45,10 @@
     installXboxStartupTiming(host, xboxProfileStartupServices, () => runtime?.(76725).J());
 
     host.addEventListener('message', ({data}) => {
+        if (data?.event === 'xbox-catalog-changed') {
+            refreshLibrary();
+            return;
+        }
         if (data?.event === 'xbox-install') {
             installer.update(data.appId, data.stage, data.progress);
             return;
@@ -80,7 +93,7 @@
             const timeout = method !== 'play' && method !== 'install' && method !== 'storage-move' ? setTimeout(() => {
                 pending.delete(id);
                 reject(new Error('Steam broker timed out'));
-            }, 60000) : undefined;
+            }, method === 'cloud-backup-download' || method === 'cloud-backup-restore' ? 180000 : 60000) : undefined;
             pending.set(id, {resolve, reject, timeout});
             try {
                 const request = {id, method};
@@ -156,12 +169,14 @@
             // that Apps.RegisterForAppOverviewChanges supplies to UpdateAppOverview.
             const {bs: change, Ul: status} = runtime(76142);
             const current = new Set();
+            const backups = new Map();
             const apps = games.map(game => {
                 if (!validId(game.id) || current.has(game.id) || typeof game.name !== 'string' ||
                     typeof game.installed !== 'boolean' || typeof game.canPlay !== 'boolean') {
                     throw new Error('Invalid owned-game snapshot');
                 }
                 current.add(game.id);
+                if (game.installed && game.cloudBackup === true) backups.set(game.id, {canRestore: game.cloudRestore === true});
                 const local = {clientid: '0', installed: game.installed};
                 if (game.id === activeApp && game.installed) local.display_status = status.Fi; // Running
                 else if (game.installed) local.display_status = game.canPlay ? status.hr : status.Yh; // ReadyToLaunch / NotLaunchable
@@ -170,6 +185,7 @@
                     sort_as: game.name.toLowerCase(), visible_in_game_list: true, subscribed_to: true,
                     per_client_data: [local]};
             });
+            cloudBackupApps = backups;
             const revision = JSON.stringify(apps.map(app => [
                 app.appid, app.display_name, app.per_client_data[0].display_status
             ]));
@@ -252,6 +268,7 @@
             const result = await runAction(appId, source, () => send('play', appId));
             if (result === 'unsupported-build') throw new Error('This Steam build has no matching Xbox compatibility profile.');
             if (result === 'source-file-check-failed') throw new Error('The Xbox compatibility file check failed.');
+            if (result === 'prerequisite-restart-required') throw new Error('Reopen GabeBox before trying to play again.');
             if (result !== 'presented' && result !== 'window-ready') throw new Error(String(result || 'Launch unconfirmed'));
         }
     }};
@@ -363,7 +380,8 @@
     installXboxMessaging(client);
     installXboxCoreStartup(client, send);
     installXboxServices(client, send);
-    installCloudCacheReads = installXboxCloudCache(client, send);
+    cloudCache = installXboxCloudCache(client, send);
+    if (localCloudConfig) cloudCache.observeStartup();
     const showGameOverlay = installXboxUrls(client, () => activeApp);
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {

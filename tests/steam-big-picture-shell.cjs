@@ -1,4 +1,4 @@
-// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--install] [--downloads] [--startup-history] [--empty-account [--hold-tour]]
+// node tests/steam-big-picture-shell.cjs <staged ValveClient/steamui> [public/url_list.txt] [--require-gamepad] [--single-webview] [--accounts] [--network] [--storage] [--store] [--home] [--install] [--downloads] [--controller] [--startup-history] [--startup-local-cloud] [--cloud-backups] [--empty-account [--hold-tour]]
 // Set NODE_PATH for playwright and CHROMIUM_PATH for an existing Chromium binary.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
@@ -8,7 +8,7 @@ const {chromium} = require('playwright');
 
 const origin = 'https://steamloopback.host';
 const entry = origin + '/index.html?IN_CLIENT=true';
-const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--install', '--downloads', '--startup-history'].includes(arg));
+const args = process.argv.slice(2).filter(arg => !['--require-gamepad', '--native-startup', '--single-webview', '--accounts', '--empty-account', '--hold-tour', '--network', '--storage', '--store', '--home', '--install', '--downloads', '--controller', '--startup-history', '--startup-local-cloud', '--cloud-backups'].includes(arg));
 const accounts = process.argv.includes('--accounts');
 const emptyOnly = process.argv.includes('--empty-account');
 const networkOnly = process.argv.includes('--network');
@@ -17,9 +17,12 @@ const storeOnly = process.argv.includes('--store');
 const homeOnly = process.argv.includes('--home');
 const installOnly = process.argv.includes('--install');
 const downloadsOnly = process.argv.includes('--downloads');
+const controllerOnly = process.argv.includes('--controller');
 const installAppId = 1817070;
 const startupHistory = process.argv.includes('--startup-history');
-const framedGamepad = startupHistory || installOnly || downloadsOnly || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
+const cloudBackups = process.argv.includes('--cloud-backups');
+const startupLocalCloud = cloudBackups || process.argv.includes('--startup-local-cloud');
+const framedGamepad = startupHistory || startupLocalCloud || installOnly || downloadsOnly || homeOnly || storeOnly || networkOnly || storageOnly || accounts || emptyOnly || process.argv.includes('--single-webview');
 const requireGamepad = process.argv.includes('--require-gamepad');
 const assets = path.resolve(args[0] || 'ValveClient/steamui');
 const catalog = path.resolve(args[1] || path.join(assets, '../public/url_list.txt'));
@@ -32,7 +35,8 @@ const secondAccount = '76561198000000001';
 const emptyAccount = '76561198000000002';
 const catalogs = {
     [emptyAccount]: [],
-    [fixtureAccount]: [{id: 42, name: 'Fixture A', installed: true, canPlay: true},
+    [fixtureAccount]: [{id: 42, name: 'Fixture A', installed: true, canPlay: true,
+        ...(cloudBackups ? {cloudBackup: true, cloudRestore: true} : {})},
         {id: installOnly || downloadsOnly ? installAppId : 73, name: 'Fixture B', installed: false, canPlay: false}],
     [secondAccount]: [{id: 81, name: 'Second Atlas', installed: false, canPlay: false},
         {id: 93, name: 'Second Lantern', installed: true, canPlay: true}]
@@ -56,6 +60,8 @@ function setupHost(steamId, windowState, catalogs) {
     window.fixtureNativePad = {slot: 0, bits: 0, lt: 0, rt: 0, lx: 0, ly: 0, rx: 0, ry: 0};
     window.fixtureSteamId = sessionStorage.getItem('fixture-next-account') || steamId;
     window.fixtureReads = new Map();
+    window.fixtureLateGame = null;
+    window.fixtureBackupCount = 0;
     window.hostEvent = data => {
         if (data.event === 'xbox-game') window.fixtureRunningApp = data.appId;
         events.dispatchEvent(new MessageEvent('message', {data}));
@@ -85,7 +91,7 @@ function setupHost(steamId, windowState, catalogs) {
             window.fixtureCalls.push(request);
             if (typeof request === 'string') return;
             let reply;
-            const games = catalogs[window.fixtureSteamId];
+            const games = catalogs[window.fixtureSteamId]?.concat(window.fixtureLateGame || []);
             switch (request.method) {
                 case 'store-browser': return; // The Store test drives isolated browser receipts explicitly.
                 case 'network-state': reply = {result: window.fixtureNetwork || {level: 'offline'}}; break;
@@ -109,6 +115,19 @@ function setupHost(steamId, windowState, catalogs) {
                     break;
                 }
                 case 'library': reply = games ? {result: games} : {error: 'signed-out'}; break;
+                case 'cloud-backup-status':
+                case 'cloud-backup-download':
+                    if (!games?.some(game => game.id === request.appId && game.installed && game.cloudBackup)) {
+                        reply = {error: 'unavailable'};
+                    } else if (request.method === 'cloud-backup-download') {
+                        ++window.fixtureBackupCount;
+                        reply = {result: 'snapshot:67'};
+                    } else reply = {result: 'snapshots:' + window.fixtureBackupCount};
+                    break;
+                case 'cloud-backup-restore':
+                    reply = games?.some(game => game.id === request.appId && game.installed && game.cloudRestore)
+                        ? {result: 'restored:67'} : {error: 'unavailable'};
+                    break;
                 case 'session': reply = {result: {steamId: window.fixtureSteamId}}; break;
                 case 'sign-out':
                     window.fixtureSteamId = null;
@@ -617,6 +636,49 @@ async function openStockLibrary(page, popup) {
     await play.click();
     await page.waitForFunction(before => fixtureCalls.filter(c => c.method === 'play' && c.appId === 42).length > before, count);
 }
+async function checkCloudBackups(page, popup) {
+    await stockTile(popup, 'Fixture A').click();
+    async function openCloud() {
+        await popup.getByLabel('Manage', {exact: true}).click();
+        await popup.getByRole('menuitem', {name: /properties/i}).waitFor({state: 'visible'});
+        await popup.getByRole('menuitem', {name: 'Cloud backups', exact: true}).click();
+    }
+    await openCloud();
+    const download = popup.getByText('Download backup', {exact: true});
+    await popup.getByText('No backups saved on this Xbox.').waitFor({state: 'visible'});
+    await download.click();
+    await popup.getByText('1 backup saved on this Xbox.').waitFor({state: 'visible'});
+    await download.click();
+    await popup.getByText('2 backups saved on this Xbox.').waitFor({state: 'visible'});
+    await popup.getByText('Saved a backup of 67 Steam save files on this Xbox.').waitFor({state: 'visible'});
+    await pressNative(page, 8);
+    await download.waitFor({state: 'hidden'});
+    assert.deepEqual(await page.evaluate(() => fixtureCalls.filter(call => call.method === 'cloud-backup-download')
+        .map(call => call.appId)), [42,42]);
+    async function startRestore() {
+        await openCloud();
+        await popup.getByText('2 backups saved on this Xbox.').waitFor({state: 'visible'});
+        await popup.getByText('Download and use saves', {exact: true}).click();
+        await popup.getByText('Use Steam Cloud saves?', {exact: true}).waitFor({state: 'visible'});
+        await popup.getByText(/replaces matching files/).waitFor({state: 'visible'});
+    }
+    await startRestore();
+    await pressNative(page, 8);
+    await popup.getByText('Use Steam Cloud saves?', {exact: true}).waitFor({state: 'hidden'});
+    assert.equal(await page.evaluate(() => fixtureCalls.filter(call => call.method === 'cloud-backup-restore').length), 0);
+    await startRestore();
+    await popup.getByText('Download and use saves', {exact: true}).click();
+    await popup.getByText('Restored 67 Steam save files. Choose Play to use them.').waitFor({state: 'visible'});
+    assert.deepEqual(await page.evaluate(() => fixtureCalls.filter(call => call.method === 'cloud-backup-restore')
+        .map(call => call.appId)), [42]);
+    await pressNative(page, 8);
+    await download.waitFor({state: 'hidden'});
+    const playBefore = await page.evaluate(() => fixtureCalls.filter(call => call.method === 'play').length);
+    await popup.getByText(/^play$/i).first().click();
+    await page.waitForFunction(before => fixtureCalls.filter(call => call.method === 'play' && call.appId === 42).length > before,
+        playBefore);
+    console.log('Stock Manage retained Properties, showed two Cloud snapshots, required restore confirmation, and kept Play.');
+}
 async function checkController(page, popup) {
     // Supply a W3C gamepad reading at the browser boundary. No SteamClient method
     // or Valve controller/navigation module is replaced in this test.
@@ -625,7 +687,7 @@ async function checkController(page, popup) {
             buttons: Array.from({length: 17}, () => ({pressed: false})), axes: [0, 0, 0, 0]};
         const unbound = {index: 1, id: 'Fixture Unmapped', connected: true, mapping: '', buttons: [], axes: []};
         const state = window.controllerFixture = {pad, pads: [pad, unbound], digital: [], analog: [], guide: [], unbound: [],
-            changes: 0};
+            changes: 0, disconnected: []};
         Object.defineProperty(navigator, 'getGamepads', {configurable: true, value: () => state.pads});
     });
     if (popup) await popup.evaluate(() => Object.defineProperty(navigator, 'getGamepads', {
@@ -639,6 +701,7 @@ async function checkController(page, popup) {
         state.readInventory = async () => (await svc.GetControllerList({})).Body().toObject().controllers;
         state.subs = [
             svc.RegisterForNotifyControllerListChanged(() => { state.changes++; }),
+            svc.RegisterForNotifyControllerDisconnected(event => state.disconnected.push(event.Body().controller_index())),
             SteamClient.Input.RegisterForControllerInputMessages((...e) => state.digital.push(e)),
             SteamClient.Input.RegisterForControllerAnalogInputMessages((...e) => state.analog.push(e)),
             SteamClient.System.UI.RegisterForSystemKeyEvents(e => state.guide.push(e)),
@@ -654,14 +717,30 @@ async function checkController(page, popup) {
         return [reply.BSuccess(), reply.Hdr().eresult()];
     });
     assert.deepEqual(pairing, [false, 20]);
+    const accessibility = await page.evaluate(async () => {
+        let runtime; webpackChunksteamui.push([['xbox-controller-accessibility'], {}, r => { runtime = r; }]);
+        const reply = await runtime(744).f_.GetControllerAccessibilityStrings({});
+        return [reply.BSuccess(), reply.Body().toObject().strings];
+    });
+    assert.deepEqual(accessibility, [true, []]);
     const connected = await page.evaluate(() => controllerFixture.readInventory());
     assert.deepEqual(connected.map(p => [p.controller_index, p.name]), [[0, 'Fixture Standard'], [1, 'Fixture Unmapped']]);
+    const configuration = await page.evaluate(async () => {
+        try { await SteamClient.Input.GetConfigForAppAndController(42, 0); }
+        catch (error) { return error.message; }
+    });
+    assert.match(configuration, /Steam Input configuration is unavailable/);
     await page.evaluate(() => {
         controllerFixture.pad.axes[1] = -0.8; // overlap the held D-pad direction
         controllerFixture.pad.buttons[12].pressed = false;
     });
     await page.waitForFunction(() => controllerFixture.analog.some(args => args[4] === -0.8));
-    await page.evaluate(() => { controllerFixture.pads = []; });
+    await page.evaluate(() => {
+        // Installing the fixture can replace the slot used to navigate here.
+        controllerFixture.disconnected.length = 0;
+        controllerFixture.changes = 0;
+        controllerFixture.pads = [];
+    });
     await page.waitForFunction(() => controllerFixture.changes > 0 && controllerFixture.digital.some(args => args[1] === 20 && !args[2]));
     assert.deepEqual(await page.evaluate(() => controllerFixture.readInventory()), []);
     const value = await page.evaluate(() => {
@@ -673,6 +752,7 @@ async function checkController(page, popup) {
     assert.deepEqual(value.guide, [{eKey: 0, nControllerIndex: 0}]);
     assert.deepEqual(value.analog, [[0, 24, false, 0, -0.8], [0, 24, false, 0, 0]]);
     assert.deepEqual(value.unbound, [[{strName: 'Fixture Unmapped'}], []]);
+    assert.deepEqual(value.disconnected, [0, 1]);
 }
 
 function visibleShell() {
@@ -1023,8 +1103,10 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             await serve(page);
             observe(page);
             page.setDefaultTimeout(10000);
+            const returning = startupLocalCloud ? 'if (location.origin === ' + JSON.stringify(origin) +
+                ') localStorage.setItem(' + JSON.stringify('xbox-steamui:1:' + account + ':Deck_GuidedTourVersionSeen') + ', "1");\n' : '';
             await page.addInitScript({content: 'if(window===top){ const xboxNativeWindow=Object.freeze(' + JSON.stringify(state) + ');\n' +
-                '(' + setupHost.toString() + ')(' + JSON.stringify(account) + ', xboxNativeWindow, ' + JSON.stringify(catalogs) + ');\n' + source + '\n}'});
+                returning + '(' + setupHost.toString() + ')(' + JSON.stringify(account) + ', xboxNativeWindow, ' + JSON.stringify(catalogs) + ');\n' + source + '\n}'});
             await page.goto(entry);
         }
         await openOwner();
@@ -1034,7 +1116,26 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
         });
         await page.waitForFunction(() => App.BFinishedInitBeforeLogin(), undefined, {timeout: 5000}).catch(() => {});
         // Valve waits up to ten seconds for each cloud namespace and for FriendsUI.
-        if (steamId) await page.waitForFunction(() => App.GetServicesInitialized(), undefined, {timeout: 35000}).catch(() => {});
+        if (startupLocalCloud) {
+            await page.waitForFunction(() => App.GetServicesInitialized(), undefined, {timeout: 15000}).catch(async error => {
+                const details = await page.evaluate(() => ({
+                    receipts: fixtureCalls.filter(call => typeof call.method === 'string' && call.method.startsWith('startup-')),
+                    connected: SystemNetworkStore.hasSteamConnection,
+                    waiter: String(window.cloudStorageInternalState?.WaitForSync).slice(0, 150),
+                    namespaces: [...(window.cloudStorageInternalState?.m_mapNamespaces || [])]
+                }));
+                throw new Error(error.message + '\n' + JSON.stringify(details) + '\n' + [...errors].slice(-8).join('\n'));
+            });
+            const localStartup = await page.evaluate(() => ({
+                namespaces: fixtureCalls.filter(call => call.method === 'startup-cloud-local-fallback').map(call => call.namespace),
+                servicesMs: fixtureCalls.find(call => call.method === 'startup-service-timing' && call.label === 'total')?.elapsedMs,
+                connected: SystemNetworkStore.hasSteamConnection
+            }));
+            assert.deepEqual(localStartup.namespaces, [3, 1, 4]);
+            assert.equal(localStartup.connected, false);
+            assert(Number.isInteger(localStartup.servicesMs) && localStartup.servicesMs < 7500);
+            console.log('Valve UI services initialized with local Cloud config:', JSON.stringify(localStartup));
+        } else if (steamId) await page.waitForFunction(() => App.GetServicesInitialized(), undefined, {timeout: 35000}).catch(() => {});
         else await page.waitForTimeout(1200);
         assert(files.has('/sp.js') && files.has('/index.html'));
         const boot = await page.evaluate(() => {
@@ -1096,6 +1197,19 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
                 // Chromium exposes an idle controller. All actual button transitions
                 // come through the native Windows.Gaming.Input reply.
                 const welcome = popup.getByText('Welcome to Big Picture', {exact: true}).first();
+                if (startupLocalCloud) {
+                    await stockTile(popup, 'Fixture A').waitFor({state: 'visible'});
+                    assert(!await welcome.isVisible());
+                    if (cloudBackups) { await checkCloudBackups(page, popup); return; }
+                    await page.evaluate(() => {
+                        window.fixtureLateGame = {id: 84, name: 'Late Catalog Title', installed: false, canPlay: false};
+                        hostEvent({event: 'xbox-catalog-changed'});
+                    });
+                    await stockTile(popup, 'Late Catalog Title').waitFor({state: 'visible'});
+                    await openStockLibrary(page, popup);
+                    console.log('The returning account reached stock All Games, displayed a late title, and submitted Play.');
+                    return;
+                }
                 if (framedGamepad) await welcome.waitFor({state:'visible', timeout:20000}).catch(async err => {
                     throw new Error(err.message + '\nGenuine fresh tour state: ' + JSON.stringify(await page.evaluate(async () => {
                         let r; webpackChunksteamui.push([['tour-observation'],{}, v=>{r=v;}]);
@@ -1177,6 +1291,11 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
             await welcome.waitFor({state: 'visible', timeout: 15000});
             await completeTour(page, popup, () => pressPad(page, popup, 0));
             await openStockLibrary(page, popup);
+            if (controllerOnly) {
+                await checkController(page, popup);
+                console.log('Valve returned a typed controller inventory and the removed slot indices.');
+                return;
+            }
             await checkAppAdapter(page);
             await checkRunningControls(page, popup);
             await checkController(page, popup);
@@ -1188,11 +1307,14 @@ async function verifyStartup(browser, source, steamId, nativeGamepads = false) {
 
 (async () => {
     await fs.access(path.join(assets, 'sp.js'));
-    const source = execFileSync('python3', ['-m', 'build_tools.bundle_big_picture', catalog], {cwd: repo, encoding: 'utf8'});
+    const bundleArgs = ['-m', 'build_tools.bundle_big_picture', catalog];
+    if (startupLocalCloud) bundleArgs.push('--local-cloud-cache-reads', '--profile-startup-services', '--movie-probe-assets', assets);
+    const source = execFileSync('python3', bundleArgs, {cwd: repo, encoding: 'utf8'});
     const browser = await chromium.launch({headless: true, chromiumSandbox: true,
         executablePath: process.env.CHROMIUM_PATH, args: ['--host-resolver-rules=MAP * ~NOTFOUND', '--disable-background-networking']});
     try {
         if (emptyOnly) await verifyStartup(browser, source, emptyAccount, true);
+        else if (controllerOnly) await verifyStartup(browser, source, fixtureAccount);
         else if (framedGamepad || process.argv.includes('--native-startup')) await verifyStartup(browser, source, fixtureAccount, true);
         else {
             await verifyStartup(browser, source, null);

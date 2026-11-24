@@ -38,5 +38,8 @@ namespace XboxProbe.Native
         static String SteamSessionSteamId();
         static UInt32 SteamSdlInputAck();
         static Windows.Foundation.IAsyncOperation<String> SteamLibraryCommand(String commandName, String commandArguments);
+        static Windows.Foundation.IAsyncOperation<String> SteamCloudSnapshot(UInt32 app, Boolean download);
+        static Windows.Foundation.IAsyncOperation<String> ResumeSteamBigPictureSignIn(Windows.Storage.StorageFile file, String prefix);
+        static Windows.Foundation.IAsyncOperation<String> CompleteSteamCatalog();
     };
 }

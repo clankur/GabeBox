@@ -49,6 +49,63 @@ test("only numeric owned AppIDs can reach the real play or install action", asyn
     assert.deepEqual(calls, [["play", session.games[0]], ["install", session.games[1]]]);
 });
 
+test("cloud backups are exposed and dispatched only for a supported installed game under the current account", async () => {
+    const {session, broker, calls} = fixture();
+    session.supportsCloudBackup = id => id === 12 || id === 23;
+    let finish;
+    session.cloudBackup = async (id, download) => {
+        calls.push([id, download]);
+        if (download) return new Promise(resolve => { finish = resolve; });
+        return "snapshots:0";
+    };
+    const games = await broker.library();
+    assert.equal(games[0].cloudBackup, true);
+    assert.equal(games[1].cloudBackup, undefined);
+    assert.equal(await broker.cloudBackup("12", true), "invalid-app");
+    assert.equal(await broker.cloudBackup(13, true), "not-owned");
+    assert.equal(await broker.cloudBackup(23, false), "not-installed");
+    session.supportsCloudBackup = () => false;
+    assert.equal(await broker.cloudBackup(12, true), "unsupported");
+    session.supportsCloudBackup = id => id === 12;
+    assert.equal(await broker.cloudBackup(12, false), "snapshots:0");
+    const pending = broker.cloudBackup(12, true);
+    assert.equal(await broker.cloudBackup(12, true), "busy");
+    assert.equal(await broker.play(12), "busy");
+    assert.equal(await broker.signOut(), "busy");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, [[12, false], [12, true]]);
+    session.steamId = () => "76561197960268002";
+    finish("snapshot:67");
+    assert.equal(await pending, "signed-out");
+    assert.equal(await broker.cloudBackup(12, false), "signed-out");
+});
+
+test("Cloud restore requires its own support and shares the download and Play lock", async () => {
+    const {session, broker, calls} = fixture();
+    session.supportsCloudBackup = () => true;
+    session.cloudBackup = async () => "snapshot:67";
+    session.supportsCloudRestore = id => id === 12;
+    let finish;
+    session.cloudRestore = id => new Promise(resolve => {
+        calls.push(id);
+        finish = resolve;
+    });
+    assert.equal((await broker.library())[0].cloudRestore, true);
+    assert.equal((await broker.library())[1].cloudRestore, undefined);
+    assert.equal(await broker.cloudRestore(23), "unsupported");
+    session.isInstalled = async () => false;
+    assert.equal(await broker.cloudRestore(12), "not-installed");
+    session.isInstalled = async () => true;
+    const restore = broker.cloudRestore(12);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, [12]);
+    assert.equal(await broker.cloudBackup(12, true), "busy");
+    assert.equal(await broker.play(12), "busy");
+    finish("restored:67");
+    assert.equal(await restore, "restored:67");
+    assert.equal(await broker.play(12), "presented");
+});
+
 test("only the current idle owner can sign out using the stock menu", async () => {
     const {session, broker} = fixture();
     let calls = 0;
@@ -117,13 +174,16 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         done(resolve, reject) { this.then(resolve, reject); }
     }
     for (const outcome of ["ready", "missing", "failed", "lost", "configured", "configured-consumed",
-        "cold-hosted-trial", "mounted-storage", "native-unavailable"]) {
+        "cold-hosted-trial", "mounted-storage", "native-unavailable", "prerequisite-restart",
+        "prerequisite-other-account", "prerequisite-request", "early-catalog", "early-catalog-other-account",
+        "primary-activation", "startpage-activation-unavailable"]) {
         const elements = new Map();
         const statuses = [];
-        const rootAttributes = {};
+        const rootAttributes = {"data-steam-big-picture": "true"};
+        if (outcome === "primary-activation") rootAttributes["data-steam-primary-xaml"] = "true";
         const document = {
             documentElement: {
-                getAttribute: name => name === "data-steam-big-picture" ? "true" : null,
+                getAttribute: name => rootAttributes[name] ?? null,
                 setAttribute(name, value) { rootAttributes[name] = value; }
             },
             getElementById(id) {
@@ -141,6 +201,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const window = { steamBigPictureBroker: context.steamBigPictureBroker };
         const calls = [];
         const configured = outcome.startsWith("configured");
+        const earlyCatalog = outcome.startsWith("early-catalog");
         const coldTrial = outcome === "cold-hosted-trial";
         const configuredAppIds = [];
         const marker = {name: coldTrial ? "steam-launch-app.txt" : "steam-launch-via-big-picture.txt"};
@@ -154,9 +215,16 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const markerKey = "steamBigPictureLaunchProbePackage";
         const packageId = "signed-host-1";
         if (outcome === "configured-consumed") settings.set(markerKey, packageId);
+        const restartKey = "steamPrerequisitePlayActivation";
+        if (outcome === "prerequisite-restart" || outcome === "prerequisite-other-account") {
+            const account = outcome === "prerequisite-restart" ? "76561197960268001" : "76561197960268002";
+            settings.set(restartKey, "steam-prerequisite-play " + account + " 12 123");
+        }
         let finishWarmup;
         const warmup = new Promise(resolve => { finishWarmup = resolve; });
-        let loseRenderer, activeBroker, firstManifest, inventory;
+        let loseRenderer, activeBroker, firstManifest, inventory, finishCatalog;
+        let activeOwner = "76561197960268001", catalogChanges = 0;
+        if (outcome === "prerequisite-request") firstManifest = {name: "appmanifest_12.acf"};
         if (outcome !== "missing") {
             window.steamBigPictureHost = { async open(broker, onFailure) {
                 loseRenderer = onFailure;
@@ -164,7 +232,8 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 calls.push(await broker.library());
                 if (outcome === "failed") throw Error("renderer startup");
                 if (configured) await warmup;
-            }, playConfiguredTrial(appId) { configuredAppIds.push(appId); } };
+            }, playConfiguredTrial(appId) { configuredAppIds.push(appId); }, resume() {},
+            catalogChanged() { ++catalogChanges; } };
         }
         const manifests = {
             getFilesAsync: () => Operation.resolve({size: 1, getAt: () => firstManifest}),
@@ -174,6 +243,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const localFolder = {createFileAsync: name => Operation.resolve({name}), tryGetItemAsync: () =>
             Operation.resolve(firstManifest ? steamLibrary : null)};
         let installPolls = 0;
+        const restartRequests = [], downloadReports = [];
         const globals = {
             window, document, navigator: outcome === "missing" ? {} : {gamepadInputEmulation: "mouse"},
             setTimeout, clearTimeout,
@@ -183,6 +253,9 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                     tryGetItemAsync: name => Operation.resolve(
                         outcome === "ready" && name === "steam-library-inventory.txt" ? {} :
                             (configured || coldTrial) && name === marker.name ? marker : null)
+                } } }, Core: { CoreApplication: { requestRestartAsync(args) {
+                    restartRequests.push(args);
+                    return Operation.resolve("unavailable");
                 } } } },
                 System: { Profile: { AnalyticsInfo: { versionInfo: {
                     deviceFamily: outcome === "missing" ? "Windows.Desktop" : "Windows.Xbox"
@@ -191,12 +264,14 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                     ApplicationData: { current: { localFolder, localSettings: {values: {
                         hasKey: key => settings.has(key),
                         lookup: key => settings.get(key),
-                        insert: (key, value) => settings.set(key, value)
+                        insert: (key, value) => settings.set(key, value),
+                        remove: key => settings.delete(key)
                     }} } },
                     CreationCollisionOption: { replaceExisting: 1 },
                     FileIO: {
                         writeTextAsync(file, text) {
                             if (file.name === "steam-library-inventory.json") inventory = JSON.parse(text);
+                            if (file.name === "steam-download-report.txt") downloadReports.push(text);
                             latestReport = text;
                             return Operation.resolve();
                         },
@@ -208,8 +283,14 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 Web: { Http: { Filters: { HttpBaseProtocolFilter: class {} }, HttpClient: class { close() {} } } }
             },
             XboxProbe: { Native: { ProbeRunner: {
-                steamSessionSteamId: () => "76561197960268001",
+                steamSessionSteamId: () => activeOwner,
+                launchSteamGame() {
+                    assert.equal(outcome, "prerequisite-request");
+                    return Operation.resolve("steam_launch_redistributables_manifest=complete\r\n" +
+                        "steam_launch=prerequisite-restart-required\r\n");
+                },
                 resumeSteamSignIn() {
+                    assert(!earlyCatalog, "Use the native progressive restore for Big Picture");
                     if (outcome === "native-unavailable") {
                         throw Object.assign(Error("local activation details"), {number: 0x80040154 | 0});
                     }
@@ -218,18 +299,34 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 queueSteamDownload: appId => {
                     assert.equal(appId, 12);
                     return Operation.resolve("downloading:1290\r\nsteam_download_measurement=unavailable\r\n" +
+                        "steam_download_active=other\r\nsteam_download_other_active_app=23\r\n" +
                         "steam_download_depot_activity=observed\r\nsteam_download_bytes_downloaded=0\r\n" +
                         "steam_download_bytes_to_download=2048\r\n");
                 },
                 steamDownloadStatus: () => {
                     if (installPolls++ === 0) return "downloading:1290\r\nsteam_download_measurement=steam\r\n" +
                         "steam_download_bytes_downloaded=1024\r\nsteam_download_bytes_to_download=2048\r\n" +
+                        "steam_download_active=selected\r\nsteam_download_other_active_app=0\r\n" +
                         "steam_download_network_bytes_per_second=512\r\nsteam_download_disk_bytes_per_second=0\r\n";
                     firstManifest = {name: "appmanifest_12.acf"};
-                    return "installed:4\r\nsteam_download_measurement=unavailable\r\n";
+                    return "installed:4\r\nsteam_download_measurement=unavailable\r\n" +
+                        "steam_download_active=none\r\nsteam_download_other_active_app=0\r\n";
                 }
             } } }
         };
+        let activationRegistrations = 0;
+        if (outcome === "primary-activation" || outcome === "startpage-activation-unavailable") {
+            globals.Windows.UI = {WebUI: {WebUIApplication: {addEventListener() {
+                ++activationRegistrations;
+                throw new Error("Access is denied");
+            }}}};
+        }
+        if (earlyCatalog) {
+            Object.assign(globals.XboxProbe.Native.ProbeRunner, {
+                resumeSteamBigPictureSignIn: () => Operation.resolve(JSON.stringify([{id: 12, name: "A", game: true}])),
+                completeSteamCatalog: () => new Operation(resolve => { finishCatalog = resolve; })
+            });
+        }
         let driveMounted = true;
         const nativeStorageCalls = [];
         if (outcome === "mounted-storage") {
@@ -244,6 +341,7 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         const signInPage = vm.createContext(globals);
         vm.runInContext(fs.readFileSync(require.resolve("../ui/signin/steam-game-launch.js"), "utf8"), signInPage);
         vm.runInContext(fs.readFileSync(require.resolve("../ui/signin/steam-signin.js"), "utf8"), signInPage);
+        assert.equal(activationRegistrations, outcome === "startpage-activation-unavailable" ? 1 : 0);
         // The platform's first session lookup has not completed. Fresh QR
         // must already use focus navigation, even when no session is restored.
         assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");
@@ -272,6 +370,30 @@ test("integrated sign-in goes directly to the Valve host, including when startup
         assert.equal(document.getElementById("signin").hidden, true);
         assert.equal(document.getElementById("library").hidden, true);
         assert.equal(statuses.length, 1);
+        if (earlyCatalog) {
+            assert.equal(statuses[0].hidden, true);
+            assert.deepEqual(Array.from(calls[0], game => game.id), [12]);
+            if (outcome === "early-catalog-other-account") activeOwner = "76561197960268002";
+            finishCatalog(JSON.stringify([{id: 23, name: "B", game: true}]));
+            await new Promise(resolve => setImmediate(resolve));
+            if (outcome === "early-catalog") {
+                assert.equal(catalogChanges, 1);
+                assert.deepEqual(Array.from(await activeBroker.library(), game => game.id), [12, 23]);
+            } else {
+                assert.equal(catalogChanges, 0);
+                await assert.rejects(activeBroker.library(), /signed-out/);
+            }
+        }
+        if (outcome === "prerequisite-restart" || outcome === "prerequisite-other-account") {
+            assert.deepEqual(configuredAppIds, outcome === "prerequisite-restart" ? [12] : []);
+            assert.equal(settings.has(restartKey), false);
+        }
+        if (outcome === "prerequisite-request") {
+            assert.equal(await activeBroker.play(12), "prerequisite-restart-required");
+            assert.equal(restartRequests.length, 1);
+            assert.match(restartRequests[0], /^steam-prerequisite-play 76561197960268001 12 \d+$/);
+            assert.match(latestReport, /^steam_launch_prerequisite_restart_request=unavailable\r?$/m);
+        }
         if (coldTrial) {
             assert.match(latestReport, /steam_sdl_host_frame=presented/);
             assert.deepEqual(calls, [], "Steam cannot start while the cold game owns the primary window");
@@ -316,6 +438,14 @@ test("integrated sign-in goes directly to the Valve host, including when startup
                 networkBytesPerSecond: 512, diskBytesPerSecond: 0};
             assert.deepEqual(stages, [["starting"], ["downloading", {measurement: "unavailable", depotActivity: true}],
                 ["downloading", measured], ["installed", measured]]);
+            assert.ok(downloadReports.some(report =>
+                report.includes("steam_download_active=other\r\nsteam_download_other_active_app=23\r\n") &&
+                report.includes("status=steam-download-in-progress")));
+            assert.ok(downloadReports.some(report =>
+                report.includes("steam_download_active=selected\r\nsteam_download_other_active_app=0\r\n") &&
+                report.includes("status=steam-download-in-progress")));
+            assert.match(downloadReports.at(-1),
+                /steam_download_active=none\r\nsteam_download_other_active_app=0[\s\S]+status=steam-download-complete/);
             assert.equal((await activeBroker.library())[0].installed, true);
             assert.equal(await activeBroker.install(12), "already-installed");
             globals.navigator.gamepadInputEmulation = "mouse";

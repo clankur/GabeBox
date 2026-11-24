@@ -5,7 +5,7 @@ function installXboxControllerService(runtime, gamepads) {
     if (!runtime?.m?.[45121]) return;
     const defaults = runtime(52660).OI();
     if (defaults.GetDefaultTransport()) return;
-    const methods = new Set(['SteamInputManager.GetControllerList#1',
+    const methods = new Set(['SteamInputManager.GetControllerList#1', 'SteamInputManager.GetControllerAccessibilityStrings#1',
         'SteamInputManager.WaitInitialControllerStateEnumerated#1', 'SteamInputManager.ShouldTritonPairInOobe#1']);
     defaults.SetDefaultTransport({
         async SendMsg(method, request, response, options) {
@@ -16,6 +16,13 @@ function installXboxControllerService(runtime, gamepads) {
                 // Valve's OOBE handles this specific unsuccessful response.
                 const reply = runtime(98237).w.InitFromObject(response, {});
                 reply.Hdr().set_eresult(20); // k_EResultServiceUnavailable
+                return reply;
+            }
+            if (method === 'SteamInputManager.GetControllerAccessibilityStrings#1') {
+                // Xbox supplies logical gamepad controls but no Steam hardware
+                // accessibility strings. The pinned store can load zero strings.
+                const reply = runtime(98237).w.InitFromObject(response, {strings: []});
+                reply.Hdr().set_eresult(1);
                 return reply;
             }
             const view = getXboxGamepadWindow();

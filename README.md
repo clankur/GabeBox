@@ -107,8 +107,9 @@ The builder verifies Valve’s [pinned client manifest](runtime/steam/pins/steam
 | --- | --- |
 | **Windows game compatibility** | Broader startup and gameplay support, including Factorio and later Unity, Godot, and DirectX titles. Spider-Man needs complete world rendering and a verified gameplay cycle. [Compatibility investigations](analysis/steam-compatibility.md) · [Factorio #43](https://github.com/clankur/GabeBox/issues/43) · [Spider-Man #67](https://github.com/clankur/GabeBox/issues/67) |
 | **Store, overlay, and Steam Input** | The tagged release reached the Store loading screen. Reliable storefront rendering, complete Play → overlay → Resume → Exit cycles, and Steam-owned controller remapping need more console verification. [Big Picture ledger](analysis/big-picture-reliability.md) · [Steam Input design](analysis/steam-input.md) |
-| **Downloads and storage** | Refresh the correct active download when the queue changes and resolve installed game paths after shared prerequisites finish. [Game paths #54](https://github.com/clankur/GabeBox/issues/54) · [Download queue #55](https://github.com/clankur/GabeBox/issues/55) |
-| **Saves and performance** | Extend Steam Cloud support, verify save and reload per game, and work toward sustained 60 FPS at native 1080p during gameplay. [Steam Cloud #56](https://github.com/clankur/GabeBox/issues/56) · [Frame measurement](docs/XBOX-DIAGNOSTICS.md#collect-and-measure) |
+| **Downloads and storage** | Verify active download changes and the first-time shared prerequisite recovery on Xbox. [Queue and path analysis](analysis/steam-ui-downloads-storage.md) · [Game paths #54](https://github.com/clankur/GabeBox/issues/54) · [Download queue #55](https://github.com/clankur/GabeBox/issues/55) |
+| **Saves and performance** | Verify Cloud backups, per-title save and reload, and sustained 60 FPS at native 1080p during gameplay. [Cloud and performance analysis](analysis/steam-ui-cloud-performance.md) · [Steam Cloud #56](https://github.com/clankur/GabeBox/issues/56) |
+| **Cached sign-in and Big Picture startup** | Measure the time from remembered sign-in to a populated, controller-ready Library on Xbox. [Startup analysis](analysis/steam-ui-cached-login-startup.md) |
 
 [Browse all open issues](https://github.com/clankur/GabeBox/issues?q=is%3Aissue+is%3Aopen)
 

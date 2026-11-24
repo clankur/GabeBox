@@ -95,6 +95,7 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("ProbeNative.dll", b"MZold")
             package.writestr("XboxProbe.Native.winmd", b"MZold")
             package.writestr("steam-signin.html", page)
+            package.writestr("steam-cloud.js", b"old Cloud helper")
             package.writestr("steam-sdl-host-975370.txt", b"")
             package.writestr("steam-sdl-host-413150.txt", b"")
             package.writestr("StardewStartupDiagnostic.dll", b"recovery hook")
@@ -202,6 +203,7 @@ class BigPicturePackageTests(unittest.TestCase):
                                            surfaceless_profiles=["1145360=10929685"])
 
         load_sdl.assert_called_once_with(sdl_artifact, 975370)
+        self.assertEqual((self.layout / "steam-cloud.js").read_bytes(), (library_builder.SIGNIN / "steam-cloud.js").read_bytes())
         self.assertEqual((self.layout / "DwarfRuntime/SDL2.dll").read_bytes(), sdl)
         self.assertEqual((self.layout / "DwarfRuntime/LICENSE.SDL2").read_bytes(), license_text)
         result = ElementTree.parse(self.layout / "AppxManifest.xml")

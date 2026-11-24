@@ -38,6 +38,7 @@
 #include "SteamLibraryStorage.h"
 #include "SteamCloudRestore.h"
 #include "../shared/steam-handoff-control.h"
+#include "steam-download-queue.h"
 #include "steam-launch-detail.h"
 #include "steam-session-cache-policy.h"
 
@@ -510,6 +511,12 @@ static winrt::Windows::Foundation::IAsyncAction SteamRuntime(
     co_await FileIO::WriteTextAsync(file, winrt::hstring(report + complete));
 }
 
+struct SteamCatalogTitle {
+    std::uint32_t id;
+    std::uint32_t type = 0;
+    winrt::hstring name;
+};
+
 struct SteamSignInHandles {
     using ReleasePipe = bool (__cdecl *)(std::int32_t);
     using ReleaseUser = void (__cdecl *)(std::int32_t, std::int32_t);
@@ -526,6 +533,12 @@ struct SteamSignInHandles {
     std::uintptr_t const *userMethods = nullptr;
     std::uint64_t accountId = 0;
     std::vector<std::uint32_t> games;
+    std::uint64_t catalogSession = 0;
+    ULONGLONG catalogDeadline = 0;
+    void *catalogApps = nullptr;
+    SteamReadAppData catalogRead = nullptr;
+    SteamAppValue catalogType = nullptr;
+    std::vector<SteamCatalogTitle> pendingCatalog;
 
     void *appManager = nullptr;
     std::uint32_t downloadApp = 0;
@@ -575,6 +588,10 @@ struct SteamSignInHandles {
 // Valve code under the DLL loader lock.
 static std::mutex steamSessionMutex;
 static SteamSignInHandles *liveSteamSession = nullptr;
+static std::uint64_t steamCatalogSession = 0;
+// The app-manager install directory applies to every AppID in this process.
+// Signing out does not establish that Steam cleared it.
+static bool steamInstallOverrideApplied = false;
 static std::atomic_flag steamSignInActive{};
 static std::atomic_flag steamLaunchActive{};
 
@@ -686,6 +703,64 @@ static winrt::hstring ReadSteamAppField(SteamReadAppData read, void *apps, std::
     }
 }
 
+static constexpr std::uint32_t SteamGameType = 1;
+
+static bool SteamCatalogTitlePending(SteamCatalogTitle const& title) {
+    return !title.type || (title.type == SteamGameType && title.name.empty());
+}
+
+static void ReadSteamCatalogTitle(SteamCatalogTitle &title, void *apps, SteamReadAppData read, SteamAppValue type) {
+    if (!title.type) title.type = type(apps, title.id);
+    if (title.name.empty()) title.name = ReadSteamAppField(read, apps, title.id, "name");
+}
+
+static void AppendSteamCatalogGame(winrt::Windows::Data::Json::JsonArray const& library,
+        SteamSignInHandles &session, SteamCatalogTitle const& title) {
+    using namespace winrt::Windows::Data::Json;
+    JsonObject entry;
+    entry.SetNamedValue(L"id", JsonValue::CreateNumberValue(title.id));
+    entry.SetNamedValue(L"name", JsonValue::CreateStringValue(title.name));
+    entry.SetNamedValue(L"game", JsonValue::CreateBooleanValue(true));
+    library.Append(entry);
+    session.games.push_back(title.id);
+}
+
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> CompleteSteamCatalog() {
+    winrt::apartment_context caller;
+    std::vector<SteamCatalogTitle> titles;
+    std::uint64_t catalogSession = 0;
+    for (;;) {
+        {
+            std::lock_guard lock(steamSessionMutex);
+            auto session = liveSteamSession;
+            if (!session || (catalogSession && session->catalogSession != catalogSession) || !session->OwnsSession())
+                co_return winrt::hstring{};
+            if (!catalogSession) {
+                if (session->pendingCatalog.empty()) co_return winrt::hstring{};
+                catalogSession = session->catalogSession;
+                titles.swap(session->pendingCatalog); // Claim the pending batch once for this activation.
+            }
+            session->PumpCallbacks();
+            bool hasPending = false;
+            for (auto &title : titles) {
+                if (SteamCatalogTitlePending(title))
+                    ReadSteamCatalogTitle(title, session->catalogApps, session->catalogRead, session->catalogType);
+                hasPending |= SteamCatalogTitlePending(title);
+            }
+            if (!hasPending || GetTickCount64() >= session->catalogDeadline) {
+                if (!session->OwnsSession()) co_return winrt::hstring{};
+                winrt::Windows::Data::Json::JsonArray additions;
+                for (auto const& title : titles) {
+                    if (title.type == SteamGameType && !title.name.empty()) AppendSteamCatalogGame(additions, *session, title);
+                }
+                co_return additions.Stringify();
+            }
+        }
+        co_await winrt::resume_after(std::chrono::milliseconds(1500));
+        co_await caller;
+    }
+}
+
 static void SteamStartupDuration(std::wstring &report, const wchar_t *stage, ULONGLONG started) {
     report += std::wstring(L"steam_native_startup_") + stage + L"_ms=" +
         std::to_wstring(GetTickCount64() - started) + L"\r\n";
@@ -694,7 +769,7 @@ static void SteamStartupDuration(std::wstring &report, const wchar_t *stage, ULO
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         winrt::Windows::Storage::StorageFile file, winrt::hstring prefix, winrt::hstring account,
         winrt::hstring approval, winrt::hstring accountId, bool remember, std::uint32_t expiry,
-        bool restoring = false) {
+        bool restoring = false, bool earlyCatalog = false) {
     using winrt::Windows::Storage::FileIO;
     using CreateUser = std::int32_t (__cdecl *)(std::int32_t *);
     using SetToken = void (__cdecl *)(void *, const char *, const char *);
@@ -862,56 +937,71 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     co_await save(L"status=steam-reading-library-titles\r\n");
     auto read = reinterpret_cast<SteamReadAppData>(appsMethods[0]);
     auto request = reinterpret_cast<SteamRequestAppInfo>(appsMethods[7]);
-    apps.resize(count);
-    std::vector<winrt::hstring> names(count);
+    auto appType = reinterpret_cast<SteamAppValue>(appsMethods[10]);
+    std::vector<SteamCatalogTitle> titles;
+    titles.reserve(count);
+    for (std::int32_t i = 0; i < count; ++i) titles.push_back({apps[i], 0, {}});
     std::vector<std::uint32_t> missing;
     const auto metadataStarted = GetTickCount64();
     deadline = metadataStarted + 20000;
+    auto metadataNeeded = [earlyCatalog](SteamCatalogTitle const& title) {
+        return earlyCatalog ? SteamCatalogTitlePending(title) : title.name.empty();
+    };
     for (bool requested = false;; requested = true) {
         handles.PumpCallbacks();
         missing.clear();
-        for (size_t i = 0; i < apps.size(); ++i) {
-            if (names[i].empty()) names[i] = ReadSteamAppField(read, clientApps, apps[i], "name");
-            if (names[i].empty()) missing.push_back(apps[i]);
+        bool namedGame = false;
+        for (auto &title : titles) {
+            if (!requested || metadataNeeded(title)) ReadSteamCatalogTitle(title, clientApps, read, appType);
+            if (metadataNeeded(title)) missing.push_back(title.id);
+            else namedGame |= title.type == SteamGameType;
         }
         if (missing.empty() || GetTickCount64() >= deadline) break;
         if (!requested) {
             report += request(clientApps, missing.data(), static_cast<std::int32_t>(missing.size()))
                 ? L"steam_library_metadata_request=accepted\r\n" : L"steam_library_metadata_request=not-queued\r\n";
         }
+        if (earlyCatalog && namedGame) {
+            handles.catalogDeadline = deadline;
+            handles.catalogApps = clientApps;
+            handles.catalogRead = read;
+            handles.catalogType = appType;
+            for (auto const& title : titles) {
+                if (SteamCatalogTitlePending(title)) handles.pendingCatalog.push_back(title);
+            }
+            break;
+        }
         co_await winrt::resume_after(std::chrono::milliseconds(1500));
         co_await caller;
     }
     SteamStartupDuration(report, L"title_metadata", metadataStarted);
+    if (!handles.OwnsSession()) {
+        report += L"steam_library_metadata=session-lost\r\n";
+        co_await save(complete);
+        co_return winrt::hstring{};
+    }
 
     using namespace winrt::Windows::Data::Json;
     JsonArray library;
-    auto appType = reinterpret_cast<SteamAppValue>(appsMethods[10]);
-    constexpr std::uint32_t gameType = 1;
     size_t namedCount = 0;
     size_t unnamedGames = 0, unnamedUnknownType = 0;
-    for (size_t i = 0; i < apps.size(); ++i) {
-        const auto type = appType(clientApps, apps[i]);
-        if (names[i].empty()) {
-            if (type == gameType) ++unnamedGames;
-            else if (!type) ++unnamedUnknownType;
+    for (auto &title : titles) {
+        if (!title.type) title.type = appType(clientApps, title.id);
+        if (title.name.empty()) {
+            if (title.type == SteamGameType) ++unnamedGames;
+            else if (!title.type) ++unnamedUnknownType;
             continue;
         }
         ++namedCount;
-        if (type != gameType) continue;
-        JsonObject entry;
-        entry.SetNamedValue(L"id", JsonValue::CreateNumberValue(apps[i]));
-        entry.SetNamedValue(L"name", JsonValue::CreateStringValue(names[i]));
-        entry.SetNamedValue(L"game", JsonValue::CreateBooleanValue(true));
-        handles.games.push_back(apps[i]);
-        library.Append(entry);
+        if (title.type == SteamGameType) AppendSteamCatalogGame(library, handles, title);
     }
     report += L"steam_library_named=" + std::to_wstring(namedCount) + L"\r\n";
     report += L"steam_library_unnamed_games=" + std::to_wstring(unnamedGames) + L"\r\n";
     report += L"steam_library_unnamed_unknown_type=" + std::to_wstring(unnamedUnknownType) + L"\r\n";
+    report += L"steam_library_pending_metadata=" + std::to_wstring(handles.pendingCatalog.size()) + L"\r\n";
     report += L"steam_library_filter=games-only\r\n";
     report += L"steam_library_visible=" + std::to_wstring(library.Size()) + L"\r\n";
-    if (!namedCount) {
+    if (!namedCount && !missing.empty()) {
         report += L"steam_library_metadata=missing\r\n";
         co_await save(complete);
         co_return winrt::hstring{};
@@ -925,13 +1015,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
     if (restoring) report += L"steam_session_cache=restored\r\n";
     co_await save(L"status=steam-library-rendering\r\n");
     std::lock_guard lock(steamSessionMutex);
+    handles.catalogSession = ++steamCatalogSession;
     ++winrt::get_module_lock();
     liveSteamSession = session.release();
     co_return payload;
 }
 
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSignIn(
-        winrt::Windows::Storage::StorageFile reportFile, winrt::hstring prefix) {
+        winrt::Windows::Storage::StorageFile reportFile, winrt::hstring prefix, bool earlyCatalog = false) {
     using winrt::Windows::Security::Cryptography::DataProtection::DataProtectionProvider;
     using namespace winrt::Windows::Storage;
     using namespace winrt::Windows::Storage::Streams;
@@ -983,7 +1074,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamSi
         auto report = std::wstring(prefix);
         SteamStartupDuration(report, L"cache_open", cacheStarted);
         auto payload = co_await SteamSignIn(reportFile, winrt::hstring(report), std::move(account), std::move(approval),
-            std::move(accountId), false, 0, true);
+            std::move(accountId), false, 0, true, earlyCatalog);
         if (!payload.empty()) co_return payload;
     } catch (winrt::hresult_error const& error) {
         invalidRecord = steam_session_cache::invalidRecordRead(recordLoaded, static_cast<std::uint32_t>(error.code().value));
@@ -1434,6 +1525,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> StartSteamDow
     auto session = liveSteamSession;
     if (!session || !session->OwnsSession()) co_return winrt::hstring(L"session-lost");
     if (session->downloadApp || steamLaunchActive.test()) co_return winrt::hstring(L"busy");
+    if (steamInstallOverrideApplied) co_return winrt::hstring(L"prerequisite-restart-required");
     const auto base = reinterpret_cast<std::uintptr_t>(session->module);
     using IsSubscribed = bool (__cdecl *)(void *, std::uint32_t);
     if (session->userMethods[182] != base + 0x75d640) co_return winrt::hstring(L"interface-error");
@@ -1589,7 +1681,8 @@ static winrt::hstring ReadSteamDownload() {
         session->downloadRetry = accepted ? Retry::Accepted : Retry::Declined;
         if (accepted) {
             session->lastTransition = now;
-            return winrt::hstring(L"resuming:" + std::to_wstring(state));
+            return winrt::hstring(L"resuming:" + std::to_wstring(state) +
+                DescribeSteamDownloadActivity(app, activeApp) + L"\r\n");
         }
     }
 
@@ -1610,7 +1703,7 @@ static winrt::hstring ReadSteamDownload() {
     } else {
         checkpoint = L"queued";
     }
-    auto report = checkpoint + L":" + std::to_wstring(state);
+    auto report = checkpoint + L":" + std::to_wstring(state) + DescribeSteamDownloadActivity(app, activeApp);
     const bool manifestMeasuresProgress = manifest && ValidSteamDownloadProgress(*manifest) &&
         (manifest->downloaded || manifest->staged);
     report += live ? L"\r\nsteam_download_measurement=steam" : manifestMeasuresProgress ?
@@ -1867,6 +1960,92 @@ enum class GameBackend { SteamPlay, DosBox, SdlHost };
 static constexpr std::uint32_t dwarfFortressAppId = 975370;
 static constexpr std::uint32_t stardewValleyAppId = 413150;
 
+static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RunSteamCloudSnapshot(
+        std::uint32_t app, bool download) {
+    using namespace winrt::Windows::Data::Json;
+    using namespace winrt::Windows::Storage;
+    if (!app || app > 0xffffff) co_return winrt::hstring(L"unsupported");
+    std::uint64_t account;
+    {
+        std::lock_guard lock(steamSessionMutex);
+        const auto session = liveSteamSession;
+        if (!session || !session->OwnsSession()) co_return winrt::hstring(L"sign-in");
+        if (std::find(session->games.begin(), session->games.end(), app) == session->games.end())
+            co_return winrt::hstring(L"not-owned");
+        account = session->accountId;
+    }
+    StorageFolder stage{nullptr};
+    try {
+        if (app != slayTheSpireAppId) {
+            auto package = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
+            auto marker = (co_await package.TryGetItemAsync(L"steam-cloud-snapshot-trial.txt")).try_as<StorageFile>();
+            if (!marker || !steam_cloud::SnapshotTrialMatches(co_await FileIO::ReadTextAsync(marker), app, account))
+                co_return winrt::hstring(L"unsupported");
+        }
+        auto root = ApplicationData::Current().LocalFolder();
+        auto cloud = co_await root.CreateFolderAsync(L"SteamCloud", CreationCollisionOption::OpenIfExists);
+        auto snapshots = co_await cloud.CreateFolderAsync(L"Snapshots", CreationCollisionOption::OpenIfExists);
+        auto owner = co_await snapshots.CreateFolderAsync(std::to_wstring(account), CreationCollisionOption::OpenIfExists);
+        auto title = co_await owner.CreateFolderAsync(std::to_wstring(app), CreationCollisionOption::OpenIfExists);
+        if (!download) {
+            auto folders = co_await title.GetFoldersAsync();
+            unsigned count = 0;
+            for (const auto& folder : folders) {
+                auto name = folder.Name();
+                if (std::wstring_view(name).starts_with(L"snapshot-")) ++count;
+            }
+            std::lock_guard lock(steamSessionMutex);
+            if (!liveSteamSession || liveSteamSession->accountId != account || !liveSteamSession->OwnsSession())
+                co_return winrt::hstring(L"sign-in");
+            co_return winrt::hstring(L"snapshots:" + std::to_wstring(count));
+        }
+        if (steamLaunchActive.test_and_set()) co_return winrt::hstring(L"busy");
+        struct ResetOperation {
+            ~ResetOperation() { steamLaunchActive.clear(); }
+        } resetOperation;
+        {
+            std::lock_guard lock(steamSdlMutex);
+            if (steamSdlSurface && steamSdlSurface->Alive()) co_return winrt::hstring(L"busy");
+        }
+        winrt::hstring result = L"storage-error";
+        try {
+            stage = co_await title.CreateFolderAsync(SlayCloudArchiveName(L"pending-"));
+            auto response = JsonObject::Parse(co_await StageSteamCloudFiles(app, account, stage));
+            result = response.GetNamedString(L"status");
+            if (result == L"ready") {
+                auto files = response.GetNamedArray(L"files");
+                JsonObject manifest;
+                manifest.SetNamedValue(L"schema", JsonValue::CreateNumberValue(1));
+                manifest.SetNamedValue(L"appId", JsonValue::CreateNumberValue(app));
+                manifest.SetNamedValue(L"files", files.as<IJsonValue>());
+                const winrt::hstring saved{L"snapshot:" + std::to_wstring(files.Size())};
+                auto file = co_await stage.CreateFileAsync(L"manifest.json");
+                co_await FileIO::WriteTextAsync(file, manifest.Stringify());
+                {
+                    std::lock_guard lock(steamSessionMutex);
+                    if (!liveSteamSession || liveSteamSession->accountId != account || !liveSteamSession->OwnsSession())
+                        result = L"sign-in";
+                }
+                if (result == L"ready") {
+                    co_await stage.RenameAsync(SlayCloudArchiveName(L"snapshot-"), NameCollisionOption::FailIfExists);
+                    stage = nullptr;
+                    result = saved;
+                }
+            }
+        } catch (winrt::hresult_error const&) {
+            result = L"storage-error";
+        }
+        try {
+            if (stage) co_await stage.DeleteAsync(StorageDeleteOption::PermanentDelete);
+        } catch (winrt::hresult_error const&) {
+            // Pending directories are never returned as published backups.
+        }
+        co_return result;
+    } catch (winrt::hresult_error const&) {
+        co_return winrt::hstring(L"storage-error");
+    }
+}
+
 static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySteamCloud(
         std::uint32_t app, bool preview) {
     using namespace winrt::Windows::Data::Json;
@@ -1897,7 +2076,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSlaySt
         auto stage = co_await title.CreateFolderAsync(L"download", CreationCollisionOption::GenerateUniqueName);
         winrt::hstring result;
         try {
-            auto response = JsonObject::Parse(co_await StageSteamCloudFiles(app, stage));
+            auto response = JsonObject::Parse(co_await StageSteamCloudFiles(app, account, stage));
             auto status = response.GetNamedString(L"status");
             if (status == L"ready") {
                 bool sameAccount;
@@ -2357,6 +2536,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto session = liveSteamSession;
         if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
         if (session->downloadApp) co_return winrt::hstring(L"steam_launch=busy\r\n");
+        if (steamInstallOverrideApplied)
+            co_return winrt::hstring(L"steam_launch=prerequisite-restart-required\r\n");
         auto managerMethods = FindSteamAppManager(*session);
         const auto base = reinterpret_cast<std::uintptr_t>(session->module);
         if (!managerMethods || managerMethods[83] != base + 0x880030 ||
@@ -2434,6 +2615,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     const std::wstring packageRoot(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
     std::wstring gameDirectory;
     bool waitForSharedInstall = false;
+    bool appliedSharedOverride = false;
     co_await checkpoint(L"checking-prerequisites");
     {
         std::lock_guard lock(steamSessionMutex);
@@ -2460,12 +2642,31 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto end = dependencies.begin() + count;
         if (std::find(dependencies.begin(), end, commonRedistributables) != end) {
             report += L"steam_launch_common_redistributables=required\r\n";
-            report += L"steam_launch_redistributables_requested_index=" + std::to_wstring(libraryIndex) + L"\r\n";
             auto state = reinterpret_cast<SteamAppValue>(methods[4])(manager, commonRedistributables);
             report += L"steam_launch_redistributables_initial_state=" + std::to_wstring(state) + L"\r\n";
             report += DescribeSteamDestination(
                 manager, methods, commonRedistributables, L"initial", libraryRoot, dataRoot, packageRoot);
             if ((state & installMask) != fullyInstalled) {
+                const auto destination = ReadSteamDestination(
+                    manager, methods, commonRedistributables, libraryRoot, dataRoot, packageRoot);
+                if (destination.installScope == L"read-only-package" ||
+                        destination.libraryScope == L"read-only-package") {
+                    using ForceInstallDirectory = void (__cdecl *)(void *, const char *);
+                    if (methods[86] != base + 0x77b430)
+                        co_return winrt::hstring(report + L"steam_launch=interface-error\r\n");
+                    const auto writablePath = winrt::to_string(path);
+                    reinterpret_cast<ForceInstallDirectory>(methods[86])(manager, writablePath.c_str());
+                    steamInstallOverrideApplied = true;
+                    appliedSharedOverride = true;
+                    report += L"steam_launch_prerequisite_restart=required\r\n";
+                    report += DescribeSteamDestination(
+                        manager, methods, commonRedistributables, L"after_override", libraryRoot, dataRoot, packageRoot);
+                    const auto library = RegisterSteamLibrary(manager, methods, path);
+                    if (library.index < 0)
+                        co_return winrt::hstring(report + L"steam_launch=dependency-library-folder-error\r\n");
+                    libraryIndex = library.index;
+                }
+                report += L"steam_launch_redistributables_requested_index=" + std::to_wstring(libraryIndex) + L"\r\n";
                 // Let Steam obtain the shared dependency of the game it just verified the account owns.
                 auto install = reinterpret_cast<SteamInstall>(methods[0]);
                 auto code = install(manager, commonRedistributables, libraryIndex, false);
@@ -2505,6 +2706,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     report += L"steam_launch_redistributables_final_state=" + std::to_wstring(state) + L"\r\n";
                     report += DescribeSteamDestination(
                         manager, methods, commonRedistributables, L"final", libraryRoot, dataRoot, packageRoot);
+                    if (appliedSharedOverride) {
+                        const auto currentDirectory = SteamPath(reinterpret_cast<SteamAppPath>(methods[5]), manager, app);
+                        const bool atLibraryRoot = CompareStringOrdinal(
+                            currentDirectory.c_str(), -1, libraryRoot.c_str(), -1, TRUE) == CSTR_EQUAL;
+                        report += std::wstring(L"steam_launch_game_install_scope=") +
+                            (atLibraryRoot ? L"library-root" :
+                                SteamPathScope(currentDirectory, libraryRoot, dataRoot, packageRoot)) + L"\r\n";
+                    }
                     break;
                 }
                 if (now >= deadline) {
@@ -2517,6 +2726,27 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_await winrt::resume_after(std::chrono::milliseconds(500));
             co_await caller;
         }
+    }
+
+    if (appliedSharedOverride) {
+        // An installed state can arrive before Steam publishes the writable manifest.
+        const auto deadline = GetTickCount64() + 5000;
+        do {
+            try {
+                const auto shared = steam_storage::ReadAppManifest(libraryRoot, commonRedistributables);
+                if (shared && shared->IsInstalled()) {
+                    co_return winrt::hstring(report + L"steam_launch_redistributables_manifest=complete\r\n"
+                        L"steam_launch=prerequisite-restart-required\r\n");
+                }
+            } catch (std::runtime_error const&) {
+                // Retry while Steam is replacing its manifest.
+            }
+            if (GetTickCount64() >= deadline) break;
+            co_await winrt::resume_after(std::chrono::milliseconds(250));
+            co_await caller;
+        } while (true);
+        co_return winrt::hstring(report + L"steam_launch_redistributables_manifest=incomplete\r\n"
+            L"steam_launch=dependency-install-incomplete\r\n");
     }
 
     auto packageFolder = winrt::Windows::ApplicationModel::Package::Current().InstalledLocation();
@@ -2736,6 +2966,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch_game_install_scope=" +
                 SteamPathScope(gameDirectory, libraryRoot, dataRoot, packageRoot) + L"\r\nsteam_launch=install-path-error\r\n");
         }
+        report += L"steam_launch_game_directory_check=matched\r\n";
         if (hostedStardew && CompareStringOrdinal(gameDirectory.c_str(), -1,
                 (libraryRoot + L"\\steamapps\\common\\Stardew Valley").c_str(), -1, TRUE) != CSTR_EQUAL) {
             co_return winrt::hstring(report + L"steam_launch=install-path-error\r\n");
@@ -3255,6 +3486,15 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
         return ::ResumeSteamSignIn(file, prefix);
     }
 
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> ResumeSteamBigPictureSignIn(
+            winrt::Windows::Storage::StorageFile const& file, winrt::hstring const& prefix) {
+        return ::ResumeSteamSignIn(file, prefix, true);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> CompleteSteamCatalog() {
+        return ::CompleteSteamCatalog();
+    }
+
     winrt::Windows::Foundation::IAsyncOperation<bool> SignOutSteam() {
         return SteamSignOutAndForget();
     }
@@ -3317,6 +3557,10 @@ struct ProbeFactory : winrt::implements<ProbeFactory, winrt::Windows::Foundation
 
     winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RestoreSteamCloud(std::uint32_t app, bool preview) {
         return RestoreSlaySteamCloud(app, preview);
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamCloudSnapshot(std::uint32_t app, bool download) {
+        return RunSteamCloudSnapshot(app, download);
     }
 
     winrt::hstring SteamSdlRgbDeltaFrame(std::uint32_t previousSequence) {

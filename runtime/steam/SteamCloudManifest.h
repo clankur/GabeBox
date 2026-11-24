@@ -14,6 +14,14 @@ inline constexpr std::uint32_t maxFileBytes = 32 * 1024 * 1024;
 inline constexpr std::uint32_t maxTotalBytes = 256 * 1024 * 1024;
 inline constexpr std::uint32_t maxListBytes = 4 * 1024 * 1024;
 
+inline bool SnapshotTrialMatches(std::wstring_view marker, std::uint32_t app, std::uint64_t account) {
+    if (marker.ends_with(L"\n")) {
+        marker.remove_suffix(1);
+        if (marker.ends_with(L"\r")) marker.remove_suffix(1);
+    }
+    return app && account && marker == std::to_wstring(app) + L" " + std::to_wstring(account);
+}
+
 inline void AppendVarint(std::string &buffer, std::uint64_t value) {
     while (value > 127) {
         buffer.push_back(static_cast<char>((value & 127) | 128));

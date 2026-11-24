@@ -19,7 +19,7 @@ from build_tools.prepare_steam_core import coff_imports, parse_import_table
 from build_tools.redirect_pe_imports import PeImage, parse_rules, patch_recipe
 from build_tools.stage_profiles import WIN32_ADAPTERS
 from build_tools.verify_win32_source import read_profile, verify_install
-from tools.measure import reaches_gpu_60
+from tools.measure import reaches_native_1080p
 
 
 WIN32_RUNTIME = ROOT / "runtime/win32"
@@ -653,7 +653,8 @@ def coverage(games, target, audits, evidence, require_gpu_60=False, installed_bu
         if (not trial.get("build_id") or not trial.get("evidence")
                 or any(trial["checks"].get(check) is not True for check in CHECKS)):
             continue
-        if require_gpu_60 and (trial.get("performance_scene") != "gameplay" or not reaches_gpu_60(trial.get("performance"))):
+        if require_gpu_60 and (trial.get("performance_scene") != "gameplay"
+                               or not reaches_native_1080p(trial.get("performance"))):
             continue
         known_builds = (installed_builds or {}).get(identifier) or {audit["build_id"] for audit in by_game[identifier]}
         if not known_builds or known_builds == {trial["build_id"]}:
@@ -723,7 +724,7 @@ def main():
     report.add_argument("--library-audit", type=Path, action="append", default=[],
                         help="include results from scan-library, repeat as needed")
     report.add_argument("--evidence", type=Path, help="JSON array of observed game trials")
-    report.add_argument("--require-gpu-60", action="store_true", help="require a hardware 60 fps scene measurement for each counted title")
+    report.add_argument("--require-gpu-60", action="store_true", help="require native 1080p hardware 60 fps gameplay for each counted title")
     args = parser.parse_args()
     try:
         if args.command == "scan":

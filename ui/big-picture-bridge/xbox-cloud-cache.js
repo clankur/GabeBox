@@ -108,6 +108,49 @@ function installXboxCloudCache(client, send) {
             return config;
         });
     }
+    function installOfflineStartup(state) {
+        const waitForSync = state?.WaitForSync;
+        if (typeof waitForSync !== 'function') return;
+        const reported = new Set();
+        function disconnected() {
+            try { return state.m_CMInterface?.BIsConnected?.() === false; } catch (_) { return false; }
+        }
+        state.WaitForSync = function (namespace) {
+            const original = waitForSync.call(this, namespace);
+            if (this !== state || ![1, 3, 4].includes(namespace) || !disconnected()) return original;
+            // The pinned startup consumes local configuration after this
+            // best-effort wait. Keep Valve's resolver and scheduled sync active.
+            return new Promise((resolve, reject) => {
+                let settled = false;
+                const timer = setTimeout(() => {
+                    account().then(() => {
+                        if (settled || !disconnected()) return;
+                        if (!reported.has(namespace)) {
+                            reported.add(namespace);
+                            try { host.postMessage({method: 'startup-cloud-local-fallback', namespace}); } catch (_) {}
+                        }
+                        finish(resolve);
+                    }).catch(() => {});
+                }, 750);
+                function finish(callback, value) {
+                    settled = true;
+                    clearTimeout(timer);
+                    callback(value);
+                }
+                Promise.resolve(original).then(value => finish(resolve, value), error => finish(reject, error));
+            });
+        };
+    }
+    function observeStartup() {
+        const name = 'cloudStorageInternalState';
+        if (Object.hasOwn(window, name)) return;
+        // The pinned module publishes its state before starting Init. Observe
+        // that assignment so the bridge does not reorder Valve's module loads.
+        Object.defineProperty(window, name, {configurable: true, set(state) {
+            Object.defineProperty(window, name, {value: state, writable: true, configurable: true, enumerable: true});
+            try { installOfflineStartup(state); } catch (_) {}
+        }});
+    }
     client.CloudStorage = {async WriteKey(key, json) {
         if (typeof json !== 'string') throw new TypeError('Expected Steam UI cache data');
         await access(key, json);
@@ -119,5 +162,5 @@ function installXboxCloudCache(client, send) {
         access(data.key).then(body => reply(body === undefined ? 404 : 200, body),
             error => reply(error.message === 'Steam UI cache session ended' ? 403 : 503));
     });
-    return installLocalReads;
+    return {installLocalReads, observeStartup};
 }
