@@ -1,12 +1,12 @@
 """Stage build-matched compatibility profiles in an Xbox package."""
 
 import json
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import re
 
 from build_tools.redirect_pe_imports import validate_patch_recipe
 from build_tools.stage_session import read_package_member
-from build_tools.verify_win32_source import read_profile
+from build_tools.verify_win32_source import read_profile, valid_win32_component
 
 
 WIN32_ADAPTERS = frozenset({
@@ -270,8 +270,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             for row in rows:
                 image, tab, key = row.removesuffix("\r").partition("\t")
                 if (len(image.encode("utf-16-le")) > 520 or image.casefold() in companions_by_name
-                        or any(not part or len(part.encode("utf-16-le")) > 510 or part.endswith((".", " "))
-                               or re.search(r'[<>:"\\|?*\x00-\x1f]', part) or PureWindowsPath(part).is_reserved()
+                        or any(len(part.encode("utf-16-le")) > 510 or not valid_win32_component(part)
                                for part in image.split("/"))):
                     raise ValueError(f"Invalid or duplicate companion path for AppID {app}: {image!r}.")
                 companions_by_name[image.casefold()] = key

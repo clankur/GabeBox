@@ -3,9 +3,22 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import re
 import stat
+
+
+RESERVED_WIN32_NAMES = {"AUX", "CON", "CONIN$", "CONOUT$", "NUL", "PRN"} | {
+    prefix + number for prefix in ("COM", "LPT") for number in "123456789¹²³"
+}
+INVALID_WIN32_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def valid_win32_component(name):
+    """Validate one Windows path component consistently on every build host."""
+    stem = name.partition(".")[0].rstrip(" ").upper()
+    return (bool(name) and not name.endswith((".", " ")) and stem not in RESERVED_WIN32_NAMES
+            and INVALID_WIN32_CHARACTERS.search(name) is None)
 
 
 def read_profile(profile):
@@ -26,7 +39,7 @@ def read_profile(profile):
             name, size, digest = row["path"], row["size"], row["sha256"]
             if (not isinstance(name, str) or len(name) > 260
                     or any(not re.fullmatch(r"[A-Za-z0-9_. -]{1,255}", part)
-                           or part.endswith((".", " ")) or PureWindowsPath(part).is_reserved()
+                           or not valid_win32_component(part)
                            for part in name.split("/"))
                     or name.lower() in names or type(size) is not int or not 0 < size < 2**53
                     or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):

@@ -10,6 +10,7 @@ PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
 PROBE_REPORT = 'probe-report.txt'
 BIG_PICTURE_REPORT = 'big-picture-report.txt'
+WEBVIEW_REPORT = 'big-picture-webview-report.txt'
 
 CHILD_EXIT = (('exit_code_matches', 'yes'),)
 PIPE_EXCHANGE = CHILD_EXIT + (('ipc', 'success'),)

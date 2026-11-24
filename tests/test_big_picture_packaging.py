@@ -533,6 +533,9 @@ class BigPicturePackageTests(unittest.TestCase):
         files.write_text("nested/" + pin)
         with self.assertRaisesRegex(ValueError, "top-level DLL"):
             stage_trials(self.layout, profiles, template)
+        files.write_text("COM¹.dll\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate companion path"):
+            stage_trials(self.layout, profiles, template)
         files.write_text(pin)
         stage_trials(self.layout, profiles, template)
         self.assertEqual((self.layout / files.name).read_text(), pin)

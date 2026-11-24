@@ -7,7 +7,7 @@ import struct
 import time
 from urllib.parse import urlencode
 
-from probe.catalog import PROBE_REPORT
+from probe.catalog import PROBE_REPORT, WEBVIEW_REPORT
 from probe.runner import report_fields as fields
 
 from .measure import FILETIME_EPOCH, HEADER, PRESENT
@@ -32,7 +32,6 @@ GPU_MAILBOX_NAME = re.compile(r'sdl-host-[0-9]{1,10}-[0-9]{1,20}\.bin')
 LOCAL = r'\LocalState'
 TEMP = r'\TempState'
 PRIMARY_REPORT = 'big-picture-primary-startup.txt'
-WEBVIEW_REPORT = 'big-picture-webview-report.txt'
 COUNT = re.compile(r'[0-9]{1,20}')
 CHECKPOINT = re.compile(r'[a-z][a-z0-9_.-]{0,62}(?::(?:0x[0-9a-f]{1,8}|[a-z][a-z0-9-]{0,40}))?', re.I)
 TIMINGS = re.compile(r'[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}(?:,[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}){0,63}')
