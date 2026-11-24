@@ -65,6 +65,12 @@ CASES = {
         'Verify the helper exit code and a named-pipe request and reply.',
         PIPE_EXCHANGE, report_kind='packaged-child-process', require_run_id=True,
     ),
+    'mouse-source': ProbeCase(
+        PROBE_NAME + '.MouseSource', 'UWP mouse source control',
+        'Detect nonzero relative mouse motion in the foreground CoreWindow.',
+        (('relative_motion', 'observed'),), report_kind='uwp-mouse-source',
+        require_run_id=True, terminal_status='mouse-sample-complete',
+    ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',
         'Check the result of the graphics helper in the selected package build.',

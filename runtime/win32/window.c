@@ -1085,6 +1085,8 @@ static void OpenHostedPointer(void) {
     }
 }
 
+static BYTE HostedKeyState(UINT key);
+
 static void PollHostedPointer(void) {
     const HWND handle = VirtualForegroundWindow();
     if (!handle) return;
@@ -1116,8 +1118,8 @@ static void PollHostedPointer(void) {
     const SHORT wheel = serial != hostPointerSerial ? (SHORT)(keys >> 16) : 0;
     const BOOL moved = handle != hostPointerWindow || screen.x != hostPointerScreen.x || screen.y != hostPointerScreen.y;
     UINT count = moved + (wheel != 0);
-    WPARAM buttons = ((hostedKeys[VK_SHIFT] & 0x80) ? MK_SHIFT : 0) |
-        ((hostedKeys[VK_CONTROL] & 0x80) ? MK_CONTROL : 0);
+    WPARAM buttons = ((HostedKeyState(VK_SHIFT) & 0x80) ? MK_SHIFT : 0) |
+        ((HostedKeyState(VK_CONTROL) & 0x80) ? MK_CONTROL : 0);
     for (UINT i = 0; i < ARRAYSIZE(bindings); ++i) {
         if (changed & bindings[i].mask) ++count;
         if (pressed & bindings[i].mask) buttons |= bindings[i].flag;

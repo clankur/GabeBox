@@ -29,7 +29,14 @@ static BOOL Take(HWND window, UINT message, WPARAM key, UINT flags) {
     return deliveredCount == before + 1 && delivered[before].message == message && delivered[before].wParam == key;
 }
 
-static unsigned VerifyKeyboard(SdlHostKeyboard *keyboard) {
+static LONG PublishPointer(SdlHostMailbox *mailbox, LONG pointer) {
+    InterlockedIncrement(&mailbox->input_serial);
+    InterlockedExchange(&mailbox->input_pointer, pointer);
+    return InterlockedIncrement(&mailbox->input_serial);
+}
+
+static unsigned VerifyKeyboard(SdlHostMailbox *mailbox) {
+    SdlHostKeyboard *keyboard = &mailbox->keyboard;
     const HINSTANCE module = GetModuleHandleW(NULL);
     const WNDCLASSW cls = {0, OnMessage, 0, 0, module, NULL, NULL, NULL, NULL, L"HostedKeyboardControl"};
     if (!RegisterClassW(&cls)) return 0x75510000u;
@@ -57,6 +64,21 @@ static unsigned VerifyKeyboard(SdlHostKeyboard *keyboard) {
     if (!Take(window, WM_CHAR, 0x00e9, 1) || !Take(window, WM_CHAR, 0xd83d, 1) ||
             !Take(window, WM_CHAR, 0xde42, 1) || !Take(window, WM_KEYUP, key, 0xc01e0001) ||
             GetKeyState(key) || GetKeyState(VK_SHIFT) >= 0) return 0x75550000u;
+
+    Publish(keyboard, (SdlHostKey){228, 1, {0}});
+    if (!Take(window, WM_KEYDOWN, VK_CONTROL, 0x011d0001) || GetKeyState(VK_RCONTROL) >= 0)
+        return 0x75580000u;
+    const LONG press = PublishPointer(mailbox, SDL_HOST_POINTER_LEFT);
+    const WPARAM pressed = MK_LBUTTON | MK_SHIFT | MK_CONTROL;
+    if (!PeekMessageW(&pending, window, 0, 0, PM_REMOVE) || pending.message != WM_MOUSEMOVE ||
+            pending.wParam != pressed || !PeekMessageW(&pending, window, 0, 0, PM_REMOVE) ||
+            pending.message != WM_LBUTTONDOWN || pending.wParam != pressed ||
+            SdlHostLoad(&mailbox->input_ack) != press) return 0x75580001u;
+    Publish(keyboard, (SdlHostKey){228, 0, {0}});
+    if (!Take(window, WM_KEYUP, VK_CONTROL, 0xc11d0001) || GetKeyState(VK_CONTROL)) return 0x75580002u;
+    const LONG release = PublishPointer(mailbox, 0);
+    if (!PeekMessageW(&pending, window, 0, 0, PM_REMOVE) || pending.message != WM_LBUTTONUP ||
+            pending.wParam != MK_SHIFT || SdlHostLoad(&mailbox->input_ack) != release) return 0x75580003u;
 
     Publish(keyboard, (SdlHostKey){0, 0, "discard"});
     if (!PeekMessageW(&pending, window, 0, 0, PM_NOREMOVE) || pending.message != WM_CHAR) return 0x75560000u;
@@ -102,7 +124,7 @@ static unsigned RunControl(void) {
             SetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_KEYBOARD", L"1") &&
             SetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", path)) {
         InterlockedExchange(&mailbox->magic, SDL_HOST_MAGIC);
-        result = VerifyKeyboard(&mailbox->keyboard);
+        result = VerifyKeyboard(mailbox);
     }
     if (mailbox) UnmapViewOfFile(mailbox);
     if (mapping) CloseHandle(mapping);
