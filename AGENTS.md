@@ -5,7 +5,7 @@ Target compatibility across the full Steam game catalog through the app’s norm
 ## Performance target
 
 - Target sustained **60 FPS at native 1920 × 1080** during representative gameplay. Prefer hardware rendering and GPU-to-GPU presentation. Preserve the game’s simulation timing and controller responsiveness when changing frame pacing.
-- Measure distinct frames actually presented on Xbox for at least 30 seconds after the scene stabilizes. Record internal render resolution, output resolution, average FPS, lowest rolling one-second frame count, and whether frames used shared GPU textures or CPU uploads. Use `measure.py --require-gpu-60` for the hardware path. Report startup stalls separately. [Native fullscreen presentation](docs/GAME-LAUNCH.md#native-fullscreen-presentation)
+- Measure distinct frames actually presented on Xbox for at least 30 seconds after the scene stabilizes. Record internal render resolution, output resolution, average FPS, lowest rolling one-second frame count, and whether frames used shared GPU textures or CPU uploads. Use `python3 -m tools.measure --require-gpu-60` for the hardware path. Report startup stalls separately. [Native fullscreen presentation](docs/GAME-LAUNCH.md#native-fullscreen-presentation)
 - Respect deliberate game-engine caps and fixed internal resolutions. Document the game-imposed limit and the best verified result. Keep limitations introduced by the compatibility layer visible as open performance work.
 
 ## Design for reuse

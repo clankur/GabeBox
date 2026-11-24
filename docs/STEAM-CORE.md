@@ -182,7 +182,7 @@ Use the optional `--library-inventory` flag when preparing a local sign-in test 
 
 The `1.0.76.0` Series X run provided 134 games for comparison. Dwarf Fortress was selected for its x64 Windows requirement and 500 MB published storage minimum. Package `1.0.78.0` submitted its install, then Steam paused with state `514`, update result `11`, and no transfer or installed executable. The app measured 29,909,069,824 bytes available. The temporary console inventory was removed after candidate selection. [Windows SDK build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44874202315) · [Dwarf Fortress system requirements](https://store.steampowered.com/app/975370/Dwarf_Fortress/#app_sysreq)
 
-For a local test of the Microsoft x64 desktop C++ runtime, download the official `Microsoft.VCLibs.x64.14.00.Desktop.appx`. Pass it to `prepare-steam-core.py --vclibs-framework` and supply the same original signed APPX to `python3 -m tools.xbox_deploy deploy --dependency`. The prepare step checks the framework identity, architecture and DLL filenames. Xbox validates the dependency during installation. [Microsoft’s deployment instructions and download](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
+For a local test of the Microsoft x64 desktop C++ runtime, download the official `Microsoft.VCLibs.x64.14.00.Desktop.appx`. Pass it to `python3 -m build_tools.prepare_steam_core --vclibs-framework` and supply the same original signed APPX to `python3 -m tools.xbox_deploy deploy --dependency`. The prepare step checks the framework identity, architecture and DLL filenames. Xbox validates the dependency during installation. [Microsoft’s deployment instructions and download](https://learn.microsoft.com/en-us/windows/msix/msix-troubleshooting-guide)
 
 The console accepted version `1.0.84.0` with framework version `14.0.33321.0`. Steam restored the saved session, reused the installed game and accepted Play. The captured process exited with `0xC0000139` (entry point missing) before a ready window. The change in error narrowed the loader investigation. [Microsoft’s NTSTATUS reference](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55)
 
@@ -267,9 +267,9 @@ For a console acceptance trial, additionally supply `--launch-app-id 7760 --inst
 
 ## Inspect installed Windows imports
 
-Pass the local `UnityPlayer.dll` from the installed title to `prepare-steam-core.py --inspect-pe` when preparing a control layout. Repeat the option for additional PE files. The input binaries stay local. The layout contains only the generated import inventory and the probe. Package and deploy the control through the existing CLI, using the same signed VCLibs dependency as the game-launch comparison. Version `1.0.94.0` reported `opengl32.dll_system_load_error=0x0000007E` and the two missing User32 exports. This reports which imports could resolve in the Xbox control process.
+Pass the local `UnityPlayer.dll` from the installed title to `python3 -m build_tools.prepare_steam_core --inspect-pe` when preparing a control layout. Repeat the option for additional PE files. The input binaries stay local. The layout contains only the generated import inventory and the probe. Package and deploy the control through the existing CLI, using the same signed VCLibs dependency as the game-launch comparison. Version `1.0.94.0` reported `opengl32.dll_system_load_error=0x0000007E` and the two missing User32 exports. This reports which imports could resolve in the Xbox control process.
 
-Add `--readobj /path/to/llvm-readobj` to include delayed imports in the control. Pass the same option to `steam-compatibility.py scan` or `scan-library` to keep startup imports and delayed imports distinct when interpreting its results.
+Add `--readobj /path/to/llvm-readobj` to include delayed imports in the control. Use the same option with the `scan` or `scan-library` subcommand of `python3 -m tools.steam_compatibility` to keep startup imports and delayed imports distinct when interpreting its results.
 
 ## Capture the Slay the Spire console diagnostic
 
