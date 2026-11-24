@@ -14,7 +14,7 @@ EVIDENCE_FIELDS = {
     'activation_start', 'activation_end', 'core_window_hresult', 'mouse_subscription_hresult',
     'mouse_capabilities_hresult', 'mouse_present', 'mouse_button_count',
     'document_visible', 'pointer_input', 'pointer_moves', 'pointer_down', 'pointer_wheel',
-    'visible', 'registered', 'start_tick', 'hr',
+    'visible', 'registered', 'start_tick', 'hr', 'stage', 'presented',
 }
 
 

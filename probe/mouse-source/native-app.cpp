@@ -33,13 +33,22 @@ extern "C" HRESULT FhdLocalPath(WCHAR* buffer, DWORD capacity) {
 namespace {
 void checkpoint(char const* name, char const* text) noexcept {
     WCHAR path[1024];
-    const auto leaf = std::string_view(name) == "startup" ? L"\\mouse-startup.txt" : L"\\mouse-capture.txt";
+    const auto leaf = std::string_view(name) == "startup" ? L"\\mouse-startup.txt" :
+        std::string_view(name) == "independent" ? L"\\mouse-independent.txt" : L"\\mouse-capture.txt";
     if (FAILED(FhdLocalPath(path, ARRAYSIZE(path))) || !FhdFrameTrace::suffix(path, ARRAYSIZE(path), leaf)) return;
     file_handle file{CreateFile2(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, CREATE_ALWAYS, nullptr)};
     DWORD written;
     if (file) WriteFile(file.get(), text, static_cast<DWORD>(strlen(text)), &written, nullptr);
 }
+}
+#ifdef MOUSE_PROBE_INDEPENDENT
+#include "native-independent.h"
+#endif
+namespace {
 struct MouseApp : ApplicationT<MouseApp> {
+#ifdef MOUSE_PROBE_INDEPENDENT
+    std::shared_ptr<IndependentMouseProbe> independent = std::make_shared<IndependentMouseProbe>();
+#endif
     std::shared_ptr<NativePanelMouseProbe> probe = std::make_shared<NativePanelMouseProbe>();
     DispatcherTimer timer{nullptr};
     Grid target{nullptr};
@@ -73,6 +82,9 @@ struct MouseApp : ApplicationT<MouseApp> {
     void snapshot() {
         const bool visible = core.Visible() && core.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground;
         probe->report(visible);
+#ifdef MOUSE_PROBE_INDEPENDENT
+        independent->snapshot(visible, runId);
+#endif
         if (!ready && visible) {
             const bool complete = probe->registered == 0x3f;
             HRESULT hr = S_OK;
@@ -94,9 +106,14 @@ struct MouseApp : ApplicationT<MouseApp> {
             attempts, accepted, confirmed, unsigned(captured), outside, releases, lost, static_cast<unsigned long>(last),
             keyDown, keyUp, static_cast<unsigned long>(keyRegistration));
         checkpoint("capture", record);
+#ifdef MOUSE_PROBE_INDEPENDENT
+        status.Text(L"Mouse movements  " + to_hstring(independent->moves.load()) + L"     Presses  " +
+                    to_hstring(independent->down.load()) + L"     Wheel events  " + to_hstring(independent->wheel.load()));
+#else
         status.Text(L"Relative movements   " + to_hstring(static_cast<uint32_t>(InterlockedCompareExchange(&probe->nonzeroDeltas, 0, 0))) +
                     L"     Confirmed captures   " + to_hstring(confirmed) +
                     L"     Outside movements   " + to_hstring(outside));
+#endif
     }
     void OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEventArgs const&) {
         auto view = Window::Current();
@@ -136,7 +153,11 @@ struct MouseApp : ApplicationT<MouseApp> {
                 return line;
             };
             label(L"Xbox mouse capture", 32);
+#ifdef MOUSE_PROBE_INDEPENDENT
+            label(L"Move the physical mouse, click, then scroll on the purple panel.", 18);
+#else
             label(L"Hold the mouse button here, drag outside the box, then release.", 18);
+#endif
             status = label(L"Listening", 16);
             lines.IsHitTestVisible(false);
             target.Children().Append(lines);
@@ -175,6 +196,24 @@ struct MouseApp : ApplicationT<MouseApp> {
             target.PointerCaptureLost([this](auto const&, auto const& event) {
                 if (event.Pointer().PointerId() == id) { ++lost; captured = false; }
             });
+#ifdef MOUSE_PROBE_INDEPENDENT
+            independent->panel = SwapChainPanel{};
+            root.Children().Append(independent->panel);
+            target.IsHitTestVisible(false);
+            target.Background(nullptr);
+
+            auto stop = [weak = std::weak_ptr<IndependentMouseProbe>(independent)](auto const&, auto const&) {
+                if (auto state = weak.lock()) state->close();
+            };
+            core.Closed(stop);
+            core.VisibilityChanged([weak = std::weak_ptr<IndependentMouseProbe>(independent)](auto const&, auto const& event) {
+                if (!event.Visible()) if (auto state = weak.lock(); state && state->visibleOnce) state->close();
+            });
+            core.Activated([weak = std::weak_ptr<IndependentMouseProbe>(independent)](auto const&, auto const& event) {
+                if (event.WindowActivationState() == CoreWindowActivationState::Deactivated)
+                    if (auto state = weak.lock(); state && state->visibleOnce) state->close();
+            });
+#endif
             root.Children().Append(target);
             view.Content(root);
             view.Activate();
