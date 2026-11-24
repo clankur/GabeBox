@@ -46,6 +46,8 @@ struct MouseApp : ApplicationT<MouseApp> {
     TextBlock status{nullptr};
     CoreWindow core{nullptr};
     unsigned attempts = 0, accepted = 0, confirmed = 0, outside = 0, releases = 0, lost = 0;
+    unsigned keyDown = 0, keyUp = 0;
+    HRESULT keyRegistration = E_PENDING;
     uint32_t id = 0;
     HRESULT last = E_PENDING;
     int present = -1;
@@ -86,9 +88,11 @@ struct MouseApp : ApplicationT<MouseApp> {
         std::snprintf(record, sizeof(record),
             "run_id=%llu probe=native-mouse-capture start_tick=%llu tick=%llu visible=%u mouse_present=%d registered=0x%x\r\n"
             "xaml_attempts=%u xaml_accepted=%u verified_pointer_in_capture_list=%u current_capture=%u "
-            "same_pointer_moves_outside=%u releases=%u lost=%u last_hr=%08lx\r\n",
+            "same_pointer_moves_outside=%u releases=%u lost=%u last_hr=%08lx\r\n"
+            "core_key_down=%u core_key_up=%u key_registration_hr=%08lx\r\n",
             runId, probe->startTick, GetTickCount64(), unsigned(visible), present, probe->registered,
-            attempts, accepted, confirmed, unsigned(captured), outside, releases, lost, static_cast<unsigned long>(last));
+            attempts, accepted, confirmed, unsigned(captured), outside, releases, lost, static_cast<unsigned long>(last),
+            keyDown, keyUp, static_cast<unsigned long>(keyRegistration));
         checkpoint("capture", record);
         status.Text(L"Relative movements   " + to_hstring(static_cast<uint32_t>(InterlockedCompareExchange(&probe->nonzeroDeltas, 0, 0))) +
                     L"     Confirmed captures   " + to_hstring(confirmed) +
@@ -104,6 +108,15 @@ struct MouseApp : ApplicationT<MouseApp> {
             startup("mouse-capture-starting", false, S_OK);
             core = view.CoreWindow();
             probe->open(core);
+            try {
+                core.KeyDown([this](auto const& sender, auto const&) {
+                    if (sender.Visible() && sender.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) ++keyDown;
+                });
+                core.KeyUp([this](auto const& sender, auto const&) {
+                    if (sender.Visible() && sender.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) ++keyUp;
+                });
+                keyRegistration = S_OK;
+            } catch (...) { keyRegistration = to_hresult(); }
             try { present = Windows::Devices::Input::MouseCapabilities{}.MousePresent(); } catch (...) {}
             Grid root;
             root.Background(SolidColorBrush(Windows::UI::Color{255, 22, 30, 45}));
