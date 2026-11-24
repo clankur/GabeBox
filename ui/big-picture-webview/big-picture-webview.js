@@ -300,7 +300,7 @@
             try { request = JSON.parse(raw); } catch (_) { return; }
             if (!request || typeof request !== "object") return;
             if (request.method === "store-native-stage") {
-                if (!/^(create-received|creating-controller|configuring-controller|initial-document-confirmed|opening-bootstrap|bootstrap-started|bootstrap-served|bootstrap-denied|initial-about-blank|bootstrap-complete|bootstrap-failed|public-requested|command-error|error|visible|hidden|http-status-unavailable|browser-process-failed)$/.test(request.stage) ||
+                if (!/^(create-received|creating-controller|configuring-controller|initial-document-confirmed|opening-bootstrap|bootstrap-started|bootstrap-served|bootstrap-denied|initial-about-blank|bootstrap-complete|bootstrap-failed|public-requested|public-started|command-error|error|visible|hidden|http-status-unavailable|browser-process-failed)$/.test(request.stage) ||
                     !Number.isInteger(request.code)) return;
                 if (request.stage === "create-received") { storeStages = []; storeNavigation = ""; }
                 if (storeStages.length >= 16) storeStages.shift();
@@ -311,7 +311,7 @@
             if (request.method === "store-js-stage") {
                 var stage = request.stage;
                 if (["create", "visible", "geometry", "blank-complete", "initial-ready", "navigate", "remote-start",
-                        "remote-complete", "failed", "closed"].indexOf(stage) < 0) return;
+                        "remote-complete", "timed-out", "failed", "closed"].indexOf(stage) < 0) return;
                 if (stage === "create") storeJsStages = [];
                 if (storeJsStages.indexOf(stage) < 0) { storeJsStages.push(stage); record(last, true); }
                 return;

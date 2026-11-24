@@ -210,9 +210,9 @@ async function checkStore(browser, page, popup) {
         await isolated.route('**/*', route => route.abort('internetdisconnected'));
         await remote.goto(nav.url).catch(() => {});
         assert.equal((await requested).url(), nav.url);
-        await page.evaluate(({id,url}) => {
-            hostEvent({event:'store-browser', id, kind:'start', url});
-            hostEvent({event:'store-browser', id, kind:'complete', url, success:false, code:1});
+        await page.evaluate(({id,url,request}) => {
+            hostEvent({event:'store-browser', id, kind:'start', url, request});
+            hostEvent({event:'store-browser', id, kind:'complete', url, request, success:false, code:1});
         }, nav);
         await page.waitForFunction(() => {
             let r; webpackChunksteamui.push([['fixture-store-route'], {}, f => { r=f; }]);

@@ -8,14 +8,27 @@ const options = {strName:'MainBrowser', parentPopupBrowserID:2, strUserAgentIden
     strInitialURL:blank, bPreventCloseFromJavascript:true};
 function environment() {
     const sent = [], owner = new EventTarget(), host = new EventTarget();
+    const timers = new Map();
+    let timerId = 0, now = 0;
     Object.assign(owner, {innerWidth:800, innerHeight:600});
     host.postMessage = msg => sent.push(structuredClone(msg));
     const client = {BrowserView:{Destroy(view) { sent.push({destroyPopup:view}); }}};
-    const adapter = runInNewContext(source + '\ninstallXboxStoreBrowser', {URL})(client,host,() => owner);
+    const adapter = runInNewContext(source + '\ninstallXboxStoreBrowser', {
+        URL, setTimeout(callback, delay) { timers.set(++timerId, {callback, end: now + delay}); return timerId; },
+        clearTimeout(id) { timers.delete(id); }
+    })(client,host,() => owner);
+    function advance(ms) {
+        now += ms;
+        for (const [id, {callback, end}] of timers) {
+            if (end > now) continue;
+            timers.delete(id);
+            callback();
+        }
+    }
     const receive = (id, kind, fields = {}) => host.dispatchEvent(new MessageEvent('message',
-        {data:{event:'store-browser',id,kind,...fields}}));
+        {data:{event:'store-browser',id,kind,request:0,...fields}}));
     const view = client.BrowserView.Create(options);
-    return {client,adapter,owner,sent,view,receive,id:sent[0].id};
+    return {client,adapter,owner,sent,view,receive,advance,id:sent[0].id};
 }
 test('only committed native navigation advances stock history, including the real blank bootstrap', () => {
     const {sent,view,receive,id} = environment(), history = [], finished = [], errors = [];
@@ -29,19 +42,65 @@ test('only committed native navigation advances stock history, including the rea
     receive(id,'complete',{url:'about:blank',success:true});
     assert.deepEqual(history[0], {index:0,entries:[{url:blank}]});
     view.LoadURL(url);
-    assert.deepEqual(sent.at(-1),{method:'store-browser',id,action:'navigate',url});
-    receive(id,'start',{url});
+    const request = sent.at(-1).request;
+    assert.deepEqual(sent.at(-1),{method:'store-browser',id,action:'navigate',url,request});
+    receive(id,'start',{url,request});
     receive(id,'title',{title:'Steam Store'});
-    receive(id,'complete',{url,success:true});
+    receive(id,'complete',{url,request,success:true});
     assert.deepEqual(finished.at(-1),[url,'Steam Store']);
-    receive(id,'complete',{url:next,success:false,code:503});
+    receive(id,'complete',{url:next,request,success:false,code:503});
     assert.equal(errors.at(-1)[0],503); assert.equal(history.length,2);
-    receive(id,'complete',{url:next,success:true});
+    assert.deepEqual(finished.at(-1),[next,'']);
+    receive(id,'complete',{url:next,request,success:true});
     receive(id,'history',{canGoBack:true,canGoForward:false});
     view.GoBack();
     assert.equal(sent.at(-1).action,'back');
-    receive(id,'complete',{url,success:true});
+    receive(id,'complete',{url,request,success:true});
     assert.equal(history.at(-1).index,1); assert.equal(history.at(-1).entries.length,3);
+    view.GoBack();
+    receive(id,'start',{url:'about:blank',request});
+    receive(id,'complete',{url:'about:blank',request,success:true});
+    assert.equal(history.at(-1).index,0); assert.equal(history.at(-1).entries.length,3);
+});
+test('a public request with no native callback expires and Reload ignores stale receipts', () => {
+    const {client,sent,view,receive,advance,id} = environment();
+    const history = [], finished = [], errors = [];
+    view.on('history-changed', value => history.push(structuredClone(value)));
+    view.on('finished-request', (...args) => finished.push(args));
+    view.on('load-error', (...args) => errors.push(args));
+    receive(id,'initial-document',{url:'about:blank'});
+    const url = 'https://store.steampowered.com/';
+    view.LoadURL(url);
+    const first = sent.at(-1).request;
+    receive(id,'start',{url:'about:blank'});
+    receive(id,'complete',{url:'about:blank',success:true});
+    advance(19999);
+    assert.equal(errors.length,0);
+    assert.equal(finished.length,0);
+    advance(1);
+    assert.deepEqual(sent.at(-1),{method:'store-browser',id,action:'stop',request:first});
+    assert.deepEqual(finished,[[url,'']]);
+    assert.deepEqual(errors,[[-7,url,'Steam Store navigation timed out']]);
+    view.Reload();
+    const retry = sent.at(-1).request;
+    assert.notEqual(retry,first);
+    assert.deepEqual(sent.at(-1),{method:'store-browser',id,action:'navigate',url,request:retry});
+    receive(id,'complete',{url,request:first,success:true});
+    receive(id,'start',{url:'about:blank'});
+    receive(id,'complete',{url:'about:blank',success:true});
+    assert.deepEqual(history,[{index:0,entries:[{url:blank}]}]);
+    receive(id,'controller-reset',{request:retry});
+    receive(id,'start',{url,request:retry});
+    receive(id,'title',{title:'Steam Store'});
+    receive(id,'complete',{url,request:retry,success:true});
+    advance(20000);
+    assert.equal(errors.length,1);
+    assert.deepEqual(finished.at(-1),[url,'Steam Store']);
+    assert.deepEqual(history.at(-1),{index:0,entries:[{url}]});
+    view.LoadURL(url + 'explore/');
+    client.BrowserView.Destroy(view);
+    advance(20000);
+    assert.equal(sent.at(-1).action,'close');
 });
 test('denies other constructors, origins and credential-bearing URLs and isolates stale instances', () => {
     const {client,sent,view,receive,id} = environment();
