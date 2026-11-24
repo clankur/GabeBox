@@ -440,7 +440,7 @@ inline std::optional<DepotActivity> ReadDepotActivity(std::wstring_view library,
         if (!complete) return;
         const auto write = (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
             info.ftLastWriteTime.dwLowDateTime;
-        activity.latestWrite = std::max(activity.latestWrite, write);
+        activity.latestWrite = (std::max)(activity.latestWrite, write);
         activity.totalSize += (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
         ++activity.files;
     });

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -1513,7 +1514,7 @@ static std::optional<std::uint64_t> SteamDownloadRate(std::uint64_t previous, st
     // Avoid mixing samples across a changed download plan, counter reset, or
     // a polling interruption. GetTickCount64 supplies elapsed milliseconds.
     if (!total || previousTotal != total || current < previous || elapsed < 500 || elapsed > 10000 ||
-            current - previous > std::numeric_limits<std::uint64_t>::max() / 1000) return std::nullopt;
+            current - previous > (std::numeric_limits<std::uint64_t>::max)() / 1000) return std::nullopt;
     return (current - previous) * 1000 / elapsed;
 }
 
