@@ -649,6 +649,27 @@ class BigPicturePackageTests(unittest.TestCase):
         stage_trials(self.layout, trial, notify_runtime)
         self.assertEqual((self.layout / notify).read_bytes(), b"")
 
+        directinput = f"steam-win32-disable-sdl-directinput-{app}.txt"
+        (profile / directinput).write_text("unexpected")
+        with self.assertRaisesRegex(ValueError, "an empty marker and hosted XInput"):
+            stage_trials(self.layout, trial, notify_runtime)
+        (profile / directinput).write_bytes(b"")
+        (profile / marker).unlink()
+        with self.assertRaisesRegex(ValueError, "an empty marker and hosted XInput"):
+            stage_trials(self.layout, trial, notify_runtime)
+        (profile / marker).touch()
+        with self.assertRaisesRegex(ValueError, "launch-scoped SDL DirectInput selection"):
+            stage_trials(self.layout, trial, notify_runtime)
+        directinput_runtime = self.work / "sdl-directinput-runtime.appx"
+        with ZipFile(notify_runtime) as source, ZipFile(directinput_runtime, "w") as target:
+            for name in source.namelist():
+                data = source.read(name)
+                if name == "ProbeNative.dll":
+                    data += "SDL_JOYSTICK_DIRECTINPUT\0".encode("utf-16le")
+                target.writestr(name, data)
+        stage_trials(self.layout, trial, directinput_runtime)
+        self.assertEqual((self.layout / directinput).read_bytes(), b"")
+
     def test_default_audio_profile_requires_verified_launch_components(self):
         self.layout.mkdir()
         profile = self.work / "profile"

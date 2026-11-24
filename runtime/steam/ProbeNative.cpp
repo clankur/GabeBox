@@ -2274,6 +2274,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowHostedKeyboard = false;
     bool shadowWgl = false;
     bool shadowHostedXInput = false;
+    bool shadowDisableSdlDirectInput = false;
     bool shadowHostedControllerNotify = false;
     bool shadowDefaultAudio = false;
     bool shadowD3d12DefaultAdapter = false;
@@ -2375,6 +2376,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowHostedXInput = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-disable-sdl-directinput-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size() || !shadowHostedXInput) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDisableSdlDirectInput = true;
                 }
                 if (auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-hosted-controller-notify-" + std::to_wstring(app) + L".txt")) {
@@ -3338,6 +3347,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (shadowWgl) {
                 variables.emplace_back(L"SDL_VIDEO_DRIVER", L"windows");
                 variables.emplace_back(L"SDL_OPENGL_LIBRARY", L"OPENGL32.DLL");
+            }
+            if (shadowDisableSdlDirectInput) {
+                variables.emplace_back(L"SDL_JOYSTICK_DIRECTINPUT", L"0");
+                report += L"steam_shadow_sdl_directinput=disabled\r\n";
             }
             auto environment = SteamChildEnvironment(variables);
             if (environment.empty()) {

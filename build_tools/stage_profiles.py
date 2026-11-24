@@ -131,6 +131,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     hosted_window_frame = False
     hosted_keyboard = False
     hosted_xinput = False
+    disable_sdl_directinput = False
     hosted_controller_notify = False
     default_audio = False
     desktop_documents = False
@@ -280,6 +281,12 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                                  f"declared XInput adapter for AppID {app}.")
             files[xinput_marker] = b""
             hosted_xinput = True
+        sdl_directinput_marker = f"steam-win32-disable-sdl-directinput-{app}.txt"
+        if (root / sdl_directinput_marker).is_file():
+            if (root / sdl_directinput_marker).stat().st_size or xinput_marker not in files:
+                raise ValueError(f"Disabling SDL DirectInput needs an empty marker and hosted XInput for AppID {app}.")
+            files[sdl_directinput_marker] = b""
+            disable_sdl_directinput = True
         notify_marker = f"steam-win32-hosted-controller-notify-{app}.txt"
         if (root / notify_marker).is_file():
             if ((root / notify_marker).stat().st_size or xinput_marker not in files
@@ -501,6 +508,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_HOSTED_XINPUT\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError("Use a Steam Core artifact with launch-scoped XInput support.")
+    if disable_sdl_directinput and "SDL_JOYSTICK_DIRECTINPUT\0".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact with launch-scoped SDL DirectInput selection.")
     if hosted_wgl:
         variable = "XBOX_WIN32_HOSTED_WGL\0".encode("utf-16le")
         if any(variable not in component for component in (

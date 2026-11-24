@@ -55,7 +55,7 @@ GAME_KEYS = {
     'steam_shadow_stage', 'steam_shadow_child', 'steam_shadow_renderer', 'steam_shadow_godot_shader_cache',
     'steam_sdl_host', 'steam_sdl_host_frame', 'steam_sdl_opengl_gpu_mailbox', 'steam_dos',
     'steam_source_check', 'steam_shadow_documents', 'steam_shadow_companion_hashes', 'steam_shadow_keyboard',
-    'steam_shadow_roaming_folders',
+    'steam_shadow_roaming_folders', 'steam_shadow_sdl_directinput',
 }
 GAME_CODES = {'steam_shadow_stage_hresult', 'steam_shadow_win32', 'steam_shadow_exit',
               'steam_launch_process_exit', 'steam_shadow_child_exit_u32', 'steam_shadow_child_exit_error_u32'}
