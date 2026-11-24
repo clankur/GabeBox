@@ -102,6 +102,8 @@ The JSON summary gives the latest filtered records and counts for graphics pipel
 
 The inspector reads up to 1 MiB of the live trace and marks `truncated` when more bytes are available. A record still being written is skipped. A terminal report must include its completion marker. Pass `--output` to save the summary and the complete allowlisted records within the read limit. The inspection only reads the selected package's diagnostics through Device Portal.
 
+A focused Win32 profile can redirect `ExitProcess` and `TerminateProcess` to `XboxWin32LoaderTrace.dll` to record the exit API, code, and caller. For a self-exit with `0xFFFFFFFF`, the adapter also attempts to record up to eight module-relative frames from the terminating thread. A trace can show a direct exit from an engine worker. When the engine returns through `main` first, the stack only shows the remaining runtime frames. The trace reports when the stack capture API is unavailable.
+
 ## Collect and measure
 
 `--output` creates a new local directory. Available files depend on which diagnostics the signed package enables.

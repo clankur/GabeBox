@@ -10,6 +10,7 @@
 
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
+static volatile LONG exitStackObserved;
 static volatile LONG workingDirectoryStarted;
 static volatile LONG originalImageObserved;
 static volatile LONG assetEvents;
@@ -375,13 +376,45 @@ static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
     SetLastError(error);
 }
 
+static void RecordExitStack(void) {
+    if (InterlockedExchange(&exitStackObserved, 1)) return;
+    const DWORD error = GetLastError();
+    typedef USHORT (WINAPI *CaptureStack)(ULONG, ULONG, PVOID *, PULONG);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    const CaptureStack capture = kernel ? (CaptureStack)(void *)GetProcAddress(kernel, "RtlCaptureStackBackTrace") : NULL;
+    PVOID frames[8];
+    const USHORT count = capture && findImage ? capture(1, ARRAYSIZE(frames), frames, NULL) : 0;
+    BOOL recorded = FALSE;
+    for (USHORT i = 0; i < count; ++i) {
+        char line[150];
+        char *frame = Hex(Text(line, "fault exit-stack frame=0x"), i, 2);
+        char *out = RecordImageAddress(frame, frames[i]);
+        if (out == frame) continue;
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+        recorded = TRUE;
+    }
+    if (!recorded) {
+        const char line[] = "fault exit-stack=unavailable\r\n";
+        AppendTrace(line, sizeof(line) - 1);
+    }
+    SetLastError(error);
+}
+
 DECLSPEC_NORETURN void WINAPI XboxExitProcess(UINT code) {
     RecordProcessExit("exit-process", code, __builtin_return_address(0));
+    if (code == MAXDWORD) RecordExitStack();
     ExitProcess(code);
 }
 
 BOOL WINAPI XboxTerminateProcess(HANDLE process, UINT code) {
     RecordProcessExit("terminate-process", code, __builtin_return_address(0));
+    if (code == MAXDWORD) {
+        const DWORD error = GetLastError();
+        const BOOL self = process == GetCurrentProcess();
+        SetLastError(error);
+        if (self) RecordExitStack();
+    }
     return TerminateProcess(process, code);
 }
 
