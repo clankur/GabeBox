@@ -9,5 +9,8 @@
     "XboxWin32LoaderTrace.dll",
     "XboxWin32Window.dll",
     "XboxWin32XInput910.dll"
-  ]
+  ],
+  "required_exports": {
+    "XboxWin32Window.dll": ["GetKeyboardState", "GetKeyState", "IsIconic", "IsZoomed", "TranslateMessage"]
+  }
 }

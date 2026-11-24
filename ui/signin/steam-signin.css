@@ -89,7 +89,7 @@ canvas { max-width: 40vw; margin-left: 2em; background: white; }
 
 
 html[data-steam-big-picture="true"] #library,
-html[data-steam-big-picture="true"] #sdl-menu,
-html[data-steam-big-picture="true"] #sdl-text,
+html[data-steam-big-picture="true"] #sdl-game:not([data-hosted-keyboard-controls]) #sdl-menu,
+html[data-steam-big-picture="true"] #sdl-game:not([data-hosted-keyboard-controls]) #sdl-text,
 html[data-steam-big-picture="true"] #xcom-game > button { display: none !important; }
 #big-picture-status { padding: 10vh 6vw; }

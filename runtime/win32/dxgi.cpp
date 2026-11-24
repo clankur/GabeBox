@@ -297,7 +297,11 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         ProducerCadenceTrace::PresentTiming timing;
         const bool measure = cadence_.Enabled() && !(flags & DXGI_PRESENT_TEST);
         if (measure) timing.entered = cadence_.Timestamp();
-        AcquireSRWLockExclusive(&lock_);
+        if (flags & DXGI_PRESENT_DO_NOT_WAIT) {
+            if (!TryAcquireSRWLockExclusive(&lock_)) return DXGI_ERROR_WAS_STILL_DRAWING;
+        } else {
+            AcquireSRWLockExclusive(&lock_);
+        }
         if (timing.entered) timing.locked = cadence_.Timestamp();
         HRESULT capture;
         unsigned index;

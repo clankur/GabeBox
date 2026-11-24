@@ -180,6 +180,71 @@ static std::vector<std::wstring> RelativeComponents(std::wstring_view path) {
     throw winrt::hresult_invalid_argument();
 }
 
+static void DateRoamingDefault(StorageFile const& file) {
+    // Games that reconcile settings by modification time should prefer an
+    // existing cloud copy over this first-run default.
+    constexpr std::uint64_t baseline = 119'600'064'000'000'000; // 1980-01-01 UTC as FILETIME ticks.
+    const FILETIME modified{static_cast<DWORD>(baseline), static_cast<DWORD>(baseline >> 32)};
+    CREATEFILE2_EXTENDED_PARAMETERS options{};
+    options.dwSize = sizeof(options);
+    options.dwFileFlags = FILE_FLAG_OPEN_REPARSE_POINT;
+    const auto handle = CreateFile2(file.Path().c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING, &options);
+    if (handle == INVALID_HANDLE_VALUE) winrt::throw_last_error();
+    winrt::handle attributes(handle);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(attributes.get(), &info)) winrt::throw_last_error();
+    if (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+        throw winrt::hresult_access_denied();
+    if (!SetFileTime(attributes.get(), nullptr, nullptr, &modified)) winrt::throw_last_error();
+}
+
+static IAsyncOperation<bool> SeedRoamingDefault(StorageFolder folder, StorageFile seed) {
+    constexpr std::uint32_t maximumSize = 4096;
+    const auto length = (co_await seed.GetBasicPropertiesAsync()).Size();
+    if (!length || length > maximumSize) throw winrt::hresult_invalid_argument();
+    const auto bytes = co_await FileIO::ReadBufferAsync(seed);
+    if (bytes.Length() != length) throw winrt::hresult_invalid_argument();
+    const std::string_view text(reinterpret_cast<char const*>(bytes.data()), bytes.Length());
+    const auto line = text.find('\n');
+    if (line == text.npos) throw winrt::hresult_invalid_argument();
+    auto path = text.substr(0, line);
+    if (path.ends_with('\r')) path.remove_suffix(1);
+    if (path.size() > 220 || !path.ends_with(".ini") || path.find_first_not_of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./ -") != path.npos)
+        throw winrt::hresult_invalid_argument();
+    const auto content = text.substr(line + 1);
+    if (content.find_first_not_of(" \t\r\n") == content.npos ||
+            std::any_of(content.begin(), content.end(), [](unsigned char ch) {
+                return !(ch == '\t' || ch == '\r' || ch == '\n' || (ch >= ' ' && ch <= '~'));
+            })) throw winrt::hresult_invalid_argument();
+    const auto parts = RelativeComponents(winrt::to_hstring(path));
+    CheckType(folder, true);
+    for (size_t index = 0; index + 1 < parts.size(); ++index) {
+        folder = co_await folder.CreateFolderAsync(parts[index], CreationCollisionOption::OpenIfExists);
+        CheckType(folder, true);
+    }
+    const winrt::hstring filename(parts.back());
+    if (co_await folder.TryGetItemAsync(filename)) co_return false;
+
+    // Publish the complete file in one rename. Another launch or the game
+    // may create its own configuration while this file is being written.
+    auto temporary = co_await folder.CreateFileAsync(L"xbox-profile-default.tmp", CreationCollisionOption::GenerateUniqueName);
+    winrt::hresult failure = S_OK;
+    try {
+        const auto begin = bytes.data() + line + 1;
+        co_await FileIO::WriteBufferAsync(temporary, CryptographicBuffer::CreateFromByteArray({begin, begin + content.size()}));
+        DateRoamingDefault(temporary);
+        co_await temporary.RenameAsync(filename, NameCollisionOption::FailIfExists);
+    } catch (winrt::hresult_error const& error) {
+        failure = error.code();
+    }
+    if (failure == S_OK) co_return true;
+    co_await temporary.DeleteAsync(StorageDeleteOption::PermanentDelete);
+    if (failure == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) || failure == HRESULT_FROM_WIN32(ERROR_FILE_EXISTS))
+        co_return false;
+    winrt::throw_hresult(failure);
+}
+
 static std::wstring OpenInstall(std::wstring root, std::wstring_view relative) {
     CheckNativeType(root, true);
     for (const auto& part : RelativeComponents(relative)) {

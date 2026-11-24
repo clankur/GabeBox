@@ -294,6 +294,74 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "XboxWin32SteamDiscovery.dll").read_bytes(), feature)
         self.assertFalse((self.layout / "steam_api64.dll").exists())
 
+        adapter = "XboxWin32SteamDiscovery.dll"
+        required = ["SteamAPI_RestartAppIfNecessary", "SteamInternal_SteamAPI_Init"]
+        declaration = profile / f"steam-win32-adapters-{app}.json"
+        declaration.write_text(json.dumps({"build_id": build, "required_adapters": [],
+                                           "required_exports": {adapter: required}}))
+        with self.assertRaisesRegex(ValueError, "Invalid Win32 adapter export requirements"):
+            stage_trials(self.layout, [f"{app}={profile}"], template)
+        declaration.write_text(json.dumps({"build_id": build, "required_adapters": [adapter],
+                                           "required_exports": {adapter: required}}))
+
+        def adapter_image(names):
+            image = bytearray(0x600)
+            image[:2], image[0x80:0x84] = b"MZ", b"PE\0\0"
+            struct.pack_into("<I", image, 0x3c, 0x80)
+            struct.pack_into("<HH", image, 0x84, 0x8664, 1)
+            struct.pack_into("<HH", image, 0x94, 240, 0x2000)
+            optional = 0x98
+            struct.pack_into("<H", image, optional, 0x20b)
+            struct.pack_into("<II", image, optional + 56, 0x2000, 0x200)
+            struct.pack_into("<III", image, optional + 108, 16, 0x1000, 0x200)
+            struct.pack_into("<8sIIIIIIHHI", image, optional + 240, b".rdata", 0x400, 0x1000,
+                             0x400, 0x200, 0, 0, 0, 0, 0x40000040)
+            struct.pack_into("<5I", image, 0x214, len(names), len(names), 0x1040, 0x1050, 0x1060)
+            for index, name in enumerate(names):
+                offset = 0x280 + 64 * index
+                symbol = name.encode("ascii") + b"\0"
+                image[offset:offset + len(symbol)] = symbol
+                struct.pack_into("<I", image, 0x240 + 4 * index, 0x1300 + 16 * index)
+                struct.pack_into("<I", image, 0x250 + 4 * index, 0x1000 + offset - 0x200)
+                struct.pack_into("<H", image, 0x260 + 2 * index, index)
+            image[0x400:0x400 + len(feature)] = feature
+            return image
+
+        def package_adapter(image):
+            runtime = self.work / "sdk-adapter.appx"
+            with ZipFile(template) as baseline, ZipFile(runtime, "w") as package:
+                for member in baseline.namelist():
+                    package.writestr(member, image if member == adapter else baseline.read(member))
+            return runtime
+
+        stale = package_adapter(adapter_image(required[:1]))
+        with self.assertRaisesRegex(ValueError, "missing required Win32 exports: SteamInternal_SteamAPI_Init"):
+            stage_trials(self.layout, [f"{app}={profile}"], stale)
+
+        valid = adapter_image(required)
+        stage_trials(self.layout, [f"{app}={profile}"], package_adapter(valid))
+        self.assertEqual((self.layout / adapter).read_bytes(), valid)
+
+        for offset, value, error in (
+            (0x10c, 0x500, "outside the file-backed sections"),
+            (0x244, 0x4000, "invalid pe named export target"),
+            (0x244, 0x11ff, "invalid pe export forwarder"),
+            (0x254, 0x1080, "invalid pe export name ordering"),
+        ):
+            with self.subTest(error=error):
+                malformed = bytearray(valid)
+                struct.pack_into("<I", malformed, offset, value)
+                with self.assertRaisesRegex(ValueError, "(?i)" + error):
+                    stage_trials(self.layout, [f"{app}={profile}"], package_adapter(malformed))
+                self.assertEqual((self.layout / adapter).read_bytes(), valid)
+
+        forwarded = bytearray(valid)
+        struct.pack_into("<I", forwarded, 0x244, 0x11c0)
+        forwarder = b"AnotherAdapter.#5\0"
+        forwarded[0x3c0:0x3c0 + len(forwarder)] = forwarder
+        stage_trials(self.layout, [f"{app}={profile}"], package_adapter(forwarded))
+        self.assertEqual((self.layout / adapter).read_bytes(), forwarded)
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
@@ -664,6 +732,44 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "matching hosted build"):
             stage_trials(self.layout, trial, runtime)
 
+    def test_hosted_window_frame_requires_launch_support_and_window_exports(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        window, loader = "XboxWin32Window.dll", "XboxWin32LoaderTrace.dll"
+        (profile / f"steam-win32-adapters-{app}.json").write_text(json.dumps({
+            "build_id": build, "required_adapters": [window, loader]}))
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+        marker = f"steam-win32-window-frame-{app}.txt"
+        (profile / marker).touch()
+        runtime = self.work / "window-frame-runtime.appx"
+        variable = "XBOX_WIN32_HOSTED_WINDOW_FRAME\0".encode("utf-16le")
+        trial = [f"{app}={profile}"]
+        exports = b"AdjustWindowRectEx\0AdjustWindowRectExForDpi\0GetDpiForWindow\0"
+        for window_binary in (variable, variable + exports):
+            with ZipFile(runtime, "w") as package:
+                package.writestr(window, window_binary)
+                package.writestr(loader, variable)
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32Dxgi.dll"):
+                    package.writestr(name, b"runtime fixture")
+            if window_binary == variable:
+                with self.assertRaisesRegex(ValueError, "matching hosted build"):
+                    stage_trials(self.layout, trial, runtime)
+                (profile / f"steam-win32-dxgi-{app}.txt").touch()
+                with self.assertRaisesRegex(ValueError, "launch-scoped window frame support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+
     def test_publisher_opengl_requires_a_matching_hosted_profile_and_runtime(self):
         self.layout.mkdir()
         profile = self.work / "profile"
@@ -741,6 +847,29 @@ class BigPicturePackageTests(unittest.TestCase):
         (profile / marker).write_text("unscoped-path")
         with self.assertRaisesRegex(ValueError, "an empty marker"):
             stage_trials(self.layout, trial, runtime)
+
+        seed_name = f"steam-win32-roaming-default-{app}.txt"
+        seed = profile / seed_name
+        content = b"[input]\ninput-method=GameController\n"
+        seed.write_bytes(b"Game/config/config.ini\n" + content)
+        (profile / marker).unlink()
+        with self.assertRaisesRegex(ValueError, "a matching Roaming profile"):
+            stage_trials(self.layout, trial, runtime)
+        (profile / marker).touch()
+        for path in (b"../config.ini", b"Game/AUX/config.ini", b"Game/config.bin", b"/config.ini"):
+            seed.write_bytes(path + b"\n" + content)
+            with self.assertRaisesRegex(ValueError, "a relative INI path"):
+                stage_trials(self.layout, trial, runtime)
+        seed.write_bytes(b"Game/config/config.ini\n" + content)
+        with self.assertRaisesRegex(ValueError, "first-run Roaming defaults support"):
+            stage_trials(self.layout, trial, runtime)
+        self.assertFalse((self.layout / seed_name).exists())
+        with ZipFile(runtime, "w") as package:
+            package.writestr("XboxWin32Input.dll", b"input")
+            package.writestr(desktop, variable)
+            package.writestr("ProbeNative.dll", source_check + variable + "steam_shadow_roaming_default=".encode("utf-16le"))
+        stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / seed_name).read_bytes(), seed.read_bytes())
 
     def test_win32_system_companions_require_a_matching_runtime_and_top_level_dll(self):
         self.layout.mkdir()

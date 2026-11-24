@@ -29,10 +29,14 @@ dxgi_output=false
 dxgi_output_hosted=false
 win32_opengl=false
 wgl_loader=false
-window_properties=false
+window_control=false
+window_geometry=false
+window_frame=false
+window_keyboard=false
 d3d11_combined=false
 d3d11_hosted=false
 d3d11_hosted_output=false
+d3d11_nonblocking_present=false
 wasapi_desktop=false
 wasapi_async=false
 wasapi_hosted=false
@@ -105,14 +109,18 @@ case ${1:-} in
         desktop_documents=true
         shift
         ;;
-    --window-properties)
-        window_properties=true
+    --window-properties|--window-geometry|--window-frame|--window-keyboard)
+        window_control=true
+        if [[ $1 == --window-geometry ]]; then window_geometry=true; fi
+        if [[ $1 == --window-frame ]]; then window_frame=true; fi
+        if [[ $1 == --window-keyboard ]]; then window_keyboard=true; fi
         shift
         ;;
-    --d3d11-combined|--d3d11-hosted|--d3d11-hosted-output)
+    --d3d11-combined|--d3d11-hosted|--d3d11-hosted-output|--d3d11-nonblocking-present)
         d3d11_combined=true
         if [[ $1 != --d3d11-combined ]]; then d3d11_hosted=true; fi
         if [[ $1 == --d3d11-hosted-output ]]; then d3d11_hosted_output=true; fi
+        if [[ $1 == --d3d11-nonblocking-present ]]; then d3d11_nonblocking_present=true; fi
         shift
         ;;
     --dxgi-composition)
@@ -149,7 +157,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --hosted-xinput-loader | --hosted-xinput-rumble | --controller-notification | --hosted-controller-notification | --wasapi-desktop | --wasapi-async | --wasapi-hosted | --steam-sdk-versioned | --raw-input | --ime-filename | --wic-stream | --gdi-plus | --ani-cursor | --ani-cursor-adapter | --desktop-window | --desktop-endpoints | --desktop-documents | --window-properties | --d3d11-combined | --d3d11-hosted | --d3d11-hosted-output | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | --dxgi-present-commit | --dxgi-d3d11-resize | --dxgi-output-native | --dxgi-output-hosted | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --hosted-xinput-loader | --hosted-xinput-rumble | --controller-notification | --hosted-controller-notification | --wasapi-desktop | --wasapi-async | --wasapi-hosted | --steam-sdk-versioned | --raw-input | --ime-filename | --wic-stream | --gdi-plus | --ani-cursor | --ani-cursor-adapter | --desktop-window | --desktop-endpoints | --desktop-documents | --window-properties | --window-geometry | --window-frame | --window-keyboard | --d3d11-combined | --d3d11-hosted | --d3d11-hosted-output | --d3d11-nonblocking-present | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | --dxgi-present-commit | --dxgi-d3d11-resize | --dxgi-output-native | --dxgi-output-hosted | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
@@ -257,13 +265,13 @@ linker=("${LLD_LINK:-lld-link}" /nologo /machine:x64 "/subsystem:$subsystem" /ap
 graphics_libs=()
 child="$src/child.c"
 child_output="$layout/child.exe"
-if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_properties || $d3d11_combined ||
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined ||
         $win32_imports || $desktop_window || $hosted_xinput || $controller_notification ||
         $raw_input || $ime_filename || $ani_adapter || $steam_sdk_versioned; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
 fi
-if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_properties || $d3d11_combined; then
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined; then
     for source in window window-gl window-monitor; do
         "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
     done
@@ -279,7 +287,7 @@ if $dxgi_window || $dxgi_output_hosted || $d3d11_hosted; then
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/dxgi.def" "/out:$layout/XboxWin32Dxgi.dll" \
         "/implib:$build/XboxWin32Dxgi.lib" "$build/dxgi.obj" "$build/dxgi-frame.obj" "$windows_app"
 fi
-if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_loader; then
+if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_loader || $window_frame; then
     "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 \
         "/def:$repo/runtime/win32/ntdll-eh.def" "/out:$build/ntdll-eh.lib"
     "${win32_compiler[@]}" -fms-extensions -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
@@ -387,8 +395,8 @@ elif $controller_notification; then
     if $hosted_controller_notify; then child_output="$build/standard-controller-notification.exe"; fi
 elif $wasapi_desktop || $wasapi_async || $wasapi_hosted; then
     child="$src/wasapi-child.cpp"
-elif $win32_opengl || $window_properties || $d3d11_combined; then
-    python3 - "$build" "$window_bindings" "$win32_opengl" "$wgl_loader" <<'PY'
+elif $win32_opengl || $window_control || $d3d11_combined; then
+    python3 - "$build" "$window_bindings" "$win32_opengl" "$wgl_loader" "$window_keyboard" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -401,6 +409,8 @@ if sys.argv[3] == "true":
         libraries["kernel32.dll"] = ["GetProcAddress", "LoadLibraryW"]
 else:
     libraries = {"user32.dll": libraries["user32.dll"]}
+if sys.argv[5] == "true":
+    libraries["user32.dll"] = [*libraries["user32.dll"], "MapVirtualKeyW"]
 for library, functions in libraries.items():
     (build / Path(library).with_suffix(".def")).write_text(
         f"LIBRARY {library}\nEXPORTS\n    " + "\n    ".join(functions) + "\n")
@@ -411,7 +421,13 @@ PY
         "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/$library.def" "/out:$build/$library.lib"
         graphics_libs+=("$build/$library.lib")
     done
-    if $window_properties; then
+    if $window_keyboard; then
+        child="$src/window-keyboard-child.c"
+    elif $window_frame; then
+        child="$src/window-frame-child.c"
+    elif $window_geometry; then
+        child="$src/window-geometry-child.c"
+    elif $window_control; then
         child="$src/window-properties-child.c"
     elif $d3d11_combined; then
         child="$src/d3d11-combined-child.cpp"
@@ -513,7 +529,7 @@ else
     done
     graphics_libs=("$build/OpenGL.lib" "$build/EGL.lib")
 fi
-if $win32_opengl || $window_properties || $hosted_xinput || $controller_notification ||
+if $win32_opengl || $window_control || $hosted_xinput || $controller_notification ||
         $raw_input || $ime_filename || $steam_sdk_versioned; then
     if $hosted_xinput_loader; then win32_compiler+=(-DPROBE_XINPUT_LOADER); fi
     if $hosted_xinput_rumble; then win32_compiler+=(-DPROBE_XINPUT_RUMBLE); fi
@@ -534,6 +550,7 @@ elif $dxgi_composition || $dxgi_output || $wic_stream || $gdi_plus || $ani_curso
     if $dxgi_output_hosted; then child_flags+=(-DPROBE_DXGI_OUTPUT_HOSTED); fi
     if $d3d11_hosted; then child_flags+=(-DPROBE_D3D11_HOSTED); fi
     if $d3d11_hosted_output; then child_flags+=(-DPROBE_D3D11_HOSTED_OUTPUT); fi
+    if $d3d11_nonblocking_present; then child_flags+=(-DPROBE_D3D11_NONBLOCKING_PRESENT); fi
     if $wasapi_async; then child_flags+=(-DPROBE_WASAPI_ASYNC); fi
     if $wasapi_hosted; then child_flags+=(-DPROBE_WASAPI_HOSTED); fi
     if $ani_cursor; then child_flags+=(-I"$build"); fi
@@ -581,9 +598,9 @@ if $hosted_xinput && ! $hosted_xinput_loader; then
 EOF
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/xinput-control-bindings.json" "$layout/child.exe"
 fi
-if $win32_opengl || $window_properties || $d3d11_combined || $hosted_xinput_loader || $hosted_controller_notify; then
+if $win32_opengl || $window_control || $d3d11_combined || $hosted_xinput_loader || $hosted_controller_notify; then
     python3 - "$repo" "$child_output" "$window_bindings" "$build/window-control-bindings.json" \
-        "$win32_opengl" "$d3d11_hosted" "$hosted_xinput_loader" "$hosted_controller_notify" "$wgl_loader" <<'PY'
+        "$win32_opengl" "$d3d11_hosted" "$hosted_xinput_loader" "$hosted_controller_notify" "$wgl_loader" "$window_frame" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -607,6 +624,8 @@ if sys.argv[8] == "true":
     loader_bindings = {"LoadLibraryA", "LoadLibraryW", "GetProcAddress"}
 if sys.argv[9] == "true":
     rules.pop("kernel32.dll")
+    loader_bindings = {"LoadLibraryW", "GetProcAddress"}
+if sys.argv[10] == "true":
     loader_bindings = {"LoadLibraryW", "GetProcAddress"}
 used = {}
 for lookup, name, iat, _ in image.import_descriptors():

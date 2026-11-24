@@ -110,6 +110,26 @@ CASES = {
         'Check frame continuity after a rejected resize and a new GPU generation after a successful resize.',
         CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
     ),
+    'd3d11-nonblocking-present': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted D3D11 nonblocking present control',
+        'Check Present and Present1 rejection while a resize holds the hosted chain lock.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'window-geometry': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted window geometry and style control',
+        'Check committed client geometry, position messages, and window style transitions.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'window-frame': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted window frame and DPI control',
+        'Check scoped DPI lookup and exact client dimensions when switching to a windowed style.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'window-keyboard': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted window keyboard control',
+        'Check mailbox key and Unicode text delivery, key state and focus reset.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
     'wgl-loader': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Dynamic hosted WGL control',
         'Check hosted pixel formats, OpenGL export selection, and core-context rendering.',
@@ -138,5 +158,6 @@ PACKAGE_CASES = {
     case.package: key for key, case in CASES.items()
     if key not in ('named-pipe', 'steam-loader', 'wasapi-hosted', 'profile-folders', 'steam-sdk-versioned',
                    'dxgi-present-commit', 'dxgi-output-native', 'dxgi-output-hosted', 'd3d11-hosted-output',
-                   'dxgi-d3d11-resize', 'wgl-loader')
+                   'dxgi-d3d11-resize', 'd3d11-nonblocking-present', 'window-geometry', 'window-frame',
+                   'window-keyboard', 'wgl-loader')
 }

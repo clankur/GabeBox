@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #define XBOX_DESKTOP_DC ((HDC)(ULONG_PTR)0x584244000001ULL)
+#define XBOX_WINDOW_DPI 96
 
 /* Private HWND and HDC values belong to this backend. */
 typedef struct XboxWindow {
@@ -11,13 +12,16 @@ typedef struct XboxWindow {
     WNDPROC procedure;
     HINSTANCE instance;
     RECT bounds;
+    RECT normalBounds;
     DWORD style;
     DWORD extendedStyle;
     LONG_PTR userData;
     ATOM classAtom;
     UINT contexts;
+    UINT positionChange;
     int pixelFormat;
     BOOL destroying;
+    BOOL restoreMaximized;
     struct WindowProperty *properties;
 } XboxWindow;
 

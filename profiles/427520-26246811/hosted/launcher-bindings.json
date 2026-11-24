@@ -32,6 +32,7 @@
     "SHGetFolderPathW": "XboxWin32Desktop.dll"
   },
   "user32.dll": {
+    "AdjustWindowRectEx": "XboxWin32Window.dll",
     "ClientToScreen": "XboxWin32Window.dll",
     "CreateIconFromResourceEx": "XboxWin32Input.dll",
     "CreateWindowExW": "XboxWin32Window.dll",
@@ -47,6 +48,8 @@
     "GetDC": "XboxWin32Window.dll",
     "GetFocus": "XboxWin32Window.dll",
     "GetForegroundWindow": "XboxWin32Window.dll",
+    "GetKeyboardState": "XboxWin32Window.dll",
+    "GetKeyState": "XboxWin32Window.dll",
     "GetMonitorInfoA": "XboxWin32Window.dll",
     "GetMonitorInfoW": "XboxWin32Window.dll",
     "GetPropW": "XboxWin32Window.dll",
@@ -55,6 +58,8 @@
     "GetWindowLongPtrW": "XboxWin32Window.dll",
     "GetWindowLongW": "XboxWin32Window.dll",
     "GetWindowRect": "XboxWin32Window.dll",
+    "IsIconic": "XboxWin32Window.dll",
+    "IsZoomed": "XboxWin32Window.dll",
     "MonitorFromPoint": "XboxWin32Window.dll",
     "MonitorFromWindow": "XboxWin32Window.dll",
     "PeekMessageW": "XboxWin32Window.dll",
@@ -67,9 +72,11 @@
     "SetFocus": "XboxWin32Window.dll",
     "SetForegroundWindow": "XboxWin32Window.dll",
     "SetPropW": "XboxWin32Window.dll",
+    "SetWindowLongW": "XboxWin32Window.dll",
     "SetWindowLongPtrW": "XboxWin32Window.dll",
     "SetWindowPos": "XboxWin32Window.dll",
     "ShowWindow": "XboxWin32Window.dll",
+    "TranslateMessage": "XboxWin32Window.dll",
     "UnregisterClassW": "XboxWin32Window.dll"
   }
 }

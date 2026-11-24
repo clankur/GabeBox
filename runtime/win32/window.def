@@ -58,3 +58,12 @@ EXPORTS
     EnumDisplaySettingsA=XboxEnumDisplaySettingsA @56
     GetPixelFormat=XboxGetPixelFormat @57
     DescribePixelFormat=XboxDescribePixelFormat @58
+    SetWindowLongW=XboxSetWindowLongW @59
+    AdjustWindowRectEx=XboxAdjustWindowRectEx @60
+    AdjustWindowRectExForDpi=XboxAdjustWindowRectExForDpi @61
+    GetDpiForWindow=XboxGetDpiForWindow @62
+    IsIconic=XboxIsIconic @63
+    IsZoomed=XboxIsZoomed @64
+    GetKeyboardState=XboxGetKeyboardState @65
+    GetKeyState=XboxGetKeyState @66
+    TranslateMessage=XboxTranslateMessage @67

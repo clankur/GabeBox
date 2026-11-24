@@ -781,10 +781,19 @@ static FARPROC HostedDxgiProcedure(HMODULE module, const char *name) {
     return adapter ? GetProcAddress(adapter, name) : NULL;
 }
 
-static FARPROC HostedWglProcedure(const char *name) {
+static FARPROC HostedWindowProcedure(const char *name) {
     static PVOID volatile loaded;
     const HMODULE adapter = LoadSharedPackagedAdapter(&loaded, L"XboxWin32Window.dll");
     return adapter ? GetProcAddress(adapter, name) : NULL;
+}
+
+static FARPROC HostedWindowFrameProcedure(HMODULE module, const char *name) {
+    if (!(SameName(name, "AdjustWindowRectExForDpi") || SameName(name, "GetDpiForWindow")) ||
+            module != GetModuleHandleW(L"user32.dll")) return NULL;
+    WCHAR enabled[2];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_WINDOW_FRAME", enabled, ARRAYSIZE(enabled)) != 1 ||
+            enabled[0] != L'1') return NULL;
+    return HostedWindowProcedure(name);
 }
 
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
@@ -803,7 +812,7 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     if (module && (ULONG_PTR)name > 0xffffu) {
         if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l' &&
                 module == InterlockedCompareExchangePointer(&hostedOpenGlModule, NULL, NULL) && HostedWglEnabled()) {
-            const FARPROC hosted = HostedWglProcedure(name);
+            const FARPROC hosted = HostedWindowProcedure(name);
             if (hosted) {
                 const char trace[] = "asset opengl-wgl=hosted\r\n";
                 AppendTrace(trace, sizeof(trace) - 1);
@@ -824,6 +833,14 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 const char d3d11[] = "asset d3d11-combined=hosted\r\n";
                 if (name[0] == 'D') AppendTrace(d3d11, sizeof(d3d11) - 1);
                 else AppendTrace(dxgi, sizeof(dxgi) - 1);
+                if (!result) error = previous;
+                result = hosted;
+            }
+        } else if (name[0] == 'A' || name[0] == 'G') {
+            const FARPROC hosted = HostedWindowFrameProcedure(module, name);
+            if (hosted) {
+                const char trace[] = "asset window-frame=hosted\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
                 if (!result) error = previous;
                 result = hosted;
             }

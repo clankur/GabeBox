@@ -3,8 +3,9 @@
 import json
 from pathlib import Path
 import re
+import struct
 
-from build_tools.redirect_pe_imports import validate_patch_recipe
+from build_tools.redirect_pe_imports import PeImage, validate_patch_recipe
 from build_tools.stage_session import read_package_member
 from build_tools.verify_win32_source import read_profile, valid_win32_component
 
@@ -82,14 +83,20 @@ def read_adapter_requirements(path, app, build):
         declaration = json.loads(data)
     except ValueError as error:
         raise ValueError(f"Invalid Win32 adapter declaration JSON for AppID {app}.") from error
-    if (not isinstance(declaration, dict) or set(declaration) != {"build_id", "required_adapters"}
-            or declaration["build_id"] != build):
+    if (not isinstance(declaration, dict) or set(declaration) - {"build_id", "required_adapters", "required_exports"}
+            or declaration.get("build_id") != build):
         raise ValueError(f"The Win32 adapter declaration must match build {build} for AppID {app}.")
-    names = declaration["required_adapters"]
+    names = declaration.get("required_adapters")
     if not isinstance(names, list) or any(not isinstance(name, str) or name not in WIN32_ADAPTERS for name in names):
         raise ValueError(f"Unknown or invalid Win32 adapter declaration for AppID {app}.")
     if len(names) != len(set(names)):
         raise ValueError(f"Duplicate Win32 adapter declaration for AppID {app}.")
+    exports = declaration.get("required_exports", {})
+    if not isinstance(exports, dict) or any(
+            name not in names or not isinstance(symbols, list) or not symbols
+            or any(not isinstance(symbol, str) or not re.fullmatch(r"[!-~]{1,128}", symbol) for symbol in symbols)
+            or len(symbols) != len(set(symbols)) for name, symbols in exports.items()):
+        raise ValueError(f"Invalid Win32 adapter export requirements for AppID {app}.")
     return declaration
 
 
@@ -99,6 +106,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         return
     files = {}
     required_adapters = set()
+    required_exports = {}
 
     def stage_source_profile(name, path):
         if name in files:
@@ -120,11 +128,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     legacy_steam_sdk = False
     desktop_dxgi = False
     hosted_dxgi_output = False
+    hosted_window_frame = False
+    hosted_keyboard = False
     hosted_xinput = False
     hosted_controller_notify = False
     default_audio = False
     desktop_documents = False
     roaming_appdata = False
+    roaming_default = False
     storage_trace = False
     hashed_companions = False
     system_companions = False
@@ -162,12 +173,17 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             raise ValueError(f"The Win32 source profile does not include the trial build for AppID {app}.")
         adapter_name = f"steam-win32-adapters-{app}.json"
         profile_adapters = ()
+        profile_exports = {}
         if (root / adapter_name).is_file():
             declaration = read_adapter_requirements(root / adapter_name, app, fields[0])
             profile_adapters = declaration["required_adapters"]
             required_adapters.update(profile_adapters)
+            profile_exports = declaration.get("required_exports", {})
+            for name, symbols in profile_exports.items():
+                required_exports.setdefault(name, set()).update(symbols)
             files[adapter_name] = json.dumps(declaration, separators=(",", ":")).encode("ascii")
-        if fields[2:3] == ["opengl3"] and not any(fields[3:4]):
+        publisher_opengl = fields[2:3] == ["opengl3"] and not any(fields[3:4])
+        if publisher_opengl:
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
             if (source_profile is None or fields[6:7] != ["loader-trace"] or not hosted.is_file()
                     or hosted.read_text(encoding="ascii") != fields[0]
@@ -230,6 +246,29 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                                  f"and declared Window and DXGI adapters for AppID {app}.")
             files[dxgi_output_marker] = b""
             hosted_dxgi_output = True
+        window_frame_marker = f"steam-win32-window-frame-{app}.txt"
+        if (root / window_frame_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / window_frame_marker).stat().st_size or (dxgi_marker not in files and not publisher_opengl)
+                    or source_profile is None or fields[6:7] != ["loader-trace"] or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]
+                    or not {"XboxWin32Window.dll", "XboxWin32LoaderTrace.dll"}.issubset(profile_adapters)):
+                raise ValueError(f"Hosted window frame needs a matching hosted build, source profile, loader trace, "
+                                 f"and declared Window and LoaderTrace adapters for AppID {app}.")
+            files[window_frame_marker] = b""
+            hosted_window_frame = True
+        keyboard_marker = f"steam-win32-hosted-keyboard-{app}.txt"
+        if (root / keyboard_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            exports = profile_exports.get("XboxWin32Window.dll", ())
+            if ((root / keyboard_marker).stat().st_size or dxgi_marker not in files or source_profile is None
+                    or fields[6:7] != ["loader-trace"] or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]
+                    or not {"GetKeyState", "GetKeyboardState", "TranslateMessage"}.issubset(exports)):
+                raise ValueError(f"Hosted keyboard needs a matching DXGI build, source profile, loader trace, "
+                                 f"and declared Window keyboard exports for AppID {app}.")
+            files[keyboard_marker] = b""
+            hosted_keyboard = True
         xinput_marker = f"steam-win32-hosted-xinput-{app}.txt"
         if (root / xinput_marker).is_file():
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
@@ -270,6 +309,20 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                                  f"and the declared desktop adapter for AppID {app}.")
             files[roaming_marker] = b""
             roaming_appdata = True
+        roaming_default_name = f"steam-win32-roaming-default-{app}.txt"
+        if (root / roaming_default_name).is_file():
+            with (root / roaming_default_name).open("rb") as source:
+                seed = source.read(4097)
+            path, newline, content = seed.partition(b"\n")
+            path = path.removesuffix(b"\r")
+            if (roaming_marker not in files or len(seed) > 4096 or not newline or not path.endswith(b".ini")
+                    or not re.fullmatch(rb"[A-Za-z0-9_./ -]{1,220}", path)
+                    or any(not valid_win32_component(part) for part in path.decode("ascii").split("/"))
+                    or not re.fullmatch(rb"[\x09\x0a\x0d\x20-\x7e]+", content) or not content.strip()):
+                raise ValueError(f"The Roaming default needs a matching Roaming profile, a relative INI path, "
+                                 f"and ASCII settings for AppID {app}.")
+            files[roaming_default_name] = path + newline + content
+            roaming_default = True
         for option in ("working-directory", "original-executable", "dynamic-companions"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
@@ -402,12 +455,33 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         optional.add("XboxWin32DisplayConfig.dll")
     for name in sorted(required_adapters | (optional & available)):
         files[name] = read_package_member(package, name)
+    for name, symbols in sorted(required_exports.items()):
+        try:
+            actual = PeImage(files[name], read_only=True).named_exports()
+        except (ValueError, struct.error) as error:
+            raise ValueError(f"Cannot inspect Win32 adapter exports in {name}: {error}") from error
+        missing = symbols - actual
+        if missing:
+            raise ValueError(f"{name} is missing required Win32 exports: {', '.join(sorted(missing))}.")
 
     native = read_package_member(package, "ProbeNative.dll")
+    if roaming_default and "steam_shadow_roaming_default=".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact with first-run Roaming defaults support.")
+    if hosted_window_frame:
+        variable = "XBOX_WIN32_HOSTED_WINDOW_FRAME\0".encode("utf-16le")
+        window = files["XboxWin32Window.dll"]
+        if (any(variable not in component for component in (native, files["XboxWin32LoaderTrace.dll"], window))
+                or any(symbol not in window for symbol in (b"AdjustWindowRectEx\0", b"AdjustWindowRectExForDpi\0",
+                                                          b"GetDpiForWindow\0"))):
+            raise ValueError("Use a Steam Core artifact with launch-scoped window frame support.")
     if hosted_dxgi_output:
         variable = "XBOX_WIN32_HOSTED_DXGI_OUTPUT\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Dxgi.dll"]:
             raise ValueError("Use a Steam Core artifact with launch-scoped DXGI output support.")
+    if hosted_keyboard:
+        variable = "XBOX_WIN32_HOSTED_KEYBOARD\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32Window.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped keyboard support.")
     if hosted_xinput:
         variable = "XBOX_WIN32_HOSTED_XINPUT\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:

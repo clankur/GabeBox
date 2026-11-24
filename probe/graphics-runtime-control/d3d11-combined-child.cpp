@@ -1,5 +1,8 @@
 #include <d3d11.h>
 #include <wrl/client.h>
+#ifdef PROBE_D3D11_NONBLOCKING_PRESENT
+#include <d3d11_4.h>
+#endif
 
 #include "../../runtime/shared/child-process.h"
 
@@ -90,6 +93,103 @@ static unsigned int SelectOutput(ComPtr<IDXGIAdapter>& adapter, LUID& luid) {
             adapter->EnumOutputs(1, &extra) != nativeAdapter->EnumOutputs(1, nativeOutput.ReleaseAndGetAddressOf()) ||
             output->WaitForVBlank() != DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) return 0x751b0000u;
     return 0;
+}
+#endif
+
+#ifdef PROBE_D3D11_NONBLOCKING_PRESENT
+struct ResizeRequest {
+    IDXGISwapChain* chain;
+    HRESULT result = E_PENDING;
+    volatile LONG started = 0;
+    volatile LONG completed = 0;
+};
+
+static void CALLBACK ResizeOnWorker(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) {
+    auto& request = *static_cast<ResizeRequest*>(context);
+    InterlockedExchange(&request.started, 1);
+    request.result = request.chain->ResizeBuffers(0, 80, 80, DXGI_FORMAT_UNKNOWN, 0);
+    InterlockedExchange(&request.completed, 1);
+}
+
+static void CALLBACK EndStalledControl(PTP_CALLBACK_INSTANCE, void*, PTP_TIMER) {
+    TerminateProcess(GetCurrentProcess(), 0x752d0000u);
+}
+
+static unsigned int CheckBusyPresents(ResizeRequest& request, IDXGISwapChain1* chain1, PTP_WORK work) {
+    constexpr UINT flags = DXGI_PRESENT_TEST | DXGI_PRESENT_DO_NOT_WAIT;
+    const DXGI_PRESENT_PARAMETERS parameters{};
+    const HRESULT idle = request.chain->Present(0, flags);
+    if (FAILED(idle)) return 0x75230000u | (static_cast<UINT>(idle) & 0xffffu);
+    const HRESULT idle1 = chain1->Present1(0, flags, &parameters);
+    if (FAILED(idle1)) return 0x75240000u | (static_cast<UINT>(idle1) & 0xffffu);
+
+    // The caller owns the device lock. The worker acquires the hosted lock
+    // and then waits below it in native ResizeBuffers.
+    SubmitThreadpoolWork(work);
+    const auto deadline = GetTickCount64() + 1000;
+    while (GetTickCount64() < deadline) {
+        if (InterlockedCompareExchange(&request.completed, 0, 0)) return 0x75250000u;
+        if (InterlockedCompareExchange(&request.started, 0, 0)) {
+            const HRESULT result = request.chain->Present(0, flags);
+            if (result == DXGI_ERROR_WAS_STILL_DRAWING) {
+                if (request.chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT) != DXGI_ERROR_WAS_STILL_DRAWING)
+                    return 0x752c0000u;
+                if (chain1->Present1(0, flags, &parameters) != DXGI_ERROR_WAS_STILL_DRAWING ||
+                        InterlockedCompareExchange(&request.completed, 0, 0)) return 0x75260000u;
+                return 0;
+            }
+            if (FAILED(result)) return 0x75270000u | (static_cast<UINT>(result) & 0xffffu);
+        }
+        SleepEx(1, FALSE);
+    }
+    return 0x75280000u;
+}
+
+static unsigned int CheckResizeRecovery(const ResizeRequest& request, IDXGISwapChain1* chain) {
+    if (request.result != S_OK) return 0x75290000u | (static_cast<UINT>(request.result) & 0xffffu);
+    DXGI_SWAP_CHAIN_DESC description{};
+    if (FAILED(chain->GetDesc(&description)) || description.BufferDesc.Width != 80 ||
+            description.BufferDesc.Height != 80) return 0x752a0000u;
+    const DXGI_PRESENT_PARAMETERS parameters{};
+    const HRESULT result = chain->Present1(0, DXGI_PRESENT_TEST | DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+    return FAILED(result) ? 0x752b0000u | (static_cast<UINT>(result) & 0xffffu) : 0;
+}
+
+static unsigned int VerifyNonblockingPresent(IDXGISwapChain* chain, ID3D11DeviceContext* context) {
+    ComPtr<IDXGISwapChain1> chain1;
+    ComPtr<ID3D11Multithread> multithread;
+    if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain1))) || !chain1 ||
+            FAILED(context->QueryInterface(IID_PPV_ARGS(&multithread))) || !multithread) return 0x75200000u;
+    ResizeRequest request{chain};
+    const PTP_WORK work = CreateThreadpoolWork(ResizeOnWorker, &request, nullptr);
+    if (!work) return 0x75220000u | (GetLastError() & 0xffffu);
+    const BOOL previous = multithread->SetMultithreadProtected(TRUE);
+    if (!multithread->GetMultithreadProtected()) {
+        multithread->SetMultithreadProtected(previous);
+        CloseThreadpoolWork(work);
+        return 0x75210000u;
+    }
+    const PTP_TIMER watchdog = CreateThreadpoolTimer(EndStalledControl, nullptr, nullptr);
+    if (!watchdog) {
+        const auto error = GetLastError();
+        multithread->SetMultithreadProtected(previous);
+        CloseThreadpoolWork(work);
+        return 0x752e0000u | (error & 0xffffu);
+    }
+    constexpr ULONGLONG due = static_cast<ULONGLONG>(-50'000'000LL);
+    FILETIME timeout{static_cast<DWORD>(due), static_cast<DWORD>(due >> 32)};
+    SetThreadpoolTimer(watchdog, &timeout, 0, 0);
+    multithread->Enter();
+    auto error = CheckBusyPresents(request, chain1.Get(), work);
+    multithread->Leave();
+    WaitForThreadpoolWorkCallbacks(work, FALSE);
+    CloseThreadpoolWork(work);
+    multithread->SetMultithreadProtected(previous);
+    if (!error) error = CheckResizeRecovery(request, chain1.Get());
+    SetThreadpoolTimer(watchdog, nullptr, 0, 0);
+    WaitForThreadpoolTimerCallbacks(watchdog, TRUE);
+    CloseThreadpoolTimer(watchdog);
+    return error;
 }
 #endif
 
@@ -184,6 +284,10 @@ static unsigned int TryCombinedCall() {
         &failedLevel, &failedContext);
     if (invalidResult != DXGI_ERROR_INVALID_CALL) return 0x737c0000u | (static_cast<UINT>(invalidResult) & 0xffffu);
     if (failedChain || failedDevice || failedContext || failedLevel) return 0x737d0000u;
+#endif
+#ifdef PROBE_D3D11_NONBLOCKING_PRESENT
+    buffer.Reset();
+    if (const auto error = VerifyNonblockingPresent(chain.Get(), context.Get())) return error;
 #endif
     return PROBE_EXPECTED_CHILD_EXIT;
 }

@@ -2270,6 +2270,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowLocalCrashReports = false;
     bool shadowDxgi = false;
     bool shadowDxgiOutput = false;
+    bool shadowWindowFrame = false;
+    bool shadowHostedKeyboard = false;
     bool shadowWgl = false;
     bool shadowHostedXInput = false;
     bool shadowHostedControllerNotify = false;
@@ -2282,6 +2284,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowDocuments = false;
     bool shadowRoamingAppData = false;
     StorageFile shadowRecipe{nullptr};
+    StorageFile shadowRoamingDefault{nullptr};
     StorageFile shadowFiles{nullptr};
     StorageFile shadowSteamSdk{nullptr};
     StorageFile shadowLegacySteamSdk{nullptr};
@@ -2349,6 +2352,22 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     shadowDxgiOutput = true;
                 }
                 if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-window-frame-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowWindowFrame = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-hosted-keyboard-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowHostedKeyboard = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-hosted-xinput-" + std::to_wstring(app) + L".txt")) {
                     const auto file = marker.try_as<StorageFile>();
                     if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
@@ -2412,6 +2431,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     }
                     shadowRoamingAppData = true;
                 }
+                if (auto seed = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-roaming-default-" + std::to_wstring(app) + L".txt")) {
+                    shadowRoamingDefault = seed.try_as<StorageFile>();
+                    if (!shadowRoamingDefault || !shadowRoamingAppData) {
+                        shadowRoamingDefault = nullptr;
+                        report += L"steam_shadow_roaming_default=invalid-profile\r\n";
+                    }
+                }
                 auto shaderCache = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-godot-shader-cache-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
                 if (shaderCache) {
@@ -2449,6 +2476,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (shadowDxgi && (!shadowRecipe || !shadowRuntime.empty() || !shadowRenderer.empty() ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
                         (shadowDxgiOutput && (!shadowDxgi || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) ||
+                        (shadowWindowFrame && ((!shadowDxgi && !shadowWgl) || !sourceProfile || !shadowTrace ||
+                            !hostedSurfaceless || !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
+                        (shadowHostedKeyboard && (!shadowDxgi || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) ||
                         (shadowWgl && (!shadowRecipe || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll") ||
@@ -2878,6 +2910,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     winrt::handle slayProcess;
     winrt::handle shadowProcess;
     steam_win32_stage::StageFolder shadowStage;
+    StorageFolder shadowRoamingFolder{nullptr};
+    std::array<StorageFolder, 3> shadowRoamingParents{nullptr, nullptr, nullptr};
     std::wstring shadowRoaming;
     std::wstring shadowCache;
     std::wstring shadowDocumentsPath;
@@ -2895,6 +2929,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto session = liveSteamSession;
             if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
             shadowOwner = session->accountId;
+            if (shadowRoamingDefault && shadowOwner != sourceOwner)
+                co_return winrt::hstring(L"steam_launch=session-lost\r\n");
         }
         auto profiles = co_await root.CreateFolderAsync(L"SteamWin32TrialProfiles", CreationCollisionOption::OpenIfExists);
         auto account = co_await profiles.CreateFolderAsync(winrt::to_hstring(shadowOwner), CreationCollisionOption::OpenIfExists);
@@ -2908,6 +2944,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 if (shadowRoaming.empty() || shadowRoaming.size() >= MAX_PATH)
                     winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
                 steam_win32_stage::CheckNativeType(shadowRoaming, true);
+                if (shadowRoamingDefault) {
+                    shadowRoamingFolder = roaming;
+                    shadowRoamingParents = {profiles, account, profile};
+                }
             } catch (winrt::hresult_error const& error) {
                 co_return winrt::hstring(report + L"steam_launch=shadow-roaming-appdata-error\r\nsteam_shadow_win32=" +
                     Hex(error.code()) + L"\r\n");
@@ -2995,6 +3035,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (!fresh || !fresh->installed || (!expectedBuild.empty() && fresh->buildId != expectedBuild) ||
                 (sourceProfile && fresh->installDir != location->app.installDir))
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+    }
+    if (shadowRoamingDefault) {
+        try {
+            for (const auto& folder : shadowRoamingParents) steam_win32_stage::CheckType(folder, true);
+            const bool seeded = co_await steam_win32_stage::SeedRoamingDefault(shadowRoamingFolder, shadowRoamingDefault);
+            report += seeded ? L"steam_shadow_roaming_default=created\r\n" : L"steam_shadow_roaming_default=existing\r\n";
+        } catch (winrt::hresult_error const& error) {
+            report += L"steam_shadow_roaming_default=unavailable\r\nsteam_shadow_roaming_default_hresult=" +
+                Hex(error.code()) + L"\r\n";
+        }
     }
     if (hostedSdl && app == dwarfFortressAppId) {
         try {
@@ -3256,6 +3306,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_STREAMLINE_UNAVAILABLE", shadowStreamlineUnavailable ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_WINDOW_FRAME", shadowWindowFrame && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_KEYBOARD", shadowHostedKeyboard && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_WGL", shadowWgl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_XINPUT", shadowHostedXInput ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY", shadowHostedControllerNotify ? L"1" : L""},
@@ -3290,6 +3342,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
             if (shadowWgl) report += L"steam_shadow_wgl=hosted\r\n";
             if (shadowDxgiOutput) report += L"steam_shadow_dxgi_output=hosted-fallback\r\n";
+            if (shadowWindowFrame) report += L"steam_shadow_window_frame=hosted\r\n";
+            if (shadowHostedKeyboard) report += L"steam_shadow_keyboard=hosted\r\n";
             if (shadowDocuments) report += L"steam_shadow_documents=profile\r\n";
             if (shadowRoamingAppData) report += L"steam_shadow_roaming_appdata=profile\r\n";
             if (shadowLocalCrashReports) report += L"steam_shadow_crash_reporting=local\r\n";

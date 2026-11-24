@@ -59,8 +59,9 @@ def parse_rules(document):
 
 
 class PeImage:
-    def __init__(self, image, *, allow_signed_source=False):
+    def __init__(self, image, *, allow_signed_source=False, read_only=False):
         self.image = image
+        self.read_only = read_only
         pe = self.word(0x3c)
         if image[:2] != b"MZ" or image[pe:pe + 4] != b"PE\0\0" or self.short(pe + 4) != 0x8664:
             raise ValueError("Use a Windows x64 PE executable or DLL.")
@@ -83,11 +84,15 @@ class PeImage:
                 raise ValueError("Use a complete PE file with its original sections.")
             self.sections.append((virtual_size, address, raw_size, raw))
         self.new_section_offset = self.section_table + count * 40
+        self.certificate_offset = None
+        if read_only:
+            if self.new_section_offset > min(self.headers_size, len(image)):
+                raise ValueError("Invalid PE section table extent.")
+            return
         if self.new_section_offset + 40 > min(self.headers_size, len(image)):
             raise ValueError("The PE headers have no room for another section.")
         if self.word(self.directory(11)) or self.word(self.directory(11) + 4):
             raise ValueError("Use a PE without a bound import table.")
-        self.certificate_offset = None
         offset, size = struct.unpack_from("<II", image, self.directory(4))
         if offset or size:
             if not allow_signed_source:
@@ -152,6 +157,43 @@ class PeImage:
             raise ValueError("Unterminated PE import name.")
         self.locate(rva, end - offset + 1)
         return self.image[offset:end].decode("ascii")
+
+    def named_exports(self):
+        address, size = struct.unpack_from("<II", self.image, self.directory(0))
+        if not address and not size:
+            return set()
+        image_size = self.word(self.optional + 56)
+        if not address or size < 40 or address + size > image_size:
+            raise ValueError("Invalid PE export directory.")
+        directory = self.locate(address, size)
+        functions_count, names_count, functions, names, ordinals = struct.unpack_from("<5I", self.image, directory + 20)
+        if not names_count:
+            return set()
+        functions = self.locate(functions, functions_count * 4)
+        names = self.locate(names, names_count * 4)
+        ordinals = self.locate(ordinals, names_count * 2)
+        exports = set()
+        previous = ""
+        for index in range(names_count):
+            ordinal = self.short(ordinals + index * 2)
+            if ordinal >= functions_count:
+                raise ValueError("Invalid PE named export ordinal.")
+            target = self.word(functions + ordinal * 4)
+            if address <= target < address + size:
+                forwarder = self.string(target)
+                module, _, symbol = forwarder.rpartition(".")
+                if (len(forwarder) + 1 > address + size - target or not SYMBOL.fullmatch(module)
+                        or not SYMBOL.fullmatch(symbol) or (symbol.startswith("#") and not symbol[1:].isdigit())):
+                    raise ValueError("Invalid PE export forwarder.")
+            elif not 0 < target < image_size or not any(start <= target < start + max(virtual_size, raw_size)
+                                                        for virtual_size, start, raw_size, _ in self.sections):
+                raise ValueError("Invalid PE named export target.")
+            name = self.string(self.word(names + index * 4))
+            if name <= previous:
+                raise ValueError("Invalid PE export name ordering.")
+            exports.add(name)
+            previous = name
+        return exports
 
     def import_descriptors(self):
         table = self.word(self.directory(1))
@@ -317,6 +359,8 @@ class PeImage:
                 offset += length
 
     def redirect(self, rules, *, omit_dwarf_mapping=False, trim_dwarf=False):
+        if self.read_only:
+            raise ValueError("Cannot redirect imports on a read-only PE image.")
         omit_dwarf_mapping = omit_dwarf_mapping or trim_dwarf
         if self.certificate_offset is not None and omit_dwarf_mapping:
             raise ValueError("Build the signed-source recipe without a DWARF layout change.")

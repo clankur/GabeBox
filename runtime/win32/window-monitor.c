@@ -88,7 +88,7 @@ int WINAPI XboxGetDeviceCaps(HDC dc, int index) {
     case TECHNOLOGY: return DT_RASDISPLAY;
     case HORZRES: case DESKTOPHORZRES: return bounds.right;
     case VERTRES: case DESKTOPVERTRES: return bounds.bottom;
-    case LOGPIXELSX: case LOGPIXELSY: return 96;
+    case LOGPIXELSX: case LOGPIXELSY: return XBOX_WINDOW_DPI;
     case BITSPIXEL: return 32;
     case PLANES: return 1;
     case VREFRESH: return 60;
