@@ -1,6 +1,17 @@
 (function () {
     "use strict";
-    var session;
+    var session, releasedGame;
+
+    function reopenReleasedGame(appId) {
+        if (!releasedGame || releasedGame.appId !== appId) return null;
+        var game = releasedGame;
+        if (!game.returning) {
+            game.returning = game.reopen();
+            function clear() { if (releasedGame === game) releasedGame = null; }
+            game.returning.then(clear, clear);
+        }
+        return game.returning;
+    }
 
     function switchView(to, from) {
         if (to === from) return Promise.resolve();
@@ -240,6 +251,23 @@
             return raising;
         }
         function played(appId) { return !failed && playing && presented && appId === playingApp; }
+        function releaseRendererFor(appId) {
+            if (!primaryXaml) return Promise.resolve();
+            return Promise.resolve().then(function () {
+                return Windows.ApplicationModel.Package.current.installedLocation
+                    .tryGetItemAsync("steam-win32-release-renderer-" + appId + ".txt");
+            }).then(function (marker) {
+                if (!marker || failed) return;
+                releasedGame = {appId: appId, reopen: function () { return open(broker, onFailure); }};
+                return finish("game-renderer-released", true).then(function () {
+                    // Allow the WebView processes to release their commit before game startup.
+                    return new Promise(function (resolve) { setTimeout(resolve, 2000); });
+                }).then(function () {
+                    sampleMemory("released_for_game");
+                    record("game-renderer-released", true);
+                });
+            }, function () { /* A package without an available opt-in keeps the shell resident. */ });
+        }
         function playGame(appId) {
             if (raising) return Promise.resolve("busy");
             if (playing) {
@@ -255,7 +283,8 @@
                     visible = false;
                     setGameForeground(true);
                     sampleMemory("handoff");
-                    return record("game-window-backgrounded");
+                    record("game-window-backgrounded");
+                    return releaseRendererFor(appId);
                 });
             }).then(function (outcome) {
                 if (outcome === "presented" || outcome === "window-ready") {
@@ -278,6 +307,8 @@
             });
         }
         function resume(exitedApp) {
+            var reopening = reopenReleasedGame(exitedApp || playingApp);
+            if (reopening) return reopening;
             if (warming && !settled) return Promise.resolve();
             if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
             var returning = playing;
@@ -666,7 +697,9 @@
         samplePresenter: function (stage) {
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);
         },
-        resume: function (appId) { return session ? session.resume(appId) : Promise.resolve(); },
+        resume: function (appId) {
+            return reopenReleasedGame(appId) || (session ? session.resume(appId) : Promise.resolve());
+        },
         playConfiguredTrial: function (appId) {
             return session ? session.playConfiguredTrial(appId) : Promise.resolve("unavailable");
         },

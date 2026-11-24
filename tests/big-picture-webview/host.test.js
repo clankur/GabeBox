@@ -7,7 +7,7 @@ const source = fs.readFileSync(require.resolve("../../ui/big-picture-webview/big
 const drain = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture({hostedApps = [], activationError = false, primary = false, xaml = false, warm = false, earlyLibrary = false,
-                  expected = 0, findRequest, openReport = async () => ({})} = {}) {
+                  expected = 0, findRequest, findInstalled = async () => null, openReport = async () => ({})} = {}) {
     let stage = "closed", poll, timeout;
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
@@ -35,6 +35,7 @@ function fixture({hostedApps = [], activationError = false, primary = false, xam
     vm.runInNewContext(source, {
         Date: {now: () => now}, window, BigPictureView: {Native: {Renderer: renderer}},
         Windows: {
+            ApplicationModel: {Package: {current: {installedLocation: {tryGetItemAsync: findInstalled}}}},
             System: {MemoryManager: memory},
             Foundation: {GuidHelper: {createNewGuid: () => "test"}},
             Storage: {
@@ -617,6 +618,51 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     assert.ok(app.reports.at(-1).includes("memory_first_frame_limit_bytes=1073741824"));
     assert.equal(app.opens(), 1);
     assert.equal(await app.shell.showForGame(1145360, 90, restore), false);
+});
+
+test("a signed hosted profile releases the primary renderer and reopens it for the owning game", async () => {
+    const appId = 42, lookups = [];
+    const app = fixture({primary: true, xaml: true, async findInstalled(name) {
+        lookups.push(name);
+        return name === "steam-win32-release-renderer-42.txt" ? {} : null;
+    }});
+    let launches = 0;
+    const ready = app.start({async play(_id, handoff) { await handoff(); launches++; return "presented"; }});
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    const play = app.shell.playConfiguredTrial(appId);
+    await drain();
+    assert.deepEqual(lookups, ["steam-win32-release-renderer-42.txt"]);
+    assert.equal(launches, 0);
+    assert.match(app.reports.at(-1), /status=game-renderer-released/);
+    app.expire();
+    assert.equal(await play, "presented");
+    await app.shell.resume();
+    await app.shell.resume(7);
+    assert.equal(app.owners.length, 1);
+    const returning = app.shell.resume(appId);
+    assert.equal(app.shell.resume(appId), returning);
+    await drain();
+    await app.advance("gamepad-ready");
+    await returning;
+    assert.equal(app.owners.length, 2);
+    assert.equal(launches, 1);
+});
+
+test("a failure after renderer release restores the library before reporting Play failed", async () => {
+    const app = fixture({primary: true, xaml: true, findInstalled: async () => ({})});
+    const ready = app.start({async play(_id, handoff) { await handoff(); return "failed"; }});
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    const play = app.shell.playConfiguredTrial(42);
+    await drain();
+    app.expire();
+    await drain();
+    await app.advance("gamepad-ready");
+    assert.equal(await play, "failed");
+    assert.equal(app.owners.length, 2);
 });
 
 test("a declined or rejected Resume preserves the running game's next attempt", async () => {

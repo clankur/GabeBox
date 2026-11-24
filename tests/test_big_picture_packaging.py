@@ -506,6 +506,13 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertFalse((self.layout / "D3D12").exists())
         self.assertEqual(json.loads((self.layout / "steam-win32-source-1817070.json").read_text()),
                          json.loads(source.read_text()))
+        release = profile / "steam-win32-release-renderer-1817070.txt"
+        release.touch()
+        with self.assertRaisesRegex(ValueError, "matching hosted build and source fingerprints"):
+            stage_trials(self.layout, [f"1817070={profile}"], template)
+        (self.layout / "steam-sdl-surfaceless-1817070.txt").write_text("14752622")
+        stage_trials(self.layout, [f"1817070={profile}"], template)
+        self.assertEqual((self.layout / release.name).read_bytes(), b"")
         files.write_text(pin + pin.lower())
         with self.assertRaisesRegex(ValueError, "duplicate companion path"):
             stage_trials(self.layout, [f"1817070={profile}"], template)
