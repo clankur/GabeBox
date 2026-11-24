@@ -89,6 +89,16 @@ python3 -m tools.xbox_deploy probe --case mouse-source --version "$version" --ti
 
 Move, click, and scroll with the physical mouse for 25 seconds after the control opens and leave the controller idle. The hosted app counts `MouseDevice.MouseMoved` callbacks and browser pointer events separately. If no nonzero relative delta arrives in the first 10 seconds and the host exposes a CoreWindow, it also tries pointer capture. The report includes document visibility, reported mouse capabilities, relative callbacks and deltas, browser event counts, and the available activation and capture results. The CLI passes when it observes `relative_motion=observed`. Browser events and hosted game delivery are separate results. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
 
+## Native game panel mouse capture
+
+Add an empty `fhd-mouse-source.txt` to the root of a test APPX layout containing the matching native presenter DLL and WinRT metadata. Install the signed build and open a hosted game through Big Picture. Leave the controller idle, move the physical mouse over the game, press and hold the left button while moving, release, and scroll.
+
+```sh
+python3 -m tools.xbox_deploy report --version "$version" --mouse-source
+```
+
+Capture a report before and after input while `visible=1`. Match `start_tick` between the observations. `registered=0x3f` indicates that all six subscriptions succeeded. The probe counts relative motion and CoreWindow mouse events after the game presents its first frame and while its panel is foreground. `panel_mouse_down` counts routed mouse presses. `capture_attempts` advances only during contact on that panel. `capture_hr=0` records a successful `SetPointerCapture` call and `release_hr=0` records a successful explicit release. A zero attempt count leaves capture untested. Track the game's mailbox alongside these counters to locate where input stopped. [Microsoft capture requirements](https://learn.microsoft.com/en-us/uwp/api/windows.ui.core.corewindow.setpointercapture)
+
 ## Xbox packaged process test
 
 This x64 UWP diagnostic calls `CreateProcessW` for one fixed executable bundled with the app. The helper returns `0x000051A7` when its entry point runs. The app displays the result and writes it to `LocalState/probe-report.txt`. It requires no Steam account, Valve files, or network access on the Xbox.

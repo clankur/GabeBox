@@ -921,6 +921,8 @@ def main():
                                 const='slay-console', help='summarize the publisher console diagnostic for this launch')
     report_variant.add_argument('--stardew-host', dest='report_file', action='store_const',
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
+    report_variant.add_argument('--mouse-source', dest='report_file', action='store_const',
+                                const='fhd-mouse-source.txt', help='read the opted-in foreground native mouse probe')
     report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     observe_command = commands.add_parser('observe', help='watch Steam startup or a game launch without controlling the Xbox')
