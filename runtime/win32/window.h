@@ -22,6 +22,7 @@ typedef struct XboxWindow {
     int pixelFormat;
     BOOL destroying;
     BOOL restoreMaximized;
+    BOOL messageOnly;
     struct WindowProperty *properties;
 } XboxWindow;
 

@@ -187,8 +187,10 @@ jobs:
                                     @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
               $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"
+                $unwindFlags = @()
+                if ($source -eq 'loader-trace') { $unwindFlags = @('-funwind-tables', '-fasynchronous-unwind-tables') }
                 & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `
-                  -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "runtime/win32/$source.c" -o $object
+                  @unwindFlags -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "runtime/win32/$source.c" -o $object
                 $object
               })
               $libraries = @($lib)

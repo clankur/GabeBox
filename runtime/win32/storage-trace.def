@@ -1,7 +1,9 @@
 LIBRARY XboxWin32StorageTrace
 EXPORTS
-    CreateDirectoryW=XboxTraceCreateDirectoryW
-    SetCurrentDirectoryW=XboxTraceSetCurrentDirectoryW
-    GetFileAttributesW=XboxTraceStorageAttributesW
-    ExitProcess=XboxTraceExitProcess
-    TerminateProcess=XboxTraceTerminateProcess
+    CreateDirectoryW=XboxTraceCreateDirectoryW @1
+    ExitProcess=XboxTraceExitProcess @2
+    GetFileAttributesW=XboxTraceStorageAttributesW @3
+    SetCurrentDirectoryW=XboxTraceSetCurrentDirectoryW @4
+    TerminateProcess=XboxTraceTerminateProcess @5
+    CreateFileW=XboxTraceStorageCreateFileW @6
+    GetFinalPathNameByHandleW=XboxTraceFinalPathName @7

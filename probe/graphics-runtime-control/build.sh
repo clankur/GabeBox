@@ -290,7 +290,8 @@ fi
 if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_loader || $window_frame; then
     "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 \
         "/def:$repo/runtime/win32/ntdll-eh.def" "/out:$build/ntdll-eh.lib"
-    "${win32_compiler[@]}" -fms-extensions -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
+    "${win32_compiler[@]}" -fms-extensions -funwind-tables -fasynchronous-unwind-tables \
+        -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/loader-trace.def" \
         "/out:$layout/XboxWin32LoaderTrace.dll" "/implib:$build/XboxWin32LoaderTrace.lib" \
         "$build/loader-trace.obj" "$windows_app" "$build/ntdll-eh.lib"

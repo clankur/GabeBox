@@ -198,6 +198,33 @@ static void DateRoamingDefault(StorageFile const& file) {
     if (!SetFileTime(attributes.get(), nullptr, nullptr, &modified)) winrt::throw_last_error();
 }
 
+static IAsyncAction PrepareRoamingFolders(StorageFolder root, StorageFile manifest) {
+    const auto length = (co_await manifest.GetBasicPropertiesAsync()).Size();
+    if (!length || length > 2048) throw winrt::hresult_invalid_argument();
+    const auto bytes = co_await FileIO::ReadBufferAsync(manifest);
+    if (bytes.Length() != length) throw winrt::hresult_invalid_argument();
+    std::string_view text(reinterpret_cast<char const*>(bytes.data()), bytes.Length());
+    std::vector<std::vector<std::wstring>> paths;
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        auto path = text.substr(0, end);
+        if (path.ends_with('\r')) path.remove_suffix(1);
+        if (paths.size() == 16 || path.empty() || path.size() > 220 || path.find_first_not_of(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./ -") != path.npos)
+            throw winrt::hresult_invalid_argument();
+        paths.push_back(RelativeComponents(winrt::to_hstring(path)));
+        text.remove_prefix(end == text.npos ? text.size() : end + 1);
+    }
+    CheckType(root, true);
+    for (const auto& path : paths) {
+        auto folder = root;
+        for (const auto& part : path) {
+            folder = co_await folder.CreateFolderAsync(part, CreationCollisionOption::OpenIfExists);
+            CheckType(folder, true);
+        }
+    }
+}
+
 static IAsyncOperation<bool> SeedRoamingDefault(StorageFolder folder, StorageFile seed) {
     constexpr std::uint32_t maximumSize = 4096;
     const auto length = (co_await seed.GetBasicPropertiesAsync()).Size();

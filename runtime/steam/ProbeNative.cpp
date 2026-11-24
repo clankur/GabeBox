@@ -2284,6 +2284,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowDocuments = false;
     bool shadowRoamingAppData = false;
     StorageFile shadowRecipe{nullptr};
+    StorageFile shadowRoamingFolders{nullptr};
     StorageFile shadowRoamingDefault{nullptr};
     StorageFile shadowFiles{nullptr};
     StorageFile shadowSteamSdk{nullptr};
@@ -2438,6 +2439,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         shadowRoamingDefault = nullptr;
                         report += L"steam_shadow_roaming_default=invalid-profile\r\n";
                     }
+                }
+                if (const auto folders = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-roaming-folders-" + std::to_wstring(app) + L".txt")) {
+                    shadowRoamingFolders = folders.try_as<StorageFile>();
+                    if (!shadowRoamingFolders || !shadowRoamingAppData)
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 }
                 auto shaderCache = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-godot-shader-cache-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
@@ -2929,7 +2936,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto session = liveSteamSession;
             if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
             shadowOwner = session->accountId;
-            if (shadowRoamingDefault && shadowOwner != sourceOwner)
+            if ((shadowRoamingFolders || shadowRoamingDefault) && shadowOwner != sourceOwner)
                 co_return winrt::hstring(L"steam_launch=session-lost\r\n");
         }
         auto profiles = co_await root.CreateFolderAsync(L"SteamWin32TrialProfiles", CreationCollisionOption::OpenIfExists);
@@ -2944,7 +2951,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 if (shadowRoaming.empty() || shadowRoaming.size() >= MAX_PATH)
                     winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
                 steam_win32_stage::CheckNativeType(shadowRoaming, true);
-                if (shadowRoamingDefault) {
+                if (shadowRoamingFolders || shadowRoamingDefault) {
                     shadowRoamingFolder = roaming;
                     shadowRoamingParents = {profiles, account, profile};
                 }
@@ -3035,6 +3042,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (!fresh || !fresh->installed || (!expectedBuild.empty() && fresh->buildId != expectedBuild) ||
                 (sourceProfile && fresh->installDir != location->app.installDir))
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+    }
+    if (shadowRoamingFolders) {
+        try {
+            for (const auto& folder : shadowRoamingParents) steam_win32_stage::CheckType(folder, true);
+            co_await steam_win32_stage::PrepareRoamingFolders(shadowRoamingFolder, shadowRoamingFolders);
+            report += L"steam_shadow_roaming_folders=ready\r\n";
+        } catch (winrt::hresult_error const& error) {
+            co_return winrt::hstring(report + L"steam_launch=shadow-roaming-folders-error\r\nsteam_shadow_win32=" +
+                Hex(error.code()) + L"\r\n");
+        }
     }
     if (shadowRoamingDefault) {
         try {

@@ -135,6 +135,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     default_audio = False
     desktop_documents = False
     roaming_appdata = False
+    roaming_folders = False
     roaming_default = False
     storage_trace = False
     hashed_companions = False
@@ -309,6 +310,18 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                                  f"and the declared desktop adapter for AppID {app}.")
             files[roaming_marker] = b""
             roaming_appdata = True
+        roaming_folders_name = f"steam-win32-roaming-folders-{app}.txt"
+        if (root / roaming_folders_name).is_file():
+            with (root / roaming_folders_name).open("rb") as source:
+                paths = source.read(2049)
+            entries = paths.replace(b"\r\n", b"\n").removesuffix(b"\n").split(b"\n")
+            if (roaming_marker not in files or len(paths) > 2048 or len(entries) > 16
+                    or any(not re.fullmatch(rb"[A-Za-z0-9_./ -]{1,220}", path)
+                           or any(not valid_win32_component(part) for part in path.decode("ascii").split("/"))
+                           for path in entries)):
+                raise ValueError(f"The Roaming folders need a matching Roaming profile and relative paths for AppID {app}.")
+            files[roaming_folders_name] = b"\n".join(entries) + b"\n"
+            roaming_folders = True
         roaming_default_name = f"steam-win32-roaming-default-{app}.txt"
         if (root / roaming_default_name).is_file():
             with (root / roaming_default_name).open("rb") as source:
@@ -465,6 +478,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             raise ValueError(f"{name} is missing required Win32 exports: {', '.join(sorted(missing))}.")
 
     native = read_package_member(package, "ProbeNative.dll")
+    if roaming_folders and "steam_shadow_roaming_folders=".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact with first-run Roaming folder support.")
     if roaming_default and "steam_shadow_roaming_default=".encode("utf-16le") not in native:
         raise ValueError("Use a Steam Core artifact with first-run Roaming defaults support.")
     if hosted_window_frame:

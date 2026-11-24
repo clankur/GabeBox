@@ -11,8 +11,12 @@ static LPARAM moved, resized;
 static WPARAM resizeState;
 static BOOL adjusted, suppressDefault, destroyBeforeChange, vetoRestore, restoreOnMove, restoreOnChanged, maximizeOnShow;
 static BOOL sawGeometry, wasIconic, wasZoomed;
+static HWND createdParent;
+static WPARAM helperMessage;
 
 static LRESULT CALLBACK OnMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) createdParent = ((const CREATESTRUCTW *)lparam)->hwndParent;
+    if (message == WM_APP) helperMessage = wparam;
     switch (message) {
     case WM_WINDOWPOSCHANGING:
     case WM_WINDOWPOSCHANGED:
@@ -65,6 +69,21 @@ static LRESULT CALLBACK OnMessage(HWND window, UINT message, WPARAM wparam, LPAR
         ShowWindow(window, SW_MAXIMIZE);
     }
     return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static BOOL VerifyMessageWindow(LPCWSTR name, HINSTANCE instance) {
+    const HWND foreground = GetForegroundWindow();
+    const HWND helper = CreateWindowExW(0, name, L"Message helper", WS_OVERLAPPED,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, HWND_MESSAGE, NULL, instance, NULL);
+    RECT client;
+    MSG message;
+    if (!helper || createdParent != HWND_MESSAGE || !GetClientRect(helper, &client) || client.right || client.bottom ||
+            ShowWindow(helper, SW_SHOW) || (GetWindowLongW(helper, GWL_STYLE) & WS_VISIBLE) ||
+            SetForegroundWindow(helper) || GetForegroundWindow() != foreground || GetDC(helper)) return FALSE;
+    if (!PostMessageW(helper, WM_APP, 42, 0) || !PeekMessageW(&message, helper, WM_APP, WM_APP, PM_REMOVE) ||
+            message.hwnd != helper) return FALSE;
+    DispatchMessageW(&message);
+    return helperMessage == 42 && DestroyWindow(helper);
 }
 
 static BOOL Matches(const UINT *expected, UINT count) {
@@ -176,6 +195,7 @@ static unsigned int VerifyGeometry(void) {
             !wasZoomed || wasIconic || resizeState != SIZE_MAXIMIZED) return 0x75420000u;
 
     messageCount = 0;
+    if (!VerifyMessageWindow(windowClass.lpszClassName, module)) return 0x75430000u;
     destroyBeforeChange = TRUE;
     const UINT changing[] = {WM_WINDOWPOSCHANGING};
     if (SetWindowPos(window, NULL, 0, 0, 64, 64, SWP_NOZORDER) ||

@@ -455,6 +455,7 @@ BOOL WINAPI XboxSetForegroundWindow(HWND handle) {
     XboxWindow *window = XboxFindWindow(handle);
     if (!window) return FALSE;
     if (window->destroying) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return FALSE; }
+    if (window->messageOnly) return FALSE;
     UpdateWindowActivation(handle, handle);
     return TRUE;
 }
@@ -496,6 +497,7 @@ HWND WINAPI XboxSetFocus(HWND handle) {
     XboxWindow *window = XboxFindWindow(handle);
     if (!window) return NULL;
     if (window->destroying) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return NULL; }
+    if (window->messageOnly) return NULL;
     const HWND previous = focusWindow;
     UpdateWindowActivation(handle, handle);
     return previous;
@@ -577,7 +579,8 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
         SetLastError(ERROR_CANNOT_FIND_WND_CLASS);
         return NULL;
     }
-    if (parent || menu) {
+    const BOOL messageOnly = parent == HWND_MESSAGE;
+    if ((parent && !messageOnly) || menu) {
         XboxWindowTrace("win32_window_create=parent-or-menu-unsupported\n");
         SetLastError(ERROR_NOT_SUPPORTED);
         return NULL;
@@ -593,6 +596,11 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     }
     if (x == CW_USEDEFAULT) x = 0;
     if (y == CW_USEDEFAULT) y = 0;
+    if (messageOnly) {
+        style &= ~WS_VISIBLE;
+        if (width == CW_USEDEFAULT) width = 0;
+        if (height == CW_USEDEFAULT) height = 0;
+    }
     if (width == CW_USEDEFAULT || height == CW_USEDEFAULT) {
         const RECT desktop = XboxDesktopBounds();
         if (width == CW_USEDEFAULT) width = desktop.right;
@@ -608,7 +616,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     AcquireSRWLockExclusive(&windowGeometryLock);
     *window = (XboxWindow){ .handle = handle, .procedure = entry->procedure, .instance = classInstance,
         .bounds = bounds, .normalBounds = bounds, .style = style, .extendedStyle = exStyle,
-        .classAtom = (ATOM)(entry - classes + 1) };
+        .classAtom = (ATOM)(entry - classes + 1), .messageOnly = messageOnly };
     ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
@@ -630,7 +638,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
         return NULL;
     }
     if (window->handle != handle) return NULL;
-    XboxWindowTrace("win32_window=created\n");
+    XboxWindowTrace(messageOnly ? "win32_window=message-only-created\n" : "win32_window=created\n");
     return handle;
 }
 
@@ -794,7 +802,8 @@ BOOL WINAPI XboxScreenToClient(HWND handle, POINT *point) {
 
 HDC WINAPI XboxGetDC(HWND handle) {
     if (!handle) return XBOX_DESKTOP_DC;
-    return XboxFindWindow(handle) ? (HDC)handle : NULL;
+    XboxWindow *window = XboxFindWindow(handle);
+    return window && !window->messageOnly ? (HDC)handle : NULL;
 }
 
 int WINAPI XboxReleaseDC(HWND handle, HDC dc) {
@@ -803,6 +812,7 @@ int WINAPI XboxReleaseDC(HWND handle, HDC dc) {
 }
 
 static BOOL ShowHostedWindow(XboxWindow *window, HWND handle, int command, BOOL notify) {
+    if (window->messageOnly) return FALSE;
     const BOOL previous = (window->style & WS_VISIBLE) != 0;
     const BOOL showing = command != SW_HIDE;
     const UINT change = activationChange;
@@ -925,7 +935,7 @@ static DWORD HostedShowState(const XboxWindow *window, int command) {
 
 BOOL WINAPI XboxShowWindow(HWND handle, int command) {
     XboxWindow *window = XboxFindWindow(handle);
-    if (!window || window->destroying) return FALSE;
+    if (!window || window->destroying || window->messageOnly) return FALSE;
     const BOOL previous = (window->style & WS_VISIBLE) != 0;
     const DWORD current = window->style & HOSTED_WINDOW_STATE;
     const DWORD state = HostedShowState(window, command);
@@ -999,6 +1009,7 @@ LONG_PTR WINAPI XboxSetWindowLongPtrW(HWND handle, int index, LONG_PTR value) {
         window->procedure = (WNDPROC)value; break;
     case GWLP_HINSTANCE: window->instance = (HINSTANCE)value; break;
     case GWL_STYLE:
+        if (window->messageOnly) value &= ~(LONG_PTR)WS_VISIBLE;
         if ((window->style ^ (DWORD)value) & HOSTED_WINDOW_STATE) ++window->positionChange;
         window->style = (DWORD)value;
         break;

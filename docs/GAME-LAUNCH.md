@@ -66,6 +66,8 @@ For a build that queries `CSIDL_APPDATA`, bind the same Shell32 import and inclu
 
 A matching Roaming profile may include `steam-win32-roaming-default-APPID.txt` with a relative `.ini` path on the first line and the initial settings below it. The launcher writes the complete default to a temporary file in the account’s game profile and renames it only if the destination is absent. The default's modification timestamp predates Steam Cloud so a game comparing modification times can prefer its existing cloud settings. `steam_shadow_roaming_default` reports whether the launcher created the file, found an existing file, or encountered a storage error. Play continues if the default is unavailable.
 
+A matching Roaming profile can also list required directories in `steam-win32-roaming-folders-APPID.txt`, one relative path per line. The launcher validates the list, creates missing folders inside the account's game profile, and verifies that each is an ordinary directory. It keeps existing contents and reports `steam_shadow_roaming_folders=ready` before spawning the game.
+
 ### Verify an installed Steam SDK companion
 
 Use `inspect-game --version PACKAGE_VERSION --app-id APPID --expected-build BUILD --fingerprint-input RELATIVE_PATH` to stream an EXE or DLL from the completed installation and report its size and SHA-256. The command checks the manifest again before reporting the result. Use that record with `--source-profile` and `--export-inputs` to inspect a verified copy locally when needed.

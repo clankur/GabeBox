@@ -871,6 +871,24 @@ class BigPicturePackageTests(unittest.TestCase):
         stage_trials(self.layout, trial, runtime)
         self.assertEqual((self.layout / seed_name).read_bytes(), seed.read_bytes())
 
+        folders_name = f"steam-win32-roaming-folders-{app}.txt"
+        folders = profile / folders_name
+        for path in (b"../saves", b"Game/AUX", b"/saves", b"Game//saves"):
+            folders.write_bytes(path + b"\n")
+            with self.assertRaisesRegex(ValueError, "relative paths"):
+                stage_trials(self.layout, trial, runtime)
+        folders.write_bytes(b"Game/saves\r\nGame/scenarios\r\n")
+        with self.assertRaisesRegex(ValueError, "first-run Roaming folder support"):
+            stage_trials(self.layout, trial, runtime)
+        with ZipFile(runtime) as package:
+            native = package.read("ProbeNative.dll")
+        with ZipFile(runtime, "w") as package:
+            package.writestr("XboxWin32Input.dll", b"input")
+            package.writestr(desktop, variable)
+            package.writestr("ProbeNative.dll", native + "steam_shadow_roaming_folders=".encode("utf-16le"))
+        stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / folders_name).read_bytes(), b"Game/saves\nGame/scenarios\n")
+
     def test_win32_system_companions_require_a_matching_runtime_and_top_level_dll(self):
         self.layout.mkdir()
         profile = self.work / "profile"

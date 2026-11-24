@@ -8,10 +8,20 @@
     "XboxWin32GdiPlus.dll",
     "XboxWin32Input.dll",
     "XboxWin32LoaderTrace.dll",
+    "XboxWin32StorageTrace.dll",
     "XboxWin32Window.dll",
     "XboxWin32XInput910.dll"
   ],
   "required_exports": {
+    "XboxWin32LoaderTrace.dll": [
+      "ExitProcess",
+      "RaiseException",
+      "TerminateProcess"
+    ],
+    "XboxWin32StorageTrace.dll": [
+      "CreateFileW",
+      "GetFinalPathNameByHandleW"
+    ],
     "XboxWin32Window.dll": [
       "GetKeyboardState",
       "GetKeyState",

@@ -11,6 +11,7 @@
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
 static volatile LONG exitStackObserved;
+static volatile LONG cxxExceptionsObserved;
 static volatile LONG workingDirectoryStarted;
 static volatile LONG originalImageObserved;
 static volatile LONG assetEvents;
@@ -20,6 +21,7 @@ static volatile LONG failedCommits;
 static DWORD faultTraceCount;
 static const DWORD delayModuleMissing = 0xC06D007E;
 static const DWORD delayExportMissing = 0xC06D007F;
+static const DWORD msvcCxxException = 0xE06D7363;
 typedef BOOL (WINAPI *FindImage)(DWORD, LPCWSTR, HMODULE *);
 static FindImage findImage;
 typedef HRESULT (WINAPI *CreateD3D12Device)(IUnknown *, UINT, const IID *, void **);
@@ -219,18 +221,21 @@ static void ObserveAssetA(const char *path, const char *operation, BOOL success,
     SetLastError(error);
 }
 
-static void ObserveWorkingDirectory(void) {
+static void ObserveWorkingDirectory(const char *prefix) {
     WCHAR current[512], approved[512];
     const DWORD actual = GetCurrentDirectoryW(ARRAYSIZE(current), current);
     const DWORD expected = GetEnvironmentVariableW(L"XBOX_WIN32_INSTALL_ROOT", approved, ARRAYSIZE(approved));
-    const char *line = "asset cwd=unknown\r\n";
+    const char *state = "unknown";
     if (actual && actual < ARRAYSIZE(current) && expected && expected < ARRAYSIZE(approved)) {
-        line = CompareStringOrdinal(current, actual, approved, expected, TRUE) == CSTR_EQUAL
-            ? "asset cwd=install-root\r\n" : "asset cwd=other\r\n";
+        DWORD actualLength = actual, expectedLength = expected;
+        while (actualLength > 3 && current[actualLength - 1] == L'\\') --actualLength;
+        while (expectedLength > 3 && approved[expectedLength - 1] == L'\\') --expectedLength;
+        state = CompareStringOrdinal(current, actualLength, approved, expectedLength, TRUE) == CSTR_EQUAL
+            ? "install-root" : "other";
     }
-    DWORD size = 0;
-    while (line[size]) ++size;
-    AppendTrace(line, size);
+    char line[60];
+    const char *end = Text(Text(Text(line, prefix), state), "\r\n");
+    AppendTrace(line, (DWORD)(end - line));
 }
 
 static void RestoreWorkingDirectory(void) {
@@ -238,6 +243,7 @@ static void RestoreWorkingDirectory(void) {
     const WCHAR variable[] = L"XBOX_WIN32_WORKING_DIRECTORY";
     const DWORD capacity = GetEnvironmentVariableW(variable, NULL, 0);
     if (capacity <= 1) return;
+    ObserveWorkingDirectory("asset cwd-before=");
     DWORD error = ERROR_FILENAME_EXCED_RANGE;
     if (capacity <= 32768) {
         HANDLE heap = GetProcessHeap();
@@ -255,6 +261,7 @@ static void RestoreWorkingDirectory(void) {
     out = error == ERROR_SUCCESS ? Text(out, "ok") : Hex(Text(out, "error-0x"), error, 8);
     out = Text(out, "\r\n");
     AppendTrace(line, (DWORD)(out - line));
+    ObserveWorkingDirectory("asset cwd-after=");
 }
 
 static DWORD RuntimeError(HMODULE runtime) {
@@ -351,7 +358,7 @@ static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
 static void StartFaultTrace(void) {
     if (InterlockedExchange(&faultTraceStarted, 1) ||
             GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", NULL, 0) <= 1) return;
-    ObserveWorkingDirectory();
+    ObserveWorkingDirectory("asset cwd=");
     typedef PVOID (WINAPI *RegisterHandler)(ULONG, PVECTORED_EXCEPTION_HANDLER);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     RegisterHandler registerHandler = kernel ? (RegisterHandler)(void *)GetProcAddress(kernel, "AddVectoredExceptionHandler") : NULL;
@@ -363,7 +370,7 @@ static void StartFaultTrace(void) {
     AppendTrace(line, length);
 }
 
-static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
+static void RecordFaultCall(const char *api, DWORD code, const void *caller) {
     const DWORD error = GetLastError();
     StartFaultTrace();
     char line[150];
@@ -376,18 +383,22 @@ static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
     SetLastError(error);
 }
 
-static void RecordExitStack(void) {
-    if (InterlockedExchange(&exitStackObserved, 1)) return;
+static __attribute__((noinline)) void RecordStack(const char *prefix) {
     const DWORD error = GetLastError();
     typedef USHORT (WINAPI *CaptureStack)(ULONG, ULONG, PVOID *, PULONG);
-    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    const CaptureStack capture = kernel ? (CaptureStack)(void *)GetProcAddress(kernel, "RtlCaptureStackBackTrace") : NULL;
+    HMODULE module = GetModuleHandleW(L"kernel32.dll");
+    FARPROC captureExport = module ? GetProcAddress(module, "RtlCaptureStackBackTrace") : NULL;
+    if (!captureExport) {
+        module = GetModuleHandleW(L"ntdll.dll");
+        if (module) captureExport = GetProcAddress(module, "RtlCaptureStackBackTrace");
+    }
+    const CaptureStack capture = (CaptureStack)(void *)captureExport;
     PVOID frames[8];
     const USHORT count = capture && findImage ? capture(1, ARRAYSIZE(frames), frames, NULL) : 0;
     BOOL recorded = FALSE;
     for (USHORT i = 0; i < count; ++i) {
         char line[150];
-        char *frame = Hex(Text(line, "fault exit-stack frame=0x"), i, 2);
+        char *frame = Hex(Text(Text(line, prefix), " frame=0x"), i, 2);
         char *out = RecordImageAddress(frame, frames[i]);
         if (out == frame) continue;
         out = Text(out, "\r\n");
@@ -395,25 +406,28 @@ static void RecordExitStack(void) {
         recorded = TRUE;
     }
     if (!recorded) {
-        const char line[] = "fault exit-stack=unavailable\r\n";
-        AppendTrace(line, sizeof(line) - 1);
+        const char *state = !capture ? "export-unavailable" : !findImage ? "module-lookup-unavailable"
+            : !count ? "empty" : "unmapped";
+        char line[60];
+        const char *end = Text(Text(Text(Text(line, prefix), "="), state), "\r\n");
+        AppendTrace(line, (DWORD)(end - line));
     }
     SetLastError(error);
 }
 
 DECLSPEC_NORETURN void WINAPI XboxExitProcess(UINT code) {
-    RecordProcessExit("exit-process", code, __builtin_return_address(0));
-    if (code == MAXDWORD) RecordExitStack();
+    RecordFaultCall("exit-process", code, __builtin_return_address(0));
+    if (code == MAXDWORD && !InterlockedExchange(&exitStackObserved, 1)) RecordStack("fault exit-stack");
     ExitProcess(code);
 }
 
 BOOL WINAPI XboxTerminateProcess(HANDLE process, UINT code) {
-    RecordProcessExit("terminate-process", code, __builtin_return_address(0));
+    RecordFaultCall("terminate-process", code, __builtin_return_address(0));
     if (code == MAXDWORD) {
         const DWORD error = GetLastError();
         const BOOL self = process == GetCurrentProcess();
         SetLastError(error);
-        if (self) RecordExitStack();
+        if (self && !InterlockedExchange(&exitStackObserved, 1)) RecordStack("fault exit-stack");
     }
     return TerminateProcess(process, code);
 }
@@ -421,7 +435,11 @@ BOOL WINAPI XboxTerminateProcess(HANDLE process, UINT code) {
 void WINAPI XboxRaiseException(DWORD code, DWORD flags, DWORD count, const ULONG_PTR *arguments) {
     if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_ACCESS_VIOLATION ||
             code == delayModuleMissing || code == delayExportMissing)
-        RecordProcessExit("raise-exception", code, __builtin_return_address(0));
+        RecordFaultCall("raise-exception", code, __builtin_return_address(0));
+    if (code == msvcCxxException && InterlockedIncrement(&cxxExceptionsObserved) <= 4) {
+        RecordFaultCall("raise-exception", code, __builtin_return_address(0));
+        RecordStack("fault cxx-stack");
+    }
     RaiseException(code, flags, count, arguments);
 }
 
@@ -886,6 +904,7 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
 DWORD WINAPI XboxOriginalGetModuleFileNameW(HMODULE module, LPWSTR filename, DWORD size) {
     const DWORD previous = GetLastError();
     if (filename && size && (!module || module == GetModuleHandleW(NULL))) {
+        RestoreWorkingDirectory();
         const WCHAR variable[] = L"XBOX_WIN32_ORIGINAL_EXECUTABLE";
         const DWORD capacity = GetEnvironmentVariableW(variable, NULL, 0);
         if (capacity > 1 && capacity <= 32768) {
