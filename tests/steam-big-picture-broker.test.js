@@ -5,7 +5,7 @@ const vm = require("node:vm");
 
 const context = vm.createContext({});
 vm.runInContext("delete Promise.prototype.finally", context);
-vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-big-picture-broker.js"), "utf8"), context);
+vm.runInContext(fs.readFileSync(require.resolve("../ui/signin/steam-big-picture-broker.js"), "utf8"), context);
 
 function fixture() {
     const calls = [];
@@ -242,8 +242,8 @@ test("integrated sign-in goes directly to the Valve host, including when startup
             };
         }
         const signInPage = vm.createContext(globals);
-        vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-game-launch.js"), "utf8"), signInPage);
-        vm.runInContext(fs.readFileSync(require.resolve("../probe/signin/steam-signin.js"), "utf8"), signInPage);
+        vm.runInContext(fs.readFileSync(require.resolve("../ui/signin/steam-game-launch.js"), "utf8"), signInPage);
+        vm.runInContext(fs.readFileSync(require.resolve("../ui/signin/steam-signin.js"), "utf8"), signInPage);
         // The platform's first session lookup has not completed. Fresh QR
         // must already use focus navigation, even when no session is restored.
         assert.equal(globals.navigator.gamepadInputEmulation, outcome === "missing" ? undefined : "keyboard");

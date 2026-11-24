@@ -1,4 +1,4 @@
-#include "child-process.h"
+#include "../runtime/shared/child-process.h"
 
 #ifndef PROBE_CHILD_WAIT_MS
 #define PROBE_CHILD_WAIT_MS 3000u

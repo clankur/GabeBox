@@ -4,9 +4,9 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
   pull_request:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'probe/fhd/**', 'probe/probe.c', 'probe/sdl-*-protocol.h', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
 
 permissions:
   contents: read
@@ -41,15 +41,15 @@ jobs:
           & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\media-test.obj" "/Fe$work\media-test.exe" tests/fhd-media-frame-count.test.cpp
           & "$work\media-test.exe"
 
-          & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" probe/fhd/Fhd.Native.idl
+          & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" runtime/presenter/Fhd.Native.idl
           & "$tool\cppwinrt.exe" -input "$out\Fhd.Native.winmd" -reference $metadata -output "$work\projection" -include Fhd.Native -overwrite
           $objects = @()
           foreach ($source in 'render-host','host-session','gpu-receiver','hosted-input','media-source','panel-presenter') {
             $obj = "$work\$source.obj"
-            & cl.exe /nologo /c /O2 /Gy /MT /EHsc /std:c++20 /DNOMINMAX /DUNICODE /D_UNICODE /DFHD_SDK_METADATA /DFHD_NATIVE_INPUT "/I$work\projection" "/I$sdk\Include\$version\cppwinrt" "/Fo$obj" "probe/fhd/$source.cpp"
+            & cl.exe /nologo /c /O2 /Gy /MT /EHsc /std:c++20 /DNOMINMAX /DUNICODE /D_UNICODE /DFHD_SDK_METADATA /DFHD_NATIVE_INPUT "/I$work\projection" "/I$sdk\Include\$version\cppwinrt" "/Fo$obj" "runtime/presenter/$source.cpp"
             $objects += $obj
           }
-          & cl.exe /nologo /c /TC /std:c11 /O2 /Gy /MT "/Fo$work\targets.obj" probe/fhd/present.c
+          & cl.exe /nologo /c /TC /std:c11 /O2 /Gy /MT "/Fo$work\targets.obj" runtime/presenter/present.c
           & "$env:ProgramFiles\LLVM\bin\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -ffunction-sections -DFHD_GRAPHICS_CONTROL -DFHD_SECONDARY_VIEW -DFHD_HOSTED_VIEW -c probe/probe.c -o "$work\entry.obj"
           & link.exe /nologo /dll /machine:x64 /subsystem:windows,10.00 /appcontainer /opt:ref /dynamicbase /nxcompat /highentropyva /Brepro /export:DllGetActivationFactory /export:DllCanUnloadNow "/out:$out\Fhd.Native.dll" "/implib:$work\Fhd.Native.lib" @objects "$work\targets.obj" "$work\entry.obj" WindowsApp.lib d3d11.lib d3d12.lib dxgi.lib dxguid.lib
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' -CertStoreLocation Cert:\CurrentUser\My

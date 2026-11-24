@@ -6,6 +6,9 @@ on:
     branches: ['feature/native-steam-big-picture']
     paths:
       - 'probe/big-picture-windowed/**'
+      - 'ui/big-picture/AppxManifest.xml'
+      - 'ui/Assets/**'
+      - 'build_tools/**'
       - '.github/workflows/xbox-windowed-control.yml'
 
 permissions:

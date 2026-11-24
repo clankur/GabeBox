@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {runInNewContext} = require('node:vm');
-const source = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-store-browser.js'),'utf8');
+const source = readFileSync(require.resolve('../ui/big-picture-bridge/xbox-store-browser.js'),'utf8');
 const blank = 'data:text/html,%3Cbody%3E%3C%2Fbody%3E';
 const options = {strName:'MainBrowser', parentPopupBrowserID:2, strUserAgentIdentifier:'Valve Steam Gamepad',
     strInitialURL:blank, bPreventCloseFromJavascript:true};
@@ -81,7 +81,7 @@ test('clips native bounds and forwards controller edges only while Valve focuses
 
 test('two B taps remain Steam navigation while the Store has focus', () => {
     const {client, owner, view, sent, adapter} = environment();
-    const inputSource = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-input.js'), 'utf8');
+    const inputSource = readFileSync(require.resolve('../ui/big-picture-bridge/xbox-input.js'), 'utf8');
     let tick, pressed = false;
     Object.assign(owner, {document: {hidden: false}, setTimeout(callback) { tick = callback; return 1; }});
     client.System = {};
@@ -104,7 +104,7 @@ test('two B taps remain Steam navigation while the Store has focus', () => {
 });
 
 test('a controller release follows its press across Store focus changes and disconnects', () => {
-    const inputSource = readFileSync(require.resolve('../probe/big-picture-bridge/xbox-input.js'), 'utf8');
+    const inputSource = readFileSync(require.resolve('../ui/big-picture-bridge/xbox-input.js'), 'utf8');
     for (const [index, code, key] of [[0, 0, 'enter'], [12, 20, 'up']]) {
         const {client, owner, view, sent, adapter} = environment();
         let tick, connected = true, pressed = false;

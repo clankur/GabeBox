@@ -10,7 +10,7 @@ static HRESULT testDeleteString(HSTRING);
 #define RoGetActivationFactory testFactory
 #define WindowsCreateString testCreateString
 #define WindowsDeleteString testDeleteString
-#include "../probe/fhd/hosted-input.cpp"
+#include "../runtime/presenter/hosted-input.cpp"
 #undef GetTickCount
 #undef RoGetActivationFactory
 #undef WindowsCreateString
@@ -18,7 +18,7 @@ static HRESULT testDeleteString(HSTRING);
 #include <cassert>
 #include <cstring>
 #include <iostream>
-#include "../probe/fhd/pointer-cursor.h"
+#include "../runtime/presenter/pointer-cursor.h"
 static DWORD clockMs;
 static DWORD testTick() { return clockMs; }
 struct Obj {
@@ -102,6 +102,21 @@ static HRESULT testCreateString(const WCHAR *, UINT, HSTRING *r) {
 static HRESULT testDeleteString(HSTRING) { return 0; }
 static SdlHostMailbox box;
 int main() {
+    SdlHostGamepad wire = {};
+    const auto neutralPad = SdlHostIdleGamepad(SDL_HOST_PAD_CONNECTED | 7);
+    SdlHostGamepadState sample = {};
+    assert(!SdlHostReadGamepad(&wire, 0, &sample));
+    const LONG firstPacket = SdlHostPublishGamepad(&wire, &neutralPad);
+    assert(firstPacket == 2 && SdlHostReadGamepad(&wire, 0, &sample) == firstPacket);
+    assert(sample.buttons == SDL_HOST_PAD_CONNECTED && sample.axes[4] == -32768 && !wire.ack);
+    assert(!SdlHostReadGamepad(&wire, firstPacket, &sample));
+    wire.serial = 3;
+    assert(!SdlHostReadGamepad(&wire, firstPacket, &sample));
+    wire.serial = -2;
+    const SdlHostGamepadState held = {SDL_HOST_PAD_CONNECTED | 1 | 1 << 20, {-40000, 40000}};
+    assert(SdlHostPublishGamepad(&wire, &held) == 2);
+    assert(SdlHostReadGamepad(&wire, 0, &sample) == 2);
+    assert(sample.buttons == (SDL_HOST_PAD_CONNECTED | 1) && sample.axes[0] == -32768 && sample.axes[1] == 32767);
     for (void **vt : {winVt, listVt, padVt, staticsVt}) {
         vt[0] = (void *)query;
         vt[1] = (void *)ref;

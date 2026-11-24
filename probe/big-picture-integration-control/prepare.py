@@ -2,15 +2,20 @@
 import argparse
 import hashlib
 from pathlib import Path
-import runpy
+import sys
 import shutil
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from build_tools.prepare_primary_control import prepare as prepare_primary_control
+from build_tools.stage_webview import add_webview_host
 
 
 def prepare(layout, primary, primary_pin, renderer, renderer_pin, version):
     source = Path(__file__).resolve().parent
     if hashlib.sha256((renderer / "SHA256SUMS").read_bytes()).hexdigest() != renderer_pin:
         raise ValueError("Unexpected WebView2 renderer checksum manifest")
-    runpy.run_path(str(source.parent / "big-picture-primary/prepare-smoke.py"))["prepare"](
+    prepare_primary_control(
         layout, primary, primary_pin, version)
     manifest = layout / "AppxManifest.xml"
     text = manifest.read_bytes()
@@ -19,7 +24,7 @@ def prepare(layout, primary, primary_pin, renderer, renderer_pin, version):
         raise ValueError("Unexpected control package identity")
     manifest.write_bytes(text.replace(previous, b'Name="XboxPortabilityProbe.PrimaryRendererControl"')
                          .replace(b"Steam Primary Activation Control", b"Primary Renderer Control"))
-    runpy.run_path(str(source.parent / "big-picture-webview/stage.py"))["add_webview_host"](layout, renderer)
+    add_webview_host(layout, renderer)
     shutil.copyfile(source / "account.js", layout / "activation-check.js")
     content = layout / "ValveClient/steamui"
     content.mkdir(parents=True)

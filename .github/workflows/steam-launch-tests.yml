@@ -2,39 +2,9 @@ name: Test Steam game launch
 
 on:
   push:
-    paths:
-      - 'probe/signin/**'
-      - 'probe/big-picture-bridge/**'
-      - 'probe/big-picture-webview/**'
-      - 'probe/prepare-big-picture-library.py'
-      - 'probe/prepare-steam-core.py'
-      - 'probe/ProbeNative.cpp'
-      - 'probe/steam-launch-detail.h'
-      - 'probe/SteamCloud*.h'
-      - 'probe/SteamWin32Stage.h'
-      - 'probe/redirect-pe-imports.py'
-      - 'probe/fhd/measure.py'
-      - 'probe/sdl-frame-copy.h'
-      - 'probe/XboxProbe.Native.idl'
-      - 'tests/**'
-      - '.github/workflows/steam-launch-tests.yml'
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'analysis/**/*.py', 'pyproject.toml', 'uv.lock', '.github/workflows/steam-launch-tests.yml']
   pull_request:
-    paths:
-      - 'probe/signin/**'
-      - 'probe/big-picture-bridge/**'
-      - 'probe/big-picture-webview/**'
-      - 'probe/prepare-big-picture-library.py'
-      - 'probe/prepare-steam-core.py'
-      - 'probe/ProbeNative.cpp'
-      - 'probe/steam-launch-detail.h'
-      - 'probe/SteamCloud*.h'
-      - 'probe/SteamWin32Stage.h'
-      - 'probe/redirect-pe-imports.py'
-      - 'probe/fhd/measure.py'
-      - 'probe/sdl-frame-copy.h'
-      - 'probe/XboxProbe.Native.idl'
-      - 'tests/**'
-      - '.github/workflows/steam-launch-tests.yml'
+    paths: ['build_tools/**', 'tools/**', 'runtime/**', 'ui/**', 'probe/**', 'tests/**', 'profiles/**', 'analysis/**/*.py', 'pyproject.toml', 'uv.lock', '.github/workflows/steam-launch-tests.yml']
 
 permissions:
   contents: read
@@ -50,9 +20,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: node --test tests/*.test.js probe/big-picture-webview/*.test.js
-      - run: python -m unittest discover -s tests
-      - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-launch-detail.test.cpp -o /tmp/steam-launch-detail-test && /tmp/steam-launch-detail-test
-      - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-cloud-manifest.test.cpp -o /tmp/steam-cloud-manifest-test && /tmp/steam-cloud-manifest-test
-      - run: g++ -std=c++20 -Wall -Wextra -Werror tests/steam-library-manifest.test.cpp -o /tmp/steam-library-manifest-test && /tmp/steam-library-manifest-test
-      - run: g++ -std=c++20 -O2 -Wall -Wextra -Werror tests/steam-sdl-frame.test.cpp -o /tmp/steam-sdl-frame-test && /tmp/steam-sdl-frame-test
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.9.13'
+      - run: uv run --locked ruff check
+      - run: uv run --locked python -m pytest
+      - run: node --test tests/*.test.js tests/big-picture-webview/*.test.js
+      - name: Run portable Steam C++ tests
+        shell: bash
+        run: |
+          for source in tests/steam-*.cpp; do
+            echo "Testing $source"
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror "$source" -o "$RUNNER_TEMP/steam-test"
+            "$RUNNER_TEMP/steam-test"
+          done

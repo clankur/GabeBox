@@ -8,4 +8,4 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/vstdlib-leaf.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 unzip -p "$archive" vstdlib_s64.dll > "$work/vstdlib_s64.dll"
-python3 "$here/emulate_vstdlib_leaf.py" "$work/vstdlib_s64.dll"
+uv run --locked --script "$here/emulate_vstdlib_leaf.py" "$work/vstdlib_s64.dll"

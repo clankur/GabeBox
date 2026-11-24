@@ -1,7 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <GL/gl.h>
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 
 int _fltused;
 

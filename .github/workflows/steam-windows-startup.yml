@@ -5,8 +5,11 @@ on:
     paths:
       - analysis/trace-steam-startup.ps1
       - analysis/stage-pinned-client.py
-      - analysis/valve-release.json
-      - analysis/steam_client_win64.manifest
+      - build_tools/paths.py
+      - build_tools/stage_glyphs.py
+      - build_tools/stage_pinned_client.py
+      - runtime/steam/pins/valve-release.json
+      - runtime/steam/pins/steam_client_win64.manifest
       - .github/workflows/steam-windows-startup.yml
   workflow_dispatch:
     inputs:

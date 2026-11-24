@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pefile==2024.8.26", "unicorn==2.1.4"]
+# ///
 """Bounded Unicorn execution of one offline Valve PE leaf; no loader/imports."""
 import random
 import hashlib

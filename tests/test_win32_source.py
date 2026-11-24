@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-VERIFY = Path(__file__).resolve().parents[1] / "probe" / "verify-win32-source.py"
+VERIFY = Path(__file__).resolve().parents[1] / "build_tools/verify_win32_source.py"
 
 
 class Win32SourceTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class Win32SourceTests(unittest.TestCase):
         self.assertIn("Size mismatch", self.verify().stderr)
 
     def test_profile_cannot_read_outside_install_or_duplicate_paths(self):
-        for name in ("../Game.exe", "assets\\game.exe", "NUL.exe", "assets//game.exe", "asset_archive/TOC"):
+        for name in ("../Game.exe", "assets\\game.exe", "NUL.exe", "COM1 .dll", "assets//game.exe", "asset_archive/TOC"):
             with self.subTest(name=name):
                 invalid = self.verify("123", self.record, dict(self.record, path=name))
                 self.assertEqual(invalid.returncode, 1)

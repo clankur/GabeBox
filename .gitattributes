@@ -1,2 +1,2 @@
 # Preserve the exact bytes covered by the Valve release pin on Windows checkouts.
-analysis/steam_client_win64.manifest -text
+runtime/steam/pins/steam_client_win64.manifest -text

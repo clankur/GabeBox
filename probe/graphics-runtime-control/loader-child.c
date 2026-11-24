@@ -1,6 +1,6 @@
 /* Compare normal imports for a process outside the package with and without
    an adjacent SDL DLL. The only files involved are private test fixtures. */
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 #include "sdl-version.h"
 
 #define IMPORT __declspec(dllimport)

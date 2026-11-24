@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const launchFile = path.join(__dirname, "../probe/signin/steam-game-launch.js");
+const launchFile = path.join(__dirname, "../ui/signin/steam-game-launch.js");
 const browser = vm.createContext({});
 vm.runInContext(readFileSync(launchFile, "utf8"), browser, { filename: launchFile });
 const dispatch = browser.steamGameLaunch;

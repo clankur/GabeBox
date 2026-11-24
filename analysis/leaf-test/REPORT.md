@@ -1,6 +1,6 @@
 # Testing one Steam client function
 
-Valve’s Windows x64 client ships `V_binarytohex` in `vstdlib_s64.dll`. It converts bytes to lowercase hexadecimal and terminates the string with a NUL byte. Valve documents the operation in the Source SDK. This small, deterministic operation let us compare original behavior with an independently written implementation without needing a Steam account or a running client. [Pinned client archives](../valve-release.json) · [Valve declaration](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/tier1/strtools.h#L602-L614) · [Valve implementation](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/tier1/strtools.cpp#L1645-L1658)
+Valve’s Windows x64 client ships `V_binarytohex` in `vstdlib_s64.dll`. It converts bytes to lowercase hexadecimal and terminates the string with a NUL byte. Valve documents the operation in the Source SDK. This small, deterministic operation let us compare original behavior with an independently written implementation without needing a Steam account or a running client. [Pinned client archives](../../runtime/steam/pins/valve-release.json) · [Valve declaration](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/tier1/strtools.h#L602-L614) · [Valve implementation](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/tier1/strtools.cpp#L1645-L1658)
 
 ## Findings
 
@@ -12,7 +12,7 @@ This experiment establishes behavior for the tested inputs to one public utility
 
 ## Reproduction
 
-Use the Windows `bins_win64` archive pinned in the [release inventory](../valve-release.json). Install Python packages `unicorn==2.1.4` and `pefile` in your test environment. Run these commands in this directory with Clang and a host C compiler available.
+Use the Windows `bins_win64` archive pinned in the [release inventory](../../runtime/steam/pins/valve-release.json). The emulation runner uses `uv` to install the versions recorded in the [script lockfile](emulate_vstdlib_leaf.py.lock). Run these commands in this directory with Clang and a host C compiler available.
 
 ```sh
 ./run-emulation.sh /path/to/the/pinned/bins_win64.zip

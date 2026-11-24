@@ -9,24 +9,24 @@ During live play on Xbox build `1.0.230.106`, the final 30 seconds of the native
 Install the Windows version of Hades through Steam. Set `steam_install` to the local Hades directory and run these commands from the repository root. The source checksums are for Steam build `10929685`.
 
 ```sh
-profile_source="$PWD/probe/win32-runtime/profiles/1145360-10929685"
+profile_source="$PWD/profiles/1145360-10929685"
 profile=$(mktemp -d)
 (cd "$steam_install" && shasum -a 256 -c "$profile_source/SOURCE-SHA256SUMS") || exit 1
 cp "$profile_source"/steam-win32-*.txt "$profile/"
-python3 probe/redirect-pe-imports.py --recipe "$steam_install/x64/EngineWin64s.dll" \
+cp "$profile_source/steam-win32-adapters-1145360.json" "$profile/"
+python3 -m build_tools.redirect_pe_imports --recipe "$steam_install/x64/EngineWin64s.dll" \
   "$profile_source/engine-bindings.json" "$profile/steam-win32-shadow-1145360.xwp"
-python3 probe/redirect-pe-imports.py --recipe "$steam_install/x64/Hades.exe" \
+python3 -m build_tools.redirect_pe_imports --recipe "$steam_install/x64/Hades.exe" \
   "$profile_source/launcher-bindings.json" "$profile/steam-win32-shadow-1145360-launcher.xwp"
 ```
 
-Follow the [single-window Big Picture build](big-picture.md#reproduce-the-single-window-series-x-build). Use the Steam Core template, FHD presenter and primary XAML host artifacts built from this checkout. The regular FHD base provides the SDL and Mesa dependencies for the shared hosted package and declares the x64 Visual C++ UWP and UWPDesktop frameworks. Add the following options to the Big Picture packaging command before signing. Set `steam_core_appx` to the APPX in the current x64 Steam Core template artifact.
+Follow the [single-window Big Picture build](big-picture.md#reproduce-the-single-window-series-x-build). Use the Steam Core template, FHD presenter and primary XAML host artifacts built from this checkout. The regular FHD base provides the SDL and Mesa dependencies for the shared hosted package and declares the x64 Visual C++ UWP and UWPDesktop frameworks. Add the following options to the Big Picture packaging command before signing.
 
 ```sh
 --surfaceless-profile 1145360=10929685 \
---win32-trial-profile "1145360=$profile" \
---win32-runtime-template "$steam_core_appx"
+--win32-trial-profile "1145360=$profile"
 ```
 
 Install the signed package and the framework dependencies if needed. Sign in with an account that owns Hades, install it in the Xbox Steam library, and select **Play**. The launcher rechecks the entitlement, installed build and original binary hashes. The signed package contains the runtime adapters and recipes. Game binaries come from Steam on the console, and staging leaves the Steam depot files intact.
 
-The profile supplies Hades' native gamepad options and the original image names. The runtime provides reusable desktop window calls, DXGI presentation, hosted XInput and local crash reporting. This checkout's profile is pinned to the Windows x64 DirectX executable. [Supergiant's gamepad and launch guidance](https://www.supergiantgames.com/faqs/hades/)
+The profile supplies Hades' native gamepad options and the original image names. It requires the `ktmw32.dll` transaction adapter from the same signed Steam Core artifact. The runtime also provides desktop window calls, DXGI presentation, hosted XInput and local crash reporting. This checkout's profile is pinned to the Windows x64 DirectX executable. [Supergiant's gamepad and launch guidance](https://www.supergiantgames.com/faqs/hades/)

@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 
-compat = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "steam-compatibility.py"))
-measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe" / "fhd" / "measure.py"))
+compat = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/steam_compatibility.py"))
+measure = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/measure.py"))
 
 
 class SteamCompatibilityTests(unittest.TestCase):
@@ -210,10 +210,17 @@ DelayImport {
                              f"D3D12/D3D12Core.dll\tsha256:{fingerprints[1]['sha256']}\n")
             self.assertEqual((output / "steam-win32-shadow-1817070.txt").read_text().splitlines(),
                              ["123", "Example.exe", "", "", "", "", "loader-trace"])
+            self.assertEqual(json.loads((output / "steam-win32-adapters-1817070.json").read_bytes()), {
+                "build_id": "123",
+                "required_adapters": [
+                    "XboxWin32Desktop.dll", "XboxWin32Dxgi.dll", "XboxWin32Input.dll",
+                    "XboxWin32LoaderTrace.dll", "XboxWin32Window.dll",
+                ],
+            })
             self.assertFalse((output / "Example.exe").exists())
             self.assertEqual(game.read_bytes(), image)
 
-            packager = runpy.run_path(str(Path(__file__).resolve().parents[1] / "probe/prepare-big-picture-library.py"))
+            packager = runpy.run_path(str(Path(__file__).resolve().parents[1] / "build_tools/prepare_big_picture_library.py"))
             layout = work / "layout"
             layout.mkdir()
             (layout / "steam-signin.html").write_text(
@@ -230,7 +237,8 @@ DelayImport {
                              "XboxWin32Window.dll", "XboxWin32Dxgi.dll", "XboxWin32LoaderTrace.dll"):
                     archive.writestr(name, b"runtime fixture")
             packager["stage_surfaceless_profiles"](layout, ["1817070=123"])
-            packager["stage_win32_trial_profiles"](layout, [f"1817070={output}"], template)
+            with ZipFile(template) as archive:
+                packager["stage_win32_trial_profiles"](layout, [f"1817070={output}"], archive)
             self.assertIn('data-apps="975370 1817070"', (layout / "steam-signin.html").read_text())
             self.assertEqual((layout / "steam-sdl-surfaceless-1817070.txt").read_text(), "123")
             self.assertTrue((layout / "XboxWin32Dxgi.dll").is_file())

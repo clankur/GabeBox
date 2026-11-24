@@ -1,4 +1,4 @@
-#include "../probe/sdl-frame-copy.h"
+#include "../runtime/steam/sdl-frame-copy.h"
 #include <algorithm>
 #include <cassert>
 #include <vector>

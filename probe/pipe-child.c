@@ -1,6 +1,6 @@
 #include <windows.h>
 
-#include "pipe-protocol.h"
+#include "../runtime/shared/pipe-protocol.h"
 
 void WINAPI PipeChildEntry(void) {
     const WCHAR *command = GetCommandLineW();

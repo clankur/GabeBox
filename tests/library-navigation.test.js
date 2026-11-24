@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { adjacent } = require("../probe/signin/library-navigation.js");
+const { adjacent } = require("../ui/signin/library-navigation.js");
 
 const tile = (offsetLeft, offsetTop) => ({ offsetLeft, offsetTop });
 

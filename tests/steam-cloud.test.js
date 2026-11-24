@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { supported, message } = require("../probe/signin/steam-cloud.js");
+const { supported, message } = require("../ui/signin/steam-cloud.js");
 
 test("only Slay the Spire has an Xbox cloud save destination", () => {
     assert.equal(supported(646570), true);

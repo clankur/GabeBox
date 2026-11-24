@@ -1,4 +1,4 @@
-#include "../probe/sdl-swap-clock.h"
+#include "../runtime/shared/sdl-swap-clock.h"
 #include <assert.h>
 
 int main(void)

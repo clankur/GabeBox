@@ -3,9 +3,9 @@
 #include <windows.h>
 #include <xinput.h>
 #include <stddef.h>
-#include "../child-process.h"
-#include "../sdl-host-protocol.h"
-#include "../win32-runtime/loader-trace-output.h"
+#include "../../runtime/shared/child-process.h"
+#include "../../runtime/shared/sdl-host-protocol.h"
+#include "../../runtime/win32/loader-trace-output.h"
 
 #define CHECKPOINT(name) AppendTrace("input hosted-xinput-control=" name "\r\n", \
     sizeof("input hosted-xinput-control=" name "\r\n") - 1)

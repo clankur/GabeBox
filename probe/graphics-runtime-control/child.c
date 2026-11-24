@@ -1,5 +1,5 @@
 /* Verify the packaged desktop OpenGL ABI from a separate x64 process. */
-#include "../child-process.h"
+#include "../../runtime/shared/child-process.h"
 
 #define IMPORT __declspec(dllimport)
 #define WINAPI __stdcall

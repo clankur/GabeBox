@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: ['feature/native-steam-big-picture']
-    paths:
-      - 'probe/big-picture-webview/**'
+    paths: &component_paths
+      - 'ui/big-picture-webview/**'
+      - 'tests/big-picture-webview/**'
       - '.github/workflows/xbox-big-picture-webview.yml'
+
+  pull_request:
+    paths: *component_paths
 
 permissions:
   contents: read
@@ -19,13 +23,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test probe/big-picture-webview/host.test.js
+      - run: node --test tests/big-picture-webview/host.test.js
       - name: Compile and sign the UWP WebView2 component
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $src = Join-Path $PWD 'probe/big-picture-webview'
+          $src = Join-Path $PWD 'ui/big-picture-webview'
           $work = Join-Path $env:RUNNER_TEMP 'big-picture-webview'
           $out = Join-Path $work 'artifact'
           New-Item -ItemType Directory -Path $out | Out-Null
@@ -56,6 +60,7 @@ jobs:
             "/I$work/projection" "/I$kits/Include/$kit/cppwinrt" "/Fo$work/renderer.obj" "/Fe$out/BigPictureView.Native.dll" `
             "$src/renderer.cpp" WindowsApp.lib uuid.lib /link /APPCONTAINER /SUBSYSTEM:WINDOWS,10.00 "/IMPLIB:$work/renderer.lib" `
             /EXPORT:DllGetActivationFactory=GetBigPictureViewFactory /EXPORT:DllCanUnloadNow=CanUnloadBigPictureView
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { return }
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
@@ -65,6 +70,7 @@ jobs:
             } | Set-Content -Encoding ascii "$out/SHA256SUMS"
           } finally { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" }
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: xbox-big-picture-webview-x64
           path: ${{ runner.temp }}/big-picture-webview/artifact/

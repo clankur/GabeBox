@@ -1,0 +1,12 @@
+{
+  "build_id": "23986256",
+  "required_adapters": [
+    "XboxWin32Desktop.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32Input.dll",
+    "XboxWin32LoaderTrace.dll",
+    "XboxWin32SteamDiscovery.dll",
+    "XboxWin32Window.dll",
+    "XboxWin32XInput910.dll"
+  ]
+}

@@ -4,11 +4,12 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-async function exercisePlayer(packed) {
-    const source = fs.readFileSync(path.join(__dirname, "../probe/signin/steam-sdl-host.js"), "utf8");
+async function exercisePlayer(packed, pointer = false) {
+    const source = fs.readFileSync(path.join(__dirname, "../ui/signin/steam-sdl-host.js"), "utf8");
     const elements = new Map();
     const listeners = {};
     const calls = [];
+    const gamepadSamples = [];
     let focus;
     let pad = 0;
     let frame;
@@ -22,7 +23,7 @@ async function exercisePlayer(packed) {
                 hidden: true, style: {}, width: 1, height: 1, clientWidth: 1280, clientHeight: 720,
                 focus() { focus = this; },
                 addEventListener() {},
-                getAttribute() { return "646570"; },
+                getAttribute(name) { return name === "data-apps" || pointer ? "646570" : null; },
                 getContext() {
                     return { createImageData: () => ({ data: new Uint8Array(4) }), putImageData(image) {
                         presented++;
@@ -36,7 +37,7 @@ async function exercisePlayer(packed) {
 
     const buttons = { a: 1, b: 2, start: 4, back: 8, up: 16, down: 32, left: 64, right: 128 };
     const window = {
-        steamSdlGamepad: { buttons, read: () => [pad, 0, 0, 0, 0, -32768, -32768] },
+        steamSdlGamepad: { buttons, read: () => ({gamepad: [pad, 0, 0, 0, 0, -32768, -32768], overlay: pad}) },
         addEventListener(name, listener) { listeners[name] = listener; }
     };
     const document = {
@@ -67,7 +68,7 @@ async function exercisePlayer(packed) {
         steamSdlRunning: () => true,
         steamSdlKeyboardReady: () => true,
         sendSteamSdlInput() {},
-        sendSteamSdlGamepad() {},
+        sendSteamSdlGamepad(mask) { gamepadSamples.push(mask); return gamepadSamples.length; },
         sendSteamSdlKey(scan, down) { calls.push(["key", scan, down]); return true; },
         sendSteamSdlText(value) { calls.push(["text", value]); return true; },
         resetSteamSdlKeyboard() { calls.push(["reset"]); }
@@ -100,6 +101,7 @@ async function exercisePlayer(packed) {
     frameAvailable = true;
     frame(150);
     assert.equal(presented, 3);
+    assert.equal(gamepadSamples.length, pointer ? 0 : 1);
 
     function key(type, code, value, keyCode) {
         listeners[type]({ type, code, key: value, keyCode, preventDefault() {} });
@@ -142,22 +144,32 @@ async function exercisePlayer(packed) {
 test("the SDL player presents each refresh and routes keyboard input", () => exercisePlayer(false));
 test("the SDL player decodes bulk RGB while retaining keyboard input", () => exercisePlayer(true));
 
+test("pointer delivery follows package configuration for any hosted AppID", () => exercisePlayer(false, true));
+
 test("the primary video polls the controller independently and a quick mouse click reaches SDL in order", async () => {
     const elements = new Map(), listeners = {}, edges = [], overlays = [], samples = [];
     let now = 100, pump, ack = 0, buttons = 0, serial = 0, padSerial = 0, rejectPad = false;
     function element(id) {
         if (!elements.has(id)) elements.set(id, {
-            hidden: true, handlers: {}, getAttribute: () => "646570", getContext: () => ({}), focus() {},
+            hidden: true, handlers: {}, getAttribute: name => name === "data-apps" ? "646570" : null, getContext: () => ({}), focus() {},
             getBoundingClientRect: () => ({left: 200, top: 100, width: 1200, height: 675}),
             addEventListener(name, callback) { this.handlers[name] = callback; }
         });
         return elements.get(id);
     }
     const document = {getElementById: element, addEventListener() {}};
-    const gamepad = require("../probe/signin/steam-sdl-gamepad.js");
+    const gamepad = require("../ui/signin/steam-sdl-gamepad.js");
+    const physical = {getCurrentReading() {
+        const bits = gamepad.buttons;
+        return {buttons: (buttons & bits.b ? 8 : 0) | (buttons & bits.right ? 512 : 0) |
+            (buttons & bits.start ? 1 : 0) | (buttons & bits.back ? 2 : 0)};
+    }};
     const window = {
+        Windows: {Gaming: {Input: {Gamepad: {get gamepads() {
+            return buttons & gamepad.connected ? [physical] : [];
+        }}}}},
         addEventListener(name, fn) { listeners[name] = fn; },
-        steamSdlGamepad: {...gamepad, read: () => [buttons, 0, 0, 0, 0, -32768, -32768]},
+        steamSdlGamepad: gamepad,
         steamSdlNativeView: {open(report, events) {
             events.presented("width=1920");
             return {primary: true, cover() {}};
@@ -177,7 +189,7 @@ test("the primary video polls the controller independently and a quick mouse cli
         ApplicationView: {getForCurrentView: () => ({id: 7, isFullScreenMode: true, setDesiredBoundsMode() {}})},
         ApplicationViewBoundsMode: {useCoreWindow: 0}
     }}};
-    vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../probe/signin/steam-sdl-host.js"), "utf8"), {
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../ui/signin/steam-sdl-host.js"), "utf8"), {
         document, window, Windows, navigator: {}, performance: {now: () => now},
         requestAnimationFrame() { assert.fail("the media view must receive input without an HTML repaint"); },
         setTimeout(callback) { pump = callback; }
