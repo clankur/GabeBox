@@ -5,14 +5,25 @@
    publishes both motor values with that generation in one atomic word. */
 #define SDL_RUMBLE_MAGIC 0x53445231
 #define SDL_RUMBLE_SUFFIX L".rumble"
+#define SDL_RUMBLE_PRESENTER_ATTACHED 0x01
+#define SDL_RUMBLE_NONZERO_REQUESTED 0x02
+#define SDL_RUMBLE_NONZERO_PUBLISHED 0x04
+#define SDL_RUMBLE_NONZERO_APPLIED 0x08
+#define SDL_RUMBLE_STOP_APPLIED 0x10
+#define SDL_RUMBLE_DEVICE_ERROR 0x20
+#define SDL_RUMBLE_BRIDGE_ATTACHED 0x40
 
 typedef struct SdlRumbleMailbox {
     volatile LONG magic;
     volatile LONG active;
     volatile LONG generation;
-    volatile LONG reserved;
+    volatile LONG evidence; /* Sticky for this mailbox, including across arm generations. */
     volatile LONG64 command;
 } SdlRumbleMailbox;
+
+static inline void SdlRumbleRecord(SdlRumbleMailbox *box, LONG events) {
+    if (box) InterlockedOr(&box->evidence, events);
+}
 
 static inline LONG64 SdlRumbleCommand(LONG generation, DWORD motors) {
     return (LONG64)(((UINT64)(DWORD)generation << 32) | motors);

@@ -72,6 +72,8 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 
 `--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
 
+Add `--rumble` to read the selected launch's optional vibration mailbox after a controller effect. The connection state can be `armed`, `disarmed`, or `updating`. On an instrumented build, `bridge_attached` and `presenter_attached` identify the endpoints. The flags show whether a connected XInput slot requested a nonzero effect, the bridge accepted it, and the presenter received a successful WinRT result. `stop_applied` records a successful zero command after a nonzero attempt. `device_error` records any failed WinRT vibration call. These flags accumulate for the launch, including while the controller is disconnected or the presenter is covered. They can capture an effect that starts and stops between two diagnostic reads. Older sidecars leave the flags clear. Confirm physical vibration and cancellation on the controller.
+
 ## Inspect the current game's render state
 
 Use the AppID and `run_id` from the game observation while that launch is current.

@@ -16,17 +16,24 @@ class HostedRumble {
     unsigned failedStops_ = 0;
     bool attempted_ = false, stopping_ = false;
 
-    static HRESULT Apply(IUnknown *pad, DWORD motors) {
+    HRESULT Apply(DWORD motors) {
         using SetVibration = HRESULT(STDMETHODCALLTYPE *)(IUnknown *, Vibration);
         const Vibration value{LOWORD(motors) / 65535.0, HIWORD(motors) / 65535.0, 0., 0.};
-        return reinterpret_cast<SetVibration>((*reinterpret_cast<void ***>(pad))[7])(pad, value);
+        const HRESULT result = reinterpret_cast<SetVibration>((*reinterpret_cast<void ***>(pad_))[7])(pad_, value);
+        if (FAILED(result)) SdlRumbleRecord(box_, SDL_RUMBLE_DEVICE_ERROR);
+        else if (motors) SdlRumbleRecord(box_, SDL_RUMBLE_NONZERO_APPLIED);
+        else if (motors_) SdlRumbleRecord(box_, SDL_RUMBLE_STOP_APPLIED);
+        return result;
     }
 
 public:
     void Attach(SdlRumbleMailbox *box) {
         StopBeforeSuspend();
         box_ = box;
-        if (box_) SdlRumbleDisarm(box_);
+        if (box_) {
+            SdlRumbleDisarm(box_);
+            SdlRumbleRecord(box_, SDL_RUMBLE_PRESENTER_ATTACHED);
+        }
     }
 
     void StopBeforeSuspend() {
@@ -40,7 +47,7 @@ public:
             stopping_ = true;
             // A transient stop error must not send the old command to a
             // replacement. Retain the pad for retries, with a bounded close.
-            if (motors_ && FAILED(Apply(pad_, 0)) && ++failedStops_ < 3) return;
+            if (motors_ && FAILED(Apply(0)) && ++failedStops_ < 3) return;
             pad_->Release();
             identity_->Release();
             pad_ = nullptr;
@@ -80,12 +87,12 @@ public:
         if (!attempted_) {
             // The virtual slot becomes writable only after this pad accepts a stop.
             attempted_ = true;
-            if (SUCCEEDED(Apply(pad_, 0))) SdlRumbleArm(box_);
+            if (SUCCEEDED(Apply(0))) SdlRumbleArm(box_);
         }
         if (!SdlRumbleGeneration(box_)) return;
         const DWORD requested = SdlRumbleRead(box_);
         if (requested == motors_) return;
-        if (FAILED(Apply(pad_, requested))) {
+        if (FAILED(Apply(requested))) {
             if (requested) motors_ = requested;
             Stop();
             return;

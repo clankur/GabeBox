@@ -43,6 +43,7 @@ static BOOL CALLBACK OpenController(PINIT_ONCE once, PVOID parameter, PVOID *con
     if (length && length < ARRAYSIZE(path)) {
         mailbox = MapHostedGamepad(path);
         if (mailbox && AppendSdlRumbleSuffix(path, length, ARRAYSIZE(path))) rumble = MapSdlRumbleMailbox(path);
+        SdlRumbleRecord(rumble, SDL_RUMBLE_BRIDGE_ATTACHED);
     }
     return TRUE;
 }
@@ -158,10 +159,14 @@ DWORD WINAPI XboxXInputSetState(DWORD index, XINPUT_VIBRATION *vibration) {
     if (nativeSetState) return nativeSetState(index, vibration);
     const LONG generation = SdlRumbleGeneration(rumble);
     if (!HostedControllerConnected(index)) return ERROR_DEVICE_NOT_CONNECTED;
-    if (SdlRumblePublish(rumble, generation, vibration->wLeftMotorSpeed, vibration->wRightMotorSpeed))
+    const BOOL nonzero = vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed;
+    if (nonzero) SdlRumbleRecord(rumble, SDL_RUMBLE_NONZERO_REQUESTED);
+    if (SdlRumblePublish(rumble, generation, vibration->wLeftMotorSpeed, vibration->wRightMotorSpeed)) {
+        if (nonzero) SdlRumbleRecord(rumble, SDL_RUMBLE_NONZERO_PUBLISHED);
         return ERROR_SUCCESS;
+    }
     // SDL probes the stop command while opening the pad, before the view is attached.
-    return vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
+    return nonzero ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
 }
 
 DWORD WINAPI XboxXInputGetDSoundAudioDeviceGuids(DWORD index, GUID *render, GUID *capture) {

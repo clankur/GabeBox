@@ -293,10 +293,12 @@ int main() {
     const LONG firstRumble = SdlRumbleGeneration(&vibration);
     assert(firstRumble && motorWrites == 1 && lastMotorPad == &fakePad &&
            !lastMotors.left && !lastMotors.right);
+    assert(vibration.evidence == SDL_RUMBLE_PRESENTER_ATTACHED);
     assert(SdlRumblePublish(&vibration, firstRumble, 65535, 32768));
     FhdPollHostedInput(&box, &fakeWindow);
     assert(motorWrites == 2 && lastMotors.left == 1 && lastMotors.right == 32768 / 65535.0 &&
            !lastMotors.leftTrigger && !lastMotors.rightTrigger);
+    assert(vibration.evidence & SDL_RUMBLE_NONZERO_APPLIED);
     FhdPollHostedInput(&box, &fakeWindow);
     assert(motorWrites == 2);
 
@@ -304,8 +306,11 @@ int main() {
     selectedPad = &replacementPad;
     FhdPollHostedInput(&box, &fakeWindow);
     assert(!SdlRumbleGeneration(&vibration) && motorWrites == 3 && lastMotorPad == &fakePad);
+    assert(vibration.evidence & SDL_RUMBLE_DEVICE_ERROR);
+    assert(!(vibration.evidence & SDL_RUMBLE_STOP_APPLIED));
     FhdPollHostedInput(&box, &fakeWindow);
     assert(!SdlRumbleGeneration(&vibration) && motorWrites == 4 && lastMotorPad == &fakePad);
+    assert(vibration.evidence & SDL_RUMBLE_STOP_APPLIED);
     FhdPollHostedInput(&box, &fakeWindow);
     const LONG replacementRumble = SdlRumbleGeneration(&vibration);
     assert(replacementRumble && replacementRumble != firstRumble &&
@@ -323,6 +328,8 @@ int main() {
     FhdPollHostedInput(&box, &fakeWindow);
     const LONG resumed = SdlRumbleGeneration(&vibration);
     assert(resumed && resumed != replacementRumble && !SdlRumbleRead(&vibration));
+    assert(vibration.evidence == (SDL_RUMBLE_PRESENTER_ATTACHED | SDL_RUMBLE_NONZERO_APPLIED |
+                                  SDL_RUMBLE_STOP_APPLIED | SDL_RUMBLE_DEVICE_ERROR));
     assert(SdlRumblePublish(&vibration, resumed, 65535, 0));
     FhdPollHostedInput(&box, &fakeWindow);
     assert(lastMotors.left == 1 && !lastMotors.right);

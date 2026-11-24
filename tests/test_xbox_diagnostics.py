@@ -931,6 +931,7 @@ class ObserverTests(unittest.TestCase):
             bad_range = False
             wrong_offset = False
             changes_launch = False
+            rumble = None
 
             def pause(self, seconds):
                 self.now += seconds
@@ -946,6 +947,11 @@ class ObserverTests(unittest.TestCase):
                 if name == 'fhd-panel-input.txt':
                     markers = b'menu_chord=held\r\nmenu_request=ready\r\nmenu_request=rea' if self.now else b''
                     return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
+                if name == MAILBOX + '.rumble':
+                    assert kwargs['read_limit'] == 25
+                    if self.rumble is None:
+                        raise cli.PortalError(404, 'Sidecar does not exist.')
+                    return 200, self.rumble
                 assert name == MAILBOX
                 step = round(self.now * 2)
                 serial, ack, confirmed = ((2, 2, 2), (4, 2, 4), (6, 6, 6), (8, 6, 9))[step]
@@ -965,8 +971,9 @@ class ObserverTests(unittest.TestCase):
                 response = SimpleNamespace(getheader=lambda key, default: header, read=read)
                 return (200 if self.bad_range else 206), kwargs['receive'](response)
 
-        args = options(run_id=launch, seconds=1.5, panel_menu=True)
+        args = options(run_id=launch, seconds=1.5, panel_menu=True, rumble=True)
         fake = Portal()
+        fake.rumble = struct.pack('<4IQ', 0x53445231, 9, 9, 0x5F, 9 << 32)
         result = cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         self.assertEqual(result['activity'], {'gamepad': 'host-activity', 'pointer': 'host-idle'})
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
@@ -974,8 +981,14 @@ class ObserverTests(unittest.TestCase):
         self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
         self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'menu_request': 1})
         self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'menu_request': 1})
+        self.assertEqual(result['rumble'], {'state': 'armed', 'presenter_attached': True, 'bridge_attached': True,
+                                           'nonzero_requested': True, 'nonzero_published': True,
+                                           'nonzero_applied': True, 'stop_applied': True, 'device_error': False})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertNotIn(MAILBOX, json.dumps(result))
+        fake = Portal()
+        result = cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        self.assertEqual(result['rumble'], {'state': 'unavailable'})
         fake = Portal()
         fake.bad_range = True
         with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
@@ -991,3 +1004,17 @@ class ObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed during input sampling'):
                 cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
             self.assertFalse(args.output.exists())
+
+    def test_host_rumble_snapshot_keeps_old_sidecars_readable_and_flags_transitions(self):
+        magic = 0x53445231
+        self.assertEqual(cli.host_rumble_snapshot(None), {'state': 'unavailable'})
+        self.assertEqual(cli.host_rumble_snapshot(bytes(24)), {'state': 'invalid'})
+        self.assertEqual(cli.host_rumble_snapshot(bytes(25)), {'state': 'invalid'})
+        old = cli.host_rumble_snapshot(struct.pack('<4IQ', magic, 0, 8, 0, 0))
+        self.assertEqual(old.pop('state'), 'disarmed')
+        self.assertFalse(any(old.values()))
+        changing = cli.host_rumble_snapshot(struct.pack('<4IQ', magic, 0, 8, 0x2F, 8 << 32))
+        self.assertEqual(changing['state'], 'updating')
+        self.assertTrue(changing['nonzero_applied'])
+        self.assertTrue(changing['device_error'])
+        self.assertFalse(changing['stop_applied'])

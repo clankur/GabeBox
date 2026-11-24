@@ -156,6 +156,27 @@ SDL_INPUT_HEADER = Struct('<9I')
 SDL_INPUT_GAMEPAD = Struct('<II6iII')
 SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
 SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
+SDL_INPUT_RUMBLE = Struct('<4IQ')
+SDL_INPUT_RUMBLE_EVENTS = ('presenter_attached', 'nonzero_requested', 'nonzero_published',
+                           'nonzero_applied', 'stop_applied', 'device_error', 'bridge_attached')
+
+
+def host_rumble_snapshot(raw):
+    if raw is None:
+        return {'state': 'unavailable'}
+    if len(raw) != SDL_INPUT_RUMBLE.size:
+        return {'state': 'invalid'}
+    magic, active, generation, evidence, command = SDL_INPUT_RUMBLE.unpack(raw)
+    if magic != 0x53445231:
+        return {'state': 'invalid'}
+    if active and active == generation == command >> 32:
+        state = 'armed'
+    elif not active and not command:
+        state = 'disarmed'
+    else:
+        state = 'updating'
+    return {'state': state,
+            **{event: bool(evidence & (1 << bit)) for bit, event in enumerate(SDL_INPUT_RUMBLE_EVENTS)}}
 
 
 def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
@@ -224,6 +245,7 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         pause(min(0.5, args.seconds - elapsed))
 
     panel_after = panel_trace() if args.panel_menu else None
+    rumble = blob(mailbox + '.rumble', SDL_INPUT_RUMBLE.size) if args.rumble else None
     last = launch_report()
     if (not matching_probe(last, args.run_id, args.app_id)
             or any(first.get(key) != last.get(key) for key in ('run_id', 'steam_sdl_mailbox'))):
@@ -244,6 +266,8 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
                 added = panel_after[len(panel_before):]
                 menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
         result['panel_menu'] = menu
+    if args.rumble:
+        result['rumble'] = host_rumble_snapshot(rumble)
     if args.output:
         save_observation(args.output, result, {})
     return result
@@ -921,6 +945,8 @@ def main():
                                              help='sample duration, 0 for one snapshot (default 0, maximum 30)')
     inspections['inspect-input'].add_argument('--panel-menu', action='store_true',
                                              help='read optional package-level panel and menu checkpoints')
+    inspections['inspect-input'].add_argument('--rumble', action='store_true',
+                                             help='read optional hosted rumble checkpoints for the selected launch')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
