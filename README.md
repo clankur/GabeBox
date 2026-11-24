@@ -12,7 +12,7 @@ The goal is to make the same **Install** and **Play** flow work across the Steam
 
 - **Xbox Series X or Series S** in Developer Mode with Device Portal enabled and an Xbox profile signed in. [Activate Developer Mode](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/devkit-activation)
 - **Steam account** that owns the games you want to play, with Steam Guard in the Steam Mobile app to approve the QR sign-in.
-- **Internet access and free space** on the Xbox for Steam sign-in and game downloads. Check available space on the game’s install volume.
+- **Internet access and free space** on the Xbox for Steam sign-in and game downloads. [Provision Xbox development storage](#provision-xbox-development-storage)
 - **Deployment computer** that can reach the Xbox’s HTTPS Device Portal, with Python 3.9 or newer and a checkout of this repository for the deployment CLI.
 - **Signed GabeBox APPX** with its matching publisher certificate and any x64 framework packages required by that build. [Build from source](#build-from-source)
 
@@ -41,6 +41,18 @@ The Steam Core prototype also verified a Slay the Spire cloud-save restore with 
 | **X-COM: UFO Defense** | The earlier Steam Core library launched the owned DOS edition and rendered its intro. In-game controller input and persistent saves remain open. [DOS runtime test](https://github.com/clankur/GabeBox/issues/44) |
 
 ## Setup
+
+### Provision Xbox development storage
+
+`D:` is the Xbox’s internal Developer Mode storage. In current GabeBox builds it appears as **Xbox Development Storage** in Big Picture, and GabeBox creates `D:\DevelopmentFiles\SteamLibrary` when it opens that library. This support landed after the `1.0.230.37` tag. [Build from source](#build-from-source)
+
+**Back up existing Dev Mode data before resizing.** Changing the allocation can erase sideloaded apps, installed games, and saves stored on the developer partition. If the current allocation has enough space, keep it. [Dev storage guide](https://yosonia.com/en/510)
+
+1. In **Dev Home** on the Xbox, press the controller’s **Menu** button and choose **Manage Dev Storage**.
+2. Set an allocation large enough for the games you want to install and Steam’s temporary download and unpacking files. Select **Save** and follow the console’s restart prompts. [Dev Mode setup guide](https://github.com/XboxEmulationHub/devmodewiki/blob/master/docs/xbox-setup/xbox-developer-mode-setup.mdx#configuration)
+3. After deploying GabeBox and signing in, open Big Picture **Settings → Storage**. Confirm **Xbox Development Storage** is available and has enough free space. Select it as the default install location if another drive is selected.
+
+### Deploy and sign in
 
 Run the commands from the repository root. Use `python3 -m tools.xbox_deploy --help` to list the [Device Portal CLI](tools/xbox_deploy.py) commands.
 
