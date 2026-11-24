@@ -69,7 +69,7 @@ def gpu_mailbox(generation=2, width=1920, sequence=25, format_code=28):
 def options(**overrides):
     args = dict(version='1.2.3.4', startup=False, app_id=APP_ID, run_id=None, image_name=None, timeout=8,
                 frame_seconds=0, output=None, bootstrap_frame=False, require_checkpoint=[],
-                fail_on_checkpoint=[], watch_checkpoint=[], checkpoint_timeout=2, checkpoint_timeouts=[])
+                fail_on_checkpoint=[], watch_checkpoint=[], checkpoint_timeout=2, checkpoint_timeouts=[], keyboard=False)
     args.update(overrides)
     return SimpleNamespace(**args)
 
@@ -842,6 +842,7 @@ class ObserverTests(unittest.TestCase):
                     ranges = {
                         'bytes=0-35': struct.pack('<9I', 0x53444C31, 2, 99, 0, 0, 2, 2, 1, 0),
                         'bytes=8294456-8294495': struct.pack('<II6iII', 4, 0x10001, 1, -2, 3, -4, -32768, 32767, 2, 1),
+                        'bytes=8294496-8294507': struct.pack('<3I', 6, 7, 5),
                         'bytes=20-23': struct.pack('<I', 2),
                         'bytes=8294456-8294459': struct.pack('<I', 4),
                     }
@@ -876,13 +877,13 @@ class ObserverTests(unittest.TestCase):
         requests.clear()
         output, errors = io.StringIO(), io.StringIO()
         command = ['xbox_deploy.py', 'inspect-input', '--version', '1.2.3.4', '--app-id', str(APP_ID),
-                   '--run-id', str(launch)]
+                   '--run-id', str(launch), '--keyboard']
         with (patch.object(cli, 'DevicePortal', Portal),
               patch.object(cli, 'load_settings', return_value=settings),
               patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
             cli.main()
         result = json.loads(output.getvalue())
-        self.assertEqual(requests, [None] + ['GET'] * 7)
+        self.assertEqual(requests, [None] + ['GET'] * 8)
         self.assertEqual(result['activity']['gamepad'], 'insufficient-samples')
         self.assertEqual(result['samples'][0]['gamepad'], {
             'state': 'unacknowledged', 'serial': 4, 'ack': 2, 'connected': True,
@@ -890,6 +891,7 @@ class ObserverTests(unittest.TestCase):
         })
         self.assertEqual(result['samples'][0]['pointer']['state'], 'acknowledged')
         self.assertTrue(result['samples'][0]['keyboard_ready'])
+        self.assertEqual(result['samples'][0]['keyboard_queue'], {'read': 6, 'write': 7, 'reset': 5})
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
 
         requests.clear()

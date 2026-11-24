@@ -155,6 +155,9 @@ SDL_INPUT_MAGIC = 0x53444C31
 SDL_INPUT_HEADER = Struct('<9I')
 SDL_INPUT_GAMEPAD = Struct('<II6iII')
 SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
+SDL_INPUT_KEYBOARD_COUNTERS = Struct('<3I')
+# The gamepad snapshot ends at the first keyboard word (available).
+SDL_INPUT_KEYBOARD_COUNTERS_OFFSET = SDL_INPUT_GAMEPAD_OFFSET + SDL_INPUT_GAMEPAD.size
 SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
 SDL_INPUT_RUMBLE = Struct('<4IQ')
 SDL_INPUT_RUMBLE_EVENTS = ('presenter_attached', 'nonzero_requested', 'nonzero_published',
@@ -237,9 +240,17 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
             if pad[1] & ~0x17FFF or any(not -32768 <= axis <= 32767 for axis in pad[2:8]):
                 raise ValueError('The hosted SDL gamepad state does not match the expected protocol.')
             gamepad.update(connected=bool(pad[1] & 0x10000), buttons=f'0x{pad[1]:08x}', axes=pad[2:8])
+        keyboard_queue = None
+        if args.keyboard and pad[9]:
+            read, write, reset = SDL_INPUT_KEYBOARD_COUNTERS.unpack(
+                read_range(SDL_INPUT_KEYBOARD_COUNTERS_OFFSET, SDL_INPUT_KEYBOARD_COUNTERS.size))
+            keyboard_queue = {'read': read, 'write': write, 'reset': reset}
         elapsed = clock() - start
-        samples.append({'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
-                        'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])})
+        sample = {'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
+                  'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])}
+        if keyboard_queue is not None:
+            sample['keyboard_queue'] = keyboard_queue
+        samples.append(sample)
         if elapsed >= args.seconds or head[8]:
             break
         pause(min(0.5, args.seconds - elapsed))
@@ -947,6 +958,8 @@ def main():
                                              help='read optional package-level panel and menu checkpoints')
     inspections['inspect-input'].add_argument('--rumble', action='store_true',
                                              help='read optional hosted rumble checkpoints for the selected launch')
+    inspections['inspect-input'].add_argument('--keyboard', action='store_true',
+                                             help='read keyboard queue counters for the selected launch')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
