@@ -1,6 +1,7 @@
 // Input for the native CoreWindow on its dispatcher thread. The wire formats
 // match SteamSdlSurface and the WWA player. No captures or polling survive End.
 #include "hosted-input.h"
+#include "hosted-rumble.h"
 #include <roapi.h>
 #include <winstring.h>
 #include <stdint.h>
@@ -57,6 +58,7 @@ struct Reading {
 };
 static_assert(sizeof(Reading) == 64 && sizeof(KeyStatus) == 12, "WinRT input ABI");
 SdlHostMailbox *mail;
+HostedRumble rumble;
 IUnknown *window, *pads;
 enum OverlayState { Playing, Requested, Reported };
 OverlayState overlay;
@@ -116,6 +118,7 @@ void publishPanelPointer() {
     }
 }
 void neutral() {
+    rumble.StopBeforeSuspend();
     const auto idle = SdlHostIdleGamepad(alive() ? SdlHostLoad(&mail->gamepad.buttons) : 0);
     if (nativePad)
         setPad(idle);
@@ -453,9 +456,9 @@ LONG axis(double value) {
     LONG result = (LONG)scaled;
     return scaled < result ? result - 1 : result;
 }
-bool readPad(Reading *out) {
+IUnknown *readPad(Reading *out) {
     if (!pads)
-        return false;
+        return nullptr;
     IUnknown *list = nullptr, *pad = nullptr;
     HRESULT hr = method(pads, 10, &list);
     UINT size = 0;
@@ -466,10 +469,13 @@ bool readPad(Reading *out) {
         list->Release();
     }
     if (!pad)
-        return false;
+        return nullptr;
     hr = method(pad, 8, out);
-    pad->Release();
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        pad->Release();
+        return nullptr;
+    }
+    return pad;
 }
 } // namespace
 extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
@@ -513,13 +519,17 @@ extern "C" void FhdPauseHostedInput() {
     if (mail && overlay != Reported) {
         neutral();
         overlay = Reported;
+    } else {
+        rumble.Stop();
     }
 }
+extern "C" void FhdStopHostedRumble() { rumble.Stop(); }
 extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
     menuOnRelease = enabled != FALSE;
 }
 extern "C" BOOL FhdHostedMenuHeld() { return chordPending; }
 extern "C" void FhdEndHostedInput() {
+    rumble.Attach(nullptr);
     if (window) {
         for (auto &h : handlers)
             if (h.registered) {
@@ -539,7 +549,7 @@ extern "C" void FhdEndHostedInput() {
     menuOnRelease = false;
     sentPad = false;
 }
-extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
+extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, SdlRumbleMailbox *vibration, void *coreWindow) {
     FhdEndHostedInput();
     if (!box || !coreWindow || SdlHostLoad(&box->magic) != SDL_HOST_MAGIC)
         return E_INVALIDARG;
@@ -548,6 +558,7 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     if (FAILED(hr))
         return hr;
     mail = box;
+    rumble.Attach(vibration);
     focused = TRUE;
     BYTE shown = 1;
     method(window, Visible, &shown);
@@ -579,9 +590,14 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     return S_OK;
 }
 extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
-    if (!mail || box != mail || !coreWindow || !alive())
+    if (!mail || box != mail || !coreWindow)
         return 0;
+    if (!alive()) {
+        rumble.Stop();
+        return 0;
+    }
     if (overlay) {
+        rumble.Stop();
         if (overlay == Requested) {
             overlay = Reported;
             return 1;
@@ -590,11 +606,17 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
     }
     DWORD now = GetTickCount(), elapsed = now - lastTime;
     lastTime = now;
-    if (!foreground())
+    if (!foreground()) {
+        rumble.Stop();
         return 0;
+    }
     Reading reading = {};
     auto value = SdlHostIdleGamepad(0);
-    const bool connected = readPad(&reading);
+    IUnknown *pad = readPad(&reading);
+    const bool connected = pad != nullptr;
+    if (nativePad) rumble.Update(pad);
+    else rumble.Stop();
+    if (pad) pad->Release();
     if (connected) {
         const unsigned bits[] = {4, 8, 16, 32, 2, 0, 1, 4096, 8192, 1024, 2048, 64, 128, 256, 512};
         value.buttons = SDL_HOST_PAD_CONNECTED;

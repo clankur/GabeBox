@@ -1,0 +1,9 @@
+{
+  "gdi32.dll": {
+    "ChoosePixelFormat": "XboxWin32Window.dll",
+    "DescribePixelFormat": "XboxWin32Window.dll",
+    "GetPixelFormat": "XboxWin32Window.dll",
+    "SetPixelFormat": "XboxWin32Window.dll",
+    "SwapBuffers": "XboxWin32Window.dll"
+  }
+}

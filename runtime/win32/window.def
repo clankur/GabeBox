@@ -51,3 +51,10 @@ EXPORTS
     ScreenToClient=XboxScreenToClient @49
     GetCursorPos=XboxGetCursorPos @50
     GetPhysicalCursorPos=XboxGetPhysicalCursorPos @51
+    SetPropW=XboxSetPropW @52
+    GetPropW=XboxGetPropW @53
+    RemovePropW=XboxRemovePropW @54
+    GetWindowLongW=XboxGetWindowLongW @55
+    EnumDisplaySettingsA=XboxEnumDisplaySettingsA @56
+    GetPixelFormat=XboxGetPixelFormat @57
+    DescribePixelFormat=XboxDescribePixelFormat @58

@@ -70,6 +70,51 @@ CASES = {
         'Check the result of the graphics helper in the selected package build.',
         CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
     ),
+    'wasapi-hosted': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted WASAPI render control',
+        'Check default render discovery, activation, and stream progress.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'profile-folders': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Win32 profile folder control',
+        'Check scoped Documents and Roaming AppData paths and file round trips.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'steam-sdk-versioned': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Versioned Steam SDK control',
+        'Check caller-selected Steamworks versions, SDK results, and account validation.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'dxgi-present-commit': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'DXGI accepted-frame control',
+        'Check that only successful presents publish a shared GPU frame.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'dxgi-output-native': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Native DXGI output and mode control',
+        'Check native adapter output enumeration and ANSI display mode lookup.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'dxgi-output-hosted': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted ANSI display mode control',
+        'Check hosted ANSI display settings with a virtual monitor and a native DXGI output.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'd3d11-hosted-output': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted D3D11 explicit adapter control',
+        'Check native or hosted output selection and explicit hardware device creation.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'dxgi-d3d11-resize': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Hosted D3D11 swap-chain resize control',
+        'Check frame continuity after a rejected resize and a new GPU generation after a successful resize.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'wgl-loader': ProbeCase(
+        GRAPHICS_CONTROL_NAME, 'Dynamic hosted WGL control',
+        'Check hosted pixel formats, OpenGL export selection, and core-context rendering.',
+        CHILD_EXIT, report_kind='packaged-child-process', require_run_id=True,
+    ),
     'steam-core': ProbeCase(
         PROBE_STEAM_CORE_NAME, 'Steam Core Loader Probe',
         'Wait for the Steam Core diagnostic to finish.',
@@ -89,4 +134,9 @@ CASES = {
     ),
 }
 
-PACKAGE_CASES = {case.package: key for key, case in CASES.items() if key not in ('named-pipe', 'steam-loader')}
+PACKAGE_CASES = {
+    case.package: key for key, case in CASES.items()
+    if key not in ('named-pipe', 'steam-loader', 'wasapi-hosted', 'profile-folders', 'steam-sdk-versioned',
+                   'dxgi-present-commit', 'dxgi-output-native', 'dxgi-output-hosted', 'd3d11-hosted-output',
+                   'dxgi-d3d11-resize', 'wgl-loader')
+}

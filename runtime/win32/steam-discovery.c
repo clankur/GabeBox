@@ -145,21 +145,24 @@ DWORD WINAPI XboxSteamInitialize(BOOL retain) {
     return report | (result & 0xffffu);
 }
 
-enum LegacyOperation { LegacyInit, LegacyIsRunning, LegacyRestart };
-typedef struct LegacyCall {
-    enum LegacyOperation operation;
+enum GameSdkOperation { LegacyInit, LegacyIsRunning, LegacyRestart, VersionedInit, GameSdkOperationCount };
+enum { SdkInitOk = 0, SdkInitFailed = 1 };
+typedef struct GameSdkCall {
+    enum GameSdkOperation operation;
+    const char *versions;
+    char *message;
     HMODULE sdk;
     FARPROC entry;
     DWORD app;
     DWORD lastError;
     bool called;
-    bool result;
-} LegacyCall;
+    int result;
+} GameSdkCall;
 
-static SRWLOCK legacyLock = SRWLOCK_INIT;
-static volatile LONG legacyTraceEvents[3];
+static SRWLOCK gameSdkLock = SRWLOCK_INIT;
+static volatile LONG gameSdkTraceEvents[GameSdkOperationCount];
 
-static bool MatchLegacyAccount(HMODULE sdk) {
+static bool MatchGameSdkAccount(HMODULE sdk) {
     typedef void *(__cdecl *GetUser)(void);
     typedef bool (__cdecl *IsLoggedOn)(void *);
     typedef ULONGLONG (__cdecl *GetSteamId)(void *);
@@ -171,24 +174,46 @@ static bool MatchLegacyAccount(HMODULE sdk) {
     return expected && user && loggedOn && getId && loggedOn(user) && getId(user) == expected;
 }
 
-static DWORD CallLegacySdk(DWORD *report, void *context) {
+static void FailVersionedInit(GameSdkCall *call, const char *reason) {
+    call->result = SdkInitFailed;
+    // The ABI's optional SteamErrMsg buffer holds 1024 bytes. All reasons are adapter literals.
+    if (call->message) {
+        char *out = call->message;
+        while ((*out++ = *reason++)) {}
+    }
+}
+
+static DWORD CallGameSdk(DWORD *report, void *context) {
     typedef bool (__cdecl *Query)(void);
     typedef bool (__cdecl *Restart)(DWORD);
+    typedef int (__cdecl *InitWithVersions)(const char *, char *);
     typedef void (__cdecl *Shutdown)(void);
-    LegacyCall *call = context;
+    GameSdkCall *call = context;
+    const bool versioned = call->operation == VersionedInit;
+    Shutdown shutdown = NULL;
+    if (versioned) {
+        shutdown = (Shutdown)(void *)GetProcAddress(call->sdk, "SteamAPI_Shutdown");
+        if (!shutdown) {
+            call->lastError = GetLastError();
+            return call->lastError;
+        }
+    }
+
     SetLastError(call->lastError);
-    call->result = call->operation == LegacyRestart ? ((Restart)(void *)call->entry)(call->app) :
-        ((Query)(void *)call->entry)();
+    if (versioned) call->result = ((InitWithVersions)(void *)call->entry)(call->versions, call->message);
+    else if (call->operation == LegacyRestart) call->result = ((Restart)(void *)call->entry)(call->app);
+    else call->result = ((Query)(void *)call->entry)();
     call->lastError = GetLastError();
     call->called = true;
-    if (call->operation == LegacyInit && call->result) {
+    if ((versioned && call->result == SdkInitOk) || (call->operation == LegacyInit && call->result)) {
         *report |= STEAM_HANDOFF_SDK_INITIALIZED;
-        if (MatchLegacyAccount(call->sdk)) {
+        if (MatchGameSdkAccount(call->sdk)) {
             *report |= STEAM_HANDOFF_SDK_MATCHED;
         } else {
-            Shutdown shutdown = (Shutdown)(void *)GetProcAddress(call->sdk, "SteamAPI_Shutdown");
+            if (!shutdown) shutdown = (Shutdown)(void *)GetProcAddress(call->sdk, "SteamAPI_Shutdown");
             if (shutdown) shutdown();
-            call->result = false;
+            if (versioned) FailVersionedInit(call, "The Steam SDK did not match the signed-in Steam account.");
+            else call->result = false;
         }
     }
     return ERROR_SUCCESS;
@@ -201,17 +226,20 @@ static char *TraceError(char *out, const char *prefix, DWORD error) {
     return out;
 }
 
-static void TraceLegacyResult(char const *name, DWORD report, LegacyCall const *call,
+static void TraceGameSdkResult(char const *name, DWORD report, GameSdkCall const *call,
         DWORD discovery, DWORD cleanup) {
-    if (InterlockedIncrement(&legacyTraceEvents[call->operation]) > 4) return;
+    if (InterlockedIncrement(&gameSdkTraceEvents[call->operation]) > 4) return;
     char line[180];
     char *out = line;
-    const char *parts[] = {"asset steam-legacy-", name, call->called ? (call->result ? "=true" : "=false") : "=unavailable",
+    const bool versioned = call->operation == VersionedInit;
+    const char *parts[] = {"asset steam-legacy-", name,
+        call->called ? (versioned ? "" : (call->result ? "=true" : "=false")) : "=unavailable",
         report & STEAM_HANDOFF_SDK_DISCOVERY ? " discovery=private" : " discovery=default",
         report & STEAM_HANDOFF_SDK_MATCHED ? " account=matched" :
             report & STEAM_HANDOFF_SDK_INITIALIZED ? " account=unverified" : ""};
     for (unsigned i = 0; i < ARRAYSIZE(parts); ++i)
         for (const char *part = parts[i]; *part; ++part) *out++ = *part;
+    if (versioned && call->called) out = TraceError(out, " result=0x", (DWORD)call->result);
     if (discovery) out = TraceError(out, " discovery-error=0x", discovery);
     if (cleanup) out = TraceError(out, " cleanup-error=0x", cleanup);
     if (!call->called) out = TraceError(out, " sdk-error=0x", call->lastError);
@@ -220,19 +248,18 @@ static void TraceLegacyResult(char const *name, DWORD report, LegacyCall const *
     AppendTrace(line, (DWORD)(out - line));
 }
 
-static bool InvokeLegacy(enum LegacyOperation operation, DWORD app, const char *symbol, const char *trace) {
+static int InvokeGameSdk(GameSdkCall *call, const char *symbol, const char *trace) {
     const DWORD before = GetLastError();
+    call->lastError = ERROR_INVALID_DATA;
+    const bool versioned = call->operation == VersionedInit;
     WCHAR enabled[2];
     if (!ReadSetting(L"XBOX_STEAM_HANDOFF_LEGACY", enabled, ARRAYSIZE(enabled)) || enabled[0] != L'1') {
+        if (versioned) FailVersionedInit(call, "Steam SDK discovery is disabled for this launch.");
         SetLastError(ERROR_INVALID_DATA);
-        return false;
+        return call->result;
     }
 
-    AcquireSRWLockExclusive(&legacyLock);
-    LegacyCall call = {0};
-    call.operation = operation;
-    call.app = app;
-    call.lastError = ERROR_INVALID_DATA;
+    AcquireSRWLockExclusive(&gameSdkLock);
     DWORD report = 0;
     DWORD discovery = 0;
     DWORD cleanup = 0;
@@ -240,35 +267,44 @@ static bool InvokeLegacy(enum LegacyOperation operation, DWORD app, const char *
             ReadSetting(L"XBOX_STEAM_HANDOFF_HIVE", hivePath, ARRAYSIZE(hivePath))) {
         // The host verifies this private, staged image. Resolve only its already-loaded copy.
         WCHAR actual[1024];
-        call.sdk = GetModuleHandleW(L"steam_api64.dll");
-        DWORD length = call.sdk ? GetModuleFileNameW(call.sdk, actual, ARRAYSIZE(actual)) : 0;
+        call->sdk = GetModuleHandleW(L"steam_api64.dll");
+        DWORD length = call->sdk ? GetModuleFileNameW(call->sdk, actual, ARRAYSIZE(actual)) : 0;
         if (length && length < ARRAYSIZE(actual) &&
                 CompareStringOrdinal(sdkPath, -1, actual, -1, TRUE) == CSTR_EQUAL) {
-            call.entry = GetProcAddress(call.sdk, symbol);
-            call.lastError = call.entry ? before : GetLastError();
-            if (call.entry) {
+            call->entry = GetProcAddress(call->sdk, symbol);
+            call->lastError = call->entry ? before : GetLastError();
+            if (call->entry) {
                 HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-                discovery = WithSteamDiscovery(client, hivePath, &report, CallLegacySdk, &call, &cleanup);
+                discovery = WithSteamDiscovery(client, hivePath, &report, CallGameSdk, call, &cleanup);
                 // If discovery is unavailable, preserve the original SDK's decision.
-                if (!call.called) CallLegacySdk(&report, &call);
+                if (!(report & STEAM_HANDOFF_SDK_DISCOVERY)) CallGameSdk(&report, call);
                 if (client) FreeLibrary(client);
             }
         }
     }
-    TraceLegacyResult(trace, report, &call, discovery, cleanup);
-    ReleaseSRWLockExclusive(&legacyLock);
-    SetLastError(call.lastError);
-    return call.result;
+    if (versioned && !call->called) FailVersionedInit(call, "The staged Steam SDK entry points are unavailable.");
+    TraceGameSdkResult(trace, report, call, discovery, cleanup);
+    ReleaseSRWLockExclusive(&gameSdkLock);
+    SetLastError(call->lastError);
+    return call->result;
 }
 
 bool __cdecl XboxLegacySteamInit(void) {
-    return InvokeLegacy(LegacyInit, 0, "SteamAPI_Init", "init");
+    GameSdkCall call = {.operation = LegacyInit};
+    return InvokeGameSdk(&call, "SteamAPI_Init", "init") != 0;
 }
 
 bool __cdecl XboxLegacySteamIsRunning(void) {
-    return InvokeLegacy(LegacyIsRunning, 0, "SteamAPI_IsSteamRunning", "is-running");
+    GameSdkCall call = {.operation = LegacyIsRunning};
+    return InvokeGameSdk(&call, "SteamAPI_IsSteamRunning", "is-running") != 0;
 }
 
 bool __cdecl XboxLegacySteamRestart(DWORD app) {
-    return InvokeLegacy(LegacyRestart, app, "SteamAPI_RestartAppIfNecessary", "restart");
+    GameSdkCall call = {.operation = LegacyRestart, .app = app};
+    return InvokeGameSdk(&call, "SteamAPI_RestartAppIfNecessary", "restart") != 0;
+}
+
+int __cdecl XboxSteamInitWithVersions(const char *versions, char *message) {
+    GameSdkCall call = {.operation = VersionedInit, .versions = versions, .message = message};
+    return InvokeGameSdk(&call, "SteamInternal_SteamAPI_Init", "versioned-init");
 }

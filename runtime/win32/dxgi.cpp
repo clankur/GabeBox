@@ -22,7 +22,8 @@ bool SameInterface(REFIID first, REFIID second) {
 bool VirtualClientRect(HWND window, RECT& area) {
     using Query = BOOL (WINAPI *)(HWND, RECT*);
     auto windows = GetModuleHandleW(L"XboxWin32Window.dll");
-    auto query = windows ? reinterpret_cast<Query>(GetProcAddress(windows, "GetClientRect")) : nullptr;
+    auto query = windows ? reinterpret_cast<Query>(
+        reinterpret_cast<void*>(GetProcAddress(windows, "GetClientRect"))) : nullptr;
     if (!query || !window) return false;
     const DWORD error = GetLastError();
     const bool found = query(window, &area) != FALSE;
@@ -57,6 +58,8 @@ void Trace(const char* phase, HRESULT code) {
     AppendTrace(line, static_cast<DWORD>(out - line));
 }
 
+#include "dxgi-hosted-output.h"
+
 template<size_t N>
 bool HasPackageMarker(const WCHAR (&suffix)[N]) {
     WCHAR path[1024];
@@ -77,7 +80,7 @@ class ProducerCadenceTrace {
     inline static volatile LONG stallRecords_ = 0;
     UINT64 frequency_ = 0, start_ = 0, last_ = 0, maxGap_ = 0;
     UINT64 previousReturn_ = 0;
-    UINT attempts_ = 0, submitted_ = 0, busy_ = 0;
+    UINT attempts_ = 0, submitted_ = 0, busy_ = 0, rejected_ = 0;
     UINT immediate_ = 0, syncOne_ = 0;
     bool aggregate_ = true;
 
@@ -141,7 +144,7 @@ public:
         previousReturn_ = Timestamp();
     }
 
-    void Record(HRESULT result, bool active, UINT interval, UINT flags) {
+    void Record(HRESULT capture, HRESULT present, bool active, UINT interval, UINT flags) {
         if (!aggregate_) return;
         const auto now = Timestamp();
         if (!now) return;
@@ -149,8 +152,8 @@ public:
         if (last_ && now - last_ > maxGap_) maxGap_ = now - last_;
         last_ = now;
         ++attempts_;
-        if (result == S_OK) ++submitted_;
-        if (result == S_FALSE && active) ++busy_;
+        if (capture == S_OK) ++(present == S_OK ? submitted_ : rejected_);
+        if (capture == S_FALSE && active) ++busy_;
         if (!flags && interval == 0) ++immediate_;
         if (!flags && interval == 1) ++syncOne_;
         if (now - start_ >= frequency_ * 5) Flush();
@@ -162,12 +165,13 @@ public:
             aggregate_ = false;
             return;
         }
-        char line[240], *out = line;
+        char line[270], *out = line;
         Field(out, "dxgi cadence end-qpc=", last_);
         Field(out, " elapsed-ms=", (last_ - start_) * 1000 / frequency_);
         Field(out, " attempts=", attempts_);
         Field(out, " submitted=", submitted_);
         Field(out, " slot-busy=", busy_);
+        Field(out, " present-rejected=", rejected_);
         Field(out, " max-gap-ms=", maxGap_ * 1000 / frequency_);
         Field(out, " immediate=", immediate_);
         Field(out, " sync-one=", syncOne_);
@@ -176,7 +180,7 @@ public:
         AppendTrace(line, static_cast<DWORD>(out - line));
         start_ = last_;
         maxGap_ = 0;
-        attempts_ = submitted_ = busy_ = 0;
+        attempts_ = submitted_ = busy_ = rejected_ = 0;
         immediate_ = syncOne_ = 0;
     }
 };
@@ -196,7 +200,7 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
     bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
-    bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false;
+    bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedRejection_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
         if (flags & DXGI_PRESENT_TEST) return interval;
@@ -232,18 +236,15 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         return 0;
     }
 
-    void Publish(UINT interval, UINT flags) {
-        if (flags & DXGI_PRESENT_TEST) return;
-        const HRESULT code = publisher_.Publish(native_, queue_ ? native3_->GetCurrentBackBufferIndex() : 0);
-        cadence_.Record(code, publisher_.IsActive(), interval, flags);
+    HRESULT Capture(UINT flags, unsigned& index) {
+        if (flags & DXGI_PRESENT_TEST) return S_FALSE;
+        const HRESULT code = publisher_.Prepare(native_, queue_ ? native3_->GetCurrentBackBufferIndex() : 0, index);
         if (code == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
             using RequestClose = void (WINAPI *)(HWND);
             auto windows = GetModuleHandleW(L"XboxWin32Window.dll");
-            auto close = windows ? reinterpret_cast<RequestClose>(GetProcAddress(windows, "XboxRequestWindowClose")) : nullptr;
+            auto close = windows ? reinterpret_cast<RequestClose>(
+                reinterpret_cast<void*>(GetProcAddress(windows, "XboxRequestWindowClose"))) : nullptr;
             if (close) close(window_);
-        } else if (code == S_OK && !tracedFrame_) {
-            Trace("gpu-frame-submitted", code);
-            tracedFrame_ = true;
         } else if (FAILED(code) && !tracedError_) {
             tracedError_ = true;
             if (const char* stage = publisher_.FailureStage()) Trace(stage, code);
@@ -260,21 +261,23 @@ class HostedSwapChain final : public IDXGISwapChain4 {
             }
             Trace("gpu-frame-error", code);
         }
+        return code;
     }
 
-    UINT PreparePresent(UINT interval, UINT flags, ProducerCadenceTrace::PresentTiming& timing) {
+    UINT PreparePresent(UINT interval, UINT flags, ProducerCadenceTrace::PresentTiming& timing,
+            HRESULT& capture, unsigned& index) {
         timing.pacerFirst = paceBeforePublish_ && interval == 1 && flags == 0 && publisher_.IsActive();
         if (timing.pacerFirst) {
             const UINT nativeInterval = NativeInterval(interval, flags);
             if (timing.entered) timing.split = cadence_.Timestamp();
-            Publish(interval, flags);
+            capture = Capture(flags, index);
             if (nativeInterval == 0 && !tracedPublishTiming_) {
                 Trace("pacing-before-publish", S_OK);
                 tracedPublishTiming_ = true;
             }
             return nativeInterval;
         }
-        Publish(interval, flags);
+        capture = Capture(flags, index);
         if (timing.entered) timing.split = cadence_.Timestamp();
         return NativeInterval(interval, flags);
     }
@@ -296,12 +299,51 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         if (measure) timing.entered = cadence_.Timestamp();
         AcquireSRWLockExclusive(&lock_);
         if (timing.entered) timing.locked = cadence_.Timestamp();
-        const UINT nativeInterval = PreparePresent(interval, flags, timing);
+        HRESULT capture;
+        unsigned index;
+        const UINT nativeInterval = PreparePresent(interval, flags, timing, capture, index);
         if (timing.entered) timing.prepared = cadence_.Timestamp();
         const HRESULT result = present(nativeInterval);
         if (timing.entered) timing.returned = cadence_.Timestamp();
+        if (capture == S_OK) {
+            if (result == S_OK) {
+                publisher_.Commit(index);
+                if (!tracedFrame_) {
+                    Trace("gpu-frame-submitted", capture);
+                    tracedFrame_ = true;
+                }
+            } else if (!tracedRejection_) {
+                Trace("gpu-frame-present-rejected", result);
+                tracedRejection_ = true;
+            }
+        }
+        if (!(flags & DXGI_PRESENT_TEST)) cadence_.Record(capture, result, publisher_.IsActive(), interval, flags);
         TracePresent(interval, nativeInterval, flags, result);
         if (measure) cadence_.RecordPresent(timing, publisher_.IsActive());
+        ReleaseSRWLockExclusive(&lock_);
+        return result;
+    }
+
+    template <class NativeResize>
+    HRESULT ResizeHosted(NativeResize resize) {
+        AcquireSRWLockExclusive(&lock_);
+        // D3D12 command slots retain source buffers. D3D11 flushes its copies
+        // on submission and can keep the current exchange until DXGI succeeds.
+        HRESULT result = queue_ ? publisher_.Reset() : S_OK;
+        if (SUCCEEDED(result)) {
+            if (queue_) clock_.interval = 0;
+            result = resize();
+            if (!queue_) {
+                const DWORD error = GetLastError();
+                if (result == S_OK) {
+                    publisher_.Reset();
+                    clock_.interval = 0;
+                }
+                static volatile LONG events = 0;
+                if (InterlockedIncrement(&events) <= 12) Trace("d3d11-resize-buffers", result);
+                SetLastError(error);
+            }
+        }
         ReleaseSRWLockExclusive(&lock_);
         return result;
     }
@@ -390,14 +432,9 @@ public:
             if (queue_) return DXGI_ERROR_INVALID_CALL;
             count = 2;
         }
-        AcquireSRWLockExclusive(&lock_);
-        HRESULT code = publisher_.Reset();
-        if (SUCCEEDED(code)) {
-            clock_.interval = 0;
-            code = native_->ResizeBuffers(count, width, height, format, flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
-        }
-        ReleaseSRWLockExclusive(&lock_);
-        return code;
+        return ResizeHosted([&] {
+            return native_->ResizeBuffers(count, width, height, format, flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+        });
     }
     HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* mode) override { return native_->ResizeTarget(mode); }
     HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput** out) override { return native_->GetContainingOutput(out); }
@@ -465,15 +502,10 @@ public:
         if ((!width || !height) && !VirtualClientRect(window_, area)) return DXGI_ERROR_INVALID_CALL;
         if (!width) width = area.right - area.left;
         if (!height) height = area.bottom - area.top;
-        AcquireSRWLockExclusive(&lock_);
-        HRESULT code = publisher_.Reset();
-        if (SUCCEEDED(code)) {
-            clock_.interval = 0;
-            code = native3_->ResizeBuffers1(count, width, height, format,
+        return ResizeHosted([&] {
+            return native3_->ResizeBuffers1(count, width, height, format,
                 flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH, nodeMasks, queues);
-        }
-        ReleaseSRWLockExclusive(&lock_);
-        return code;
+        });
     }
 };
 
@@ -568,7 +600,15 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetParent(REFIID iid, void** out) override { return native_->GetParent(iid, out); }
 
-    HRESULT STDMETHODCALLTYPE EnumAdapters(UINT index, IDXGIAdapter** out) override { return native_->EnumAdapters(index, out); }
+    HRESULT STDMETHODCALLTYPE EnumAdapters(UINT index, IDXGIAdapter** out) override {
+        const HRESULT result = native_->EnumAdapters(index, out);
+        if (!index && SUCCEEDED(result) && out && *out && HostedOutputEnabled()) {
+            const DWORD previous = GetLastError();
+            MaybeWrapHostedAdapter(this, out);
+            SetLastError(previous);
+        }
+        return result;
+    }
     HRESULT STDMETHODCALLTYPE MakeWindowAssociation(HWND window, UINT flags) override {
         RECT area{};
         if (!VirtualClientRect(window, area)) {
@@ -670,15 +710,24 @@ public:
 
 enum class FactoryEntry { Legacy, Version1, Version2 };
 
+HRESULT WrapFactory(ComPtr<IDXGIFactory2>& native, ComPtr<Factory>& wrapped) {
+    if (!native) return E_NOINTERFACE;
+    void* storage = HeapAlloc(GetProcessHeap(), 0, sizeof(Factory));
+    if (!storage) return E_OUTOFMEMORY;
+    wrapped.Attach(new (storage) Factory(native.Detach()));
+    return S_OK;
+}
+
 HRESULT CreateFactory(FactoryEntry entry, UINT flags, REFIID iid, void** out) {
     if (!out) return E_POINTER;
     *out = nullptr;
-    IDXGIFactory2* native = nullptr;
+    ComPtr<IDXGIFactory2> native;
     HRESULT code;
     if (entry == FactoryEntry::Legacy) {
         using CreateLegacy = HRESULT (WINAPI *)(REFIID, void**);
         const auto module = GetModuleHandleW(L"dxgi.dll");
-        const auto create = module ? reinterpret_cast<CreateLegacy>(GetProcAddress(module, "CreateDXGIFactory")) : nullptr;
+        const auto create = module ? reinterpret_cast<CreateLegacy>(
+            reinterpret_cast<void*>(GetProcAddress(module, "CreateDXGIFactory"))) : nullptr;
         if (!create) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
         ComPtr<IDXGIFactory> legacy;
         code = create(IID_PPV_ARGS(&legacy));
@@ -689,16 +738,63 @@ HRESULT CreateFactory(FactoryEntry entry, UINT flags, REFIID iid, void** out) {
         code = CreateDXGIFactory2(flags, IID_PPV_ARGS(&native));
     }
     if (FAILED(code)) return code;
-    void* storage = HeapAlloc(GetProcessHeap(), 0, sizeof(Factory));
-    if (!storage) {
-        native->Release();
-        return E_OUTOFMEMORY;
-    }
-    auto* adapter = new (storage) Factory(native);
-    code = adapter->QueryInterface(iid, out);
-    adapter->Release();
+    ComPtr<Factory> adapter;
+    code = WrapFactory(native, adapter);
+    if (SUCCEEDED(code)) code = adapter->QueryInterface(iid, out);
     Trace("factory", code);
     return code;
+}
+
+HRESULT DeviceFactory(ID3D11Device* device, ComPtr<IDXGIFactory2>& factory) {
+    ComPtr<IDXGIDevice> dxgiDevice;
+    HRESULT code = device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+    if (FAILED(code)) return code;
+    if (!dxgiDevice) return E_NOINTERFACE;
+    ComPtr<IDXGIAdapter> adapter;
+    code = dxgiDevice->GetAdapter(&adapter);
+    if (FAILED(code)) return code;
+    if (!adapter) return E_NOINTERFACE;
+    ComPtr<IDXGIFactory> parent;
+    code = adapter->GetParent(IID_PPV_ARGS(&parent));
+    if (FAILED(code)) return code;
+    return parent ? parent.As(&factory) : E_NOINTERFACE;
+}
+
+HRESULT CreateHostedD3D11Chain(PFN_D3D11_CREATE_DEVICE create, IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver,
+        HMODULE software, UINT flags, const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk,
+        const DXGI_SWAP_CHAIN_DESC& description, IDXGISwapChain** chainOut, ID3D11Device** deviceOut,
+        D3D_FEATURE_LEVEL* levelOut, ID3D11DeviceContext** contextOut) {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL selected{};
+    HRESULT code = create(adapter, driver, software, flags, levels, levelCount, sdk, device.GetAddressOf(),
+        levelOut ? &selected : nullptr, contextOut ? context.GetAddressOf() : nullptr);
+    Trace(adapter ? "d3d11-device-explicit" : "d3d11-device-default", code);
+    if (FAILED(code)) return code;
+    if (!device || (contextOut && !context)) return E_FAIL;
+
+    // Use the factory that actually owns the native device.
+    ComPtr<IDXGIFactory2> nativeFactory;
+    code = DeviceFactory(device.Get(), nativeFactory);
+    if (FAILED(code)) {
+        Trace("d3d11-device-factory", code);
+        return code;
+    }
+    ComPtr<Factory> factory;
+    code = WrapFactory(nativeFactory, factory);
+    if (FAILED(code)) return code;
+    auto mutableDescription = description;
+    ComPtr<IDXGISwapChain> chain;
+    code = factory->CreateSwapChain(device.Get(), &mutableDescription, &chain);
+    Trace("d3d11-hosted-swap-chain", code);
+    if (FAILED(code)) return code;
+    if (!chain) return E_FAIL;
+
+    *chainOut = chain.Detach();
+    if (deviceOut) *deviceOut = device.Detach();
+    if (levelOut) *levelOut = selected;
+    if (contextOut) *contextOut = context.Detach();
+    return S_OK;
 }
 
 } // namespace
@@ -713,6 +809,48 @@ extern "C" HRESULT WINAPI XboxCreateDXGIFactory1(REFIID iid, void** out) {
 
 extern "C" HRESULT WINAPI XboxCreateDXGIFactory2(UINT flags, REFIID iid, void** out) {
     return CreateFactory(FactoryEntry::Version2, flags, iid, out);
+}
+
+extern "C" HRESULT WINAPI XboxD3D11CreateDeviceAndSwapChain(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver,
+        HMODULE software, UINT flags, const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk,
+        const DXGI_SWAP_CHAIN_DESC* description, IDXGISwapChain** chainOut, ID3D11Device** deviceOut,
+        D3D_FEATURE_LEVEL* levelOut, ID3D11DeviceContext** contextOut) {
+    const DWORD previous = GetLastError();
+    ComPtr<IHostedNativeAdapter> hostedAdapter;
+    if (adapter && SUCCEEDED(adapter->QueryInterface(hostedNativeAdapterId,
+            reinterpret_cast<void**>(hostedAdapter.GetAddressOf())))) {
+        adapter = hostedAdapter->NativeAdapter();
+        hostedAdapter.Reset();
+    }
+    const HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
+    RECT area{};
+    const bool hosted = description && chainOut && description->Windowed &&
+        VirtualClientRect(description->OutputWindow, area);
+    if (!hosted && d3d11) {
+        const auto combined = reinterpret_cast<PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN>(
+            reinterpret_cast<void*>(GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain")));
+        if (combined) {
+            SetLastError(previous);
+            return combined(adapter, driver, software, flags, levels, levelCount, sdk, description,
+                chainOut, deviceOut, levelOut, contextOut);
+        }
+    }
+    const auto create = d3d11 ? reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(
+        reinterpret_cast<void*>(GetProcAddress(d3d11, "D3D11CreateDevice"))) : nullptr;
+    SetLastError(previous);
+    if (!hosted && create && !chainOut) {
+        return create(adapter, driver, software, flags, levels, levelCount, sdk, deviceOut, levelOut, contextOut);
+    }
+    if (chainOut) *chainOut = nullptr;
+    if (deviceOut) *deviceOut = nullptr;
+    if (levelOut) *levelOut = {};
+    if (contextOut) *contextOut = nullptr;
+    if (!d3d11) return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+    if (!create || !hosted) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+    const HRESULT code = CreateHostedD3D11Chain(create, adapter, driver, software, flags, levels, levelCount,
+        sdk, *description, chainOut, deviceOut, levelOut, contextOut);
+    SetLastError(previous);
+    return code;
 }
 
 extern "C" BOOL WINAPI XboxGetOutputMonitorRect(HMONITOR monitor, RECT* area) {

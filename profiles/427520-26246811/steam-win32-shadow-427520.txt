@@ -1,0 +1,7 @@
+26246811
+factorio.exe
+
+
+
+bin/x64
+loader-trace

@@ -415,9 +415,44 @@ def export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, pro
     print(f'Exported {len(entries)} verified inputs for Steam build {build} to {output}.')
 
 
-def inspect_game(portal, package, app_id, executable, source_profile=None, export_inputs=None):
+def fingerprint_game_input(portal, package, app_id, knownfolder, steamapps, raw, expected_build, relative):
+    from build_tools.verify_win32_source import valid_win32_component
+    from tools.steam_compatibility import parse_installed_manifest
+
+    build, install, state = parse_installed_manifest(raw, app_id)
+    if build != expected_build or state != '4':
+        raise ValueError(f'Steam must show a complete installation of build {expected_build}.')
+    if not GAME_PATH_COMPONENT.fullmatch(install):
+        raise ValueError('The Steam manifest has no usable local install folder.')
+    parts = relative.split('/')
+    if (len(relative) > 260 or not parts[-1].lower().endswith(('.exe', '.dll'))
+            or any(not re.fullmatch(r'[A-Za-z0-9_. -]{1,255}', part) or not valid_win32_component(part)
+                   for part in parts)):
+        raise ValueError('Use a game-relative .exe or .dll path with forward slashes.')
+    folder = '\\'.join((steamapps, 'common', install, *parts[:-1]))
+
+    def receive(response):
+        digest = hashlib.sha256()
+        size = 0
+        for chunk in iter(lambda: response.read(1024 * 1024), b''):
+            digest.update(chunk)
+            size += len(chunk)
+        if not size:
+            raise ValueError(f'Xbox returned an empty game file: {relative}.')
+        return {'path': relative, 'size': size, 'sha256': digest.hexdigest()}
+
+    _, fingerprint = portal.request('GET', game_file_url(package, folder, parts[-1], knownfolder), receive=receive)
+    fresh = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf',
+                           1024 * 1024 + 1, knownfolder=knownfolder)
+    if fresh is None or parse_installed_manifest(fresh, app_id) != (build, install, state):
+        raise ValueError('The Xbox Steam installation changed during fingerprinting.')
+    return {build: [fingerprint]}
+
+
+def inspect_game(portal, package, app_id, executable, source_profile=None, export_inputs=None, *,
+                 fingerprint_input=None, expected_build=None):
     libraries = (('D', 'DevelopmentFiles', DEVELOPER_STEAMAPPS_PATH), ('local', 'LocalAppData', STEAMAPPS_PATH))
-    manifest_limit = 1024 * 1024 + 1 if export_inputs is not None else 65536
+    manifest_limit = 1024 * 1024 + 1 if export_inputs is not None or fingerprint_input is not None else 65536
     for drive, knownfolder, steamapps in libraries:
         raw = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf', manifest_limit, knownfolder=knownfolder)
         if raw is not None:
@@ -433,6 +468,10 @@ def inspect_game(portal, package, app_id, executable, source_profile=None, expor
             print(f'{field}={match[1]}')
     if export_inputs is not None:
         export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, source_profile, export_inputs)
+    if fingerprint_input is not None:
+        fingerprint = fingerprint_game_input(portal, package, app_id, knownfolder, steamapps, raw, expected_build,
+                                            fingerprint_input)
+        print('steam_input_fingerprint=' + json.dumps(fingerprint, separators=(',', ':')))
     if executable is None:
         return
     install = re.search(r'^[ \t]*"installdir"[ \t]+"([^"\r\n]+)"', manifest, re.MULTILINE | re.IGNORECASE)
@@ -888,6 +927,8 @@ def main():
     game.add_argument('--executable', help='relative .exe path within the game folder')
     game.add_argument('--source-profile', type=Path, help='trusted Win32 fingerprint file for exporting owned inputs')
     game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
+    game.add_argument('--fingerprint-input', help='hash one installed game-relative EXE or DLL without saving its contents')
+    game.add_argument('--expected-build', help='required exact Steam build ID for --fingerprint-input')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -975,6 +1016,10 @@ def main():
             game.error('--app-id must be a positive Steam AppID')
         if (args.source_profile is None) != (args.export_inputs is None):
             game.error('Use --source-profile and --export-inputs together')
+        if (args.fingerprint_input is None) != (args.expected_build is None):
+            game.error('Use --fingerprint-input and --expected-build together')
+        if args.expected_build is not None and not re.fullmatch(r'[1-9][0-9]{0,19}', args.expected_build):
+            game.error('--expected-build must be a positive Steam build ID')
 
     if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
         sdl.error('--frame-timeout must be between 1 and 120 seconds')
@@ -1124,7 +1169,8 @@ def main():
         return
     if args.command == 'inspect-game':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs)
+        inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs,
+                     fingerprint_input=args.fingerprint_input, expected_build=args.expected_build)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)

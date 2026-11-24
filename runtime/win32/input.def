@@ -7,3 +7,5 @@ EXPORTS
     XInputGetState=XboxXInputGetState @5
     GetRawInputBuffer=XboxGetRawInputBuffer @6
     XInputSetState=XboxXInputSetState @7
+    ImmGetIMEFileNameA=XboxImmGetIMEFileNameA @8
+    CreateIconFromResourceEx=XboxCreateIconFromResourceEx @9

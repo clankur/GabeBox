@@ -1,4 +1,7 @@
 {
+  "imm32.dll": {
+    "ImmGetIMEFileNameA": "XboxWin32Input.dll"
+  },
   "ole32.dll": {
     "GetErrorInfo": "oleaut32.dll",
     "SetErrorInfo": "oleaut32.dll"

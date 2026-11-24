@@ -3,6 +3,7 @@
 #define COBJMACROS
 #include "loader-trace-output.h"
 #include "hosted-xinput-load.h"
+#include <appmodel.h>
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
@@ -77,19 +78,72 @@ static const char *ModuleLocation(HANDLE module) {
     return loadedLength == imageLength ? "adjacent" : "staged-subdirectory";
 }
 
-static BOOL LegacyXAudioClass(REFCLSID clsid) {
-    static const GUID legacy = {0x5A508685, 0xA254, 0x4FBA, {0x9B,0x82,0x9A,0x24,0xB0,0x03,0x06,0xAF}};
-    if (!clsid || clsid->Data1 != legacy.Data1 || clsid->Data2 != legacy.Data2 || clsid->Data3 != legacy.Data3)
+static BOOL SameClass(REFCLSID clsid, const GUID *expected) {
+    if (!clsid || clsid->Data1 != expected->Data1 || clsid->Data2 != expected->Data2 || clsid->Data3 != expected->Data3)
         return FALSE;
-    for (UINT index = 0; index < ARRAYSIZE(legacy.Data4); ++index)
-        if (clsid->Data4[index] != legacy.Data4[index]) return FALSE;
+    for (UINT index = 0; index < ARRAYSIZE(expected->Data4); ++index)
+        if (clsid->Data4[index] != expected->Data4[index]) return FALSE;
     return TRUE;
 }
 
+static void RecordActivation(const char *name, HRESULT result) {
+    char line[72];
+    char *out = Text(Text(line, "asset "), name);
+    out = Hex(Text(out, " result=0x"), (DWORD)result, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static HMODULE LoadSharedPackagedAdapter(PVOID volatile *slot, LPCWSTR name) {
+    HMODULE adapter = (HMODULE)InterlockedCompareExchangePointer(slot, NULL, NULL);
+    if (!adapter) {
+        adapter = LoadPackagedLibrary(name, 0);
+        if (!adapter) return NULL;
+        HMODULE existing = (HMODULE)InterlockedCompareExchangePointer(slot, adapter, NULL);
+        if (existing) {
+            FreeLibrary(adapter);
+            adapter = existing;
+        }
+    }
+    return adapter;
+}
+
+static HRESULT DefaultAudioEnumerator(REFIID iid, LPVOID *object) {
+    // The returned COM interfaces and pending activation callbacks own code in this DLL.
+    static PVOID volatile loaded;
+    const HMODULE adapter = LoadSharedPackagedAdapter(&loaded, L"XboxWin32DefaultAudio.dll");
+    if (!adapter) return HRESULT_FROM_WIN32(GetLastError());
+    typedef HRESULT (WINAPI *CreateEnumerator)(REFIID, LPVOID *);
+    const CreateEnumerator factory = (CreateEnumerator)(void *)GetProcAddress(adapter, "XboxCreateDefaultAudioEnumerator");
+    if (!factory) return HRESULT_FROM_WIN32(GetLastError());
+    return factory(iid, object);
+}
+
 HRESULT WINAPI XboxCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *object) {
+    static const GUID mmDeviceEnumerator =
+        {0xbcde0395, 0xe52f, 0x467c, {0x8e,0x3d,0xc4,0x57,0x92,0x91,0x69,0x2e}};
+    static const GUID mmDeviceEnumeratorIid =
+        {0xa95664d2, 0x9614, 0x4f35, {0xa7,0x46,0xde,0x8d,0xb6,0x36,0x17,0xe6}};
+    static const GUID legacyXAudio =
+        {0x5a508685, 0xa254, 0x4fba, {0x9b,0x82,0x9a,0x24,0xb0,0x03,0x06,0xaf}};
     HRESULT result = CoCreateInstance(clsid, outer, context, iid, object);
+    if (SameClass(clsid, &mmDeviceEnumerator)) {
+        const DWORD error = GetLastError();
+        RecordActivation("mmdevice-enumerator-activation", result);
+        WCHAR enabled[2];
+        if ((result == REGDB_E_CLASSNOTREG || result == CLASS_E_CLASSNOTAVAILABLE || result == E_NOTIMPL) &&
+                !outer && object && context == CLSCTX_INPROC_SERVER && SameClass(iid, &mmDeviceEnumeratorIid) &&
+                GetEnvironmentVariableW(L"XBOX_WIN32_DEFAULT_AUDIO", enabled, ARRAYSIZE(enabled)) == 1 &&
+                enabled[0] == L'1') {
+            const HRESULT fallback = DefaultAudioEnumerator(iid, object);
+            RecordActivation("mmdevice-default-render-fallback", fallback);
+            if (SUCCEEDED(fallback)) result = fallback;
+        }
+        SetLastError(error);
+        return result;
+    }
     if (result != REGDB_E_CLASSNOTREG || outer || !iid || !object || context != CLSCTX_INPROC_SERVER ||
-            !LegacyXAudioClass(clsid)) return result;
+            !SameClass(clsid, &legacyXAudio)) return result;
 
     // The launch profile supplies a verified redistributable next to the staged executable.
     // Keep its server loaded while an object returned directly from its class factory may live.
@@ -117,10 +171,7 @@ HRESULT WINAPI XboxCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD conte
         }
         FreeLibrary(audio);
     }
-    char line[72];
-    char *out = Hex(Text(line, "asset xaudio27-activation result=0x"), (DWORD)result, 8);
-    out = Text(out, "\r\n");
-    AppendTrace(line, (DWORD)(out - line));
+    RecordActivation("xaudio27-activation", result);
     SetLastError(error);
     return result;
 }
@@ -462,10 +513,27 @@ static HMODULE LoadVerifiedSystemCompanion(LPCWSTR name, DWORD *error) {
     return NULL;
 }
 
+static HMODULE LoadHostedControllerNotifications(LPCSTR name) {
+    WCHAR enabled[2], wide[ARRAYSIZE(L"cfgmgr32.dll")];
+    if (!name || GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY", enabled, ARRAYSIZE(enabled)) != 1 ||
+            enabled[0] != L'1' || !MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) ||
+            CompareStringOrdinal(wide, -1, L"cfgmgr32.dll", -1, TRUE) != CSTR_EQUAL ||
+            GetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", NULL, 0) <= 1) return NULL;
+    return LoadPackagedLibrary(L"XboxWin32ControllerNotify.dll", 0);
+}
+
 HANDLE WINAPI XboxLoadLibraryA(const char *name) {
-    DWORD previous = GetLastError();
+    const DWORD previous = GetLastError();
     RestoreWorkingDirectory();
     StartFaultTrace();
+    const HMODULE hosted = LoadHostedControllerNotifications(name);
+    if (hosted) {
+        const char trace[] = "input controller-notifications=hosted\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        Record(name, hosted, 1, TRUE, previous);
+        SetLastError(previous);
+        return hosted;
+    }
     WCHAR wide[512], staged[512];
     const BOOL companion = name && DynamicCompanionsEnabled() &&
         MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) &&
@@ -476,6 +544,41 @@ HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     Record(name, result, 1, result != 0, error);
     SetLastError(error);
     return result;
+}
+
+static PVOID volatile hostedOpenGlModule;
+
+static BOOL HostedWglEnabled(void) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_WGL", enabled, ARRAYSIZE(enabled)) == 1 && enabled[0] == L'1';
+}
+
+static HMODULE LoadHostedOpenGl(LPCWSTR name) {
+    if (!name || CompareStringOrdinal(name, -1, L"opengl32.dll", -1, TRUE) != CSTR_EQUAL ||
+            !HostedWglEnabled()) return NULL;
+    HMODULE module = LoadPackagedLibrary(L"opengl32.dll", 0);
+    if (!module || module == InterlockedCompareExchangePointer(&hostedOpenGlModule, NULL, NULL)) return module;
+    WCHAR expected[512], actual[512];
+    UINT32 length = ARRAYSIZE(expected);
+    const WCHAR suffix[] = L"\\opengl32.dll";
+    const DWORD actualLength = GetModuleFileNameW(module, actual, ARRAYSIZE(actual));
+    if (!actualLength || actualLength >= ARRAYSIZE(actual) ||
+            GetCurrentPackagePath(&length, expected) != ERROR_SUCCESS || !length ||
+            length - 1 + ARRAYSIZE(suffix) > ARRAYSIZE(expected)) {
+        FreeLibrary(module);
+        return NULL;
+    }
+    for (UINT i = 0; i < ARRAYSIZE(suffix); ++i) expected[length - 1 + i] = suffix[i];
+    HMODULE retained = NULL;
+    if (CompareStringOrdinal(actual, -1, expected, -1, TRUE) != CSTR_EQUAL ||
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)module, &retained)) {
+        FreeLibrary(module);
+        return NULL;
+    }
+    // Keep the verified module identity while the caller owns its own reference.
+    const HMODULE existing = (HMODULE)InterlockedCompareExchangePointer(&hostedOpenGlModule, retained, NULL);
+    if (existing) FreeLibrary(retained);
+    return module;
 }
 
 static void RecordWideLoad(LPCWSTR path, HMODULE result, DWORD error) {
@@ -499,6 +602,15 @@ static void RecordWideLoad(LPCWSTR path, HMODULE result, DWORD error) {
 
 HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const DWORD previous = GetLastError();
+    HMODULE openGl = LoadHostedOpenGl(name);
+    if (openGl) {
+        const char trace[] = "asset opengl-module=packaged\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        RecordWideLoad(name, openGl, previous);
+        SetLastError(previous);
+        return openGl;
+    }
+    SetLastError(previous);
     HMODULE result = LoadHostedXInput(name);
     if (result) {
         const char trace[] = "input xinput-library=hosted\r\n";
@@ -655,29 +767,29 @@ static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, cons
     return result;
 }
 
-static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
+static FARPROC HostedDxgiProcedure(HMODULE module, const char *name) {
+    const BOOL combined = SameName(name, "D3D11CreateDeviceAndSwapChain");
+    if (combined) {
+        if (module != GetModuleHandleW(L"d3d11.dll")) return NULL;
+    } else if (!(SameName(name, "CreateDXGIFactory2") || SameName(name, "CreateDXGIFactory1") ||
+            SameName(name, "CreateDXGIFactory")) || module != GetModuleHandleW(L"dxgi.dll")) return NULL;
     WCHAR enabled[2];
-    if (!(SameName(name, "CreateDXGIFactory2") || SameName(name, "CreateDXGIFactory1") ||
-            SameName(name, "CreateDXGIFactory")) || module != GetModuleHandleW(L"dxgi.dll") ||
-            GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", enabled, ARRAYSIZE(enabled)) != 1 ||
-            enabled[0] != L'1') return NULL;
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", enabled, ARRAYSIZE(enabled)) != 1 ||
+            enabled[0] != L'1' || (combined && !GetProcAddress(module, "D3D11CreateDevice"))) return NULL;
     static PVOID volatile loaded;
-    HMODULE adapter = (HMODULE)InterlockedCompareExchangePointer(&loaded, NULL, NULL);
-    if (!adapter) {
-        adapter = LoadPackagedLibrary(L"XboxWin32Dxgi.dll", 0);
-        if (!adapter) return NULL;
-        HMODULE existing = (HMODULE)InterlockedCompareExchangePointer(&loaded, adapter, NULL);
-        if (existing) {
-            FreeLibrary(adapter);
-            adapter = existing;
-        }
-    }
-    return GetProcAddress(adapter, name);
+    const HMODULE adapter = LoadSharedPackagedAdapter(&loaded, L"XboxWin32Dxgi.dll");
+    return adapter ? GetProcAddress(adapter, name) : NULL;
+}
+
+static FARPROC HostedWglProcedure(const char *name) {
+    static PVOID volatile loaded;
+    const HMODULE adapter = LoadSharedPackagedAdapter(&loaded, L"XboxWin32Window.dll");
+    return adapter ? GetProcAddress(adapter, name) : NULL;
 }
 
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
+    const DWORD previous = GetLastError();
     if (module && (ULONG_PTR)name <= 0xffffu) {
-        const DWORD previous = GetLastError();
         if (module == GetModuleHandleW(L"XboxWin32XInput910.dll")) {
             Record(name, module, 0, FALSE, ERROR_PROC_NOT_FOUND);
             SetLastError(ERROR_PROC_NOT_FOUND);
@@ -688,16 +800,31 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     FARPROC result = GetProcAddress(module, name);
     DWORD error = GetLastError();
     Record(name, module, 0, result != 0, error);
-    if (result && (ULONG_PTR)name > 0xffffu) {
-        if (name[0] == 'D' && SameName(name, "D3D12CreateDevice") &&
+    if (module && (ULONG_PTR)name > 0xffffu) {
+        if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l' &&
+                module == InterlockedCompareExchangePointer(&hostedOpenGlModule, NULL, NULL) && HostedWglEnabled()) {
+            const FARPROC hosted = HostedWglProcedure(name);
+            if (hosted) {
+                const char trace[] = "asset opengl-wgl=hosted\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
+                if (!result) error = previous;
+            } else {
+                // The packaged desktop WGL functions cannot use hosted handles.
+                error = ERROR_PROC_NOT_FOUND;
+            }
+            result = hosted;
+        } else if (result && name[0] == 'D' && SameName(name, "D3D12CreateDevice") &&
                 module == GetModuleHandleW(L"d3d12.dll")) {
             const PVOID first = InterlockedCompareExchangePointer(&d3d12CreateDevice, (PVOID)result, NULL);
             if (!first || first == (PVOID)result) result = (FARPROC)(PVOID)TraceD3D12CreateDevice;
-        } else if (name[0] == 'C') {
-            const FARPROC hosted = HostedDxgiFactory(module, name);
+        } else if ((result && name[0] == 'C') || name[0] == 'D') {
+            const FARPROC hosted = HostedDxgiProcedure(module, name);
             if (hosted) {
-                const char trace[] = "asset dxgi-factory=hosted\r\n";
-                AppendTrace(trace, sizeof(trace) - 1);
+                const char dxgi[] = "asset dxgi-factory=hosted\r\n";
+                const char d3d11[] = "asset d3d11-combined=hosted\r\n";
+                if (name[0] == 'D') AppendTrace(d3d11, sizeof(d3d11) - 1);
+                else AppendTrace(dxgi, sizeof(dxgi) - 1);
+                if (!result) error = previous;
                 result = hosted;
             }
         }

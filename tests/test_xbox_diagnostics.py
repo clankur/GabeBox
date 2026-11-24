@@ -771,6 +771,39 @@ class ObserverTests(unittest.TestCase):
                     cli.export_game_inputs(bad_portal, *inputs, bad)
                 self.assertFalse(bad.exists())
 
+    def test_game_input_fingerprint_is_read_only_and_bound_to_the_installed_build(self):
+        manifest = b'"AppState" { "appid" "42" "buildid" "123" "StateFlags" "4" "installdir" "Fixture" }'
+        payload = b'installed SDK fixture' * 60000
+        requests = []
+
+        class Portal:
+            def __init__(self, final_manifest=manifest):
+                self.final_manifest = final_manifest
+
+            def request(self, method, path, **kwargs):
+                query = parse_qs(urlsplit(path).query)
+                requests.append((method, query))
+                if query['filename'] == ['steam_api64.dll']:
+                    return 200, kwargs['receive'](io.BytesIO(payload))
+                assert query['filename'] == ['appmanifest_42.acf']
+                return 200, self.final_manifest
+
+        relative = 'bin/x64/steam_api64.dll'
+        inputs = (APP, APP_ID, 'DevelopmentFiles', cli.DEVELOPER_STEAMAPPS_PATH, manifest)
+        actual = cli.fingerprint_game_input(Portal(), *inputs, '123', relative)
+        self.assertEqual(actual, {'123': [
+            {'path': relative, 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}]})
+        self.assertEqual(requests[0][1]['path'], [cli.DEVELOPER_STEAMAPPS_PATH + r'\common\Fixture\bin\x64'])
+        self.assertEqual([method for method, _ in requests], ['GET', 'GET'])
+        requests.clear()
+        with self.assertRaisesRegex(ValueError, 'complete installation of build 124'):
+            cli.fingerprint_game_input(Portal(), *inputs, '124', relative)
+        with self.assertRaisesRegex(ValueError, 'game-relative'):
+            cli.fingerprint_game_input(Portal(), *inputs, '123', '../steam_api64.dll')
+        self.assertEqual(requests, [])
+        with self.assertRaisesRegex(ValueError, 'installation changed'):
+            cli.fingerprint_game_input(Portal(manifest.replace(b'"123"', b'"124"')), *inputs, '123', relative)
+
     def test_standard_cli_reuses_pinned_setup_and_get_only_requests(self):
         launch = EPOCH_MS + 1
         fingerprint = '1' * 64

@@ -10,7 +10,10 @@ from build_tools.verify_win32_source import read_profile, valid_win32_component
 
 
 WIN32_ADAPTERS = frozenset({
-    "XboxWin32CrashReport.dll", "XboxWin32Desktop.dll", "XboxWin32DisplayConfig.dll", "XboxWin32Dxgi.dll",
+    "XboxWin32ControllerNotify.dll", "XboxWin32CrashReport.dll", "XboxWin32Desktop.dll", "XboxWin32DisplayConfig.dll",
+    "XboxWin32DefaultAudio.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32GdiPlus.dll",
     "XboxWin32Input.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll", "XboxWin32StorageTrace.dll",
     "XboxWin32Timer.dll", "XboxWin32Unity.dll", "XboxWin32Window.dll", "XboxWin32XInput910.dll", "ktmw32.dll",
 })
@@ -110,12 +113,18 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         stage_source_profile(f"steam-win32-source-{app}.json", Path(path))
     trace = False
     desktop_gl = False
+    hosted_wgl = False
     unity_host = False
     crash_reports = False
     steam_sdk = False
     legacy_steam_sdk = False
     desktop_dxgi = False
+    hosted_dxgi_output = False
+    hosted_xinput = False
+    hosted_controller_notify = False
+    default_audio = False
     desktop_documents = False
+    roaming_appdata = False
     storage_trace = False
     hashed_companions = False
     system_companions = False
@@ -137,7 +146,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 or not re.fullmatch(r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.exe", fields[1])
                 or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d12"))
                 or (len(fields) >= 4 and fields[3] not in ("", "godot", "unity"))
-                or (len(fields) >= 3 and fields[2] and fields[3:4] not in (["godot"], ["unity"]))
+                or (len(fields) >= 3 and fields[2] == "d3d12" and fields[3:4] not in (["godot"], ["unity"]))
                 or (len(fields) >= 5 and fields[4] and not re.fullmatch(
                     r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.(?:exe|dll)", fields[4]))
                 or (len(fields) >= 6 and len(fields[5]) > 260)
@@ -152,10 +161,20 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         if source_profile is not None and fields[0] not in json.loads(source_profile):
             raise ValueError(f"The Win32 source profile does not include the trial build for AppID {app}.")
         adapter_name = f"steam-win32-adapters-{app}.json"
+        profile_adapters = ()
         if (root / adapter_name).is_file():
             declaration = read_adapter_requirements(root / adapter_name, app, fields[0])
-            required_adapters.update(declaration["required_adapters"])
+            profile_adapters = declaration["required_adapters"]
+            required_adapters.update(profile_adapters)
             files[adapter_name] = json.dumps(declaration, separators=(",", ":")).encode("ascii")
+        if fields[2:3] == ["opengl3"] and not any(fields[3:4]):
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if (source_profile is None or fields[6:7] != ["loader-trace"] or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]
+                    or not {"XboxWin32Window.dll", "XboxWin32LoaderTrace.dll"}.issubset(profile_adapters)):
+                raise ValueError(f"Publisher OpenGL needs a matching hosted build, source profile, loader trace, "
+                                 f"and declared Window and LoaderTrace adapters for AppID {app}.")
+            hosted_wgl = True
         trace |= fields[6:7] == ["loader-trace"]
         desktop_gl |= fields[2:3] == ["opengl3"]
         recipe = (root / recipe_name).read_bytes()
@@ -200,12 +219,57 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The DXGI marker requires the game's default native renderer for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
+        dxgi_output_marker = f"steam-win32-dxgi-output-{app}.txt"
+        if (root / dxgi_output_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / dxgi_output_marker).stat().st_size or dxgi_marker not in files or source_profile is None
+                    or fields[6:7] != ["loader-trace"] or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]
+                    or not {"XboxWin32Window.dll", "XboxWin32Dxgi.dll"}.issubset(profile_adapters)):
+                raise ValueError(f"Hosted DXGI output needs a matching hosted build, source profile, loader trace, "
+                                 f"and declared Window and DXGI adapters for AppID {app}.")
+            files[dxgi_output_marker] = b""
+            hosted_dxgi_output = True
+        xinput_marker = f"steam-win32-hosted-xinput-{app}.txt"
+        if (root / xinput_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / xinput_marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]
+                    or "XboxWin32XInput910.dll" not in profile_adapters or not hosted.is_file()
+                    or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"Hosted XInput needs a matching hosted build, source profile, loader trace, and "
+                                 f"declared XInput adapter for AppID {app}.")
+            files[xinput_marker] = b""
+            hosted_xinput = True
+        notify_marker = f"steam-win32-hosted-controller-notify-{app}.txt"
+        if (root / notify_marker).is_file():
+            if ((root / notify_marker).stat().st_size or xinput_marker not in files
+                    or "XboxWin32ControllerNotify.dll" not in profile_adapters):
+                raise ValueError(f"Hosted controller notifications need hosted XInput and a declared "
+                                 f"notification adapter for AppID {app}.")
+            files[notify_marker] = b""
+            hosted_controller_notify = True
+        audio_marker = f"steam-win32-default-audio-{app}.txt"
+        if (root / audio_marker).is_file():
+            if ((root / audio_marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]
+                    or "XboxWin32DefaultAudio.dll" not in profile_adapters):
+                raise ValueError(f"Default audio needs an empty marker, a source profile, loader trace, and "
+                                 f"the declared audio adapter for AppID {app}.")
+            files[audio_marker] = b""
+            default_audio = True
         documents_marker = f"steam-win32-documents-{app}.txt"
         if (root / documents_marker).is_file():
             if (root / documents_marker).stat().st_size:
                 raise ValueError(f"Expected an empty Documents marker for AppID {app}.")
             files[documents_marker] = b""
             desktop_documents = True
+        roaming_marker = f"steam-win32-roaming-appdata-{app}.txt"
+        if (root / roaming_marker).is_file():
+            if ((root / roaming_marker).stat().st_size or source_profile is None
+                    or "XboxWin32Desktop.dll" not in profile_adapters):
+                raise ValueError(f"Roaming AppData needs an empty marker, a source profile, "
+                                 f"and the declared desktop adapter for AppID {app}.")
+            files[roaming_marker] = b""
+            roaming_appdata = True
         for option in ("working-directory", "original-executable", "dynamic-companions"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
@@ -340,15 +404,41 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         files[name] = read_package_member(package, name)
 
     native = read_package_member(package, "ProbeNative.dll")
+    if hosted_dxgi_output:
+        variable = "XBOX_WIN32_HOSTED_DXGI_OUTPUT\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32Dxgi.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped DXGI output support.")
+    if hosted_xinput:
+        variable = "XBOX_WIN32_HOSTED_XINPUT\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped XInput support.")
+    if hosted_wgl:
+        variable = "XBOX_WIN32_HOSTED_WGL\0".encode("utf-16le")
+        if any(variable not in component for component in (
+                native, files["XboxWin32LoaderTrace.dll"], files["XboxWin32Window.dll"])):
+            raise ValueError("Use a Steam Core artifact with launch-scoped WGL support.")
+    if hosted_controller_notify:
+        variable = "XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped controller notification support.")
+    if default_audio:
+        variable = "XBOX_WIN32_DEFAULT_AUDIO\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped default audio support.")
     if any(name.startswith("steam-win32-source-") for name in files) and (
             "steam_source_check=".encode("utf-16le") not in native):
         raise ValueError("Use a Steam Core artifact with source-profile verification.")
     if hashed_companions and "steam_shadow_companion_hashes=verified".encode("utf-16le") not in native:
         raise ValueError("Use a Steam Core artifact with companion fingerprint verification.")
-    if desktop_documents:
-        variable = "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
+    for selected, name, label in (
+        (desktop_documents, "XBOX_WIN32_DOCUMENTS", "Documents"),
+        (roaming_appdata, "XBOX_WIN32_ROAMING_APPDATA", "Roaming AppData"),
+    ):
+        if not selected:
+            continue
+        variable = (name + "\0").encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Desktop.dll"]:
-            raise ValueError("Use a Steam Core artifact with profile Documents support.")
+            raise ValueError(f"Use a Steam Core artifact with profile {label} support.")
     if legacy_steam_sdk:
         variable = "XBOX_STEAM_HANDOFF_LEGACY\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32SteamDiscovery.dll"]:

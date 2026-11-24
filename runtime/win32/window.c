@@ -16,6 +16,12 @@ typedef struct WindowClass {
     WCHAR name[256];
 } WindowClass;
 
+typedef struct WindowProperty {
+    struct WindowProperty *next;
+    HANDLE value;
+    WCHAR name[];
+} WindowProperty;
+
 static volatile LONG windowThread;
 static WindowClass classes[CLASS_COUNT];
 static XboxWindow windows[WINDOW_COUNT];
@@ -213,10 +219,19 @@ static BOOL IsVirtualWindowHandle(HWND handle) {
     return ((ULONG_PTR)handle & ~(ULONG_PTR)0xffffff) == WINDOW_HANDLE_BASE;
 }
 
-static void InvalidateWindowGeometry(XboxWindow *window) {
+static void InvalidateWindow(XboxWindow *window) {
     AcquireSRWLockExclusive(&windowGeometryLock);
     window->handle = NULL;
+    WindowProperty *property = window->properties;
+    window->properties = NULL;
     ReleaseSRWLockExclusive(&windowGeometryLock);
+    const DWORD error = GetLastError();
+    while (property) {
+        WindowProperty *next = property->next;
+        HeapFree(GetProcessHeap(), 0, property);
+        property = next;
+    }
+    SetLastError(error);
 }
 
 static HWND VirtualForegroundWindow(void) {
@@ -272,6 +287,119 @@ static FARPROC NativeWindowProcedure(LPCSTR name) {
     FARPROC procedure = module ? GetProcAddress(module, name) : NULL;
     if (procedure) SetLastError(error);
     return procedure;
+}
+
+// The lock protects window identity and the entire property list. Properties
+// remain available to callbacks through WM_NCDESTROY.
+static WindowProperty **WindowPropertyList(HWND handle) {
+    for (UINT i = 0; i < WINDOW_COUNT; ++i) {
+        if (windows[i].handle == handle) return &windows[i].properties;
+    }
+    return NULL;
+}
+
+static LPCWSTR ResolvePropertyName(LPCWSTR name, WCHAR atomName[256]) {
+    if (!name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    if (!IS_INTRESOURCE(name)) return name;
+    // Atom lookups are optional on Xbox. String properties need no atom table.
+    typedef UINT (WINAPI *Native)(ATOM, LPWSTR, int);
+    HMODULE module = GetModuleHandleW(L"kernel32.dll");
+    Native getAtomName = module ? (Native)(void *)GetProcAddress(module, "GlobalGetAtomNameW") : NULL;
+    if (!getAtomName) {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return NULL;
+    }
+    return getAtomName((ATOM)(ULONG_PTR)name, atomName, 256) ? atomName : NULL;
+}
+
+static WindowProperty **FindWindowProperty(WindowProperty **link, LPCWSTR name) {
+    while (*link) {
+        LPCWSTR current = (*link)->name;
+        if (SameClassNameExact(current, name) ||
+                CompareStringOrdinal(current, -1, name, -1, TRUE) == CSTR_EQUAL) break;
+        link = &(*link)->next;
+    }
+    return link;
+}
+
+BOOL WINAPI XboxSetPropW(HWND handle, LPCWSTR name, HANDLE value) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef BOOL (WINAPI *Native)(HWND, LPCWSTR, HANDLE);
+        Native native = (Native)(void *)NativeWindowProcedure("SetPropW");
+        return native ? native(handle, name, value) : FALSE;
+    }
+    const DWORD previousError = GetLastError();
+    WCHAR atomName[256];
+    name = ResolvePropertyName(name, atomName);
+    if (!name) return FALSE;
+    SIZE_T length = 0;
+    while (length < 256 && name[length]) ++length;
+    if (!length || length == 256) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    DWORD error = ERROR_INVALID_WINDOW_HANDLE;
+    AcquireSRWLockExclusive(&windowGeometryLock);
+    WindowProperty **list = WindowPropertyList(handle);
+    if (list) {
+        WindowProperty **link = FindWindowProperty(list, name);
+        if (!*link) {
+            WindowProperty *property = HeapAlloc(GetProcessHeap(), 0,
+                sizeof(*property) + (length + 1) * sizeof(WCHAR));
+            if (property) {
+                for (SIZE_T i = 0; i <= length; ++i) property->name[i] = name[i];
+                property->next = NULL;
+                *link = property;
+            }
+        }
+        error = *link ? ERROR_SUCCESS : ERROR_NOT_ENOUGH_MEMORY;
+        if (*link) (*link)->value = value;
+    }
+    ReleaseSRWLockExclusive(&windowGeometryLock);
+    SetLastError(error ? error : previousError);
+    return error == ERROR_SUCCESS;
+}
+
+static HANDLE ReadWindowProperty(HWND handle, LPCWSTR name, BOOL remove) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef HANDLE (WINAPI *Native)(HWND, LPCWSTR);
+        Native native = (Native)(void *)NativeWindowProcedure(remove ? "RemovePropW" : "GetPropW");
+        return native ? native(handle, name) : NULL;
+    }
+    const DWORD previousError = GetLastError();
+    WCHAR atomName[256];
+    name = ResolvePropertyName(name, atomName);
+    if (!name) return NULL;
+    HANDLE value = NULL;
+    if (remove) AcquireSRWLockExclusive(&windowGeometryLock);
+    else AcquireSRWLockShared(&windowGeometryLock);
+    WindowProperty **list = WindowPropertyList(handle);
+    if (list) {
+        WindowProperty **link = FindWindowProperty(list, name);
+        WindowProperty *property = *link;
+        if (property) {
+            value = property->value;
+            if (remove) {
+                *link = property->next;
+                HeapFree(GetProcessHeap(), 0, property);
+            }
+        }
+    }
+    if (remove) ReleaseSRWLockExclusive(&windowGeometryLock);
+    else ReleaseSRWLockShared(&windowGeometryLock);
+    SetLastError(list ? previousError : ERROR_INVALID_WINDOW_HANDLE);
+    return value;
+}
+
+HANDLE WINAPI XboxGetPropW(HWND handle, LPCWSTR name) {
+    return ReadWindowProperty(handle, name, FALSE);
+}
+
+HANDLE WINAPI XboxRemovePropW(HWND handle, LPCWSTR name) {
+    return ReadWindowProperty(handle, name, TRUE);
 }
 
 HWND WINAPI XboxGetForegroundWindow(void) {
@@ -453,8 +581,8 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     const HWND handle = (HWND)nextHandle++;
     const RECT bounds = {x, y, x + width, y + height};
     AcquireSRWLockExclusive(&windowGeometryLock);
-    *window = (XboxWindow){handle, entry->procedure, classInstance, bounds, style, exStyle, 0,
-        (ATOM)(entry - classes + 1), 0, 0, FALSE};
+    *window = (XboxWindow){ .handle = handle, .procedure = entry->procedure, .instance = classInstance,
+        .bounds = bounds, .style = style, .extendedStyle = exStyle, .classAtom = (ATOM)(entry - classes + 1) };
     ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
@@ -464,7 +592,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
             window->destroying = TRUE;
             ClearWindowActivation(handle);
             window->procedure(handle, WM_NCDESTROY, 0, 0);
-            InvalidateWindowGeometry(window);
+            InvalidateWindow(window);
         }
         return NULL;
     }
@@ -491,7 +619,7 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
     ClearWindowActivation(handle);
     window->procedure(handle, WM_DESTROY, 0, 0);
     window->procedure(handle, WM_NCDESTROY, 0, 0);
-    InvalidateWindowGeometry(window);
+    InvalidateWindow(window);
     for (UINT i = 0; i < messageCount;) {
         if (messages[i].hwnd != handle) { ++i; continue; }
         for (UINT j = i + 1; j < messageCount; ++j) messages[j - 1] = messages[j];
@@ -646,6 +774,19 @@ LONG_PTR WINAPI XboxGetWindowLongPtrW(HWND handle, int index) {
     case GWL_EXSTYLE: return (LONG_PTR)(LONG)window->extendedStyle;
     default: SetLastError(ERROR_INVALID_INDEX); return 0;
     }
+}
+
+LONG WINAPI XboxGetWindowLongW(HWND handle, int index) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LONG (WINAPI *Native)(HWND, int);
+        Native native = (Native)(void *)NativeWindowProcedure("GetWindowLongW");
+        return native ? native(handle, index) : 0;
+    }
+    if (index == GWLP_WNDPROC || index == GWLP_HINSTANCE || index == GWLP_HWNDPARENT) {
+        SetLastError(ERROR_INVALID_INDEX);
+        return 0;
+    }
+    return (LONG)XboxGetWindowLongPtrW(handle, index);
 }
 
 LONG_PTR WINAPI XboxSetWindowLongPtrW(HWND handle, int index, LONG_PTR value) {

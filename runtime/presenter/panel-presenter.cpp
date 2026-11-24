@@ -22,7 +22,7 @@ extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
 extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
 extern "C" void FhdReleaseMedia(LONG);
-extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG);
+extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG, SdlRumbleMailbox**);
 
 namespace {
 using namespace winrt;
@@ -127,13 +127,17 @@ struct Presenter {
         fittedHeight = h;
     }
     void render() noexcept {
-        if (FAILED(status.error)) return;
+        if (FAILED(status.error)) {
+            if (status.nativeInput) FhdStopHostedRumble();
+            return;
+        }
         try {
             fit();
             status.visible = visible();
             updateInputVisibility();
             if (!status.visible) {
                 queuedSequence = 0;
+                if (status.nativeInput) FhdStopHostedRumble();
             } else {
                 pollInput();
                 ++status.renderCallbacks;
@@ -170,6 +174,7 @@ struct Presenter {
         } catch (...) {
             status.error = to_hresult();
             status.visible = false;
+            if (status.nativeInput) FhdPauseHostedInput();
         }
         publish(status);
     }
@@ -225,8 +230,9 @@ struct Presenter {
             inputTrace = CreateFile2(inputPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 CREATE_ALWAYS, nullptr);
         }
-        inputMailbox = FhdMediaInputMailbox(status.token);
-        status.inputError = FhdBeginHostedInput(inputMailbox, get_abi(window));
+        SdlRumbleMailbox *rumble = nullptr;
+        inputMailbox = FhdMediaInputMailbox(status.token, &rumble);
+        status.inputError = FhdBeginHostedInput(inputMailbox, rumble, get_abi(window));
         if (SUCCEEDED(status.inputError)) {
             FhdSetHostedInputProfile(nativePad, width, height);
             FhdHostedMenuOnRelease(TRUE);

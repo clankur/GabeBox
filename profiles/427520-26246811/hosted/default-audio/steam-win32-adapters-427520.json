@@ -1,0 +1,14 @@
+{
+  "build_id": "26246811",
+  "required_adapters": [
+    "XboxWin32ControllerNotify.dll",
+    "XboxWin32DefaultAudio.dll",
+    "XboxWin32Desktop.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32GdiPlus.dll",
+    "XboxWin32Input.dll",
+    "XboxWin32LoaderTrace.dll",
+    "XboxWin32Window.dll",
+    "XboxWin32XInput910.dll"
+  ]
+}

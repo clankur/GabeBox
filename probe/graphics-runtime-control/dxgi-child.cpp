@@ -69,7 +69,7 @@ static HRESULT CreateDesktopChain(IUnknown* device, IDXGISwapChain1** out, DXGI_
     if (SUCCEEDED(error) && baseIdentity.Get() != factoryIdentity.Get()) return E_NOINTERFACE;
     if (FAILED(error)) return error;
     description.Width = description.Height = 0;
-#ifndef PROBE_DXGI_D3D12
+#if !defined(PROBE_DXGI_D3D12) && !defined(PROBE_DXGI_PRESENT_COMMIT) && !defined(PROBE_DXGI_D3D11_RESIZE)
     description.BufferCount = 1;
     description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 #endif
@@ -84,6 +84,19 @@ static HRESULT CreateDesktopChain(IUnknown* device, IDXGISwapChain1** out, DXGI_
 #endif
 
 #ifdef PROBE_DXGI_EXCHANGE
+#if defined(PROBE_DXGI_D3D12) || defined(PROBE_DXGI_D3D11_RESIZE)
+static HRESULT WaitForFence(ID3D11Fence* fence, UINT64 sequence) {
+    const auto deadline = GetTickCount64() + 1000;
+    for (;;) {
+        const auto completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+        if (completed >= sequence) return S_OK;
+        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        SleepEx(1, FALSE);
+    }
+}
+#endif
+
 struct ExchangeControl {
     WCHAR path[1024];
     HANDLE baseFile = INVALID_HANDLE_VALUE, gpuFile = INVALID_HANDLE_VALUE;
@@ -155,9 +168,43 @@ struct ExchangeControl {
             code = lookup->OpenSharedHandleByName(gpu->names[slot][2], GENERIC_ALL, &handle);
             if (SUCCEEDED(code)) { code = modern->OpenSharedFence(handle, IID_PPV_ARGS(done)); CloseHandle(handle); }
         }
+#ifdef PROBE_DXGI_D3D11_RESIZE
+        if (SUCCEEDED(code)) code = WaitForFence(ready.Get(), sequence);
+#endif
         return FAILED(code) ? code : queue->Wait(ready.Get(), sequence);
     }
 };
+#endif
+
+#if defined(PROBE_DXGI_D3D12) || defined(PROBE_DXGI_D3D11_RESIZE)
+static HRESULT CheckSharedPixel(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture,
+        ID3D11Fence* done, UINT64 sequence, bool cyan) {
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> readback;
+    HRESULT error = device->CreateTexture2D(&desc, nullptr, &readback);
+    if (FAILED(error)) return error;
+    context->CopyResource(readback.Get(), texture);
+    D3D11_MAPPED_SUBRESOURCE pixels{};
+    error = context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &pixels);
+    if (FAILED(error)) return error;
+    const auto* pixel = static_cast<const unsigned char*>(pixels.pData);
+    const bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    const bool correct = pixel[rgba ? 0 : 2] == (cyan ? 0 : 255) && pixel[1] == (cyan ? 255 : 0) &&
+        pixel[rgba ? 2 : 0] == 255 && pixel[3] == 255;
+    context->Unmap(readback.Get(), 0);
+    if (!correct) return E_FAIL;
+    ComPtr<ID3D11DeviceContext4> modern;
+    error = context->QueryInterface(IID_PPV_ARGS(&modern));
+    if (SUCCEEDED(error)) error = modern->Signal(done, sequence);
+    if (FAILED(error)) return error;
+    modern->Flush();
+    return WaitForFence(done, sequence);
+}
 #endif
 
 #ifdef PROBE_DXGI_D3D12
@@ -183,41 +230,6 @@ static HRESULT RenderFrame(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D
         queue->ExecuteCommandLists(ARRAYSIZE(lists), lists);
     }
     return error;
-}
-
-static HRESULT CheckSharedPixel(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture,
-        ID3D11Fence* done, UINT64 sequence, bool cyan) {
-    D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-    ComPtr<ID3D11Texture2D> readback;
-    HRESULT error = device->CreateTexture2D(&desc, nullptr, &readback);
-    if (FAILED(error)) return error;
-    context->CopyResource(readback.Get(), texture);
-    D3D11_MAPPED_SUBRESOURCE pixels{};
-    error = context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &pixels);
-    if (FAILED(error)) return error;
-    const auto* pixel = static_cast<const unsigned char*>(pixels.pData);
-    const bool correct = pixel[0] == 255 && pixel[1] == (cyan ? 255 : 0) &&
-        pixel[2] == (cyan ? 0 : 255) && pixel[3] == 255;
-    context->Unmap(readback.Get(), 0);
-    if (!correct) return E_FAIL;
-    ComPtr<ID3D11DeviceContext4> modern;
-    error = context->QueryInterface(IID_PPV_ARGS(&modern));
-    if (SUCCEEDED(error)) error = modern->Signal(done, sequence);
-    if (FAILED(error)) return error;
-    modern->Flush();
-    const auto deadline = GetTickCount64() + 1000;
-    for (;;) {
-        const auto completed = done->GetCompletedValue();
-        if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
-        if (completed >= sequence) return S_OK;
-        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-        SleepEx(1, FALSE);
-    }
 }
 
 static unsigned int VerifyFrame() {
@@ -298,6 +310,65 @@ static unsigned int VerifyFrame() {
     return PROBE_EXPECTED_CHILD_EXIT;
 }
 #else
+#ifdef PROBE_DXGI_D3D11_RESIZE
+static HRESULT PresentResizeFrame(IDXGISwapChain1* chain, ID3D11Device* device, ID3D11DeviceContext* context,
+        ExchangeControl& exchange, IDXGIAdapter* adapter, ID3D11Device* consumer,
+        ID3D11DeviceContext* consumerContext, UINT size, UINT64 sequence, bool cyan) {
+    ComPtr<ID3D11Texture2D> buffer;
+    ComPtr<ID3D11RenderTargetView> target;
+    HRESULT result = chain->GetBuffer(0, IID_PPV_ARGS(&buffer));
+    if (SUCCEEDED(result)) result = device->CreateRenderTargetView(buffer.Get(), nullptr, &target);
+    if (FAILED(result)) return result;
+    const float color[4]{cyan ? 0.0f : 1.0f, cyan ? 1.0f : 0.0f, 1.0f, 1.0f};
+    context->ClearRenderTargetView(target.Get(), color);
+    result = chain->Present(0, 0);
+    if (result != S_OK) return FAILED(result) ? result : E_UNEXPECTED;
+    ComPtr<ID3D11Texture2D> shared;
+    ComPtr<ID3D11Fence> done;
+    result = exchange.Receive(adapter, consumer, consumerContext, &shared, size, sequence, &done);
+    return FAILED(result) ? result : CheckSharedPixel(consumer, consumerContext, shared.Get(), done.Get(), sequence, cyan);
+}
+
+static unsigned int VerifyResize(IDXGISwapChain1* chain, ID3D11Device* device, ID3D11DeviceContext* context,
+        IDXGIAdapter* adapter, ExchangeControl& exchange, const DXGI_SWAP_CHAIN_DESC1& description) {
+    ComPtr<ID3D11Device> consumer;
+    ComPtr<ID3D11DeviceContext> consumerContext;
+    HRESULT result = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, &consumer, nullptr, &consumerContext);
+    if (FAILED(result)) return Failure(19, result);
+    result = PresentResizeFrame(chain, device, context, exchange, adapter, consumer.Get(), consumerContext.Get(),
+        64, 1, true);
+    if (FAILED(result)) return Failure(20, result);
+    const LONG generation = SdlHostLoad(&exchange.gpu->generation);
+    ComPtr<ID3D11Texture2D> held;
+    result = chain->GetBuffer(0, IID_PPV_ARGS(&held));
+    if (FAILED(result)) return Failure(21, result);
+    result = chain->ResizeBuffers(description.BufferCount, 80, 80, description.Format, description.Flags);
+    if (result != DXGI_ERROR_INVALID_CALL) return Failure(22, SUCCEEDED(result) ? E_UNEXPECTED : result);
+    if (SdlHostLoad(&exchange.gpu->generation) != generation || !SdlHostLoad(&exchange.gpu->gpu_active) ||
+            InterlockedCompareExchange64(&exchange.gpu->sequence[0], 0, 0) != 1) return Failure(23, E_UNEXPECTED);
+    held.Reset();
+    result = PresentResizeFrame(chain, device, context, exchange, adapter, consumer.Get(), consumerContext.Get(),
+        64, 2, false);
+    if (FAILED(result)) return Failure(24, result);
+    if (SdlHostLoad(&exchange.gpu->generation) != generation) return Failure(24, E_UNEXPECTED);
+
+    context->ClearState();
+    result = chain->ResizeBuffers(description.BufferCount, 80, 80, description.Format, description.Flags);
+    if (result != S_OK) return Failure(25, result);
+    if (SdlHostLoad(&exchange.gpu->generation) || SdlHostLoad(&exchange.gpu->gpu_active)) return Failure(26, E_UNEXPECTED);
+    DXGI_SWAP_CHAIN_DESC resized{};
+    result = chain->GetDesc(&resized);
+    if (FAILED(result) || resized.BufferDesc.Width != 80 || resized.BufferDesc.Height != 80)
+        return Failure(27, FAILED(result) ? result : E_UNEXPECTED);
+    result = PresentResizeFrame(chain, device, context, exchange, adapter, consumer.Get(), consumerContext.Get(),
+        80, 3, true);
+    if (FAILED(result)) return Failure(28, result);
+    if (SdlHostLoad(&exchange.gpu->generation) == generation) return Failure(28, E_UNEXPECTED);
+    return PROBE_EXPECTED_CHILD_EXIT;
+}
+#endif
+
 static unsigned int VerifyFrame() {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -329,6 +400,11 @@ static unsigned int VerifyFrame() {
     description.Scaling = DXGI_SCALING_STRETCH;
     description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     description.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+#if defined(PROBE_DXGI_PRESENT_COMMIT) || defined(PROBE_DXGI_D3D11_RESIZE)
+    description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    description.BufferCount = 3;
+    description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+#endif
 #ifdef PROBE_DXGI_EXCHANGE
     ExchangeControl exchange;
     error = exchange.Open();
@@ -342,6 +418,9 @@ static unsigned int VerifyFrame() {
 #endif
     if (FAILED(error)) return Failure(3, error);
 
+#ifdef PROBE_DXGI_D3D11_RESIZE
+    return VerifyResize(swapChain.Get(), device.Get(), context.Get(), adapter.Get(), exchange, description);
+#else
     ComPtr<ID3D11Texture2D> frame;
     ComPtr<ID3D11RenderTargetView> target;
     error = swapChain->GetBuffer(0, IID_PPV_ARGS(&frame));
@@ -354,13 +433,29 @@ static unsigned int VerifyFrame() {
     frame->GetDesc(&readable);
     if (readable.Width != 64 || readable.Height != 64) return Failure(4, E_FAIL);
 #ifdef PROBE_DXGI_EXCHANGE
+    UINT64 sequence = 1;
+#ifdef PROBE_DXGI_PRESENT_COMMIT
+    swapChain->Present(0, DXGI_PRESENT_TEST);
+    if (SdlHostLoad(&exchange.gpu->generation)) return Failure(16, E_UNEXPECTED);
+    const float rejectedColor[4]{1.0f, 0.0f, 1.0f, 1.0f};
+    context->ClearRenderTargetView(target.Get(), rejectedColor);
+    error = swapChain->Present(5, 0);
+    if (SUCCEEDED(error)) return Failure(17, E_UNEXPECTED);
+    if (SdlHostLoad(&exchange.gpu->generation) <= 0 || SdlHostLoad(&exchange.gpu->gpu_active) ||
+            SdlHostLoad(&exchange.base->frame_sequence) ||
+            InterlockedCompareExchange64(&exchange.gpu->sequence[0], 0, 0) ||
+            InterlockedCompareExchange64(&exchange.gpu->sequence[1], 0, 0)) return Failure(18, E_UNEXPECTED);
+    context->ClearRenderTargetView(target.Get(), color);
+    sequence = 2;
+#endif
     error = swapChain->Present(0, 0);
-    if (FAILED(error)) return Failure(9, error);
+    if (error != S_OK) return Failure(9, error);
     ComPtr<ID3D11Device> consumer;
     ComPtr<ID3D11DeviceContext> consumerContext;
     error = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         nullptr, 0, D3D11_SDK_VERSION, &consumer, nullptr, &consumerContext);
-    if (SUCCEEDED(error)) error = exchange.Receive(adapter.Get(), consumer.Get(), consumerContext.Get(), frame.ReleaseAndGetAddressOf());
+    if (SUCCEEDED(error)) error = exchange.Receive(adapter.Get(), consumer.Get(), consumerContext.Get(),
+        frame.ReleaseAndGetAddressOf(), 64, sequence);
     if (FAILED(error)) return Failure(10, error);
     device = consumer;
     context = consumerContext;
@@ -378,9 +473,12 @@ static unsigned int VerifyFrame() {
     error = context->Map(copy.Get(), 0, D3D11_MAP_READ, 0, &pixels);
     if (FAILED(error)) return Failure(6, error);
     const auto *pixel = static_cast<const unsigned char *>(pixels.pData);
-    const bool cyan = pixel[0] == 255 && pixel[1] == 255 && pixel[2] == 0 && pixel[3] == 255;
+    const bool rgba = readable.Format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    const bool cyan = pixel[0] == (rgba ? 0 : 255) && pixel[1] == 255 &&
+        pixel[2] == (rgba ? 255 : 0) && pixel[3] == 255;
     context->Unmap(copy.Get(), 0);
     return cyan ? PROBE_EXPECTED_CHILD_EXIT : Failure(7, E_FAIL);
+#endif
 }
 #endif
 

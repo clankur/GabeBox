@@ -24,7 +24,8 @@ static DWORD testTick() { return clockMs; }
 struct Obj {
     void **vtable;
 };
-static Obj fakeWindow, fakeStatics, fakeList, fakePad;
+static Obj fakeWindow, fakeStatics, fakeList, fakePad, replacementPad;
+static Obj *selectedPad = &fakePad;
 static void *winVt[58], *listVt[12], *padVt[10], *staticsVt[12];
 static Reading physical;
 static UINT state;
@@ -79,16 +80,32 @@ static HRESULT getList(void *, IUnknown **r) {
     return 0;
 }
 static HRESULT getSize(void *, UINT *r) {
-    *r = 1;
+    *r = selectedPad ? 1u : 0u;
     return 0;
 }
 static HRESULT getPad(void *, UINT, IUnknown **r) {
-    *r = (IUnknown *)&fakePad;
+    *r = (IUnknown *)selectedPad;
     return 0;
 }
 static HRESULT getReading(void *, Reading *r) {
     *r = physical;
     return 0;
+}
+struct MotorWrite {
+    double left, right, leftTrigger, rightTrigger;
+};
+static MotorWrite lastMotors;
+static void *lastMotorPad;
+static unsigned motorWrites, failStops;
+static HRESULT setVibration(void *pad, MotorWrite motors) {
+    ++motorWrites;
+    lastMotorPad = pad;
+    lastMotors = motors;
+    if (!motors.left && !motors.right && failStops) {
+        --failStops;
+        return E_FAIL;
+    }
+    return S_OK;
 }
 static HRESULT testFactory(HSTRING, REFIID id, void **p) {
     assert(equal(id, iidIGamepadStatics));
@@ -132,15 +149,17 @@ int main() {
     staticsVt[10] = (void *)getList;
     listVt[6] = (void *)getPad;
     listVt[7] = (void *)getSize;
+    padVt[7] = (void *)setVibration;
     padVt[8] = (void *)getReading;
     fakeWindow = {winVt};
     fakeStatics = {staticsVt};
     fakeList = {listVt};
     fakePad = {padVt};
+    replacementPad = {padVt};
     box.magic = SDL_HOST_MAGIC;
     box.keyboard.available = 1;
     box.input_pointer = 0x0369089;
-    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
     assert(box.input_pointer == 0x0369089);
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     physical.buttons = 4 | 2048 | 512;
@@ -187,7 +206,7 @@ int main() {
     assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[4] == -32768);
     FhdEndHostedInput();
     assert(!mail && !window);
-    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
     clockMs = 2000;
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     clockMs = 3200;
@@ -252,7 +271,7 @@ int main() {
     assert(foreground());
     FhdEndHostedInput();
     box.input_serial = box.input_pointer = 0;
-    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
     FhdSetHostedInputProfile(FALSE, 1024, 768);
     assert(box.input_pointer == (2048 | 2048 << 12) && box.input_serial > 0);
     const auto firstSerial = box.input_serial;
@@ -261,10 +280,66 @@ int main() {
     FhdEndHostedInput();
     // After genuine input the top-left is a valid position, including on resume.
     box.input_pointer = 0;
-    assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
+    assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
     FhdSetHostedInputProfile(FALSE, 1024, 768);
     assert(box.input_pointer == 0 && box.input_serial == firstSerial);
     FhdEndHostedInput();
+
+    SdlRumbleMailbox vibration{};
+    vibration.magic = SDL_RUMBLE_MAGIC;
+    assert(FhdBeginHostedInput(&box, &vibration, &fakeWindow) == S_OK);
+    FhdSetHostedInputProfile(TRUE, 1920, 1080);
+    FhdPollHostedInput(&box, &fakeWindow);
+    const LONG firstRumble = SdlRumbleGeneration(&vibration);
+    assert(firstRumble && motorWrites == 1 && lastMotorPad == &fakePad &&
+           !lastMotors.left && !lastMotors.right);
+    assert(SdlRumblePublish(&vibration, firstRumble, 65535, 32768));
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(motorWrites == 2 && lastMotors.left == 1 && lastMotors.right == 32768 / 65535.0 &&
+           !lastMotors.leftTrigger && !lastMotors.rightTrigger);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(motorWrites == 2);
+
+    failStops = 1;
+    selectedPad = &replacementPad;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!SdlRumbleGeneration(&vibration) && motorWrites == 3 && lastMotorPad == &fakePad);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!SdlRumbleGeneration(&vibration) && motorWrites == 4 && lastMotorPad == &fakePad);
+    FhdPollHostedInput(&box, &fakeWindow);
+    const LONG replacementRumble = SdlRumbleGeneration(&vibration);
+    assert(replacementRumble && replacementRumble != firstRumble &&
+           motorWrites == 5 && lastMotorPad == &replacementPad);
+    assert(!SdlRumblePublish(&vibration, firstRumble, 555, 888));
+    assert(SdlRumblePublish(&vibration, replacementRumble, 0, 65535));
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(lastMotorPad == &replacementPad && !lastMotors.left && lastMotors.right == 1);
+
+    failStops = 2;
+    const unsigned writesBeforePause = motorWrites;
+    FhdPauseHostedInput();
+    assert(!SdlRumbleGeneration(&vibration) && !failStops && motorWrites == writesBeforePause + 3);
+    FhdResumeHostedInput();
+    FhdPollHostedInput(&box, &fakeWindow);
+    const LONG resumed = SdlRumbleGeneration(&vibration);
+    assert(resumed && resumed != replacementRumble && !SdlRumbleRead(&vibration));
+    assert(SdlRumblePublish(&vibration, resumed, 65535, 0));
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(lastMotors.left == 1 && !lastMotors.right);
+    failStops = 1;
+    FhdSetHostedInputProfile(FALSE, 1920, 1080);
+    assert(!SdlRumbleGeneration(&vibration) && !failStops);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!lastMotors.left && !lastMotors.right);
+    FhdSetHostedInputProfile(TRUE, 1920, 1080);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(SdlRumblePublish(&vibration, SdlRumbleGeneration(&vibration), 65535, 0));
+    FhdPollHostedInput(&box, &fakeWindow);
+    InterlockedExchange(&box.quit, 1);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!SdlRumbleGeneration(&vibration) && !lastMotors.left && !lastMotors.right);
+    FhdEndHostedInput();
+
     static_assert(FhdPointer::pixel(0, 1024) == 0 && FhdPointer::pixel(4095, 1024) == 1023);
     static_assert(FhdPointer::pixel(2048, 768) == 383);
     constexpr auto white = FhdPointer::image(false), amber = FhdPointer::image(true);

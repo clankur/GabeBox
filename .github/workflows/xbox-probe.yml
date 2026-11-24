@@ -173,9 +173,10 @@ jobs:
                 "/out:$steamLayout\keyboard-$variant.dll" "/implib:$work\keyboard-$variant.lib" `
                 "$work\keyboard-$variant.obj" $user32
             }
-            foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'input-raw', 'xinput') },
+            foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'input-raw', 'input-cursor', 'xinput') },
                                     @{ Module = 'desktop'; Name = 'XboxWin32Desktop'; Sources = @('desktop') },
                                     @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
+                                    @{ Module = 'controller-notify'; Name = 'XboxWin32ControllerNotify'; Sources = @('controller-notify') },
                                     @{ Module = 'unity'; Name = 'XboxWin32Unity'; Sources = @('unity') },
                                     @{ Module = 'display-config'; Name = 'XboxWin32DisplayConfig'; Sources = @('display-config') },
                                     @{ Module = 'timer'; Name = 'XboxWin32Timer'; Sources = @('timer') },
@@ -213,6 +214,17 @@ jobs:
             & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
               /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
               /def:runtime/win32/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
+            $cppAdapters = [ordered]@{ 'gdi-plus' = 'XboxWin32GdiPlus.dll'; 'mmdevice' = 'XboxWin32DefaultAudio.dll' }
+            foreach ($source in $cppAdapters.Keys) {
+              $object = "$work/win32-$source.obj"
+              & "$llvm\clang++.exe" --target=x86_64-pc-windows-msvc -std=c++20 -O2 -ffreestanding `
+                -fno-rtti -fno-exceptions -Wall -Wextra -Werror -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 `
+                -c "runtime/win32/$source.cpp" -o $object
+              $module = $cppAdapters[$source]
+              & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
+                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+                "/def:runtime/win32/$source.def" "/out:$steamLayout/$module" $object $lib
+            }
             Copy-Item ui/signin/* $steamLayout
             Copy-Item "$env:RUNNER_TEMP/hosted-monogame/StardewStartupDiagnostic.dll" $steamLayout
             Copy-Item runtime/dos/* $steamLayout

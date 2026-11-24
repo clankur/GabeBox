@@ -6,6 +6,16 @@ loader_order=false
 sdl_video=false
 win32_imports=false
 hosted_xinput=false
+hosted_xinput_loader=false
+hosted_xinput_rumble=false
+controller_notification=false
+hosted_controller_notify=false
+raw_input=false
+ime_filename=false
+wic_stream=false
+gdi_plus=false
+ani_cursor=false
+ani_adapter=false
 desktop_window=false
 desktop_endpoints=false
 desktop_documents=false
@@ -13,7 +23,20 @@ dxgi_composition=false
 dxgi_window=false
 dxgi_exchange=false
 dxgi_d3d12=false
+dxgi_d3d11_resize=false
+dxgi_present_commit=false
+dxgi_output=false
+dxgi_output_hosted=false
 win32_opengl=false
+wgl_loader=false
+window_properties=false
+d3d11_combined=false
+d3d11_hosted=false
+d3d11_hosted_output=false
+wasapi_desktop=false
+wasapi_async=false
+wasapi_hosted=false
+steam_sdk_versioned=false
 sdl_artifact=
 sdl_version=
 case ${1:-} in
@@ -25,8 +48,48 @@ case ${1:-} in
         win32_imports=true
         shift
         ;;
-    --hosted-xinput)
+    --hosted-xinput|--hosted-xinput-loader|--hosted-xinput-rumble)
         hosted_xinput=true
+        if [[ $1 == --hosted-xinput-loader ]]; then hosted_xinput_loader=true; fi
+        if [[ $1 == --hosted-xinput-rumble ]]; then hosted_xinput_rumble=true; fi
+        shift
+        ;;
+    --controller-notification|--hosted-controller-notification)
+        controller_notification=true
+        if [[ $1 == --hosted-controller-notification ]]; then hosted_controller_notify=true; fi
+        shift
+        ;;
+    --wasapi-desktop|--wasapi-async|--wasapi-hosted)
+        case $1 in
+            --wasapi-desktop) wasapi_desktop=true ;;
+            --wasapi-async) wasapi_async=true ;;
+            --wasapi-hosted) wasapi_hosted=true ;;
+        esac
+        shift
+        ;;
+    --steam-sdk-versioned)
+        steam_sdk_versioned=true
+        shift
+        ;;
+    --raw-input)
+        raw_input=true
+        shift
+        ;;
+    --ime-filename)
+        ime_filename=true
+        shift
+        ;;
+    --wic-stream)
+        wic_stream=true
+        shift
+        ;;
+    --gdi-plus)
+        gdi_plus=true
+        shift
+        ;;
+    --ani-cursor|--ani-cursor-adapter)
+        ani_cursor=true
+        if [[ $1 == --ani-cursor-adapter ]]; then ani_adapter=true; fi
         shift
         ;;
     --desktop-window)
@@ -42,6 +105,16 @@ case ${1:-} in
         desktop_documents=true
         shift
         ;;
+    --window-properties)
+        window_properties=true
+        shift
+        ;;
+    --d3d11-combined|--d3d11-hosted|--d3d11-hosted-output)
+        d3d11_combined=true
+        if [[ $1 != --d3d11-combined ]]; then d3d11_hosted=true; fi
+        if [[ $1 == --d3d11-hosted-output ]]; then d3d11_hosted_output=true; fi
+        shift
+        ;;
     --dxgi-composition)
         dxgi_composition=true
         shift
@@ -51,29 +124,38 @@ case ${1:-} in
         dxgi_window=true
         shift
         ;;
-    --dxgi-exchange|--dxgi-d3d12)
+    --dxgi-exchange|--dxgi-d3d12|--dxgi-present-commit|--dxgi-d3d11-resize)
         dxgi_composition=true
         dxgi_window=true
         dxgi_exchange=true
         if [[ $1 == --dxgi-d3d12 ]]; then dxgi_d3d12=true; fi
+        if [[ $1 == --dxgi-d3d11-resize ]]; then dxgi_d3d11_resize=true; fi
+        if [[ $1 == --dxgi-present-commit ]]; then dxgi_present_commit=true; fi
         shift
         ;;
-    --sdl-runtime|--sdl-video|--loader-order|--win32-opengl)
+    --dxgi-output-native|--dxgi-output-hosted)
+        dxgi_output=true
+        if [[ $1 == --dxgi-output-hosted ]]; then dxgi_output_hosted=true; fi
+        shift
+        ;;
+    --sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader)
         if [[ $1 == --loader-order ]]; then loader_order=true; fi
         if [[ $1 == --sdl-video ]]; then sdl_video=true; fi
         if [[ $1 == --win32-opengl ]]; then win32_opengl=true; fi
+        if [[ $1 == --wgl-loader ]]; then win32_opengl=true; wgl_loader=true; fi
         sdl_artifact=$(realpath "${2:?Supply an SDL2 artifact directory}")
         sdl_version=${3:?Supply the SDL2 version}
         shift 3
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --hosted-xinput-loader | --hosted-xinput-rumble | --controller-notification | --hosted-controller-notification | --wasapi-desktop | --wasapi-async | --wasapi-hosted | --steam-sdk-versioned | --raw-input | --ime-filename | --wic-stream | --gdi-plus | --ani-cursor | --ani-cursor-adapter | --desktop-window | --desktop-endpoints | --desktop-documents | --window-properties | --d3d11-combined | --d3d11-hosted | --d3d11-hosted-output | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | --dxgi-present-commit | --dxgi-d3d11-resize | --dxgi-output-native | --dxgi-output-hosted | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
 probe=$(dirname "$src")
 repo=$(dirname "$probe")
+window_bindings="$repo/runtime/win32/window-bindings.json"
 windows_app=$(realpath "$1")
 mesa=$(realpath "$2")
 template=$(realpath "$3")
@@ -175,23 +257,42 @@ linker=("${LLD_LINK:-lld-link}" /nologo /machine:x64 "/subsystem:$subsystem" /ap
 graphics_libs=()
 child="$src/child.c"
 child_output="$layout/child.exe"
-if $dxgi_window || $win32_opengl; then
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_properties || $d3d11_combined ||
+        $win32_imports || $desktop_window || $hosted_xinput || $controller_notification ||
+        $raw_input || $ime_filename || $ani_adapter || $steam_sdk_versioned; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
+fi
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_properties || $d3d11_combined; then
     for source in window window-gl window-monitor; do
         "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
     done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/window.def" "/out:$layout/XboxWin32Window.dll" \
-        "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
+        "/implib:$build/XboxWin32Window.lib" "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
 fi
-if $dxgi_window; then
+if $dxgi_window || $dxgi_output_hosted || $d3d11_hosted; then
     for source in dxgi dxgi-frame; do
         "${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver}" -std=c++20 -O2 -D_WIN32_WINNT=0x0a00 \
             -DWINVER=0x0a00 -ffreestanding -fno-rtti -fno-exceptions -Wall -Wextra -Werror \
             -c "$repo/runtime/win32/$source.cpp" -o "$build/$source.obj"
     done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/dxgi.def" "/out:$layout/XboxWin32Dxgi.dll" \
-        "$build/dxgi.obj" "$build/dxgi-frame.obj" "$windows_app"
+        "/implib:$build/XboxWin32Dxgi.lib" "$build/dxgi.obj" "$build/dxgi-frame.obj" "$windows_app"
+fi
+if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_loader; then
+    "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 \
+        "/def:$repo/runtime/win32/ntdll-eh.def" "/out:$build/ntdll-eh.lib"
+    "${win32_compiler[@]}" -fms-extensions -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/loader-trace.def" \
+        "/out:$layout/XboxWin32LoaderTrace.dll" "/implib:$build/XboxWin32LoaderTrace.lib" \
+        "$build/loader-trace.obj" "$windows_app" "$build/ntdll-eh.lib"
+fi
+if $hosted_controller_notify; then
+    "${win32_compiler[@]}" -c "$repo/runtime/win32/controller-notify.c" -o "$build/controller-notify.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/controller-notify.def" \
+        "/out:$layout/XboxWin32ControllerNotify.dll" "$build/controller-notify.obj" "$windows_app"
+fi
+if $dxgi_window; then
     factory=CreateDXGIFactory1
     if $dxgi_d3d12; then factory=CreateDXGIFactory2; fi
     cat > "$build/dxgi-window-bindings.json" <<EOF
@@ -208,15 +309,15 @@ EOF
     graphics_libs+=("$build/dxgi-user32.lib")
     child_output="$build/standard-dxgi.exe"
 fi
-if $win32_imports || $desktop_window || $hosted_xinput; then
-    win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
-        -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
-    for source in input input-raw xinput; do
+if $win32_imports || $desktop_window || $hosted_xinput || $hosted_controller_notify ||
+        $raw_input || $ime_filename || $ani_adapter; then
+    for source in input input-raw input-cursor xinput; do
         "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/win32-$source.obj"
     done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/input.def" "/out:$layout/XboxWin32Input.dll" \
-        "$build/win32-input.obj" "$build/win32-input-raw.obj" "$build/win32-xinput.obj" "$windows_app"
-    if $hosted_xinput; then
+        "$build/win32-input.obj" "$build/win32-input-raw.obj" "$build/win32-input-cursor.obj" \
+        "$build/win32-xinput.obj" "$windows_app"
+    if $hosted_xinput || $hosted_controller_notify; then
         "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/xinput910.def" "/out:$layout/XboxWin32XInput910.dll" \
             "$build/win32-xinput.obj" "$windows_app"
     fi
@@ -225,36 +326,98 @@ if $load_only; then
     compiler+=(-DPROBE_LOAD_MESA)
 elif $dxgi_composition; then
     child="$src/dxgi-child.cpp"
+elif $dxgi_output; then
+    child="$src/dxgi-output-child.cpp"
+    if $dxgi_output_hosted; then
+        cat > "$build/output-user32.def" <<'EOF'
+LIBRARY user32.dll
+EXPORTS
+    MonitorFromPoint
+    GetMonitorInfoA
+    EnumDisplaySettingsA
+    EnumDisplaySettingsW
+EOF
+        "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/output-user32.def" "/out:$build/output-user32.lib"
+        graphics_libs+=("$build/output-user32.lib")
+        child_output="$build/standard-dxgi-output.exe"
+    fi
+elif $wic_stream; then
+    child="$src/wic-stream-child.cpp"
+elif $gdi_plus; then
+    python3 - "$repo/runtime/win32/gdi-plus.def" "$build" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+exports, build = map(Path, sys.argv[1:])
+names = [line.strip().partition('=')[0] for line in exports.read_text().splitlines()[2:]]
+(build / 'original-gdi-plus.def').write_text('LIBRARY gdiplus.dll\nEXPORTS\n' + '\n'.join(names) + '\n')
+(build / 'gdi-plus-bindings.json').write_text(json.dumps({'gdiplus.dll': dict.fromkeys(names, 'XboxWin32GdiPlus.dll')}))
+PY
+    "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/original-gdi-plus.def" "/out:$build/original-gdi-plus.lib"
+    graphics_libs=("$build/original-gdi-plus.lib")
+    child="$src/gdi-plus-child.cpp"
+    child_output="$build/standard-gdi-plus.exe"
+elif $ani_cursor; then
+    python3 "$src/ani-cursor-fixture.py" "$build/ani-cursor-fixtures.h"
+    child="$src/ani-cursor-child.cpp"
+    if $ani_adapter; then
+        printf '%s\n' 'LIBRARY user32.dll' 'EXPORTS' '    CreateIconFromResourceEx' > "$build/ani-user32.def"
+        "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/ani-user32.def" "/out:$build/ani-user32.lib"
+        graphics_libs=("$build/ani-user32.lib")
+        child_output="$build/standard-ani-cursor.exe"
+    fi
+elif $hosted_xinput_loader; then
+    child="$src/xinput-child.c"
+    child_output="$build/standard-xinput-loader.exe"
 elif $hosted_xinput; then
     cat > "$build/xinput1_4.def" <<'EOF'
 LIBRARY xinput1_4.dll
 EXPORTS
     XInputGetCapabilities
     XInputGetState
+    XInputSetState
 EOF
     "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/xinput1_4.def" "/out:$build/xinput1_4.lib"
     graphics_libs=("$build/xinput1_4.lib")
     child="$src/xinput-child.c"
     child_output="$build/standard-xinput.exe"
-elif $win32_opengl; then
-    window_bindings="$repo/runtime/win32/window-bindings.json"
-    python3 - "$build" "$window_bindings" <<'PY'
+elif $controller_notification; then
+    child="$src/controller-notification-child.c"
+    if $hosted_controller_notify; then child_output="$build/standard-controller-notification.exe"; fi
+elif $wasapi_desktop || $wasapi_async || $wasapi_hosted; then
+    child="$src/wasapi-child.cpp"
+elif $win32_opengl || $window_properties || $d3d11_combined; then
+    python3 - "$build" "$window_bindings" "$win32_opengl" "$wgl_loader" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-build, bindings = map(Path, sys.argv[1:])
+build, bindings = map(Path, sys.argv[1:3])
 libraries = json.loads(bindings.read_text())
-libraries["opengl32.dll"] = ["glClearColor", "glClear", "glReadPixels", "glGetError"]
+if sys.argv[3] == "true":
+    libraries["opengl32.dll"] = ["glClearColor", "glClear", "glReadPixels", "glGetError"]
+    if sys.argv[4] == "true":
+        libraries["kernel32.dll"] = ["GetProcAddress", "LoadLibraryW"]
+else:
+    libraries = {"user32.dll": libraries["user32.dll"]}
 for library, functions in libraries.items():
     (build / Path(library).with_suffix(".def")).write_text(
         f"LIBRARY {library}\nEXPORTS\n    " + "\n    ".join(functions) + "\n")
 PY
-    for library in user32 gdi32 kernel32 opengl32; do
+    window_libraries=(user32)
+    if $win32_opengl; then window_libraries+=(gdi32 kernel32 opengl32); fi
+    for library in "${window_libraries[@]}"; do
         "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/$library.def" "/out:$build/$library.lib"
         graphics_libs+=("$build/$library.lib")
     done
-    child="$src/window-child.c"
+    if $window_properties; then
+        child="$src/window-properties-child.c"
+    elif $d3d11_combined; then
+        child="$src/d3d11-combined-child.cpp"
+    else
+        child="$src/window-child.c"
+    fi
     child_output="$build/standard-window.exe"
 elif $desktop_window || $desktop_documents; then
     if $desktop_documents; then
@@ -274,6 +437,37 @@ EOF
     "${compiler[@]}" -c "$repo/runtime/win32/desktop.c" -o "$build/win32-desktop.obj"
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/desktop.def" "/out:$layout/XboxWin32Desktop.dll" \
         "$build/win32-desktop.obj" "$windows_app"
+elif $steam_sdk_versioned; then
+    "${win32_compiler[@]}" -c "$repo/runtime/win32/steam-discovery.c" -o "$build/steam-discovery.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/steam-discovery.def" \
+        "/out:$layout/XboxWin32SteamDiscovery.dll" "/implib:$build/XboxWin32SteamDiscovery.lib" \
+        "$build/steam-discovery.obj" "$windows_app"
+    "${win32_compiler[@]}" -c "$src/steam-sdk-versioned-fixture.c" -o "$build/steam-sdk-fixture.obj"
+    "${linker[@]}" /dll /noentry "/def:$src/steam-sdk-versioned-fixture.def" \
+        "/out:$layout/steam_api64.dll" "/implib:$build/steam_api64.lib" "$build/steam-sdk-fixture.obj" "$windows_app"
+    graphics_libs=("$build/steam_api64.lib")
+    child="$src/steam-sdk-versioned-child.c"
+    child_output="$build/standard-steam-sdk.exe"
+elif $raw_input; then
+    cat > "$build/user32.def" <<'EOF'
+LIBRARY user32.dll
+EXPORTS
+    GetRawInputBuffer
+EOF
+    "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/user32.def" "/out:$build/user32.lib"
+    graphics_libs=("$build/user32.lib")
+    child="$src/raw-input-child.c"
+    child_output="$build/standard-raw-input.exe"
+elif $ime_filename; then
+    cat > "$build/imm32.def" <<'EOF'
+LIBRARY imm32.dll
+EXPORTS
+    ImmGetIMEFileNameA
+EOF
+    "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/imm32.def" "/out:$build/imm32.lib"
+    graphics_libs=("$build/imm32.lib")
+    child="$src/ime-filename-child.c"
+    child_output="$build/standard-ime-filename.exe"
 elif $win32_imports; then
     cat > "$build/ole32.def" <<'EOF'
 LIBRARY ole32.dll
@@ -319,21 +513,45 @@ else
     done
     graphics_libs=("$build/OpenGL.lib" "$build/EGL.lib")
 fi
-if $win32_opengl || $hosted_xinput; then
+if $win32_opengl || $window_properties || $hosted_xinput || $controller_notification ||
+        $raw_input || $ime_filename || $steam_sdk_versioned; then
+    if $hosted_xinput_loader; then win32_compiler+=(-DPROBE_XINPUT_LOADER); fi
+    if $hosted_xinput_rumble; then win32_compiler+=(-DPROBE_XINPUT_RUMBLE); fi
+    if $hosted_controller_notify; then win32_compiler+=(-DPROBE_HOSTED_CONTROLLER_NOTIFY); fi
+    if $wgl_loader; then win32_compiler+=(-DPROBE_WGL_LOADER); fi
     "${win32_compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
-elif $dxgi_composition; then
+elif $dxgi_composition || $dxgi_output || $wic_stream || $gdi_plus || $ani_cursor || $d3d11_combined || $wasapi_desktop || $wasapi_async || $wasapi_hosted; then
     if $dxgi_exchange; then
-        dxgi_flags=(-DPROBE_DXGI_WINDOW -DPROBE_DXGI_EXCHANGE)
+        child_flags=(-DPROBE_DXGI_WINDOW -DPROBE_DXGI_EXCHANGE)
     elif $dxgi_window; then
-        dxgi_flags=(-DPROBE_DXGI_WINDOW)
+        child_flags=(-DPROBE_DXGI_WINDOW)
     else
-        dxgi_flags=()
+        child_flags=()
     fi
-    if $dxgi_d3d12; then dxgi_flags+=(-DPROBE_DXGI_D3D12); fi
-    "${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver with Windows SDK headers}" \
-        -std=c++20 -O2 -DNDEBUG -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 "${dxgi_flags[@]+${dxgi_flags[@]}}" \
-        -ffreestanding -fno-rtti -fno-exceptions \
-        -Wall -Wextra -Werror -c "$child" -o "$build/graphics-child.obj"
+    if $dxgi_d3d12; then child_flags+=(-DPROBE_DXGI_D3D12); fi
+    if $dxgi_d3d11_resize; then child_flags+=(-DPROBE_DXGI_D3D11_RESIZE); fi
+    if $dxgi_present_commit; then child_flags+=(-DPROBE_DXGI_PRESENT_COMMIT); fi
+    if $dxgi_output_hosted; then child_flags+=(-DPROBE_DXGI_OUTPUT_HOSTED); fi
+    if $d3d11_hosted; then child_flags+=(-DPROBE_D3D11_HOSTED); fi
+    if $d3d11_hosted_output; then child_flags+=(-DPROBE_D3D11_HOSTED_OUTPUT); fi
+    if $wasapi_async; then child_flags+=(-DPROBE_WASAPI_ASYNC); fi
+    if $wasapi_hosted; then child_flags+=(-DPROBE_WASAPI_HOSTED); fi
+    if $ani_cursor; then child_flags+=(-I"$build"); fi
+    if $ani_adapter; then child_flags+=(-DPROBE_ANI_ADAPTER); fi
+    win32_cxx=("${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver with Windows SDK headers}"
+        -std=c++20 -O2 -DNDEBUG -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding
+        -fno-rtti -fno-exceptions -Wall -Wextra -Werror)
+    "${win32_cxx[@]}" "${child_flags[@]+${child_flags[@]}}" -c "$child" -o "$build/graphics-child.obj"
+    if $gdi_plus; then
+        "${win32_cxx[@]}" -c "$repo/runtime/win32/gdi-plus.cpp" -o "$build/win32-gdi-plus.obj"
+        "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/gdi-plus.def" "/out:$layout/XboxWin32GdiPlus.dll" \
+            "$build/win32-gdi-plus.obj" "$windows_app"
+    fi
+    if $wasapi_hosted; then
+        "${win32_cxx[@]}" -c "$repo/runtime/win32/mmdevice.cpp" -o "$build/win32-mmdevice.obj"
+        "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/mmdevice.def" "/out:$layout/XboxWin32DefaultAudio.dll" \
+            "$build/win32-mmdevice.obj" "$windows_app"
+    fi
 else
     "${compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
 fi
@@ -342,24 +560,54 @@ fi
 if $win32_imports; then
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$repo/runtime/win32/bindings.json" "$layout/child.exe"
 fi
-if $hosted_xinput; then
+if $raw_input; then
+    printf '%s\n' '{"user32.dll":{"GetRawInputBuffer":"XboxWin32Input.dll"}}' > "$build/raw-input-bindings.json"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/raw-input-bindings.json" "$layout/child.exe"
+fi
+if $ime_filename; then
+    printf '%s\n' '{"imm32.dll":{"ImmGetIMEFileNameA":"XboxWin32Input.dll"}}' > "$build/ime-filename-bindings.json"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/ime-filename-bindings.json" "$layout/child.exe"
+fi
+if $gdi_plus; then
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/gdi-plus-bindings.json" "$layout/child.exe"
+fi
+if $ani_adapter; then
+    printf '%s\n' '{"user32.dll":{"CreateIconFromResourceEx":"XboxWin32Input.dll"}}' > "$build/ani-cursor-bindings.json"
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/ani-cursor-bindings.json" "$layout/child.exe"
+fi
+if $hosted_xinput && ! $hosted_xinput_loader; then
     cat > "$build/xinput-control-bindings.json" <<'EOF'
-{"xinput1_4.dll":{"XInputGetCapabilities":"XboxWin32Input.dll","XInputGetState":"XboxWin32Input.dll"}}
+{"xinput1_4.dll":{"XInputGetCapabilities":"XboxWin32Input.dll","XInputGetState":"XboxWin32Input.dll","XInputSetState":"XboxWin32Input.dll"}}
 EOF
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/xinput-control-bindings.json" "$layout/child.exe"
 fi
-if $win32_opengl; then
-    python3 - "$repo" "$child_output" "$window_bindings" "$build/window-control-bindings.json" <<'PY'
+if $win32_opengl || $window_properties || $d3d11_combined || $hosted_xinput_loader || $hosted_controller_notify; then
+    python3 - "$repo" "$child_output" "$window_bindings" "$build/window-control-bindings.json" \
+        "$win32_opengl" "$d3d11_hosted" "$hosted_xinput_loader" "$hosted_controller_notify" "$wgl_loader" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-repo, child, bindings, output = map(Path, sys.argv[1:])
+repo, child, bindings, output = map(Path, sys.argv[1:5])
 sys.path.insert(0, str(repo))
 from build_tools.redirect_pe_imports import PeImage
 
 image = PeImage(child.read_bytes())
 rules = json.loads(bindings.read_text())
+loader_bindings = set()
+if sys.argv[5] != "true":
+    rules = {"user32.dll": rules["user32.dll"]}
+if sys.argv[6] == "true":
+    loader_bindings = {"LoadLibraryA", "GetProcAddress"}
+if sys.argv[7] == "true":
+    rules = {}
+    loader_bindings = {"LoadLibraryW", "GetProcAddress"}
+if sys.argv[8] == "true":
+    rules = {}
+    loader_bindings = {"LoadLibraryA", "LoadLibraryW", "GetProcAddress"}
+if sys.argv[9] == "true":
+    rules.pop("kernel32.dll")
+    loader_bindings = {"LoadLibraryW", "GetProcAddress"}
 used = {}
 for lookup, name, iat, _ in image.import_descriptors():
     library = image.string(name).lower()
@@ -367,6 +615,14 @@ for lookup, name, iat, _ in image.import_descriptors():
     for _, _, symbol in image.imported_symbols(lookup, iat):
         if symbol in members:
             used.setdefault(library, {})[symbol] = members[symbol]
+        elif (symbol in loader_bindings
+              and (library == "kernel32.dll" or library.startswith("api-ms-win-core-libraryloader-"))):
+            used.setdefault(library, {})[symbol] = "XboxWin32LoaderTrace.dll"
+if loader_bindings:
+    loader_imports = {symbol for members in used.values() for symbol, dll in members.items()
+                      if dll == "XboxWin32LoaderTrace.dll"}
+    if loader_imports != loader_bindings:
+        raise SystemExit("The control is missing a required loader trace binding.")
 output.write_text(json.dumps(used))
 PY
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/window-control-bindings.json" "$layout/child.exe"
@@ -374,9 +630,21 @@ fi
 if $dxgi_window; then
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/dxgi-window-bindings.json" "$layout/child.exe"
 fi
+if $dxgi_output_hosted; then
+    cat > "$build/dxgi-output-bindings.json" <<'EOF'
+{"user32.dll":{"MonitorFromPoint":"XboxWin32Window.dll","GetMonitorInfoA":"XboxWin32Window.dll","EnumDisplaySettingsA":"XboxWin32Window.dll","EnumDisplaySettingsW":"XboxWin32Window.dll"}}
+EOF
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/dxgi-output-bindings.json" "$layout/child.exe"
+fi
 if $desktop_documents; then
     printf '%s\n' '{"shell32.dll":{"SHGetFolderPathW":"XboxWin32Desktop.dll"}}' > "$build/documents-bindings.json"
     python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/documents-bindings.json" "$layout/child.exe"
+fi
+if $steam_sdk_versioned; then
+    cat > "$build/steam-sdk-bindings.json" <<'EOF'
+{"steam_api64.dll":{"SteamAPI_RestartAppIfNecessary":"XboxWin32SteamDiscovery.dll","SteamInternal_SteamAPI_Init":"XboxWin32SteamDiscovery.dll"}}
+EOF
+    python3 "$repo/build_tools/redirect_pe_imports.py" "$child_output" "$build/steam-sdk-bindings.json" "$layout/child.exe"
 fi
 "${compiler[@]}" -DPROBE_CHILD_WAIT_MS=15000 -c "$probe/child-process.c" -o "$build/graphics-child-process.obj"
 "${linker[@]}" /dll /noentry "/implib:$build/child-process.lib" "/out:$layout/child-process.dll" \

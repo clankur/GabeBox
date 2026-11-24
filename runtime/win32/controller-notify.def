@@ -1,0 +1,4 @@
+LIBRARY XboxWin32ControllerNotify.dll
+EXPORTS
+    CM_Register_Notification=XboxCMRegisterNotification
+    CM_Unregister_Notification=XboxCMUnregisterNotification

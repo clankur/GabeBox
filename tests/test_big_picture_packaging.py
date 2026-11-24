@@ -520,6 +520,228 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not include the trial build"):
             stage_trials(self.layout, [f"1817070={profile}"], template)
 
+    def test_hosted_xinput_profile_requires_matching_build_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        marker = f"steam-win32-hosted-xinput-{app}.txt"
+        (profile / marker).touch()
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        declaration = profile / f"steam-win32-adapters-{app}.json"
+        declaration.write_text(json.dumps({"build_id": build, "required_adapters": ["XboxWin32XInput910.dll"]}))
+        hosted = self.layout / f"steam-sdl-surfaceless-{app}.txt"
+        hosted.write_text("41")
+        runtime = self.work / "xinput-runtime.appx"
+        variable = "XBOX_WIN32_HOSTED_XINPUT\0".encode("utf-16le")
+        trial = [f"{app}={profile}"]
+        for loader in (b"older loader", variable):
+            with ZipFile(runtime, "w") as package:
+                for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32XInput910.dll"):
+                    package.writestr(name, b"runtime fixture")
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                package.writestr("XboxWin32LoaderTrace.dll", loader)
+            if loader != variable:
+                with self.assertRaisesRegex(ValueError, "matching hosted build"):
+                    stage_trials(self.layout, trial, runtime)
+                hosted.write_text(build)
+                with self.assertRaisesRegex(ValueError, "launch-scoped XInput support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        self.assertEqual((self.layout / "XboxWin32XInput910.dll").read_bytes(), b"runtime fixture")
+
+        notify = f"steam-win32-hosted-controller-notify-{app}.txt"
+        (profile / notify).touch()
+        with self.assertRaisesRegex(ValueError, "a declared notification adapter"):
+            stage_trials(self.layout, trial, runtime)
+        declaration.write_text(json.dumps({"build_id": build, "required_adapters": [
+            "XboxWin32XInput910.dll", "XboxWin32ControllerNotify.dll"]}))
+        with self.assertRaisesRegex(ValueError, "missing required Win32 adapters: XboxWin32ControllerNotify.dll"):
+            stage_trials(self.layout, trial, runtime)
+        notify_variable = "XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY\0".encode("utf-16le")
+        notify_runtime = self.work / "controller-notification-runtime.appx"
+        with ZipFile(runtime) as source, ZipFile(notify_runtime, "w") as target:
+            for name in source.namelist():
+                data = source.read(name)
+                if name in ("ProbeNative.dll", "XboxWin32LoaderTrace.dll"):
+                    data += notify_variable
+                target.writestr(name, data)
+            target.writestr("XboxWin32ControllerNotify.dll", b"notification fixture")
+        (profile / marker).unlink()
+        with self.assertRaisesRegex(ValueError, "need hosted XInput"):
+            stage_trials(self.layout, trial, notify_runtime)
+        (profile / marker).touch()
+        stage_trials(self.layout, trial, notify_runtime)
+        self.assertEqual((self.layout / notify).read_bytes(), b"")
+
+    def test_default_audio_profile_requires_verified_launch_components(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        marker = f"steam-win32-default-audio-{app}.txt"
+        (profile / marker).touch()
+        declaration = profile / f"steam-win32-adapters-{app}.json"
+        audio = "XboxWin32DefaultAudio.dll"
+        runtime = self.work / "audio-runtime.appx"
+        variable = "XBOX_WIN32_DEFAULT_AUDIO\0".encode("utf-16le")
+        trial = [f"{app}={profile}"]
+        with ZipFile(runtime, "w"):
+            pass
+        with self.assertRaisesRegex(ValueError, "the declared audio adapter"):
+            stage_trials(self.layout, trial, runtime)
+        declaration.write_text(json.dumps({"build_id": build, "required_adapters": [audio]}))
+        for loader in (b"older loader", variable):
+            with ZipFile(runtime, "w") as package:
+                for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", audio):
+                    package.writestr(name, b"runtime fixture")
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                package.writestr("XboxWin32LoaderTrace.dll", loader)
+            if loader != variable:
+                with self.assertRaisesRegex(ValueError, "launch-scoped default audio support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        self.assertEqual((self.layout / audio).read_bytes(), b"runtime fixture")
+        (profile / marker).write_text("1")
+        with self.assertRaisesRegex(ValueError, "an empty marker"):
+            stage_trials(self.layout, trial, runtime)
+
+    def test_hosted_dxgi_output_requires_matching_profile_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        window, dxgi = "XboxWin32Window.dll", "XboxWin32Dxgi.dll"
+        (profile / f"steam-win32-adapters-{app}.json").write_text(json.dumps({
+            "build_id": build, "required_adapters": [window, dxgi]}))
+        marker = f"steam-win32-dxgi-output-{app}.txt"
+        (profile / marker).touch()
+        hosted = self.layout / f"steam-sdl-surfaceless-{app}.txt"
+        hosted.write_text("41")
+        runtime = self.work / "dxgi-runtime.appx"
+        variable = "XBOX_WIN32_HOSTED_DXGI_OUTPUT\0".encode("utf-16le")
+        trial = [f"{app}={profile}"]
+        for adapter in (b"older dxgi", variable):
+            with ZipFile(runtime, "w") as package:
+                for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll", window):
+                    package.writestr(name, b"runtime fixture")
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                package.writestr(dxgi, adapter)
+            if adapter != variable:
+                with self.assertRaisesRegex(ValueError, "matching hosted build"):
+                    stage_trials(self.layout, trial, runtime)
+                (profile / f"steam-win32-dxgi-{app}.txt").touch()
+                with self.assertRaisesRegex(ValueError, "matching hosted build"):
+                    stage_trials(self.layout, trial, runtime)
+                hosted.write_text(build)
+                with self.assertRaisesRegex(ValueError, "launch-scoped DXGI output support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        (profile / marker).write_text("1")
+        with self.assertRaisesRegex(ValueError, "matching hosted build"):
+            stage_trials(self.layout, trial, runtime)
+
+    def test_publisher_opengl_requires_a_matching_hosted_profile_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\nopengl3\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        window, loader = "XboxWin32Window.dll", "XboxWin32LoaderTrace.dll"
+        (profile / f"steam-win32-adapters-{app}.json").write_text(json.dumps({
+            "build_id": build, "required_adapters": [window, loader]}))
+        trial = [f"{app}={profile}"]
+        runtime = self.work / "wgl-runtime.appx"
+        with ZipFile(runtime, "w"):
+            pass
+        with self.assertRaisesRegex(ValueError, "Publisher OpenGL needs a matching hosted build"):
+            stage_trials(self.layout, trial, runtime)
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+        variable = "XBOX_WIN32_HOSTED_WGL\0".encode("utf-16le")
+        for window_binary in (b"older window runtime", variable):
+            with ZipFile(runtime, "w") as package:
+                package.writestr(window, window_binary)
+                package.writestr(loader, variable)
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                for adapter in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    package.writestr(adapter, b"baseline adapter")
+            if window_binary != variable:
+                with self.assertRaisesRegex(ValueError, "launch-scoped WGL support"):
+                    stage_trials(self.layout, trial, runtime)
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / window).read_bytes(), variable)
+        (profile / f"steam-win32-dxgi-{app}.txt").touch()
+        with self.assertRaisesRegex(ValueError, "default native renderer"):
+            stage_trials(self.layout, trial, runtime)
+
+    def test_roaming_appdata_requires_source_pin_and_both_runtime_components(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        desktop = "XboxWin32Desktop.dll"
+        (profile / f"steam-win32-adapters-{app}.json").write_text(
+            json.dumps({"build_id": build, "required_adapters": [desktop]}))
+        marker = f"steam-win32-roaming-appdata-{app}.txt"
+        (profile / marker).touch()
+        runtime = self.work / "roaming-runtime.appx"
+        trial = [f"{app}={profile}"]
+        with ZipFile(runtime, "w"):
+            pass
+        with self.assertRaisesRegex(ValueError, "a source profile"):
+            stage_trials(self.layout, trial, runtime)
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        variable = "XBOX_WIN32_ROAMING_APPDATA\0".encode("utf-16le")
+        source_check = "steam_source_check=".encode("utf-16le")
+        for host_current, adapter_current in ((False, True), (True, False), (True, True)):
+            with ZipFile(runtime, "w") as package:
+                package.writestr("XboxWin32Input.dll", b"input")
+                package.writestr(desktop, variable if adapter_current else b"older adapter")
+                package.writestr("ProbeNative.dll", source_check + (variable if host_current else b""))
+            if host_current and adapter_current:
+                stage_trials(self.layout, trial, runtime)
+            else:
+                with self.assertRaisesRegex(ValueError, "profile Roaming AppData support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        self.assertEqual((self.layout / desktop).read_bytes(), variable)
+        (profile / marker).write_text("unscoped-path")
+        with self.assertRaisesRegex(ValueError, "an empty marker"):
+            stage_trials(self.layout, trial, runtime)
+
     def test_win32_system_companions_require_a_matching_runtime_and_top_level_dll(self):
         self.layout.mkdir()
         profile = self.work / "profile"

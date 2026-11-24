@@ -18,6 +18,7 @@ typedef struct XboxWindow {
     UINT contexts;
     int pixelFormat;
     BOOL destroying;
+    struct WindowProperty *properties;
 } XboxWindow;
 
 BOOL XboxWindowThread(void);

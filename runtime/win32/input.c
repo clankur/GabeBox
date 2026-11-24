@@ -10,24 +10,69 @@
 #define ERROR_NOT_SUPPORTED 50u
 #define IMAGE_CURSOR 2u
 #define LR_LOADFROMFILE 0x10u
+#define MAX_IME_FILENAME 260u
 
 typedef unsigned short WCHAR;
 typedef unsigned long DWORD;
 typedef void *Module;
 typedef void (WINAPI *Procedure)(void);
+typedef unsigned int (WINAPI *GetWideImeFilename)(void *, WCHAR *, unsigned int);
 
 IMPORT Module WINAPI LoadLibraryExW(const WCHAR *name, void *file, DWORD flags);
 IMPORT Module WINAPI GetModuleHandleW(const WCHAR *name);
 IMPORT Procedure WINAPI GetProcAddress(Module module, const char *name);
+IMPORT int WINAPI FreeLibrary(Module module);
 IMPORT int WINAPI WideCharToMultiByte(unsigned int codePage, DWORD flags, const WCHAR *wide, int wideCount,
     char *encoded, int size, const char *substitute, int *usedDefault);
 IMPORT int WINAPI GetLocaleInfoW(DWORD locale, DWORD field, WCHAR *result, int capacity);
+IMPORT DWORD WINAPI GetLastError(void);
 IMPORT void WINAPI SetLastError(DWORD error);
 
 Procedure XboxUser32Export(const char *name) {
     Module user = GetModuleHandleW(L"user32.dll");
     if (!user) user = LoadLibraryExW(L"user32.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return user ? GetProcAddress(user, name) : 0;
+}
+
+static unsigned int ImeFilenameFromWide(GetWideImeFilename wide, void *layout, char *buffer, unsigned int size) {
+    WCHAR filename[MAX_IME_FILENAME];
+    const unsigned int length = wide(layout, 0, 0);
+    if (!length || length >= MAX_IME_FILENAME || wide(layout, filename, length + 1) != length) return 0;
+    const int bytes = WideCharToMultiByte(0, 0, filename, (int)length, 0, 0, 0, 0);
+    if (bytes <= 0) return 0;
+    if (!size) return (unsigned int)bytes;
+    if (!buffer) return 0;
+    if ((unsigned int)bytes >= size || WideCharToMultiByte(0, 0, filename, (int)length,
+            buffer, bytes, 0, 0) != bytes) {
+        buffer[0] = 0;
+        return 0;
+    }
+    buffer[bytes] = 0;
+    return (unsigned int)bytes;
+}
+
+unsigned int WINAPI XboxImmGetIMEFileNameA(void *layout, char *buffer, unsigned int size) {
+    typedef unsigned int (WINAPI *GetAnsiImeFilename)(void *, char *, unsigned int);
+    const DWORD previous = GetLastError();
+    Module imm = LoadLibraryExW(L"imm32.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!imm) {
+        SetLastError(previous);
+        return 0;
+    }
+    const GetAnsiImeFilename ansi = (GetAnsiImeFilename)GetProcAddress(imm, "ImmGetIMEFileNameA");
+    unsigned int result = 0;
+    DWORD error = previous;
+    if (ansi) {
+        SetLastError(previous);
+        result = ansi(layout, buffer, size);
+        error = GetLastError();
+    } else {
+        const GetWideImeFilename wide = (GetWideImeFilename)GetProcAddress(imm, "ImmGetIMEFileNameW");
+        if (wide) result = ImeFilenameFromWide(wide, layout, buffer, size);
+    }
+    FreeLibrary(imm);
+    SetLastError(error);
+    return result;
 }
 
 void *WINAPI XboxLoadCursorFromFileW(const WCHAR *path) {
