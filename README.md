@@ -1,5 +1,7 @@
 # Steam on Xbox Series X Developer Mode
 
+**Turn your Xbox into a GabeCube.**
+
 This branch opens Valve’s original Big Picture UI in Xbox WebView2 after the existing Steam QR sign-in. On Series X, builds `.21` and `.22` each opened the populated Library on three consecutive cold application starts. The compatibility layer connects Valve’s Play, Resume and Exit controls to the Xbox game presenter. The release ledger tracks whether each title appears, sustains 1920×1080 playback and returns to the Library through those controls. [Big Picture setup and controls](analysis/big-picture.md) · [Per-build Series X verification](analysis/big-picture-reliability.md)
 
 The earlier Steam Core prototype provides a custom library and a fullscreen SDL player. The Series X results below were recorded with that prototype. [Verified prototype revision](https://github.com/clankur/steam-xbox-devmode/tree/547182a15be15939762c8f7ead8bbac236ab88ae)
