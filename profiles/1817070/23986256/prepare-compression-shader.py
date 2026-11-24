@@ -6,7 +6,8 @@ import hashlib
 from pathlib import Path
 import re
 import subprocess
-import tempfile
+
+from shader_preparation import prepare_container
 
 
 # Inputs are the verified DXIL outputs of Spider Launcher's owned-file converter.
@@ -96,21 +97,14 @@ def main():
     cli.add_argument("--dxv", default="dxv")
     args = cli.parse_args()
     try:
+        limit = 1024 * 1024
         with args.shader.open("rb") as source:
-            digest = hashlib.sha256(source.read(1024 * 1024)).hexdigest()
-            if source.read(1) or digest not in SHADERS:
-                raise ValueError("The input does not match a supported owned compression shader.")
-        text = subprocess.check_output([args.dxc, "-dumpbin", str(args.shader)], text=True, timeout=30)
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary)
-            ir = path / "shader.ll"
-            container = path / "shader.dxil"
-            signed = path / "shader-validated.dxil"
-            ir.write_text(scalarize(text, SHADERS[digest]), encoding="utf-8")
-            subprocess.run([args.dxa, f"-o={container}", str(ir)], timeout=30, check=True)
-            subprocess.run([args.dxv, "-o", str(signed), str(container)], timeout=30, check=True)
-            with args.output.open("xb") as output:
-                output.write(signed.read_bytes())
+            data = source.read(limit + 1)
+        profile = SHADERS.get(hashlib.sha256(data).hexdigest())
+        if len(data) > limit or profile is None:
+            raise ValueError("The input does not match a supported owned compression shader.")
+        prepare_container(data, args.output, lambda text: scalarize(text, profile),
+                          dxc=args.dxc, dxa=args.dxa, dxv=args.dxv)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         cli.error(str(error))
 

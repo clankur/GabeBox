@@ -64,13 +64,12 @@ def wrap_definition(source, return_type, function, arguments, stage, worked):
 
 def add_startup_trace(tree):
     source_root = tree / 'src'
-    shutil.copyfile(Path(__file__).with_name('sdl-startup-trace.h'), source_root / 'sdl-startup-trace.h')
-    shutil.copyfile(Path(__file__).with_name('sdl-local-preferences.h'), source_root / 'sdl-local-preferences.h')
-    shutil.copyfile(Path(__file__).with_name('sdl-software-frame.h'), source_root / 'sdl-software-frame.h')
-    runtime = Path(__file__).resolve().parent
-    shutil.copyfile(runtime / 'sdl-host-runtime.h', source_root / 'render/sdl-host-runtime.h')
-    shutil.copyfile(runtime.parent / 'shared/sdl-host-protocol.h', source_root / 'render/sdl-host-protocol.h')
-    shutil.copyfile(Path(__file__).with_name('sdl-host-display-size.h'), source_root / 'sdl-host-display-size.h')
+    adapters = Path(__file__).resolve().parent
+    shared = adapters.parent / 'shared'
+    for header in ('sdl-startup-trace.h', 'sdl-local-preferences.h', 'sdl-software-frame.h', 'sdl-host-display-size.h'):
+        shutil.copyfile(adapters / header, source_root / header)
+    for header in (adapters / 'sdl-host-runtime.h', shared / 'sdl-host-protocol.h'):
+        shutil.copyfile(header, source_root / 'render' / header.name)
     for driver in ('dummy/SDL_nullvideo.c', 'offscreen/SDL_offscreenvideo.c'):
         file = source_root / 'video' / driver
         content = file.read_text(encoding='utf-8')

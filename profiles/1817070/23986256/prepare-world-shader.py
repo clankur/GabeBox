@@ -6,7 +6,8 @@ import hashlib
 from pathlib import Path
 import re
 import subprocess
-import tempfile
+
+from shader_preparation import prepare_container
 
 
 # Inputs are the raw outputs of the Xbox system DXBC converter, before validation.
@@ -67,19 +68,8 @@ def main():
         profile = SHADERS.get(hashlib.sha256(data).hexdigest())
         if not profile:
             raise ValueError("The input does not match a supported owned converter output.")
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary)
-            source = path / "input.dxil"
-            ir = path / "shader.ll"
-            assembled = path / "shader.dxil"
-            signed = path / "validated.dxil"
-            source.write_bytes(data)
-            text = subprocess.check_output([args.dxc, "-dumpbin", str(source)], text=True, timeout=30)
-            ir.write_text(normalize(text, *profile), encoding="utf-8")
-            subprocess.run([args.dxa, f"-o={assembled}", str(ir)], timeout=30, check=True)
-            subprocess.run([args.dxv, f"-o={signed}", str(assembled)], timeout=30, check=True)
-            with args.output.open("xb") as output:
-                output.write(signed.read_bytes())
+        prepare_container(data, args.output, lambda text: normalize(text, *profile),
+                          dxc=args.dxc, dxa=args.dxa, dxv=args.dxv)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser.error(str(error))
 
