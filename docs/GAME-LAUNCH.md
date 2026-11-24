@@ -107,6 +107,8 @@ The library's Play action uses Steam to check the license and launch the install
 
 ### Play Stardew Valley in the Steam library
 
+The integrated Big Picture build stages the MonoGame startup hook from the checksum-pinned Steam Core APPX when that artifact includes it. Supply the verified SDL 2.30.9 build with `--shared-sdl ARTIFACT DLL_SHA256`.
+
 Supply the Windows CI artifact `xbox-hosted-monogame/StardewStartupDiagnostic.dll` to `--stardew-sdl-host` and the extracted `xbox-sdl2-2.30.9-x64` artifact directory to `--stardew-sdl-runtime`. The package builder verifies the SDL checksum, architecture and version. Stage Mesa with `--sdl-surfaceless --dxil-archive "$dxc_zip"` and deploy both official VC++ frameworks. The library starts the installed game through Steam. [Mesa and DXIL staging](https://github.com/clankur/steam-xbox-devmode/pull/53)
 
 For a console trial, add `--launch-app-id 413150 --repeat-launch` to the hosted Stardew layout and run `probe --steam-core` through the Xbox CLI. `1.0.211.0` presented the full title menu, acknowledged the host's test pointer event and remained on the title menu at the 40-second screenshot. The trial verifies startup, display and pointer delivery. Gameplay, audio and saves still need console validation. [Shared SDL2 build](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965047) · [Xbox host SDK](https://github.com/clankur/steam-xbox-devmode/actions/runs/44916965212)

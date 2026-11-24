@@ -6,6 +6,7 @@
     "XboxWin32Dxgi.dll",
     "XboxWin32Input.dll",
     "XboxWin32LoaderTrace.dll",
-    "XboxWin32Window.dll"
+    "XboxWin32Window.dll",
+    "ktmw32.dll"
   ]
 }

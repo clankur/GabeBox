@@ -181,6 +181,7 @@ jobs:
                                     @{ Module = 'timer'; Name = 'XboxWin32Timer'; Sources = @('timer') },
                                     @{ Module = 'storage-trace'; Name = 'XboxWin32StorageTrace'; Sources = @('storage-trace') },
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
+                                    @{ Module = 'transactions'; Name = 'ktmw32'; Sources = @('transactions') },
                                     @{ Module = 'steam-discovery'; Name = 'XboxWin32SteamDiscovery'; Sources = @('steam-discovery') },
                                     @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
               $objects = @(foreach ($source in $adapter.Sources) {
@@ -213,6 +214,7 @@ jobs:
               /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
               /def:runtime/win32/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
             Copy-Item ui/signin/* $steamLayout
+            Copy-Item "$env:RUNNER_TEMP/hosted-monogame/StardewStartupDiagnostic.dll" $steamLayout
             Copy-Item runtime/dos/* $steamLayout
             $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
             Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive

@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 from zipfile import ZipFile
 
 
-from build_tools import bundle_big_picture, stage_glyphs, stage_webview
+from build_tools import bundle_big_picture, stage_glyphs, stage_session, stage_webview
 from build_tools import prepare_big_picture_library as library_builder
 from build_tools.stage_session import APPX as SESSION_APPX
 from build_tools.prepare_big_picture import prepare_layout as prepare
@@ -96,6 +96,8 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("XboxProbe.Native.winmd", b"MZold")
             package.writestr("steam-signin.html", page)
             package.writestr("steam-sdl-host-975370.txt", b"")
+            package.writestr("steam-sdl-host-413150.txt", b"")
+            package.writestr("StardewStartupDiagnostic.dll", b"recovery hook")
             package.writestr("xcom-runtime/placeholder", b"dos runtime")
             package.writestr("AppxBlockMap.xml", b"stale footprint")
             for name in ("SDL2.dll", "opengl32.dll", "libEGL.dll", "dxil.dll"):
@@ -105,6 +107,8 @@ class BigPicturePackageTests(unittest.TestCase):
         session.mkdir()
         session_appx = session / SESSION_APPX
         xinput = "XboxWin32XInput910.dll"
+        transactions = "ktmw32.dll"
+        startup_hook = b"managed SDK hook fixture"
         metadata = (b"MZ\x00SteamSessionSteamId\x00RunSteamSignIn\x00ResumeSteamSignIn\x00LaunchSteamGame\x00"
                     b"LaunchSteamSdlGame\x00SteamLibraryCommand\x00")
         with ZipFile(session_appx, "w") as package:
@@ -112,7 +116,8 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("AppxSignature.p7x", b"signature fixture")
             package.writestr("ProbeNative.dll", b"MZsession")
             package.writestr("XboxProbe.Native.winmd", metadata)
-            for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", xinput):
+            package.writestr("StardewStartupDiagnostic.dll", startup_hook)
+            for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", xinput, transactions):
                 package.writestr(name, b"session artifact adapter")
         sums = f"{hashlib.sha256(session_appx.read_bytes()).hexdigest()}  {SESSION_APPX}\n".encode()
         (session / "SHA256SUMS").write_bytes(sums)
@@ -164,7 +169,7 @@ class BigPicturePackageTests(unittest.TestCase):
         (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
             struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
         adapter_manifest = f"steam-win32-adapters-{app}.json"
-        declaration = {"build_id": "10929685", "required_adapters": [xinput]}
+        declaration = {"build_id": "10929685", "required_adapters": [xinput, transactions]}
         manifest_path = profile / adapter_manifest
         trial = [f"{app}={profile}"]
         args = (base, host, self.layout, "1.0.230.1", self.cache, session)
@@ -172,6 +177,7 @@ class BigPicturePackageTests(unittest.TestCase):
                 patch.object(stage_webview, "SDK_FILES", {name: host_pins[name] for name in stage_webview.SDK_FILES}), \
                 patch.object(stage_glyphs, "PUBLIC_SHA256", pins["public_all"]), \
                 patch.object(bundle_big_picture, "URL_LIST_SHA256", hashlib.sha256(urls).hexdigest()), \
+                patch.object(stage_session, "pe_summary", return_value={"clr_requires_x86": "no"}), \
                 patch.object(library_builder, "load_sdl_artifact", return_value=sdl) as load_sdl:
             before = set(self.work.iterdir())
             with self.assertRaisesRegex(ValueError, "artifact checksums"):
@@ -208,6 +214,8 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "XboxProbe.Native.winmd").read_bytes(), metadata)
         self.assertEqual((self.layout / "ProbeNative.dll").read_bytes(), b"MZsession")
         self.assertEqual((self.layout / xinput).read_bytes(), b"session artifact adapter")
+        self.assertEqual((self.layout / transactions).read_bytes(), b"session artifact adapter")
+        self.assertEqual((self.layout / "StardewStartupDiagnostic.dll").read_bytes(), startup_hook)
         self.assertEqual(json.loads((self.layout / adapter_manifest).read_bytes()), declaration)
         self.assertEqual((self.layout / "steam-sdl-surfaceless-1145360.txt").read_text(), "10929685")
         self.assertTrue((self.layout / "steam-library-inventory.txt").is_file())

@@ -12,7 +12,7 @@ from build_tools.verify_win32_source import read_profile, valid_win32_component
 WIN32_ADAPTERS = frozenset({
     "XboxWin32CrashReport.dll", "XboxWin32Desktop.dll", "XboxWin32DisplayConfig.dll", "XboxWin32Dxgi.dll",
     "XboxWin32Input.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll", "XboxWin32StorageTrace.dll",
-    "XboxWin32Timer.dll", "XboxWin32Unity.dll", "XboxWin32Window.dll", "XboxWin32XInput910.dll",
+    "XboxWin32Timer.dll", "XboxWin32Unity.dll", "XboxWin32Window.dll", "XboxWin32XInput910.dll", "ktmw32.dll",
 })
 
 HOSTED_SDL_SCRIPT = re.compile(

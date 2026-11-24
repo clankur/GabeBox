@@ -17,7 +17,7 @@ from build_tools.presenter import stage_native_presenter
 from build_tools.stage_pinned_client import stage_client
 from build_tools.stage_primary import stage_primary
 from build_tools.stage_profiles import stage_legacy_pointer_mode, stage_surfaceless_profiles, stage_win32_trial_profiles
-from build_tools.stage_session import open_session_artifact, stage_session_component
+from build_tools.stage_session import open_session_artifact, stage_session_component, stage_stardew_startup_hook
 from build_tools.stage_webview import add_webview_host
 from tools.artifacts import load_sdl_artifact
 
@@ -122,6 +122,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         stage_surfaceless_profiles(staged, surfaceless_profiles)
         with open_session_artifact(session_artifact, session_checksum) as package:
             stage_session_component(staged, package)
+            stage_stardew_startup_hook(staged, package)
             stage_win32_trial_profiles(staged, win32_trial_profiles, package, win32_source_profiles)
         for name in ("xbox-network.js", "xbox-system-mode.js", "steam-signin.js", "steam-signin.css", "steam-game-launch.js", "steam-sdl-host.js",
                      "steam-sdl-native-view.js", "steam-sdl-gamepad.js", "steam-big-picture-broker.js"):

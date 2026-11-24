@@ -5,6 +5,8 @@ import re
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
+from tools.artifacts import pe_summary
+
 
 APPX = "PackagedProcessProbe-x64.appx"
 COMPONENT = ("ProbeNative.dll", "XboxProbe.Native.winmd")
@@ -70,3 +72,16 @@ def stage_session_component(layout, package):
             raise ValueError(f"Missing original Steam Core component {member}.")
     for member, data in zip(COMPONENT, (dll, metadata)):
         (layout / member).write_bytes(data)
+
+
+def stage_stardew_startup_hook(layout, package):
+    if not (layout / "steam-sdl-host-413150.txt").is_file():
+        return
+    name = "StardewStartupDiagnostic.dll"
+    # Existing pinned Steam Core artifacts leave the verified recovery hook in place.
+    if not any(member.casefold() == name.casefold() for member in package.namelist()):
+        return
+    hook = read_package_member(package, name)
+    if pe_summary(hook).get("clr_requires_x86") != "no":
+        raise ValueError("Expected a managed Stardew startup hook that supports the x64 host.")
+    (layout / name).write_bytes(hook)
