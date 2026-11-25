@@ -203,6 +203,89 @@ struct RemovalWatch {
     UINT64 start;
 };
 
+char* TraceText(char* out, const char* end, const char* text) {
+    while (text && *text && out < end) *out++ = *text++;
+    return out;
+}
+
+char* TraceName(char* out, const char* end, const char* narrow, const wchar_t* wide) {
+    if (narrow && *narrow) return TraceText(out, end, narrow);
+    if (!wide || !*wide) return TraceText(out, end, "-");
+    for (; *wide && out < end; ++wide) *out++ = *wide < 0x80 && *wide > 0x20 ? static_cast<char>(*wide) : '_';
+    return out;
+}
+
+char* TraceHex(char* out, const char* end, UINT64 value, int digits) {
+    for (int shift = (digits - 1) * 4; shift >= 0 && out < end; shift -= 4) *out++ = "0123456789ABCDEF"[(value >> shift) & 15];
+    return out;
+}
+
+// Reports D3D12 device-removed extended data (enabled by loader trace before the
+// device was created): every command list whose breadcrumbs did not all
+// complete, with the last completed and the first incomplete operations, and
+// the allocations that match a GPU page fault.
+void TraceRemovedData(ID3D12Device* device) {
+    ComPtr<ID3D12DeviceRemovedExtendedData> data;
+    HRESULT result = device->QueryInterface(IID_PPV_ARGS(data.GetAddressOf()));
+    Trace("dred-query", result);
+    if (FAILED(result)) return;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
+    result = data->GetAutoBreadcrumbsOutput(&crumbs);
+    Trace("dred-breadcrumbs", result);
+    int reported = 0;
+    for (auto* node = SUCCEEDED(result) ? crumbs.pHeadAutoBreadcrumbNode : nullptr; node && reported < 12; node = node->pNext) {
+        const UINT32 done = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+        if (!node->pCommandHistory || done >= node->BreadcrumbCount) continue;
+        ++reported;
+        char line[400], *out = line;
+        const char* end = line + sizeof(line) - 4;
+        out = TraceText(out, end, "dxgi dred-node queue=");
+        out = TraceName(out, end, node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW);
+        out = TraceText(out, end, " list=");
+        out = TraceName(out, end, node->pCommandListDebugNameA, node->pCommandListDebugNameW);
+        out = TraceText(out, end, " completed=0x");
+        out = TraceHex(out, end, done, 4);
+        out = TraceText(out, end, "/0x");
+        out = TraceHex(out, end, node->BreadcrumbCount, 4);
+        out = TraceText(out, end, " ops=");
+        const UINT32 first = done > 6 ? done - 6 : 0;
+        const UINT32 last = done + 4 < node->BreadcrumbCount ? done + 4 : node->BreadcrumbCount;
+        for (UINT32 i = first; i < last; ++i) {
+            if (i == done) out = TraceText(out, end, "[");
+            out = TraceHex(out, end, node->pCommandHistory[i], 2);
+            out = TraceText(out, end, i == done ? "] " : " ");
+        }
+        *out++ = '\r';
+        *out++ = '\n';
+        AppendTrace(line, static_cast<DWORD>(out - line));
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+    result = data->GetPageFaultAllocationOutput(&fault);
+    Trace("dred-page-fault", result);
+    if (FAILED(result)) return;
+    char line[400], *out = line;
+    const char* end = line + sizeof(line) - 4;
+    out = TraceText(out, end, "dxgi dred-fault va=0x");
+    out = TraceHex(out, end, fault.PageFaultVA, 16);
+    int listed = 0;
+    for (auto* node = fault.pHeadExistingAllocationNode; node && listed < 4; node = node->pNext, ++listed) {
+        out = TraceText(out, end, " existing=");
+        out = TraceName(out, end, node->ObjectNameA, node->ObjectNameW);
+        out = TraceText(out, end, ":0x");
+        out = TraceHex(out, end, static_cast<UINT64>(node->AllocationType), 2);
+    }
+    listed = 0;
+    for (auto* node = fault.pHeadRecentFreedAllocationNode; node && listed < 4; node = node->pNext, ++listed) {
+        out = TraceText(out, end, " freed=");
+        out = TraceName(out, end, node->ObjectNameA, node->ObjectNameW);
+        out = TraceText(out, end, ":0x");
+        out = TraceHex(out, end, static_cast<UINT64>(node->AllocationType), 2);
+    }
+    *out++ = '\r';
+    *out++ = '\n';
+    AppendTrace(line, static_cast<DWORD>(out - line));
+}
+
 DWORD WINAPI WatchDeviceRemoval(void* parameter) {
     auto* watch = static_cast<RemovalWatch*>(parameter);
     LARGE_INTEGER frequency{}, now{};
@@ -215,6 +298,7 @@ DWORD WINAPI WatchDeviceRemoval(void* parameter) {
             Trace("device-removed-reason", reason);
             Trace("device-removed-presents", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPresents, 0, 0)));
             Trace("device-removed-publishes", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPublishes, 0, 0)));
+            TraceRemovedData(watch->device);
             break;
         }
         Sleep(20);

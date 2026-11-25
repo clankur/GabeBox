@@ -874,8 +874,47 @@ static BOOL UseDefaultD3D12Adapter(const DXGI_ADAPTER_DESC1 *requested) {
     return matches;
 }
 
+/* Device-removed diagnostics. Before a hosted D3D12 device is created, force on
+   D3D12's automatic breadcrumbs and page-fault tracking so the DXGI adapter's
+   removal watchdog can report the command that was executing when the GPU
+   faulted. Only the settings interface is used; no debug layer is enabled. */
+typedef struct DredSettings DredSettings;
+typedef struct DredSettingsMethods {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(DredSettings *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(DredSettings *);
+    ULONG (STDMETHODCALLTYPE *Release)(DredSettings *);
+    void (STDMETHODCALLTYPE *SetAutoBreadcrumbsEnablement)(DredSettings *, int);
+    void (STDMETHODCALLTYPE *SetPageFaultEnablement)(DredSettings *, int);
+    void (STDMETHODCALLTYPE *SetWatsonDumpEnablement)(DredSettings *, int);
+} DredSettingsMethods;
+struct DredSettings {
+    const DredSettingsMethods *lpVtbl;
+};
+static const GUID dredSettingsIid =
+    {0x82BC481C, 0x6B9B, 0x4030, {0xAE, 0xDB, 0x7E, 0xE3, 0xD1, 0xDF, 0x1E, 0x63}};
+
+static void EnableDeviceRemovedData(void) {
+    static volatile LONG enabled;
+    if (InterlockedExchange(&enabled, 1)) return;
+    typedef HRESULT (WINAPI *GetDebugInterface)(REFIID, void **);
+    const HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+    const GetDebugInterface get = d3d12 ? (GetDebugInterface)(void *)GetProcAddress(d3d12, "D3D12GetDebugInterface") : NULL;
+    DredSettings *settings = NULL;
+    const HRESULT result = get ? get(&dredSettingsIid, (void **)&settings) : HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+    if (SUCCEEDED(result) && settings) {
+        settings->lpVtbl->SetAutoBreadcrumbsEnablement(settings, 2 /* D3D12_DRED_ENABLEMENT_FORCED_ON */);
+        settings->lpVtbl->SetPageFaultEnablement(settings, 2);
+        settings->lpVtbl->Release(settings);
+    }
+    char line[80];
+    char *out = Hex(Text(line, "asset d3d12-dred result=0x"), (DWORD)result, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
 static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, const IID *iid, void **device) {
     const DWORD previous = GetLastError();
+    if (HostedDxgiEnabled()) EnableDeviceRemovedData();
     const CreateD3D12Device create = (CreateD3D12Device)InterlockedCompareExchangePointer(&d3d12CreateDevice, NULL, NULL);
     DXGI_ADAPTER_DESC1 desc;
     const BOOL described = DescribeD3D12Adapter(adapter, &desc);
