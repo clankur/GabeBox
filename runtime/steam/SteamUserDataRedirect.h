@@ -141,7 +141,10 @@ template <class Result>
 inline Result Finish(Result result, bool failed, bool redirected, const wchar_t* operation) {
     if (failed && redirected) {
         const DWORD error = GetLastError();
-        ReportFailure(operation, error);
+        // Steam probes for files it has not written yet and creates folders that
+        // may already exist; only other errors are failures.
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_FILE_EXISTS &&
+                error != ERROR_ALREADY_EXISTS) ReportFailure(operation, error);
         SetLastError(error);
     }
     return result;

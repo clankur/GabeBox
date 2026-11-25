@@ -4,6 +4,47 @@ Slay the Spire 2 is Steam AppID `2868840`. The audited Windows build is Steam bu
 
 ## Current result
 
+Tested on Xbox Series X, OS `26100.9673`, with SteamCore `1.0.234.10` and then `1.0.234.11`. Both were built from commit `7094809` with the Steam Core template from [CI run 45585728786](https://github.com/clankur/steam-xbox-devmode/actions/runs/45585728786) and the build-pinned OpenGL profile. `.11` is the same build with a new version number, so that Big Picture's one-time configured **Play** runs again. All input came from Device Portal remote input through [`tools/xbox_remote_input.py`](../tools/xbox_remote_input.py).
+
+| Check | Result on `1.0.234.10` / `.11` | Evidence |
+| --- | --- | --- |
+| Rendering | Main menu, character portrait and card art render. No `shader_gles3.cpp:800` errors (13 before). | Screenshots `45828fb1…` (menu), `e67a375a…` (Ironclad), `c9830e19…` (combat with Strike, Defend and Bash art) |
+| Controller input | Remote pad drove menus, character select, map, combat, pause menu and quit. | Every step's screenshot |
+| Steam Cloud writes | Every write logs `Wrote … in steam remote store` (prefs, progress, the 41,362-byte `current_run.save`, `profile.save`). No `Cloud write failed`. | `LocalState\SteamUserData\118829389\2868840\remote\profile1\saves`, `remotecache.vdf` |
+| Save and reload | **Save and Quit** showed **Continue** (Overgrowth floor 1, 80/80, 99 gold). After quitting, relaunching and upgrading to `.11`, the game synced without deleting anything and **Continue** resumed the same combat, seed `8F0N0CD7JU9B`. Preferences persisted too: the Early Access screen did not return. | `0967238d…` (menu after save), `c81d2cc1…` (menu after relaunch), `e5cde100…` (resumed combat) |
+| Return to library | Main menu **Quit** → **Yes** logged `NGame.Quit called` and `Steamworks shutdown succeeded`. Device Portal process listings after each quit showed no `SlayTheSpire2.exe` and no `WerFault.exe`. The Big Picture library screenshot was taken after the first quit; screenshots after the second returned HTTP 500. | `0101f360…`, process listings |
+| 60 FPS | Active combat from `2026-11-25T09:36:55Z`: 1,799 frames, **59.967 FPS**, lowest rolling second **59**, worst 17.11 ms, all shared GPU textures, `gpu_60fps: true`. | trace `c8afeab2…` |
+| Audio | FMOD logged `Successfully initialized` and `System released` and no errors. Nobody has listened. | game log |
+
+The run's opening window (from `09:36:19Z`) averaged 59.47 FPS with a lowest second of 46. It contained two game-side stalls (167 ms and 83 ms) at the first card plays of the run, each advancing the producer by one frame. This matches the first-use loading recorded on `1.0.232.680` below. Windows from `09:36:40Z` and `09:37:00Z` also passed.
+
+### Steam Cloud saves
+
+`steamclient64.dll` sets its install root in a static initializer: it calls `GetModuleHandleA("steamclient64.dll")` and then tier0's `GetModuleFileNameUTF8`, and strips the file name. That code is at `steamclient64.dll` RVA `0x9AD325`–`0x9AD35A`, SHA-256 `5237b350…`. Steam keeps each account's state below `<root>\userdata`, including `<account>\<app>\remote` and `remotecache.vdf`. A packaged client's root is the read-only package directory, so every `ISteamRemoteStorage` write ended in `k_EResultIOFailure`. STS2 treats Steam Cloud as authoritative, so it deleted its local saves at the next launch. Only `AC\Steam\local.vdf` existed among the app's writable folders.
+
+After the sign-in client loads, the host now rebinds the path-taking kernel32 imports of `steamclient64`, `tier0_s64` and `vstdlib_s64`. Only `<root>\userdata` resolves to `LocalState\SteamUserData`, and other paths pass through unchanged. The rebound imports are `CreateFileW`, directory create and remove, delete, attributes, find, move, copy, replace and temp-name. The host's sign-in report records `steam_userdata=redirected` and the number of rebound imports. A failed redirected write is recorded once in `LocalState\steam-userdata-report.txt`. "Not found" probes are not recorded. [Path mapping](../runtime/steam/steam-userdata-path.h) · [Import rebinding](../runtime/steam/SteamUserDataRedirect.h)
+
+This makes Steam's local remote cache persistent, which is what save and reload needs. `remotecache.vdf` still shows `remotetime 0`, so this run did not confirm that the files upload to Valve's servers.
+
+### Shader cache and the current-directory limit
+
+Godot's `DirAccessWindows::change_dir` sets the process current directory, reads it back and restores it. On Xbox, `SetCurrentDirectoryW` fails with error 206 once the path passes `MAX_PATH`. That happens at `…\SlayTheSpire2\shader_cache\<Shader>\<sha256>`, which `1.0.230.82` recorded first. On every launch after the first, `make_dir` then returned `ERR_ALREADY_EXISTS`. `ShaderGLES3::initialize` returned at [`shader_gles3.cpp:800`](https://github.com/godotengine/godot/blob/4.5.1-stable/drivers/gles3/shader_gles3.cpp#L795-L809) before it recorded `max_image_units`. Every sampler that Godot assigns a unit counted back from that limit then got an invalid unit. The result was white card art, portraits and menu art.
+
+For error 206 only, the storage adapter now accepts an existing directory as a virtual current directory. `GetCurrentDirectoryW` reports it until the next successful change. The process directory itself does not move. Paths with `.` or `..` components keep the original failure. The profile binds `GetCurrentDirectoryW` beside `SetCurrentDirectoryW`. [Storage adapter](../runtime/win32/storage-trace.c)
+
+### Remaining open items
+
+- **Audible audio.** FMOD initializes and shuts down cleanly. A person needs to listen.
+- **Physical controller.** Only Device Portal remote input has been used. A physical pad goes through the same hosted pad.
+- **Steam Cloud upload.** Saves persist in Steam's local remote cache. Upload to Valve's servers has not been checked.
+- **First-use stalls.** The first card plays and new enemy moves stall for 50–170 ms while the game loads assets. These stalls come from the game.
+- **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
+- **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
+- **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
+
+## Gameplay run on `1.0.232.680`
+
+
 Tested on Xbox Series X, OS `26100.9673`, with SteamCore `1.0.232.680` and the build-pinned OpenGL profile in [`profiles/2868840/26655341`](../profiles/2868840/26655341). Big Picture **Play** launched the game at 03:48:00 local on 2026-11-25. All input came from Device Portal remote input through [`tools/xbox_remote_input.py`](../tools/xbox_remote_input.py), with no physical controller. These results were observed:
 
 - The game initialized Steamworks with the signed-in account and reported `Steam is running: True`.
@@ -31,15 +72,6 @@ Windows that overlap first-use content miss the lowest-second rule:
 
 The log reported each new asset as `Asset not cached`. Every one of these gaps advanced the producer by a single frame, so the game was loading, not the presenter dropping frames. Thirteen further stalls of 500–567 ms all fall within 0.5 s of a Device Portal `/ext/screenshot` capture, so do not take screenshots inside a measured window. Internal resolution is the game's 1920 × 1080 fullscreen window as logged. Godot does not log a render scale. The game caps itself at 60 FPS (`fps_limit: 60`).
 
-### Remaining open items on this build
-
-- **Save and reload (blocker).** Every launch logs `Deleting profile1/saves/progress.save because it does not exist on remote`, and every Steam Cloud write fails with `k_EResultIOFailure`. The game treats Steam Cloud as authoritative, so local progress is deleted at the next launch. Cloud writes through the SDK handoff must work before save and reload can pass.
-- **Card art, character portraits and the main menu render white.** Card frames, text, the map, the combat scene and the character sprite render correctly. Leads are the compressed texture path or a card shader on Mesa's OpenGL driver, and the 13 `shader_gles3.cpp:800` shader-cache errors at startup.
-- **Return to library through the overlay.** A View + Menu chord followed by Down + A closed the Big Picture webview and left the game running. Overlay screenshots return HTTP 500. The Play → overlay → exit cycle is open for every title.
-- **Physical controller.** Input was verified with Device Portal remote input only. A physical pad uses the same hosted pad, but STS2 has not been played with one on `1.0.232.680`.
-- **Audio.** FMOD initialized and logged no errors. Audible output has not been checked.
-- **Review fixes since `1.0.232.680`** (commit `30c8249`). The axis settle period, and limiting the ignore-list and DirectInput changes to hosted-XInput titles, are built and unit-tested but have not run on the console. Recheck ULTRAKILL, Spider-Man and Hades after the shared input and environment changes.
-
 ## First failing operations, in order
 
 Each row is a console run of the same Steam build. Run numbers are this note's; package versions identify them on the console.
@@ -57,7 +89,8 @@ Each row is a console run of the same Steam build. Run numbers are this note's; 
 | `1.0.232.620`–`.650` | OpenGL via Mesa | SDL found hosted XInput user 0 but never opened it: `SDL_GAMECONTROLLER_IGNORE_DEVICES` was set inside the game process | Ignore lists withdrawn after the handoff |
 | `1.0.232.660` | OpenGL via Mesa | Pad polled and active, no reaction: STS2 used Steam Input, which reported a controller but delivered no actions | Steam Input reports no controllers |
 | `1.0.232.670` | OpenGL via Mesa | Still no reaction to keys or pad: Godot's first `WM_ACTIVATE` waits on a `SetTimer` that never fired on the virtual window | `SetTimer`/`KillTimer` for virtual windows |
-| `1.0.232.680` | OpenGL via Mesa | Controller detected; run started; combat played; 60 FPS gate passed in combat | — |
+| `1.0.232.680` | OpenGL via Mesa | Controller detected; run started; combat played; 60 FPS gate passed in combat. Saves deleted at each launch: Steam Cloud writes failed with `k_EResultIOFailure`. Card art white | Writable Steam `userdata`; virtual long current directory |
+| `1.0.234.10`–`.11` | OpenGL via Mesa | Art renders; saves reload; quit returns to the library; 60 FPS in combat | — |
 
 ### WER and the "suspended host"
 
@@ -97,11 +130,11 @@ Godot's Forward+ startup crashes the system pipeline compiler, and the Mobile re
 
 ## Build-matched profile
 
-[`opengl3-bindings.json`](../profiles/2868840/26655341/opengl3-bindings.json) redirects 57 imports to shared adapters:
+[`opengl3-bindings.json`](../profiles/2868840/26655341/opengl3-bindings.json) redirects 61 imports to shared adapters:
 - Window, focus, cursor, message-pump and display queries go to the window and hosted-display adapters.
 - WGL goes to the window adapter.
 - `CreateDIBSection` and `DeleteObject` go to the window adapter.
-- Storage tracing stays as before.
+- `SetCurrentDirectoryW` and `GetCurrentDirectoryW` go to the storage adapter, which keeps a virtual current directory for deep existing paths and traces directory results.
 - `LoadLibrary*` goes to loader trace, which provides hosted `XInput1_4.dll` and the fault observer.
 
 The launch marker selects `--rendering-driver opengl3`, the Godot launcher, loader trace and `--accessibility disabled`. The companion list stages the 212 files beside the executable except the `.pck`, the launch scripts, the Steam Input configuration and Sentry's crash handler.
@@ -119,4 +152,4 @@ If no local Windows install exists, export the executable from the console with 
 
 ## Coverage status
 
-STS2 now runs gameplay at a sustained 60 FPS at 1920 × 1080 on shared GPU textures, driven by controller input. It is not yet counted as covered. Per AGENTS.md, coverage also needs audio, save and reload, and return to the library observed on build `26655341`, plus the card-art rendering fix.
+On build `26655341` with SteamCore `1.0.234.10`/`.11`, the following were observed on the console: gameplay, controller input through the hosted pad, save and reload, return to the library, and a sustained 60 FPS at 1920 × 1080 on shared GPU textures. Audio is initialized but has not been heard. Until someone listens and plays with a physical controller, STS2 counts as covered pending those two human checks, not as fully covered.

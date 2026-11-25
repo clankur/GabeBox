@@ -224,6 +224,7 @@ static BOOL IsExistingDirectory(const WCHAR *dos, DWORD length) {
 }
 
 BOOL WINAPI XboxTraceSetCurrentDirectoryW(LPCWSTR path) {
+    const DWORD entryError = GetLastError();
     AcquireSRWLockExclusive(&currentLock);
     BOOL ok = SetCurrentDirectoryW(path);
     DWORD error = ok ? ERROR_SUCCESS : GetLastError();
@@ -242,7 +243,7 @@ BOOL WINAPI XboxTraceSetCurrentDirectoryW(LPCWSTR path) {
             virtualLength = length;
             directory = NULL;
             ok = TRUE;
-            error = ERROR_SUCCESS;
+            error = entryError;
             if (!InterlockedExchange(&virtualTraced, 1)) RecordResult("SetCurrentDirectoryW", "virtual-long",
                 "existing", ContainsShaderCache(path), TRUE, ERROR_SUCCESS);
         }
@@ -266,7 +267,6 @@ DWORD WINAPI XboxTraceGetCurrentDirectoryW(DWORD size, LPWSTR buffer) {
         result = virtualLength;
     }
     ReleaseSRWLockShared(&currentLock);
-    SetLastError(ERROR_SUCCESS);
     return result;
 }
 
