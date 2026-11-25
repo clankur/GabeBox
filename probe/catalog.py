@@ -9,6 +9,7 @@ GRAPHICS_CONTROL_NAME = PROBE_NAME + '.GraphicsControl'
 PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
 NATIVE_MOUSE_PROBE_NAME = 'XboxPortabilityProbe.NativeMouseSource'
+CONTROLLER_POINTER_PROBE_NAME = 'XboxPortabilityProbe.ControllerPointer'
 PROBE_REPORT = 'probe-report.txt'
 BIG_PICTURE_REPORT = 'big-picture-report.txt'
 WEBVIEW_REPORT = 'big-picture-webview-report.txt'
@@ -16,6 +17,7 @@ NATIVE_MOUSE_CAPTURE_REPORT = 'mouse-capture.txt'
 NATIVE_MOUSE_DEVICE_REPORT = 'mouse-gameinput.txt'
 NATIVE_MOUSE_INDEPENDENT_REPORT = 'mouse-independent.txt'
 NATIVE_MOUSE_STARTUP_REPORT = 'mouse-startup.txt'
+CONTROLLER_POINTER_REPORT = 'controller-pointer.txt'
 
 CHILD_EXIT = (('exit_code_matches', 'yes'),)
 PIPE_EXCHANGE = CHILD_EXIT + (('ipc', 'success'),)
@@ -89,6 +91,12 @@ CASES = {
         (('status', 'independent-mouse-ready'), ('visible', '1'), ('presented', '1'), ('registered', '0xf')),
         filename=NATIVE_MOUSE_INDEPENDENT_REPORT, report_kind='native-independent-mouse', require_run_id=True,
         terminal_status='independent-mouse-ready',
+    ),
+    'controller-pointer': ProbeCase(
+        CONTROLLER_POINTER_PROBE_NAME, 'Xbox controller pointer',
+        'Verify the standalone app enumerated game controllers from a foreground view.',
+        (('status', 'controller-sampling'), ('visible', '1')), filename=CONTROLLER_POINTER_REPORT,
+        report_kind='controller-pointer', require_run_id=True, terminal_status='controller-sampling',
     ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',

@@ -15,6 +15,7 @@ EVIDENCE_FIELDS = {
     'mouse_capabilities_hresult', 'mouse_present', 'mouse_button_count',
     'document_visible', 'pointer_input', 'pointer_moves', 'pointer_down', 'pointer_wheel',
     'visible', 'registered', 'start_tick', 'hr', 'stage', 'presented',
+    'raw_controllers', 'gamepads', 'controllers_seen', 'hid_joystick_found', 'hid_gamepad_found',
 }
 
 

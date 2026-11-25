@@ -4,7 +4,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
 
-from probe.catalog import CASES, NATIVE_MOUSE_PROBE_NAME, PACKAGE_CASES
+from probe.catalog import CASES, CONTROLLER_POINTER_PROBE_NAME, NATIVE_MOUSE_PROBE_NAME, PACKAGE_CASES
 from probe.runner import run_case
 from tools import xbox_deploy
 
@@ -82,6 +82,26 @@ class ProbeRunnerTests(unittest.TestCase):
                 self.assertEqual(result.outcome, outcome)
                 self.assertEqual(result.evidence()['presented'], present)
         self.assertEqual(PACKAGE_CASES[NATIVE_MOUSE_PROBE_NAME], 'native-mouse-ready')
+
+    def test_controller_pointer_waits_for_a_fresh_foreground_sample(self):
+        def report(run_id, status, visible):
+            return (f'run_id={run_id}\nprobe=controller-pointer\nstatus={status}\nvisible={visible}\n'
+                    'raw_controllers=1\ngamepads=1\n')
+
+        stale = report('1', 'controller-sampling', '1')
+        start = report('2', 'controller-starting', '0')
+        ready = report('2', 'controller-sampling', '1')
+        read = Mock(side_effect=[stale, stale, start, ready])
+        with patch('probe.runner.time.sleep'):
+            result = run_case(CASES['controller-pointer'], read, lambda: False, 20, Mock())
+        self.assertEqual(result.outcome, 'passed')
+        self.assertEqual(result.evidence()['raw_controllers'], '1')
+        self.assertEqual(PACKAGE_CASES[CONTROLLER_POINTER_PROBE_NAME], 'controller-pointer')
+
+    def test_controller_pointer_fails_on_a_startup_error(self):
+        error = 'run_id=3\nprobe=controller-pointer\nstatus=controller-error\nhr=80004005\n'
+        result = run_case(CASES['controller-pointer'], Mock(side_effect=['', error]), lambda: False, 1, Mock())
+        self.assertEqual(result.outcome, 'failed')
 
     def test_json_result_records_the_selected_case_and_failure(self):
         portal = Mock()

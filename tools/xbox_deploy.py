@@ -22,7 +22,8 @@ from zipfile import BadZipFile, ZipFile
 
 
 from probe.catalog import (
-    BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
+    BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, CONTROLLER_POINTER_PROBE_NAME, CONTROLLER_POINTER_REPORT,
+    GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
     NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT, NATIVE_MOUSE_INDEPENDENT_REPORT,
     NATIVE_MOUSE_PROBE_NAME, NATIVE_MOUSE_STARTUP_REPORT,
     PROBE_CONTROL_NAME, PROBE_NAME, PROBE_REPORT, PROBE_STEAM_CORE_NAME, WEBVIEW_REPORT,
@@ -932,6 +933,8 @@ def main():
                                 const=NATIVE_MOUSE_DEVICE_REPORT, help='read the standalone GameInput mouse samples')
     report_variant.add_argument('--native-independent-mouse', dest='report_file', action='store_const',
                                 const=NATIVE_MOUSE_INDEPENDENT_REPORT, help='read the independent panel mouse counters')
+    report_variant.add_argument('--controller-pointer', dest='report_file', action='store_const',
+                                const=CONTROLLER_POINTER_REPORT, help='read the standalone controller enumeration')
     report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     observe_command = commands.add_parser('observe', help='watch Steam startup or a game launch without controlling the Xbox')
@@ -1163,6 +1166,8 @@ def main():
     if args.command == 'report':
         if args.report_file in NATIVE_MOUSE_REPORTS:
             name = NATIVE_MOUSE_PROBE_NAME
+        elif args.report_file == CONTROLLER_POINTER_REPORT:
+            name = CONTROLLER_POINTER_PROBE_NAME
         else:
             name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
         if args.report_file == 'steam-core-webview':

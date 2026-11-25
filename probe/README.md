@@ -20,6 +20,24 @@ Install the corresponding signed package before running a case. The JSON include
 
 When adding a single-package control, reuse the relevant runtime adapter and report the operation's outcome and a per-launch `run_id`. Register the package and its terminal checks in [`catalog.py`](catalog.py). The [runner](runner.py) handles fresh reports, deadlines, and verdicts. Use [normal Big Picture Play](../docs/GAME-LAUNCH.md#verification) to verify a title after the control passes.
 
+## Physical mouse input
+
+A sideloaded Dev Mode package cannot read an attached Xbox mouse on any documented
+route. Dev Mode runs in the console's `SystemOS` partition while the mouse-capable
+GameInput runtime ships inside a GDK title's `GameOs.xvd`, the remaining Win32 raw input
+entry points are either unexported or return `ERROR_CALL_NOT_IMPLEMENTED`, no HID
+collection enumerates a device, and the restricted input capabilities install without
+effect. Ten console builds established this; the evidence, the citation trail, and the
+branches holding the retired probes are in [physical mouse input on an Xbox Dev Mode
+package](../analysis/xbox-mouse-input.md).
+
+A cursor therefore has to be driven from a source this layer can read: Xbox mouse mode,
+a keyboard, a host-supplied delta source, or the controller route below.
+
+This branch is one of those branches: it still carries the probes, and the three
+sections below document them. They have no measurement left to make, so treat them as
+the reference copy rather than a starting point.
+
 Build `--raw-input` to exercise `XboxWin32Input.dll` through the same redirected `GetRawInputBuffer` import used by game profiles. The child starts with an empty input queue and checks both a size query and a read with a supplied buffer. The child expects zero records, zero reported bytes, and an untouched output buffer. An invalid header size must fail with `ERROR_INVALID_PARAMETER`. Exit codes `0x6D01xxxx` and `0x6D03xxxx` include the Win32 error for the query and read. `0x6D020000`, `0x6D040000`, and `0x6D050000` identify a query, read, or invalid-header contract mismatch. [Wine raw input tests](https://github.com/wine-mirror/wine/blob/master/dlls/user32/tests/input.c#L2530-L2555)
 
 Build `--ime-filename` to exercise the redirected `ImmGetIMEFileNameA` import. A null layout must return zero and preserve the caller's output and last error. The child also compares the size query and the returned filename length for the active keyboard layout. Exit codes `0x6F01xxxx` through `0x6F06xxxx` identify the first failed check. [Wine IME tests](https://github.com/wine-mirror/wine/blob/master/dlls/imm32/tests/imm32.c#L4159-L4227)
@@ -122,6 +140,64 @@ python3 -m tools.xbox_deploy report --version "$version" --mouse-source
 ```
 
 Capture a report before and after input while `visible=1`. Match `start_tick` between the observations. `registered=0x3f` indicates that all six subscriptions succeeded. The probe counts relative motion and CoreWindow mouse events after the game presents its first frame and while its panel is foreground. `panel_mouse_down` counts routed mouse presses. `capture_attempts` advances only during contact on that panel. `capture_hr=0` records a successful `SetPointerCapture` call and `release_hr=0` records a successful explicit release. A zero attempt count leaves capture untested. Track the game's mailbox alongside these counters to locate where input stopped. [Microsoft capture requirements](https://learn.microsoft.com/en-us/uwp/api/windows.ui.core.corewindow.setpointercapture)
+
+## Xbox controller pointer
+
+A physical mouse cannot reach a Dev Mode package, but an adapter that presents the
+mouse as a game controller can. [native-app.cpp](controller-pointer/native-app.cpp) is a
+standalone XAML app with its own package identity and no Steam dependencies. It lists every
+controller `Windows.Gaming.Input` exposes and measures how each one's readings behave.
+The [build workflow](../.github/workflows/xbox-controller-pointer.yml) produces two
+layouts with `prepare_controller_pointer`: `baseline` declares no capabilities, and
+`hid` also declares the HID joystick (`0001 0004`) and gamepad (`0001 0005`)
+collections and enumerates them. [Mouse as a controller](../analysis/xbox-mouse-input.md#mouse-as-a-controller)
+
+```sh
+gh run download "$run" -n xbox-controller-pointer-x64 -D pointer
+python3 -m tools.xbox_deploy deploy pointer/XboxControllerPointer-hid-1.0.2.1.appx \
+    --certificate pointer/XboxControllerPointer.cer --timeout 180
+python3 -m tools.xbox_deploy probe --case controller-pointer --version 1.0.2.1 --restart --timeout 60
+python3 -m tools.xbox_deploy report --version 1.0.2.1 --controller-pointer
+```
+
+The case passes once the view has stayed foreground for three consecutive one-second
+snapshots, both HID watchers have finished their first enumeration, and every device
+they found has finished its open attempt. That is when the app first
+writes `status=controller-sampling`. The report is rewritten every second for the life
+of the app, and the HID watchers keep running, so a device plugged in later appears
+without a relaunch. Read the report again after each step:
+
+1. **Positive control.** With only an Xbox controller connected, `raw_controllers`,
+   `gamepads` and `controllers_seen` are at least 1, and that controller's record shows
+   `gamepad=1`.
+2. **Generic HID joystick.** Plug in a board that presents as a plain USB HID joystick or
+   gamepad, such as an RP2040 running hid-remapper. A new `controllerN` record with
+   `gamepad=0` and advancing `distinct`, or `opened` above zero on the `hid_joystick` or
+   `hid_gamepad` line of the `hid` layout, means the package can read it without
+   accessory authentication. A nonzero `hid_*_found` with `open_failed` above zero means
+   the console lists the collection but refuses access; `open_hr` records why. The open
+   runs on the UI thread so a consent prompt can appear; accept it if the console shows
+   one, since an unanswered prompt holds the case at `controller-starting`. If nothing changes
+   and `raw_added` stays the same, that route is closed for this console build.
+3. **Adapter characterization.** With a mouse-to-joystick adapter connected (directly,
+   or through an Xbox Adaptive Controller), leave it still for five seconds, then move
+   the mouse in slow and fast strokes on each axis and press each button. Record
+   `vid` and `pid`. Each `controllerN_axisM` line gives `first` (the resting value),
+   `min` and `max` (the travel reached), and `step`, the smallest change between two
+   readings, which estimates the resolution that reaches the package. In
+   `controllerN_readings`, `distinct` counts timestamp changes out of `polls`, and
+   `read_failures` with `last_read_hr` records rejected reads. The sampler paces itself
+   with a high-resolution waitable timer and reports its measured loop period as
+   `sampler_period_us`. While that period is shorter than the device's,
+   `interval_min` and `interval_avg` describe the device's own update interval in the
+   reading's timestamp units. `above_32` counts presses on buttons past the 32-bit
+   `seen` mask. The
+   `controllerN_gamepad_*` lines record the same device through the typed `Gamepad`
+   reading that the hosted presenter uses. A gap between the raw and typed axes there
+   points to a deadzone or curve applied above the raw reading.
+
+The app selects `RequiresPointerMode::WhenRequested`, so the console does not turn the
+controller into the system pointer. [RawGameController](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.rawgamecontroller) · [Raw game controller guide](https://learn.microsoft.com/en-us/windows/uwp/gaming/raw-game-controller)
 
 ## Xbox packaged process test
 
