@@ -138,18 +138,37 @@ DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
     return result;
 }
 
+/* Record the first capability queries with their slot and result, and whether
+   the launcher's SDL backend overrides reached this process. */
+static void TraceCapabilities(DWORD index, DWORD result) {
+    static volatile LONG count;
+    const LONG call = InterlockedIncrement(&count);
+    if (call > 16) return;
+    const DWORD error = GetLastError();
+    char line[96] = "input xinput-capabilities slot=0 result=0x00000000";
+    line[31] = (char)('0' + (index & 7));
+    for (int digit = 0; digit < 8; ++digit) line[42 + digit] = "0123456789ABCDEF"[(result >> (28 - 4 * digit)) & 15];
+    unsigned length = 50;
+    if (call == 1) {
+        WCHAR value[4];
+        const DWORD size = GetEnvironmentVariableW(L"SDL_JOYSTICK_WGI", value, ARRAYSIZE(value));
+        const char *suffix = size == 1 && value[0] == L'0' ? " sdl-backends=hosted-only" : " sdl-backends=default";
+        while (*suffix) line[length++] = *suffix++;
+    }
+    line[length++] = '\r';
+    line[length++] = '\n';
+    AppendTrace(line, length);
+    SetLastError(error);
+}
+
 DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILITIES *capabilities) {
     if (!capabilities || index >= XUSER_MAX_COUNT || (flags != 0 && flags != XINPUT_FLAG_GAMEPAD))
         return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeGetCapabilities) return nativeGetCapabilities(index, flags, capabilities);
-    static volatile LONG traced;
-    if (!InterlockedExchange(&traced, 1)) {
-        if (index) TRACE("input xinput-capabilities=other-slot");
-        else if (mailbox) TRACE("input xinput-capabilities=hosted-slot");
-        else TRACE("input xinput-capabilities=mailbox-unavailable");
-    }
-    if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return ERROR_DEVICE_NOT_CONNECTED;
+    const DWORD result = index || !mailbox || SdlHostLoad(&mailbox->quit) ? ERROR_DEVICE_NOT_CONNECTED : ERROR_SUCCESS;
+    TraceCapabilities(index, result);
+    if (result != ERROR_SUCCESS) return result;
 
     *capabilities = (XINPUT_CAPABILITIES){
         XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD, 0,
