@@ -41,6 +41,7 @@ private:
     HRESULT Publish12(IDXGISwapChain1* chain, UINT backBuffer);
     HRESULT FailedAt(const char* stage, HRESULT error);
     void PublishSequence(unsigned index);
+    void ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc);
 
     SdlHostMailbox* base_ = nullptr;
     SdlGpuMailbox* gpu_ = nullptr;
@@ -53,4 +54,6 @@ private:
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
     HRESULT status_ = E_PENDING;
     const char* failureStage_ = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> probe_;
+    UINT64 published_ = 0;
 };

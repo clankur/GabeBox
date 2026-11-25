@@ -1,5 +1,7 @@
 #include "dxgi-frame.h"
 
+void AppendTrace(const char* text, DWORD size);
+
 #include <utility>
 
 extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
@@ -282,11 +284,68 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
     if (done == UINT64_MAX) return FailedAt("gpu-frame-consumer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
     if (ready < slot.submitted || done < slot.submitted) return S_FALSE;
     context_->CopyResource(slot.texture.Get(), source.Get());
+    ProbeFrame(source.Get(), desc);
     error = context_->Signal(slot.ready.Get(), next_);
     if (FAILED(error)) return FailedAt("gpu-frame-signal-error", error);
     context_->Flush();
     PublishSequence(index);
     return S_OK;
+}
+
+// Sample a few published frames to tell an all-black game image apart from a transport fault.
+void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc) {
+    static const UINT64 samples[] = {120, 600, 1800, 3600, 7200};
+    const UINT64 count = ++published_;
+    bool sample = false;
+    for (UINT64 at : samples) sample |= count == at;
+    if (!sample || (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+            desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) return;
+    const DWORD previous = GetLastError();
+    if (!probe_) {
+        ComPtr<ID3D11Device> device;
+        source->GetDevice(&device);
+        D3D11_TEXTURE2D_DESC staging = desc;
+        staging.Usage = D3D11_USAGE_STAGING;
+        staging.BindFlags = 0;
+        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        staging.MiscFlags = 0;
+        if (!device || FAILED(device->CreateTexture2D(&staging, nullptr, &probe_))) {
+            SetLastError(previous);
+            return;
+        }
+    }
+    context_->CopyResource(probe_.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(probe_.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        SetLastError(previous);
+        return;
+    }
+    UINT nonblack = 0, total = 0;
+    UINT64 sum[3]{};
+    for (UINT row = 0; row < 36; ++row) {
+        const auto* line = static_cast<const BYTE*>(mapped.pData) + mapped.RowPitch * ((desc.Height * row + desc.Height / 72) / 36);
+        for (UINT column = 0; column < 64; ++column) {
+            const BYTE* pixel = line + 4 * ((desc.Width * column + desc.Width / 128) / 64);
+            ++total;
+            sum[0] += pixel[0]; sum[1] += pixel[1]; sum[2] += pixel[2];
+            if (pixel[0] > 8 || pixel[1] > 8 || pixel[2] > 8) ++nonblack;
+        }
+    }
+    context_->Unmap(probe_.Get(), 0);
+    char text[160], *out = text;
+    auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
+    auto number = [&out](UINT64 value) {
+        char digits[24]; int length = 0;
+        do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+        while (length) *out++ = digits[--length];
+    };
+    put("dxgi frame-probe frame="); number(count);
+    put(" nonblack="); number(nonblack); put("/"); number(total);
+    put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
+    put(" format="); number(desc.Format);
+    put("\r\n");
+    AppendTrace(text, static_cast<DWORD>(out - text));
+    SetLastError(previous);
 }
 
 HRESULT DxgiFramePublisher::Publish12(IDXGISwapChain1* chain, UINT backBuffer) {
