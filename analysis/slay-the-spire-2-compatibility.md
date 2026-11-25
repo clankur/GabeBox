@@ -14,7 +14,7 @@ Tested on Xbox Series X, OS `26100.9673`, with SteamCore `1.0.234.10` and then `
 | Save and reload | **Save and Quit** showed **Continue** (Overgrowth floor 1, 80/80, 99 gold). After quitting, relaunching and upgrading to `.11`, the game synced without deleting anything and **Continue** resumed the same combat, seed `8F0N0CD7JU9B`. Preferences persisted too: the Early Access screen did not return. | `0967238d…` (menu after save), `c81d2cc1…` (menu after relaunch), `e5cde100…` (resumed combat) |
 | Return to library | Main menu **Quit** → **Yes** logged `NGame.Quit called` and `Steamworks shutdown succeeded`. Device Portal process listings after each quit showed no `SlayTheSpire2.exe` and no `WerFault.exe`. The Big Picture library screenshot was taken after the first quit; screenshots after the second returned HTTP 500. | `0101f360…`, process listings |
 | 60 FPS | Active combat from `2026-11-25T09:36:55Z`: 1,799 frames, **59.967 FPS**, lowest rolling second **59**, worst 17.11 ms, all shared GPU textures, `gpu_60fps: true`. | trace `c8afeab2…` |
-| Audio | FMOD logged `Successfully initialized` and `System released` and no errors. Nobody has listened. | game log |
+| Audio | On `1.0.236.1` the loader trace sampled the default render endpoint's peak meter every 100 ms. In every 10 s window from the menu onward, 100 of 100 samples were above silence. Peaks were 0.026–0.036 of full scale in the menu and 0.043–0.059 once combat started. FMOD logged `Successfully initialized` and `System released`. Nobody has listened. | loader trace `47fab8d2…`, `audio window=` lines |
 
 The run's opening window (from `09:36:19Z`) averaged 59.47 FPS with a lowest second of 46. It contained two game-side stalls (167 ms and 83 ms) at the first card plays of the run, each advancing the producer by one frame. This matches the first-use loading recorded on `1.0.232.680` below. Windows from `09:36:40Z` and `09:37:00Z` also passed.
 
@@ -34,10 +34,10 @@ For error 206 only, the storage adapter now accepts an existing directory as a v
 
 ### Remaining open items
 
-- **Audible audio.** FMOD initializes and shuts down cleanly. A person needs to listen.
+- **Audible audio.** The console's render endpoint carries a continuous signal while the game runs (see the table). Whether the TV or headset plays it still needs a person to listen.
 - **Physical controller.** Only Device Portal remote input has been used. A physical pad goes through the same hosted pad.
 - **Steam Cloud upload.** Saves persist in Steam's local remote cache. Upload to Valve's servers has not been checked.
-- **First-use stalls.** The first card plays and new enemy moves stall for 50–170 ms while the game loads assets. These stalls come from the game.
+- **First-use stalls.** They recur on every launch, not only the first. On `1.0.236.1` (third launch of the same save), the first card played at `10:01:56.47Z` produced four long intervals, the worst 83 ms. The first enemy turn then dropped single frames (33.4 ms) at `10:02:05`–`:09`. The opening 30 s averaged 59.33 FPS with a lowest second of 48. The pinned Mesa build ([mesa-uwp `34732bb`](https://github.com/XboxEmulationHub/mesa-uwp/tree/34732bbc207daea10bdf2fb969a4a0f7769ea1de)) has no shader disk cache. So every Godot shader variant is compiled to DXIL at first use on each launch, and Godot's program-binary cache gets nothing to store. That cost comes from the compatibility layer; the game's own uncached asset loads may add to it. These traces cannot tell the two apart. Enabling Mesa's shader cache in the UWP build is the open performance work.
 - **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
 - **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
 - **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
