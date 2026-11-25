@@ -113,6 +113,20 @@ To check foreground input delivery, hold a physical keyboard key for two seconds
 
 Add `MOUSE_PROBE_GAMEINPUT_VERSIONS` and the same package's `native/include` directory to query the console runtime for v1 through v4 and count sampled timestamp changes. For the isolated packaged-runtime experiment, also define `MOUSE_PROBE_GAMEINPUT_REDIST` and stage the package's `native/bin/xbox/GameInputRedist.dll` beside the test executable with its license and notice files. The Xbox DLL SHA-256 is `470720a88107b1fdada5af232718385feae32e0453b09f68718f285276aea760`. This build uses the typed v4 API on the packaged DLL, with independent load, factory, and first-reading checkpoints. [Xbox runtime requirements](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-xbox)
 
+## Physical mouse route matrix
+
+Build [native-app.cpp](mouse-source/native-app.cpp) with `MOUSE_PROBE_ROUTES` defined to sample every physical mouse delivery route in one foreground run. The [build workflow](../.github/workflows/xbox-mouse-routes.yml) produces both layouts: `baseline` keeps the existing capability set, and `capability` declares the restricted raw input capabilities with the HID mouse collections through `prepare_mouse_capture --input-observation`. Both select Xbox mouse mode, so an inactive pointer pipeline cannot explain a silent result.
+
+```sh
+gh run download "$run" -n xbox-mouse-routes-x64 -D routes
+python3 -m tools.xbox_deploy deploy routes/XboxMouseRoutes-capability-1.0.1.1.appx \
+    --certificate routes/XboxMouseRoutes.cer --timeout 180
+python3 -m tools.xbox_deploy probe --case native-mouse-routes --version 1.0.1.1 --restart --timeout 90
+python3 -m tools.xbox_deploy report --version 1.0.1.1 --native-mouse-routes
+```
+
+The case passes once the matrix reaches `stage=routes-sampling`, which means every enumeration finished. Move, click, and scroll the physical mouse during the three-minute sample and read the report again. `user32` is a bitmask of the resolved exports in registration order: `RegisterRawInputDevices`, `GetRawInputBuffer`, `GetRawInputData`, `GetRawInputDeviceList`, `PeekMessageW`, `GetCursorPos`, `GetAsyncKeyState`, `GetMouseMovePointsEx`. `window=1` means the probe obtained the CoreWindow's `HWND`. A `rawinput_sink_error` or `cursor_error` of `120` is `ERROR_CALL_NOT_IMPLEMENTED` from a resolved Xbox stub, which is a different result from a route that is implemented and silent. `hid_*_found=0` means the collection enumerated no devices, so its `open_hr` stays `E_PENDING` and no read was attempted. Compare the pointer counters in `--native-mouse-capture` from the same `run_id`, and hold a keyboard key during the sample for the positive control. [Raw input registration](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerrawinputdevices) · [Restricted capabilities](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations#restricted-capabilities)
+
 ## Native game panel mouse capture
 
 Add an empty `fhd-mouse-source.txt` to the root of a test APPX layout containing the matching native presenter DLL and WinRT metadata. Install the signed build and open a hosted game through Big Picture. Leave the controller idle, move the physical mouse over the game, press and hold the left button while moving, release, and scroll.

@@ -94,8 +94,8 @@ CASES = {
     'native-mouse-routes': ProbeCase(
         NATIVE_MOUSE_PROBE_NAME, 'Xbox mouse route matrix',
         'Verify the standalone app enumerated every physical mouse delivery route in the foreground.',
-        (('stage', 'routes-ready'),), filename=NATIVE_MOUSE_ROUTE_REPORT, report_kind='native-mouse-routes',
-        require_run_id=True, terminal_status='routes-ready',
+        (('stage', 'routes-sampling'),), filename=NATIVE_MOUSE_ROUTE_REPORT, report_kind='native-mouse-routes',
+        require_run_id=True, terminal_status='routes-sampling',
     ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',
