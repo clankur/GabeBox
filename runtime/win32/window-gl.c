@@ -158,9 +158,7 @@ fail:
 DECLSPEC_IMPORT HANDLE WINAPI CreateFile2FromAppW(LPCWSTR, DWORD, DWORD, DWORD,
     LPCREATEFILE2_EXTENDED_PARAMETERS);
 
-/* Record the first delivery of each host input kind in the run's loader trace. */
-static void TraceFirstInput(volatile LONG *seen, const char *line) {
-    if (InterlockedExchange(seen, 1)) return;
+static void AppendLoaderTrace(const char *line) {
     const DWORD error = GetLastError();
     WCHAR path[1024];
     const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
@@ -174,6 +172,160 @@ static void TraceFirstInput(volatile LONG *seen, const char *line) {
         }
     }
     SetLastError(error);
+}
+
+/* Record the first delivery of each host input kind in the run's loader trace. */
+static void TraceFirstInput(volatile LONG *seen, const char *line) {
+    if (InterlockedExchange(seen, 1)) return;
+    AppendLoaderTrace(line);
+}
+
+/* GL first-use timing (diagnostic, XBOX_WIN32_GL_TRACE=1).
+
+   Every GL entry point the game resolves passes through wglGetProcAddress or
+   GetProcAddress(opengl32) here, so the adapter can wrap the calls where Mesa
+   does first-use work: glCompileShader and glLinkProgram (GLSL -> NIR, or a
+   program cache hit), glProgramBinary, and draws (the d3d12 driver compiles
+   NIR -> DXIL variants and creates pipelines at the first draw that needs
+   them). Each call of 2 ms or longer is recorded in the loader trace with its
+   UTC time beside the `pso` lines, and every line carries the running count
+   and total time of its kind, including shorter calls, so a window's Mesa
+   share is the difference of two totals minus the pipeline time inside it. */
+enum { GlCompile, GlLink, GlBinary, GlDraw, GlKinds };
+static const char *const glKindNames[GlKinds] = {"compile", "link", "binary", "draw"};
+static volatile LONG64 glCounts[GlKinds], glMicros[GlKinds];
+static volatile LONG glEvents;
+static volatile LONG glTraceState; /* 0 unknown, 1 off, 2 on */
+
+typedef void (APIENTRY *GlUintProc)(unsigned int);
+typedef void (APIENTRY *GlProgramBinaryProc)(unsigned int, unsigned int, const void *, int);
+typedef void (APIENTRY *GlDrawArraysProc)(unsigned int, int, int);
+typedef void (APIENTRY *GlDrawElementsProc)(unsigned int, int, unsigned int, const void *);
+typedef void (APIENTRY *GlDrawArraysInstancedProc)(unsigned int, int, int, int);
+typedef void (APIENTRY *GlDrawElementsInstancedProc)(unsigned int, int, unsigned int, const void *, int);
+static void *volatile glOriginals[7];
+
+static BOOL GlTraceEnabled(void) {
+    LONG state = glTraceState;
+    if (!state) {
+        WCHAR enabled[2];
+        state = GetEnvironmentVariableW(L"XBOX_WIN32_GL_TRACE", enabled, ARRAYSIZE(enabled)) == 1 &&
+            enabled[0] == L'1' ? 2 : 1;
+        glTraceState = state;
+    }
+    return state == 2;
+}
+
+static char *GlText(char *out, const char *text) {
+    while (*text) *out++ = *text++;
+    return out;
+}
+
+static char *GlNumber(char *out, ULONG64 value, int width) {
+    char digits[20];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value && count < 20);
+    while (count < width) digits[count++] = '0';
+    while (count) *out++ = digits[--count];
+    return out;
+}
+
+static LONG64 GlStart(void) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+static void GlFinish(int kind, LONG64 start) {
+    const DWORD error = GetLastError();
+    LARGE_INTEGER end, frequency;
+    QueryPerformanceCounter(&end);
+    QueryPerformanceFrequency(&frequency);
+    const ULONG64 micros = (ULONG64)(end.QuadPart - start) * 1000000 / (ULONG64)frequency.QuadPart;
+    const LONG64 count = InterlockedIncrement64(&glCounts[kind]);
+    const LONG64 total = InterlockedExchangeAdd64(&glMicros[kind], (LONG64)micros) + (LONG64)micros;
+    if (micros >= 2000 && InterlockedIncrement(&glEvents) <= 4000) {
+        SYSTEMTIME now;
+        GetSystemTime(&now);
+        char line[160];
+        char *text = GlText(GlText(line, "gl kind="), glKindNames[kind]);
+        text = GlNumber(GlText(text, " utc="), now.wHour, 2);
+        text = GlNumber(GlText(text, ":"), now.wMinute, 2);
+        text = GlNumber(GlText(text, ":"), now.wSecond, 2);
+        text = GlNumber(GlText(text, "."), now.wMilliseconds, 3);
+        text = GlNumber(GlText(text, " us="), micros, 1);
+        text = GlNumber(GlText(text, " count="), (ULONG64)count, 1);
+        text = GlNumber(GlText(text, " total_us="), (ULONG64)total, 1);
+        text = GlText(text, "\r\n");
+        *text = 0;
+        AppendLoaderTrace(line);
+    }
+    SetLastError(error);
+}
+
+static void APIENTRY TimedCompileShader(unsigned int shader) {
+    const LONG64 start = GlStart();
+    ((GlUintProc)glOriginals[0])(shader);
+    GlFinish(GlCompile, start);
+}
+
+static void APIENTRY TimedLinkProgram(unsigned int program) {
+    const LONG64 start = GlStart();
+    ((GlUintProc)glOriginals[1])(program);
+    GlFinish(GlLink, start);
+}
+
+static void APIENTRY TimedProgramBinary(unsigned int program, unsigned int format, const void *binary, int length) {
+    const LONG64 start = GlStart();
+    ((GlProgramBinaryProc)glOriginals[2])(program, format, binary, length);
+    GlFinish(GlBinary, start);
+}
+
+static void APIENTRY TimedDrawArrays(unsigned int mode, int first, int count) {
+    const LONG64 start = GlStart();
+    ((GlDrawArraysProc)glOriginals[3])(mode, first, count);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawElements(unsigned int mode, int count, unsigned int type, const void *indices) {
+    const LONG64 start = GlStart();
+    ((GlDrawElementsProc)glOriginals[4])(mode, count, type, indices);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawArraysInstanced(unsigned int mode, int first, int count, int instances) {
+    const LONG64 start = GlStart();
+    ((GlDrawArraysInstancedProc)glOriginals[5])(mode, first, count, instances);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawElementsInstanced(unsigned int mode, int count, unsigned int type, const void *indices,
+                                                int instances) {
+    const LONG64 start = GlStart();
+    ((GlDrawElementsInstancedProc)glOriginals[6])(mode, count, type, indices, instances);
+    GlFinish(GlDraw, start);
+}
+
+/* Return a timed wrapper for the entry points above when the trace is on. A
+   name that resolves to a different address than the first one wrapped is
+   returned unwrapped rather than misrouted. */
+static PROC TimedGlProcedure(LPCSTR name, PROC procedure) {
+    static const char *const names[] = {"glCompileShader", "glLinkProgram", "glProgramBinary", "glDrawArrays",
+        "glDrawElements", "glDrawArraysInstanced", "glDrawElementsInstanced"};
+    void *const timed[] = {(void *)TimedCompileShader, (void *)TimedLinkProgram, (void *)TimedProgramBinary,
+        (void *)TimedDrawArrays, (void *)TimedDrawElements, (void *)TimedDrawArraysInstanced,
+        (void *)TimedDrawElementsInstanced};
+    if (!procedure || (ULONG_PTR)name <= 0xffffu || name[0] != 'g' || name[1] != 'l' || !GlTraceEnabled())
+        return procedure;
+    for (int i = 0; i < (int)ARRAYSIZE(names); ++i) {
+        if (!Equals(name, names[i])) continue;
+        InterlockedCompareExchangePointer((void *volatile *)&glOriginals[i], (void *)procedure, NULL);
+        return glOriginals[i] == (void *)procedure ? (PROC)timed[i] : procedure;
+    }
+    return procedure;
 }
 
 static HWND EventWindow(UINT windowId, BOOL exact) {
@@ -495,7 +647,7 @@ PROC WINAPI XboxWglGetProcAddress(LPCSTR name) {
     if (Equals(name, "wglGetExtensionsStringEXT")) return (PROC)(void *)ExtensionStringEXT;
     if (Equals(name, "wglSwapIntervalEXT")) return (PROC)(void *)SwapInterval;
     if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l') return NULL;
-    return (PROC)sdl.procedure(name);
+    return TimedGlProcedure(name, (PROC)sdl.procedure(name));
 }
 
 FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
@@ -508,6 +660,7 @@ FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
         if (Equals(name, "wglGetProcAddress")) return (FARPROC)(void *)XboxWglGetProcAddress;
         if (Equals(name, "wglGetCurrentContext")) return (FARPROC)(void *)XboxWglGetCurrentContext;
         if (Equals(name, "wglGetCurrentDC")) return (FARPROC)(void *)XboxWglGetCurrentDC;
+        return (FARPROC)TimedGlProcedure(name, (PROC)GetProcAddress(module, name));
     }
     return GetProcAddress(module, name);
 }
