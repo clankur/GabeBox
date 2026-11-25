@@ -18,6 +18,7 @@
     "TerminateProcess": "XboxWin32StorageTrace.dll"
   },
   "ole32.dll": {
+    "CoCreateInstance": "XboxWin32LoaderTrace.dll",
     "GetErrorInfo": "oleaut32.dll",
     "SetErrorInfo": "oleaut32.dll"
   },

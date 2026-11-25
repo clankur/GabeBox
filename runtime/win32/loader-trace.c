@@ -87,8 +87,109 @@ static BOOL LegacyXAudioClass(REFCLSID clsid) {
     return TRUE;
 }
 
+/* DirectInput is not part of the Xbox system. Input stacks such as SDL's Windows
+   joystick driver create IDirectInput8 before XInput and abandon XInput when that
+   fails, so a missing class hides the hosted controller. This object reports a
+   system with no DirectInput devices: Initialize and EnumDevices succeed without
+   callbacks, CreateDevice and FindDevice report an unregistered device and
+   GetDeviceStatus reports it detached. Controllers stay on the XInput path. */
+static const GUID directInput8Class = {0x25E609E4, 0xB259, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+static const GUID directInput8W = {0xBF798031, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+static const GUID directInput8A = {0xBF798030, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+static const GUID unknownInterface = {0, 0, 0, {0xC0, 0, 0, 0, 0, 0, 0, 0x46}};
+
+typedef struct EmptyDirectInput EmptyDirectInput;
+typedef struct EmptyDirectInputVtbl {
+    HRESULT (WINAPI *QueryInterface)(EmptyDirectInput *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(EmptyDirectInput *);
+    ULONG (WINAPI *Release)(EmptyDirectInput *);
+    HRESULT (WINAPI *CreateDevice)(EmptyDirectInput *, REFGUID, void **, IUnknown *);
+    HRESULT (WINAPI *EnumDevices)(EmptyDirectInput *, DWORD, void *, void *, DWORD);
+    HRESULT (WINAPI *GetDeviceStatus)(EmptyDirectInput *, REFGUID);
+    HRESULT (WINAPI *RunControlPanel)(EmptyDirectInput *, HWND, DWORD);
+    HRESULT (WINAPI *Initialize)(EmptyDirectInput *, HINSTANCE, DWORD);
+    HRESULT (WINAPI *FindDevice)(EmptyDirectInput *, REFGUID, const void *, GUID *);
+    HRESULT (WINAPI *EnumDevicesBySemantics)(EmptyDirectInput *, const void *, void *, void *, void *, DWORD);
+    HRESULT (WINAPI *ConfigureDevices)(EmptyDirectInput *, void *, void *, DWORD, void *);
+} EmptyDirectInputVtbl;
+struct EmptyDirectInput { const EmptyDirectInputVtbl *vtbl; const GUID *iid; };
+
+static BOOL SameGuid(const GUID *left, const GUID *right) {
+    const BYTE *a = (const BYTE *)left, *b = (const BYTE *)right;
+    for (unsigned i = 0; i < sizeof(GUID); ++i) if (a[i] != b[i]) return FALSE;
+    return TRUE;
+}
+static HRESULT WINAPI EmptyQueryInterface(EmptyDirectInput *self, REFIID iid, void **out) {
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!SameGuid(iid, &unknownInterface) && !SameGuid(iid, self->iid)) return E_NOINTERFACE;
+    *out = self;
+    return S_OK;
+}
+/* Process-lifetime singletons: reference counting cannot free them. */
+static ULONG WINAPI EmptyAddRef(EmptyDirectInput *self) { (void)self; return 2; }
+static ULONG WINAPI EmptyRelease(EmptyDirectInput *self) { (void)self; return 1; }
+static HRESULT WINAPI EmptyCreateDevice(EmptyDirectInput *self, REFGUID device, void **out, IUnknown *outer) {
+    (void)self; (void)device; (void)outer;
+    if (out) *out = NULL;
+    return REGDB_E_CLASSNOTREG; /* DIERR_DEVICENOTREG */
+}
+static HRESULT WINAPI EmptyEnumDevices(EmptyDirectInput *self, DWORD type, void *callback, void *context, DWORD flags) {
+    (void)self; (void)type; (void)context; (void)flags;
+    return callback ? S_OK : E_INVALIDARG;
+}
+static HRESULT WINAPI EmptyGetDeviceStatus(EmptyDirectInput *self, REFGUID device) {
+    (void)self; (void)device;
+    return S_FALSE; /* DI_NOTATTACHED */
+}
+static HRESULT WINAPI EmptyRunControlPanel(EmptyDirectInput *self, HWND owner, DWORD flags) {
+    (void)self; (void)owner; (void)flags;
+    return E_NOTIMPL; /* DIERR_UNSUPPORTED */
+}
+static HRESULT WINAPI EmptyInitialize(EmptyDirectInput *self, HINSTANCE instance, DWORD version) {
+    (void)self; (void)instance; (void)version;
+    return S_OK;
+}
+static HRESULT WINAPI EmptyFindDevice(EmptyDirectInput *self, REFGUID kind, const void *name, GUID *instance) {
+    (void)self; (void)kind; (void)name; (void)instance;
+    return REGDB_E_CLASSNOTREG;
+}
+static HRESULT WINAPI EmptyEnumBySemantics(EmptyDirectInput *self, const void *user, void *format, void *callback,
+        void *context, DWORD flags) {
+    (void)self; (void)user; (void)format; (void)context; (void)flags;
+    return callback ? S_OK : E_INVALIDARG;
+}
+static HRESULT WINAPI EmptyConfigureDevices(EmptyDirectInput *self, void *callback, void *parameters, DWORD flags,
+        void *data) {
+    (void)self; (void)callback; (void)parameters; (void)flags; (void)data;
+    return E_NOTIMPL;
+}
+static const EmptyDirectInputVtbl emptyDirectInputVtbl = {
+    EmptyQueryInterface, EmptyAddRef, EmptyRelease, EmptyCreateDevice, EmptyEnumDevices, EmptyGetDeviceStatus,
+    EmptyRunControlPanel, EmptyInitialize, EmptyFindDevice, EmptyEnumBySemantics, EmptyConfigureDevices,
+};
+static EmptyDirectInput emptyDirectInputW = {&emptyDirectInputVtbl, &directInput8W};
+static EmptyDirectInput emptyDirectInputA = {&emptyDirectInputVtbl, &directInput8A};
+
+static HRESULT EmptyDirectInput8(REFIID iid, LPVOID *object) {
+    EmptyDirectInput *instance = SameGuid(iid, &directInput8W) ? &emptyDirectInputW :
+        SameGuid(iid, &directInput8A) ? &emptyDirectInputA : NULL;
+    if (!instance) return E_NOINTERFACE;
+    *object = instance;
+    const char trace[] = "input directinput8=empty\r\n";
+    AppendTrace(trace, sizeof(trace) - 1);
+    return S_OK;
+}
+
 HRESULT WINAPI XboxCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *object) {
     HRESULT result = CoCreateInstance(clsid, outer, context, iid, object);
+    if (FAILED(result) && !outer && iid && object && clsid && (context & CLSCTX_INPROC_SERVER) &&
+            SameGuid(clsid, &directInput8Class)) {
+        const DWORD error = GetLastError();
+        const HRESULT empty = EmptyDirectInput8(iid, object);
+        SetLastError(error);
+        return SUCCEEDED(empty) ? empty : result;
+    }
     if (result != REGDB_E_CLASSNOTREG || outer || !iid || !object || context != CLSCTX_INPROC_SERVER ||
             !LegacyXAudioClass(clsid)) return result;
 
