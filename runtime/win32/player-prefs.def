@@ -1,0 +1,4 @@
+LIBRARY XboxWin32PlayerPrefs.dll
+EXPORTS
+    RegCreateKeyW=XboxPrefsCreateKeyW
+    RegOpenKeyExW=XboxPrefsOpenKeyExW

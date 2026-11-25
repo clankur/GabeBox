@@ -19,7 +19,7 @@ static char *AppendHex(char *out, UINT32 value) {
 
 static void RecordDisplaySizes(UINT32 flags, LONG result, const char *state, const UINT32 *paths, const UINT32 *modes) {
     if (displaySamples >= displaySampleLimit || InterlockedIncrement(&displaySamples) > displaySampleLimit) return;
-    char line[128];
+    char line[144];
     char *out = AppendText(line, "asset display-sizes=");
     out = AppendText(out, state);
     out = AppendHex(AppendText(out, " flags=0x"), flags);
@@ -28,6 +28,7 @@ static void RecordDisplaySizes(UINT32 flags, LONG result, const char *state, con
         out = AppendHex(AppendText(out, " paths=0x"), *paths);
         out = AppendHex(AppendText(out, " modes=0x"), *modes);
     }
+    out = AppendHex(AppendText(out, " tid=0x"), GetCurrentThreadId());
     out = AppendText(out, "\r\n");
     AppendTrace(line, (DWORD)(out - line));
 }

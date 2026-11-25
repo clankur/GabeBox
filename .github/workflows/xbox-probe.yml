@@ -178,6 +178,8 @@ jobs:
                                     @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
                                     @{ Module = 'unity'; Name = 'XboxWin32Unity'; Sources = @('unity') },
                                     @{ Module = 'display-config'; Name = 'XboxWin32DisplayConfig'; Sources = @('display-config') },
+                                    @{ Module = 'hosted-display'; Name = 'XboxWin32HostedDisplay'; Sources = @('hosted-display') },
+                                    @{ Module = 'player-prefs'; Name = 'XboxWin32PlayerPrefs'; Sources = @('player-prefs') },
                                     @{ Module = 'timer'; Name = 'XboxWin32Timer'; Sources = @('timer') },
                                     @{ Module = 'storage-trace'; Name = 'XboxWin32StorageTrace'; Sources = @('storage-trace') },
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
