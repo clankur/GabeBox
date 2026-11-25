@@ -452,3 +452,13 @@ Two more D3D11 results:
 The frames stayed all zero with the same full-screen-only GPU work. Rendering is not gated on input, and the empty cameras remain the open problem.
 
 **Constant-buffer scan (`40bfd4a`, `eab69e9`, `1.0.239.1`, single-threaded).** At every probe frame, the vertex constant buffers bound by the frame's last pass (64, 176 and 368 bytes) and the 64-byte pixel buffer contain no NaN or infinite floats. This does not support the hypothesis of a corrupted camera matrix. The cause of the empty cameras is still open.
+
+**Handoff, 2026-11-25 (off-console reading, no new console run).** Unity's `Player.log` from the D3D11 `1.0.23x` runs gives three findings:
+
+- **The Tutorial scene loads.** MeshCollider warnings name `4 - Health Room/Statue` and `5 - Wall Jump Room/...`, and the log has no managed exceptions. So the empty cameras are not an unloaded scene.
+- **Display-mode lookup fails.** Unity logs "Failed to find a valid fullscreen resolution for exclusiveFullscreen 1920x1080 … trying without exclusive fullscreen mode" and "MaximizedWindow is not currently supported on Windows, setting to FullsceenWindow". This is the next lead: check what the hosted DXGI output returns from `EnumOutputs`, `GetDisplayModeList` and `FindClosestMatchingMode`, and whether the camera's `pixelRect` or viewport collapses. The pipeline statistics still show full-resolution pixel work.
+- **Slow buffer uploads.** "LockBufferForWrite: Multiple uploads in flight … Falling back to slow path" appears 17 times. This is a performance note, probably not the cause.
+
+`PortalRenderV2` declares `SameFrameReadback` P/Invokes, but no code calls them, and the plugin is not in the install. `CullingOverride` is an empty `MonoBehaviour`. The decompiled project is regenerated with `ilspycmd -p -o <dir> ULTRAKILL_Data/Managed/Assembly-CSharp.dll`.
+
+The goal is still open. Visible gameplay, audio, save and reload, return to the library, and the 60 FPS gameplay sample all remain unverified.
