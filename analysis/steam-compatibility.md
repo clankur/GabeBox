@@ -423,3 +423,12 @@ The game loads its tutorial content and writes `Saves/Slot1/generalprogress.bepi
 1. Toggle the game's own `PortalOcclusion` console command with remote input. The Device Portal remote-input route is on `claude/sts2-xbox-compat-6e11d5`.
 2. Trace Unity's `AsyncGPUReadback` completion on Xbox D3D11.
 3. Confirm that `MaskedOcclusionCullingNative.dll` loads and reports its SIMD implementation.
+
+Later runs, `1.0.233.6` through `1.0.235.2`, ruled out four more causes:
+
+- **Plugin loading.** Unity's `SetDllDirectoryW` has no effect in the app container, so bare-name plugin loads failed with `0x7E`. The loader trace now records the directory and retries there (`8614175`). `lib_burst_generated.dll` and `steam_api64.dll` now load from their staged companions. The frames stayed black.
+- **Render-target formats.** Every format the main camera renders to, including RGB565, supports render-target use on this device.
+- **Settings files.** `PrefsManager` treats empty prefs files as defaults.
+- **Graphics threading.** With `-force-gfx-direct`, Unity creates its device without a render thread or graphics jobs. The pipeline statistics still show only full-screen passes and one full-resolution compute pass per frame, with no scene geometry.
+
+The game's cameras submit no meshes or UI on either renderer, with or without threading. The remaining cause is above D3D: game or Unity logic that keeps the cameras from drawing anything. `PortalRenderV2`'s occlusion only gates portal visibility, so it does not explain the missing main scene. Reading the camera setup in `CameraController` and the `Bootstrap` and scene flow comes next. The decompiler path is `dotnet` plus `ilspycmd` with `DOTNET_ROLL_FORWARD=Major`.
