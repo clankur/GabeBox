@@ -82,7 +82,7 @@ CASES = {
         report_kind='packaged-steam-core', require_run_id=True, terminal_status='steam-core-complete',
     ),
     'big-picture': ProbeCase(
-        BIG_PICTURE_NAME, 'Steam Big Picture',
+        BIG_PICTURE_NAME, 'GabeBox',
         'Check that the native Steam launcher is still running at the observation deadline.',
         (('status', 'client-running'),), filename=BIG_PICTURE_REPORT,
         report_kind='native-steam-big-picture', require_run_id=True,
