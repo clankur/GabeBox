@@ -1,5 +1,7 @@
 # GabeBox
 
+<p align="center"><img src="ui/big-picture/Assets/Splash.png" alt="GabeBox: a black Steam Machine with a green light strip" width="620"></p>
+
 **Turn your Xbox into a GabeCube.**
 
 GabeBox aims to bring Valve’s controller-friendly Big Picture interface to Xbox Series X and Series S in Developer Mode. Sign in with Steam Guard to see your own Steam library. Steam checks ownership and downloads the games you select. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
