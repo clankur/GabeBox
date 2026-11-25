@@ -420,6 +420,11 @@ static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
    (in thousandths of full scale) and how many samples were audible
    (peak > 0.001). The thread only reads the meter. */
 static volatile LONG audioMeterStarted;
+#ifdef _MSC_VER
+/* The MSVC toolchain references this marker from any floating-point code; the
+   adapter links without a C runtime, which would otherwise supply it. */
+int _fltused = 0;
+#endif
 static const GUID audioEnumeratorClass =
     {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
 static const GUID audioEnumeratorInterface =
