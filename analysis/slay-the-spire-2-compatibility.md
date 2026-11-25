@@ -49,6 +49,17 @@ For error 206 only, the storage adapter now accepts an existing directory as a v
 | `10:20:47.099` / `.149` | 50 + 50 ms | 15 + 12 ms |
 
 Everything that overlapped came from one thread compiling the game's card-play path: `PlayCardAction`, `AttackCommand`, `DamageResult`, `NCardPlayQueue` and async state machines. JIT therefore accounts for roughly a quarter of the first-card stall time. The thread running `NCard` Godot property accessors compiled for 33.7 ms at `10:20:45.010` without any frame gap. The remaining stall time, including the 117 ms gap with no JIT, is other first-use work, most likely Godot and Mesa shader compilation for the first attack's VFX and damage text. A crossgen2 ReadyToRun build of `sts2.dll` in the staged copy would remove only the JIT share. It would also mean shipping a rebuilt publisher assembly, which this repository has avoided so far. Parse the trace with Microsoft.Diagnostics.Tracing.TraceEvent: match `MethodJittingStarted` to `MethodLoadVerbose` on the same thread.
+
+**Why a shader-cache Mesa build would not help.** At the pinned revision, Mesa's d3d12 driver (`src/gallium/drivers/d3d12/d3d12_screen.cpp`, `d3d12_compiler.cpp` at mesa-uwp `34732bb`) never implements `pipe_screen::get_disk_shader_cache` and has no disk-cache code. Mesa's GL front end caches compiled programs only through that hook, and program-binary formats depend on it too. Rebuilding with `-Dshader-cache=enabled` would therefore change nothing. mesa-uwp also has no Windows CI: it builds with a UWP-patched Meson and the Visual Studio backend. Options checked:
+
+| Option | Status |
+| --- | --- |
+| Rebuild pinned Mesa with `-Dshader-cache=enabled` | Would not help: the d3d12 driver has no cache hook |
+| Implement a d3d12 disk cache (NIR plus variant key → DXIL) in a Mesa fork | Driver change in Mesa; not started |
+| Direct3D 12 route (Godot pipeline cache and ubershaders) | Device removed about 2.2 s after the first frames (`1.0.232.130`–`.170`); open |
+| ReadyToRun `sts2.dll` via crossgen2 | Removes only the JIT share, about a quarter; would ship a rebuilt publisher assembly |
+
+Until one of these lands, the first combat of each launch has stalls up to 167 ms on this route. Gameplay after first use holds 60 FPS.
 - **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
 - **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
 - **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
