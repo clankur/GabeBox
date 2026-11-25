@@ -155,7 +155,18 @@ SDL_INPUT_MAGIC = 0x53444C31
 SDL_INPUT_HEADER = Struct('<9I')
 SDL_INPUT_GAMEPAD = Struct('<II6iII')
 SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
-SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
+# The presenter labels each held chord with its source, pad (Windows.Gaming.Input) or keys
+# (VK_GAMEPAD events, as Device Portal remote input sends), and records rejected and expired chords.
+# Older presenters write a bare menu_chord=held.
+SDL_INPUT_PANEL_MARKERS = {
+    'panel_ready': (b'panel_input=ready',),
+    'chord_held': (b'menu_chord=held', b'menu_chord=held source=pad', b'menu_chord=held source=keys'),
+    'chord_from_keys': (b'menu_chord=held source=keys',),
+    'chord_ignored': (b'menu_chord=ignored reason=unpaired',),
+    'chord_expired': (b'menu_chord=expired',),
+    'menu_request': (b'menu_request=ready',),
+}
+SDL_INPUT_PANEL_LINES = frozenset(line for lines in SDL_INPUT_PANEL_MARKERS.values() for line in lines)
 
 
 def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
@@ -196,7 +207,7 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         if raw is None or len(raw) > 4096:
             return None
         complete, _, _ = raw.rpartition(b'\n')
-        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_MARKERS)
+        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_LINES)
 
     panel_before = panel_trace() if args.panel_menu else None
     samples = []
@@ -238,11 +249,11 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
     if args.panel_menu:
         menu = {'scope': 'package', 'state': 'unavailable'}
         if panel_after is not None:
-            names = ('panel_ready', 'chord_held', 'menu_request')
-            menu.update(state='observed', counts=dict(zip(names, map(panel_after.count, SDL_INPUT_PANEL_MARKERS))))
+            def count(trace):
+                return {name: sum(map(trace.count, lines)) for name, lines in SDL_INPUT_PANEL_MARKERS.items()}
+            menu.update(state='observed', counts=count(panel_after))
             if panel_before is not None and args.seconds and panel_after[:len(panel_before)] == panel_before:
-                added = panel_after[len(panel_before):]
-                menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
+                menu['added'] = count(panel_after[len(panel_before):])
         result['panel_menu'] = menu
     if args.output:
         save_observation(args.output, result, {})

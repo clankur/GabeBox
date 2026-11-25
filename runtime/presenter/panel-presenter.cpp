@@ -40,6 +40,7 @@ struct Status {
     UINT64 renderCallbacks = 0, sourceEmpty = 0, presentBusy = 0;
     UINT64 menuRequests = 0;
     UINT64 menuChords = 0;
+    UINT64 chordsIgnored = 0, chordsExpired = 0;
     bool nativeInput = false;
     HRESULT inputError = S_OK;
     HRESULT error = S_OK;
@@ -64,6 +65,7 @@ struct Presenter {
     FhdFrameTrace trace;
     HANDLE inputTrace = INVALID_HANDLE_VALUE;
     bool menuHeld = false;
+    FhdHostedChordCounts chords{};
     bool nativePad = false, attached = false, inserted = false;
     bool inputPaused = false;
     SdlHostMailbox *inputMailbox = nullptr;
@@ -104,10 +106,28 @@ struct Presenter {
         if (!status.nativeInput) return;
         const bool requested = FhdPollHostedInput(inputMailbox, get_abi(window));
         const bool held = FhdHostedMenuHeld();
+        FhdHostedChordCounts counts{};
+        FhdReadHostedChordCounts(&counts);
+        // Record where each accepted chord came from, and each rejected or expired one,
+        // so a menu request can be traced to a live controller or to key events.
         if (held && !menuHeld && status.menuChords++ < 32) {
-            constexpr char record[] = "menu_chord=held\r\n";
+            if (counts.keys > chords.keys) {
+                constexpr char record[] = "menu_chord=held source=keys\r\n";
+                inputCheckpoint(record, sizeof(record) - 1);
+            } else {
+                constexpr char record[] = "menu_chord=held source=pad\r\n";
+                inputCheckpoint(record, sizeof(record) - 1);
+            }
+        }
+        if (counts.ignored > chords.ignored && status.chordsIgnored++ < 32) {
+            constexpr char record[] = "menu_chord=ignored reason=unpaired\r\n";
             inputCheckpoint(record, sizeof(record) - 1);
         }
+        if (counts.expired > chords.expired && status.chordsExpired++ < 32) {
+            constexpr char record[] = "menu_chord=expired\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
+        chords = counts;
         menuHeld = held;
         if (requested && status.menuRequests++ < 32) {
             constexpr char record[] = "menu_request=ready\r\n";
@@ -343,6 +363,8 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"present_busy_callbacks", s.presentBusy);
         field(L"native_input", s.nativeInput); field(L"native_menu_requests", s.menuRequests);
         field(L"native_menu_chords", s.menuChords);
+        field(L"native_menu_chords_ignored", s.chordsIgnored);
+        field(L"native_menu_chords_expired", s.chordsExpired);
         if (FAILED(s.inputError)) field(L"native_input_hresult", static_cast<uint32_t>(s.inputError));
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);

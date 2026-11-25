@@ -93,6 +93,10 @@ class MessageEncodingTests(unittest.TestCase):
     def test_hold_and_repeat(self):
         self.assertEqual(remote.parse_step('hold:RT:1.5'), [(0, b'\x01\xca\x01'), (1.5, b'\x01\xca\x00')])
         self.assertEqual(len(remote.parse_step('DOWN*3')), 6)
+        self.assertEqual(remote.parse_step('chord:menu+VIEW'), [
+            (0, b'\x01\xcf\x01'), (0, b'\x01\xd0\x01'),
+            (remote.CHORD_SECONDS, b'\x01\xcf\x00'), (0, b'\x01\xd0\x00')])
+        self.assertEqual(remote.parse_step('chord:MENU+VIEW:1')[2], (1.0, b'\x01\xcf\x00'))
         self.assertEqual(remote.parse_step('DOWN*3')[4][1], b'\x01\xcc\x01')
 
     def test_keyboard_uses_scancodes_except_navigation_keys(self):
@@ -118,7 +122,7 @@ class MessageEncodingTests(unittest.TestCase):
         self.assertEqual(struct.unpack('>BHII', remote.parse_step('move:960,540')[0][1])[2:], (32785, 32798))
 
     def test_invalid_steps(self):
-        for step in ('Z', 'key:NOPE', 'shot:a.jpg', 'hold:Q:1', 'click:1920,0', 'click:1,2,3', 'scan:100', 'wait:-1',
+        for step in ('chord:MENU', 'chord:MENU+MENU', 'chord:MENU+Q', 'chord:MENU+VIEW:-1', 'Z', 'key:NOPE', 'shot:a.jpg', 'hold:Q:1', 'click:1920,0', 'click:1,2,3', 'scan:100', 'wait:-1',
                      'A*0', 'vk:zz'):
             with self.subTest(step=step), self.assertRaises(ValueError):
                 remote.parse_step(step)

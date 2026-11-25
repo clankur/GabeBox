@@ -126,6 +126,27 @@ class ObserverTests(unittest.TestCase):
             report['steam_source_file'] = path
             self.assertNotIn('steam_source_file', diagnostics.game_snapshot(report, {}, {}, APP_ID)['probe'])
 
+    def test_game_snapshot_keeps_webview_recovery_and_chord_counters(self):
+        browser = {
+            'status': 'game-restored',
+            'game_frame_latest_sample': f'appid={APP_ID} visible=1 native_menu_chords=1 native_menu_chords_ignored=2 '
+                                        'native_menu_chords_expired=0 native_menu_requests=1',
+            'webview_recovery_2': f'game-restored appid={APP_ID}',
+            'webview_recovery_10': f'game-overlay-unavailable appid={APP_ID}',
+            'webview_recovery_1': f'game-webview-lost appid={APP_ID} covered=1 '
+                                  'cause=process-error:owner:2:unresponsive:259:none',
+            'webview_recovery_3': 'game-restored appid=1 account=76561198000000001',
+            'webview_recovery_x': f'game-restored appid={APP_ID}',
+        }
+        web = diagnostics.game_snapshot({}, browser, {}, APP_ID)['webview']
+        self.assertEqual(web['webview_recovery'], [
+            f'game-webview-lost appid={APP_ID} covered=1 cause=process-error:owner:2:unresponsive:259:none',
+            f'game-restored appid={APP_ID}', f'game-overlay-unavailable appid={APP_ID}'])
+        self.assertEqual(web['game_frame_latest_sample'], {
+            'visible': '1', 'native_menu_chords': '1', 'native_menu_chords_ignored': '2',
+            'native_menu_chords_expired': '0', 'native_menu_requests': '1'})
+        self.assertNotIn('webview_recovery', diagnostics.game_snapshot({}, {}, {}, APP_ID)['webview'])
+
     def test_startup_requires_fresh_native_and_browser_runs_and_filters_fields(self):
         fixture = Fixture([
             {diagnostics.PROBE_REPORT: probe(), diagnostics.WEBVIEW_REPORT: browser(OLD_BROWSER)},
@@ -920,7 +941,8 @@ class ObserverTests(unittest.TestCase):
                     run = launch + 1 if self.changes_launch and self.now else launch
                     return 200, probe(run, extra=RENDER_FIELDS)
                 if name == 'fhd-panel-input.txt':
-                    markers = b'menu_chord=held\r\nmenu_request=ready\r\nmenu_request=rea' if self.now else b''
+                    markers = (b'menu_chord=ignored reason=unpaired\r\nmenu_chord=held source=keys\r\n'
+                               b'menu_request=ready\r\nmenu_request=rea') if self.now else b''
                     return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
                 assert name == MAILBOX
                 step = round(self.now * 2)
@@ -948,8 +970,10 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
                          ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
         self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
-        self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'menu_request': 1})
-        self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'menu_request': 1})
+        self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'chord_from_keys': 1,
+                                                          'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1})
+        self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'chord_from_keys': 1,
+                                                         'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertNotIn(MAILBOX, json.dumps(result))
         fake = Portal()

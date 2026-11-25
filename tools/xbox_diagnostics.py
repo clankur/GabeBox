@@ -68,7 +68,13 @@ FRAME_FIELDS = {
     'source_sequence', 'gpu_sequence', 'cpu_sequence', 'sample_us', 'sample_frames', 'sample_gpu_sequence',
     'sample_render_callbacks', 'sample_source_empty_callbacks', 'sample_present_busy_callbacks',
     'slots_busy', 'pool_waits', 'source_empty_callbacks', 'presentation_busy_callbacks',
+    'native_input', 'native_menu_requests', 'native_menu_chords', 'native_menu_chords_ignored',
+    'native_menu_chords_expired',
 }
+# Big Picture's numbered record of how it kept a running game when its renderer failed.
+WEBVIEW_RECOVERY = re.compile(r'webview_recovery_([1-9][0-9]?)')
+WEBVIEW_RECOVERY_ENTRY = re.compile(r'[a-z][a-z-]{0,47} appid=[1-9][0-9]{0,7}'
+                                    r'(?: covered=[01] cause=[A-Za-z0-9:._-]{1,96})?')
 
 
 def numeric(report, key):
@@ -112,6 +118,10 @@ def game_snapshot(probe, browser, exit_report, app_id):
         if frame.startswith(f'appid={app_id} '):
             frame_fields = fields(frame.replace(' ', '\n'))
             web['game_frame_' + name] = select_fields(frame_fields, FRAME_FIELDS.__contains__, COUNT)
+    recovery = sorted((int(match[1]), value) for key, value in browser.items()
+                      if (match := WEBVIEW_RECOVERY.fullmatch(key)) and WEBVIEW_RECOVERY_ENTRY.fullmatch(value))
+    if recovery:
+        web['webview_recovery'] = [value for _, value in recovery]
     return {'probe': native, 'webview': web}
 
 

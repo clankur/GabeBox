@@ -13,6 +13,9 @@ Steps (names are case-insensitive; append *N to repeat a step N times):
   LS_UP, LS_DOWN, LS_LEFT, LS_RIGHT, RS_UP, RS_DOWN, RS_LEFT, RS_RIGHT
                        tap a controller input
   hold:NAME:SECONDS    hold a controller input
+  chord:NAME+NAME[:SECONDS]
+                       press controller inputs together, hold them (default 0.25 s),
+                       then release them; chord:MENU+VIEW opens Big Picture over a game
   key:NAME             tap a keyboard key: ENTER, ESC, SPACE, TAB, BACKSPACE, letters,
                        digits, F1-F12, UP, DOWN, LEFT, RIGHT, HOME, END, PGUP, PGDN,
                        INSERT, DELETE
@@ -55,7 +58,7 @@ WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 KEY_CODES, SCAN_CODES, MOUSE, CLEAR_ALL = 1, 2, 3, 4
 MOUSE_MOVE, MOUSE_LEFT_DOWN, MOUSE_LEFT_UP = 0x0001, 0x0002, 0x0004
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-TAP_SECONDS, KEY_SECONDS = 0.12, 0.08
+TAP_SECONDS, KEY_SECONDS, CHORD_SECONDS = 0.12, 0.08, 0.25
 
 GAMEPAD = {
     'A': 0xC3, 'B': 0xC4, 'X': 0xC5, 'Y': 0xC6, 'RB': 0xC7, 'LB': 0xC8, 'LT': 0xC9, 'RT': 0xCA,
@@ -125,6 +128,15 @@ def parse_step(step):
         if target.upper() not in GAMEPAD:
             raise ValueError(f'Unknown controller input: {target}')
         actions = tap(KEY_CODES, GAMEPAD[target.upper()], seconds_value(seconds))
+    elif name == 'CHORD':
+        names, _, seconds = rest.partition(':')
+        codes = [GAMEPAD.get(target.upper()) for target in names.split('+')]
+        if len(codes) < 2 or None in codes or len(set(codes)) != len(codes):
+            raise ValueError(f'Expected two or more distinct controller inputs joined by +: {rest}')
+        held = seconds_value(seconds) if seconds else CHORD_SECONDS
+        actions = ([(0, key_message(KEY_CODES, code, True)) for code in codes] +
+                   [(held if index == 0 else 0, key_message(KEY_CODES, code, False))
+                    for index, code in enumerate(codes)])
     elif name == 'KEY':
         key = rest.upper()
         if key in VIRTUAL_KEYS:

@@ -84,7 +84,37 @@ LONG heldVirtual[256];
 // deflected physical stick keeps its analog value.
 constexpr UINT remotePadFirst = 0xC3, remotePadLast = 0xDA;
 bool remotePad[remotePadLast - remotePadFirst + 1];
+DWORD remotePressedAt[remotePadLast - remotePadFirst + 1];
 bool remotePadSeen;
+// Menu + View opens Big Picture over the game. A chord counts only when one source,
+// the live Windows.Gaming.Input reading or the VK_GAMEPAD key state, holds both
+// buttons after pressing them together and keeps them held through a short settle.
+// A button left held (a lost key-up, a game's hold-View action) never pairs with a
+// later press, and a pending chord whose last button outlives the release window is
+// dropped instead of opening Big Picture whenever that button finally comes up.
+constexpr LONG chordButtons = (1 << 4) | (1 << 6);
+constexpr unsigned remoteMenu = 0xCF - remotePadFirst, remoteView = 0xD0 - remotePadFirst;
+constexpr DWORD chordPairMs = 400, chordSettleMs = 50, chordReleaseMs = 1000;
+enum ChordSource { NoChord, PadChord, KeyChord };
+LONG padChordHeld;
+DWORD padPressedAt[2]; // View, Menu
+DWORD chordSince, chordBrokenAt;
+bool chordSettling, chordBroken, chordIgnored;
+FhdHostedChordCounts chordCounts;
+bool together(DWORD a, DWORD b) { return a - b <= chordPairMs || b - a <= chordPairMs; }
+ChordSource pairedChord() {
+    if (padChordHeld == chordButtons && together(padPressedAt[0], padPressedAt[1])) return PadChord;
+    if (remotePad[remoteMenu] && remotePad[remoteView] &&
+        together(remotePressedAt[remoteMenu], remotePressedAt[remoteView]))
+        return KeyChord;
+    return NoChord;
+}
+void trackPadChord(LONG held, DWORD now) {
+    if ((held & (1 << 4)) && !(padChordHeld & (1 << 4))) padPressedAt[0] = now;
+    if ((held & (1 << 6)) && !(padChordHeld & (1 << 6))) padPressedAt[1] = now;
+    padChordHeld = held;
+}
+void resetChord() { chordSettling = chordBroken = chordIgnored = false; }
 bool remotePadActive() {
     for (bool held : remotePad)
         if (held) return true;
@@ -186,6 +216,7 @@ void neutral() {
     physicalClick = false;
     blockChord = true;
     chordPending = false;
+    resetChord();
 }
 void queueKey(UINT scan, bool down, const char *utf8 = nullptr) {
     if (!keyboard())
@@ -408,8 +439,14 @@ void event(unsigned type, IUnknown *args) {
         }
         return;
     }
-    if (!foreground())
+    if (!foreground()) {
+        // A release is always safe. Applying it here keeps a remote session that ends
+        // while the game is covered from leaving its button held for the next poll.
+        UINT key = 0;
+        if (type == KeyUp && SUCCEEDED(method(args, 6, &key)) && key >= remotePadFirst && key <= remotePadLast)
+            remotePad[key - remotePadFirst] = false;
         return;
+    }
     if (type == CaptureLost) {
         physicalClick = false;
         sendPointer();
@@ -430,7 +467,9 @@ void event(unsigned type, IUnknown *args) {
         return;
     }
     if (key >= remotePadFirst && key <= remotePadLast) {
-        remotePad[key - remotePadFirst] = type == KeyDown;
+        bool &held = remotePad[key - remotePadFirst];
+        if (type == KeyDown && !held) remotePressedAt[key - remotePadFirst] = GetTickCount();
+        held = type == KeyDown;
         return;
     }
     if (key >= 256 || (key >= 136 && key <= 143))
@@ -575,6 +614,9 @@ extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
     menuOnRelease = enabled != FALSE;
 }
 extern "C" BOOL FhdHostedMenuHeld() { return chordPending; }
+extern "C" void FhdReadHostedChordCounts(FhdHostedChordCounts *out) {
+    if (out) *out = chordCounts;
+}
 extern "C" void FhdEndHostedInput() {
     if (window) {
         for (auto &h : handlers)
@@ -605,6 +647,8 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     if (FAILED(hr))
         return hr;
     mail = box;
+    chordCounts = {};
+    padChordHeld = 0;
     focused = TRUE;
     BYTE shown = 1;
     method(window, Visible, &shown);
@@ -665,29 +709,68 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         value.axes[4] = axis(2 * reading.lt - 1);
         value.axes[5] = axis(2 * reading.rt - 1);
     }
+    trackPadChord(connected ? value.buttons & chordButtons : 0, now);
     mergeRemotePad(value);
     const bool padPresent = (value.buttons & SDL_HOST_PAD_CONNECTED) != 0;
     blockedMenuButtons &= value.buttons;
     value.buttons &= ~blockedMenuButtons;
-    const LONG chord = (1 << 4) | (1 << 6);
-    if ((value.buttons & chord) == chord) {
-        if (!blockChord && menuOnRelease) chordPending = true;
-        else if (!blockChord) {
-            requestOverlay();
-            overlay = Reported;
-            return 1;
+    const LONG held = value.buttons & chordButtons;
+    if (held == chordButtons) {
+        chordBroken = false;
+        if (blockChord || chordPending) {
+            value.buttons &= ~chordButtons;
+        } else if (const ChordSource source = pairedChord()) {
+            value.buttons &= ~chordButtons;
+            if (!chordSettling) {
+                chordSettling = true;
+                chordSince = now;
+            }
+            if (now - chordSince >= chordSettleMs) {
+                chordSettling = false;
+                ++(source == PadChord ? chordCounts.pad : chordCounts.keys);
+                if (menuOnRelease) chordPending = true;
+                else {
+                    requestOverlay();
+                    overlay = Reported;
+                    return 1;
+                }
+            }
+        } else {
+            // Both buttons are down without being pressed together on one source. They
+            // remain ordinary game input.
+            chordSettling = false;
+            if (!chordIgnored) {
+                chordIgnored = true;
+                ++chordCounts.ignored;
+            }
         }
-        value.buttons &= ~chord;
     } else {
+        chordSettling = false;
         if (!padPresent) chordPending = false;
-        if (!(value.buttons & chord)) {
+        if (!held) {
+            chordIgnored = false;
             if (chordPending) {
                 requestOverlay();
                 overlay = Reported;
                 return 1;
             }
             blockChord = false;
-        } else if (chordPending) value.buttons &= ~chord;
+        } else if (chordPending) {
+            if (!chordBroken) {
+                chordBroken = true;
+                chordBrokenAt = now;
+            }
+            if (now - chordBrokenAt >= chordReleaseMs) {
+                // The remaining button stays down: a held or stale button rather than a
+                // chord release. Drop the chord and keep that button from the game until it
+                // is released.
+                chordPending = chordBroken = false;
+                ++chordCounts.expired;
+                blockChord = true;
+                blockedMenuButtons |= held;
+            }
+            value.buttons &= ~chordButtons;
+        }
     }
     double dx = 0, dy = 0;
     if (!keyboard()) {

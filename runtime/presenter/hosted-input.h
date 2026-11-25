@@ -9,6 +9,13 @@ HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow);
 void FhdSetHostedInputProfile(BOOL gamepad, UINT gameWidth, UINT gameHeight);
 void FhdHostedMenuOnRelease(BOOL enabled);
 BOOL FhdHostedMenuHeld();
+/* Menu + View chord diagnostics since Begin: accepted chords by source (the live
+   Windows.Gaming.Input reading or VK_GAMEPAD key events), both buttons down without
+   a paired press, and pending chords dropped because a button stayed held. */
+typedef struct FhdHostedChordCounts {
+    UINT pad, keys, ignored, expired;
+} FhdHostedChordCounts;
+void FhdReadHostedChordCounts(FhdHostedChordCounts *out);
 void FhdPauseHostedInput(void);
 BOOL FhdHostedInputForeground(void);
 int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow); /* 1 requests library overlay */
