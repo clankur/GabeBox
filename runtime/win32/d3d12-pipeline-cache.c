@@ -45,7 +45,10 @@
      it. A removal, seen after a cache call or reported by the title's own
      creation, writes "asset pso-cache device-removed after=NAME ..." with a
      DRED summary, leaves the guard naming that call, and stops the cache for
-     the rest of the process: no further cache call and no file write. A
+     the rest of the process: no further cache call and no file write. In
+     passthrough a removal from the title's creation writes only
+     "asset pso-cache device-removed after=game-create result=..." with the
+     HRESULT the title received: no removal reason and no DRED read. A
      guard left for the same identity (a process that died inside a call, or
      a removal) selects passthrough on later launches; a driver, OS or game
      build change starts over.
@@ -388,10 +391,10 @@ static void TraceDred(void *device) {
     Line(line, out);
 }
 
-/* Records the first removal, keeps the guard naming the call that preceded
-   it and stops the cache for this process. */
-static void DeviceRemoved(void *device, LONG call, HRESULT result, HRESULT reason) {
-    if (InterlockedCompareExchange(&cache.stopped, 1, 0)) return;
+/* Stops the cache for this process at the first removal and keeps the guard
+   naming the call that preceded it. FALSE when a removal was already seen. */
+static BOOL StopForRemoval(LONG call, HRESULT reason) {
+    if (InterlockedCompareExchange(&cache.stopped, 1, 0)) return FALSE;
     InterlockedExchange(&cache.removedCall, call);
     InterlockedExchange(&cache.removedReason, (LONG)reason);
     InterlockedExchange(&cache.mode, 0);
@@ -400,6 +403,26 @@ static void DeviceRemoved(void *device, LONG call, HRESULT result, HRESULT reaso
     /* Passthrough made no cache call; an earlier guard keeps its call. */
     if (!cache.passthrough) WriteGuardLocked(call);
     ReleaseSRWLockExclusive(&cache.guardLock);
+    return TRUE;
+}
+
+/* Passthrough: the title's own creation returned a removal. The cache makes
+   no call on the device, so it records only the HRESULT the title received
+   (also kept as the counters' removedReason), with no removal reason or DRED
+   read. */
+static void PassthroughRemoved(HRESULT result) {
+    if (!StopForRemoval(XBOX_PSO_CALL_GAME_CREATE, result)) return;
+    char line[120];
+    char *out = Text(Text(line, "asset pso-cache device-removed after="),
+        XboxPsoCacheCallName((uint32_t)XBOX_PSO_CALL_GAME_CREATE));
+    Line(line, Hex32(Text(out, " result="), (DWORD)result));
+    TraceStats("device-removed");
+}
+
+/* A cache mode: records the first removal with the device's reason and a
+   DRED summary, and stops the cache for this process. */
+static void DeviceRemoved(void *device, LONG call, HRESULT result, HRESULT reason) {
+    if (!StopForRemoval(call, reason)) return;
     char line[200];
     char *out = Text(Text(line, "asset pso-cache device-removed after="), XboxPsoCacheCallName((uint32_t)call));
     out = Hex32(Text(out, " result="), (DWORD)result);
@@ -1552,13 +1575,16 @@ static HRESULT HookPipeline(int kind, void *device, const void *desc, REFIID iid
         }
     }
     TraceTiming(kind, Now() - start, result, outcome);
-    /* The title's own creation reports a removal: record it with the last
-       cache call (if any) and stop the cache. Only a status read is made. A
-       creation inside a cache call (a library load) is attributed by that
-       call's own check instead. */
-    if ((cache.passthrough || (cache.configured && device == cache.device)) && IsRemoval(result) && !cache.stopped &&
-            !Reentrant())
-        DeviceRemoved(device, XBOX_PSO_CALL_GAME_CREATE, result, RemovedReason(device));
+    /* The title's own creation reports a removal: record it and stop the
+       cache. Passthrough records only the title's HRESULT and makes no call
+       on the device. A cache mode adds the device's removal reason, the last
+       cache call and a DRED summary. A creation inside a cache call (a
+       library load) is attributed by that call's own check instead. */
+    if (IsRemoval(result) && !cache.stopped && !Reentrant()) {
+        if (cache.passthrough) PassthroughRemoved(result);
+        else if (cache.configured && device == cache.device)
+            DeviceRemoved(device, XBOX_PSO_CALL_GAME_CREATE, result, RemovedReason(device));
+    }
     SetLastError(error);
     return result;
 }
