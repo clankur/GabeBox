@@ -10,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import zlib
 from urllib.parse import parse_qs, urlsplit
 
 from tools import device_portal, xbox_capture as capture, xbox_deploy as cli
@@ -208,7 +209,83 @@ class SamplerTests(unittest.TestCase):
         self.assertTrue(any(stage.startswith('portal-unreachable') for stage in progress))
 
 
+def paeth(left, above, upper_left):
+    estimate = left + above - upper_left
+    distances = abs(estimate - left), abs(estimate - above), abs(estimate - upper_left)
+    return (left, above, upper_left)[distances.index(min(distances))]
+
+
+def encoded_png(rows, bpp=4, filters=(0,), color=6, depth=8, palette=b''):
+    """Encode raw pixel rows with the PNG filter types given, cycling through them per row."""
+    width = len(rows[0]) // bpp
+    previous = bytes(len(rows[0]))
+    stream = b''
+    for index, row in enumerate(rows):
+        kind = filters[index % len(filters)]
+        encoded = bytearray()
+        for x, value in enumerate(row):
+            left = row[x - bpp] if x >= bpp else 0
+            upper_left = previous[x - bpp] if x >= bpp else 0
+            predictor = (0, left, previous[x], (left + previous[x]) // 2, paeth(left, previous[x], upper_left))[kind]
+            encoded.append((value - predictor) & 0xFF)
+        stream += bytes((kind,)) + bytes(encoded)
+        previous = row
+
+    def chunk(kind, body):
+        return struct.pack('>I4s', len(body), kind) + body + struct.pack('>I', zlib.crc32(kind + body))
+
+    header = struct.pack('>IIBBBBB', width, len(rows), depth, color, 0, 0, 0)
+    return (capture.PNG_SIGNATURE + chunk(b'IHDR', header) + (chunk(b'PLTE', palette) if palette else b'')
+            + chunk(b'IDAT', zlib.compress(stream)) + chunk(b'IEND', b''))
+
+
+class UniformColorTests(unittest.TestCase):
+    def test_detects_a_uniform_image_under_every_filter_type(self):
+        for color in (b'\xff\xff\xff\xff', b'\x00\x00\x00\xff', b'\x81\x7f\x03\xfe'):
+            rows = [color * 5] * 4
+            for filters in ((0,), (1,), (2,), (3,), (4,), (4, 3, 2, 1)):
+                with self.subTest(color=color.hex(), filters=filters):
+                    self.assertEqual(capture.png_uniform_color(encoded_png(rows, filters=filters)), '#' + color.hex())
+
+    def test_rejects_a_single_differing_pixel(self):
+        rows = [b'\xff\xff\xff' * 5] * 4
+        rows[3] = b'\xff\xff\xff' * 4 + b'\xff\xfe\xff'
+        for filters in ((0,), (1,), (2,), (3,), (4,)):
+            with self.subTest(filters=filters):
+                self.assertIsNone(capture.png_uniform_color(encoded_png(rows, bpp=3, filters=filters, color=2)))
+
+    def test_other_formats(self):
+        grey16 = [b'\x12\x34' * 3] * 2
+        self.assertEqual(capture.png_uniform_color(encoded_png(grey16, bpp=2, filters=(3,), color=0, depth=16)), '#1234')
+        indexed = [b'\x01' * 3] * 2
+        self.assertEqual(capture.png_uniform_color(
+            encoded_png(indexed, bpp=1, filters=(1,), color=3, palette=b'\x00\x00\x00\xff\xff\xff')), '#ffffff')
+        self.assertIsNone(capture.png_uniform_color(png()))  # truncated image data
+        self.assertIsNone(capture.png_uniform_color(b'not a png'))
+
+
 class ScreenshotTests(unittest.TestCase):
+    def test_flags_uniform_screenshots(self):
+        clock = Clock()
+        white = encoded_png([b'\xff' * 16] * 4, filters=(1,))
+        textured = encoded_png([bytes(range(16))] * 4)
+        responses = iter([(200, white), (200, textured)])
+
+        class Portal:
+            def request(self, method, path, **kwargs):
+                return next(responses)
+
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            result = capture.capture_screenshots(Portal(), Path(directory) / 'shots', 0, 1, 2, clock=lambda: clock.now,
+                                                 wall_clock=lambda: 1_795_633_733 + clock.now, pause=clock.pause,
+                                                 progress=progress.append)
+        first, second = result['screenshots']
+        self.assertEqual(first['uniform_color'], '#ffffffff')
+        self.assertNotIn('uniform_color', second)
+        self.assertEqual((result['saved'], result['uniform']), (2, 1))
+        self.assertEqual(progress[0], 'screenshot 1/2 shot-001.png uniform #ffffffff')
+
     def test_saves_scheduled_screenshots_and_records_failures_without_stopping(self):
         clock = Clock()
         responses = iter([(200, png()), PortalError(500, 'GET returned HTTP 500'), (200, b'not a png')])

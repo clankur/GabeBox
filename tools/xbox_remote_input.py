@@ -13,6 +13,12 @@ Steps (names are case-insensitive; append *N to repeat a step N times):
   LS_UP, LS_DOWN, LS_LEFT, LS_RIGHT, RS_UP, RS_DOWN, RS_LEFT, RS_RIGHT
                        tap a controller input
   hold:NAME:SECONDS    hold a controller input
+  hold:NAME[:SECONDS][@START]+NAME[:SECONDS][@START]...
+                       overlapping holds on one timeline: press each input START
+                       seconds after the step begins (default 0) and release it
+                       SECONDS later (default a tap); hold:VIEW:2+MENU:0.3@1.0
+                       holds View, presses Menu 1 s later for 0.3 s, then releases
+                       View at 2 s
   chord:NAME+NAME[:SECONDS]
                        press controller inputs together, hold them (default 0.25 s),
                        then release them; chord:MENU+VIEW opens Big Picture over a game
@@ -23,7 +29,9 @@ Steps (names are case-insensitive; append *N to repeat a step N times):
   move:X,Y             move the mouse to a 1920x1080 pixel position
   click:X,Y            left-click at a 1920x1080 pixel position
   wait:SECONDS         pause
-  shot:FILE.png        save a Device Portal screenshot (read-only; not sent as input)
+  shot:FILE.png        save a Device Portal screenshot (read-only; not sent as input);
+                       a single-colour image, such as the white frame returned for
+                       the Big Picture overlay, is noted as uniform-color=#... in the log
 
 Keys with a one-byte set-1 scancode are sent as scancodes, which the API
 recommends for games. Navigation keys need the 0xE0 prefix that the message
@@ -48,6 +56,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.device_portal import CertificateChanged, DevicePortal  # noqa: E402
+from tools.xbox_capture import png_uniform_color  # noqa: E402
 from tools.xbox_deploy import load_settings  # noqa: E402
 
 REMOTE_INPUT = '/ext/remoteinput'
@@ -124,6 +133,8 @@ def parse_step(step):
     name = kind.upper()
     if name in GAMEPAD and not rest:
         actions = tap(KEY_CODES, GAMEPAD[name], TAP_SECONDS)
+    elif name == 'HOLD' and ('+' in rest or '@' in rest):
+        actions = timeline(rest)
     elif name == 'HOLD':
         target, _, seconds = rest.partition(':')
         if target.upper() not in GAMEPAD:
@@ -169,6 +180,31 @@ def parse_step(step):
 
 def tap(kind, code, seconds):
     return [(0, key_message(kind, code, True)), (seconds, key_message(kind, code, False))]
+
+
+def timeline(text):
+    """Press and release controller inputs at offsets from the step's start, so holds can overlap."""
+    events = []
+    for item in text.split('+'):
+        match = re.fullmatch(r'([A-Za-z_]+)(?::([^@]+))?(?:@(.+))?', item.strip())
+        if not match or match[1].upper() not in GAMEPAD:
+            raise ValueError(f'Expected NAME[:SECONDS][@START] with a controller input: {item}')
+        start = seconds_value(match[3]) if match[3] else 0.0
+        end = start + (seconds_value(match[2]) if match[2] else TAP_SECONDS)
+        if end > 600:
+            raise ValueError(f'A hold timeline must end within 600 seconds: {text}')
+        code = GAMEPAD[match[1].upper()]
+        events += [(start, 1, code), (end, 0, code)]
+    codes = [code for _, down, code in events if down]
+    if len(set(codes)) != len(codes):
+        raise ValueError(f'Each controller input can appear once per hold timeline: {text}')
+    # Releases due at the same moment as a press are sent first.
+    events.sort(key=lambda event: event[:2])
+    actions, previous = [], 0.0
+    for moment, down, code in events:
+        actions.append((round(moment - previous, 6), key_message(KEY_CODES, code, bool(down))))
+        previous = moment
+    return actions
 
 
 def accept_key(nonce):
@@ -256,11 +292,15 @@ class RemoteInput:
         self.sent_input = True
 
     def screenshot(self, path):
+        """Save a screenshot and return notes for the step log."""
         _, data = self.portal.request('GET', SCREENSHOT, read_limit=32 * 1024 * 1024)
         if not data.startswith(b'\x89PNG\r\n\x1a\n'):
             raise ValueError('Device Portal did not return a PNG screenshot.')
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        uniform = png_uniform_color(data)
+        # Device Portal returns a uniform image, often white, for the Big Picture overlay.
+        return [f'uniform-color={uniform}'] if uniform else []
 
     def close(self):
         """Release anything still held, then close the WebSocket with status 1000."""
@@ -283,16 +323,17 @@ def utc_now():
 
 def run(client, steps, gap, log, sleep=time.sleep, now=utc_now):
     # Log the UTC time each step started so it can be matched against frame traces and loader records.
+    # A step's first action follows no pause except in wait:, which is stamped when its pause begins.
     for step in steps:
-        started = None
+        started = now()
+        notes = []
         for seconds, action in parse_step(step):
             sleep(seconds)
-            started = started or now()
             if isinstance(action, Path):
-                client.screenshot(action)
+                notes += client.screenshot(action) or []
             elif action is not None:
                 client.send(action)
-        print(f'{started or now()} {step}', file=log, flush=True)
+        print(' '.join([started, step, *notes]), file=log, flush=True)
         sleep(gap)
 
 

@@ -36,6 +36,7 @@ BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 LIFETIME_REPORT = 'lifetime-report.txt'
+OBSERVE_LIMIT = 3600
 PROTOCOL_REPORT = 'protocol-return.txt'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
@@ -925,8 +926,10 @@ def main():
     observation.add_argument('--app-id', type=int, help='wait for a new launch of this Steam AppID')
     observe_command.add_argument('--run-id', type=int, help='collect an existing game launch with this steam_launch_run_id')
     observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
-    observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
-    observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
+    observe_command.add_argument('--timeout', type=int, default=150,
+                                 help=f'observation deadline in seconds (1–{OBSERVE_LIMIT}, default 150)')
+    observe_command.add_argument('--frame-seconds', type=int, default=30,
+                                 help=f'seconds to observe after the first hosted frame (0–{OBSERVE_LIMIT}, default 30)')
     observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='[SECONDS:]TRACE',
                                  help='require this loader record or prefix in sequence, optionally with its own deadline')
     observe_command.add_argument('--fail-on-checkpoint', action='append', default=[], metavar='TRACE',
@@ -980,7 +983,12 @@ def main():
     lifetime.add_argument('--portal-return', action='store_true',
                           help='reproduce return through Device Portal’s app launcher')
     lifetime.add_argument('--dwell', type=int, default=15, help='seconds to keep the control foreground')
-    relaunch = commands.add_parser('relaunch', help='stop the installed Steam Core package and its game, then activate it again')
+    relaunch = commands.add_parser(
+        'relaunch', help='stop the installed Steam Core package and its game, then activate it again',
+        description='Stop the installed Steam Core package and any game it started, wait until none of its '
+                    'processes remain, then activate it again. This restarts Steam only. A configured '
+                    '--play-installed-app-id Play runs once per installed package version and is not repeated; '
+                    'select Play on the console or install a new package version to launch the game again.')
     relaunch.add_argument('--version', help='require a specific installed package version')
     relaunch.add_argument('--stop-timeout', type=int, default=30, help='seconds to wait for every package process to exit')
     sampler = commands.add_parser('sample-processes',
@@ -1047,8 +1055,10 @@ def main():
             observe_command.error('--image-name requires --app-id and an executable basename')
         if args.bootstrap_frame and not (args.output and args.app_id):
             observe_command.error('--bootstrap-frame requires --output and --app-id')
-        if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
-            observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
+        # The bound only catches typos. The poll loop holds no per-second state, so an hour-long
+        # gameplay session can be observed in one run.
+        if not 1 <= args.timeout <= OBSERVE_LIMIT or not 0 <= args.frame_seconds <= OBSERVE_LIMIT:
+            observe_command.error(f'Use a 1–{OBSERVE_LIMIT} second timeout and 0–{OBSERVE_LIMIT} seconds after the first frame')
         if (args.fail_on_checkpoint or args.watch_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
             observe_command.error('--fail-on-checkpoint, --watch-checkpoint and --checkpoint-timeout require --require-checkpoint')
         args.checkpoint_timeouts = []

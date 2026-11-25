@@ -1007,6 +1007,23 @@ MEASURED = (b'audio meter=ready\r\n'
             b'audio window=3 peak-milli=36 audible=100/100\r\n')
 
 
+class ObserveArgumentTests(unittest.TestCase):
+    def test_observe_accepts_an_hour_long_session(self):
+        class Reached(Exception):
+            pass
+
+        base = ['xbox_deploy.py', 'observe', '--version', '1.2.3.4', '--app-id', str(APP_ID)]
+        # Validation passes and the command goes on to read the portal settings.
+        with (patch.object(cli, 'load_settings', side_effect=Reached),
+              patch('sys.argv', base + ['--timeout', '3600', '--frame-seconds', '3600']), self.assertRaises(Reached)):
+            cli.main()
+        for extra in (['--timeout', '3601'], ['--frame-seconds', '3601'], ['--timeout', '0']):
+            with (self.subTest(extra=extra), patch('sys.argv', base + extra), redirect_stderr(io.StringIO()) as errors,
+                  self.assertRaises(SystemExit)):
+                cli.main()
+            self.assertIn('1–3600 second timeout', errors.getvalue())
+
+
 class LoaderDiagnosticTests(unittest.TestCase):
     def test_measurement_records_are_kept_in_order_and_summarized(self):
         lines = diagnostics.complete_loader_lines(b'load game.dll ok source=package\r\n' + MEASURED

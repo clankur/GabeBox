@@ -11,6 +11,7 @@ from pathlib import PureWindowsPath
 import re
 import struct
 import time
+import zlib
 from urllib.parse import urlencode
 
 from .device_portal import PortalError, PortalRetry, PortalUnavailable, utc_text
@@ -149,6 +150,65 @@ def png_size(data):
     return struct.unpack('>II', data[16:24])
 
 
+# Bytes per pixel for 8- and 16-bit greyscale, RGB, palette, greyscale-alpha and RGBA PNGs.
+PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+
+
+def png_uniform_color(data):
+    """Return the single colour of a PNG whose pixels are all equal, as hex, or None.
+
+    The filtered rows of a uniform image are fixed by its first pixel, so each row is compared
+    with that encoding instead of being unfiltered. Interlaced, sub-byte or malformed images
+    return None.
+    """
+    size = png_size(data)
+    if size is None or len(data) < 33:
+        return None
+    width, height = size
+    depth, color, _, _, interlace = data[24:29]
+    if color not in PNG_CHANNELS or depth not in (8, 16) or interlace or not width or not height:
+        return None
+    bpp = PNG_CHANNELS[color] * depth // 8
+    stride = width * bpp
+    expected_size = height * (stride + 1)
+    compressed = bytearray()
+    palette = b''
+    offset = 8
+    while offset + 12 <= len(data):
+        length, kind = struct.unpack('>I4s', data[offset:offset + 8])
+        if kind == b'IDAT':
+            compressed += data[offset + 8:offset + 8 + length]
+        elif kind == b'PLTE':
+            palette = data[offset + 8:offset + 8 + length]
+        elif kind == b'IEND':
+            break
+        offset += 12 + length
+    try:
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(bytes(compressed), expected_size + 1)
+    except zlib.error:
+        return None
+    if len(raw) != expected_size:
+        return None
+    # Row 0 sees a zero row above it, so every filter stores its first pixel unchanged.
+    pixel = raw[1:1 + bpp]
+    rest = bytes(stride - bpp)
+    half = bytes(value - value // 2 for value in pixel)
+    # Expected bytes per filter type (None, Sub, Up, Average, Paeth) for the first and later rows.
+    first_rows = {0: pixel * width, 1: pixel + rest, 2: pixel * width, 3: pixel + half * (width - 1), 4: pixel + rest}
+    later_rows = {0: pixel * width, 1: pixel + rest, 2: bytes(stride), 3: half + rest, 4: bytes(stride)}
+    for row in range(height):
+        start = row * (stride + 1)
+        rows = first_rows if row == 0 else later_rows
+        if rows.get(raw[start]) != raw[start + 1:start + 1 + stride]:
+            return None
+    if color == 3:
+        pixel = palette[3 * pixel[0]:3 * pixel[0] + 3]
+        if len(pixel) != 3:
+            return None
+    return '#' + pixel.hex()
+
+
 def capture_screenshots(portal, output, delay, interval, count, *,
                         clock=time.monotonic, wall_clock=time.time, pause=time.sleep, progress=None):
     """Save Device Portal screenshots on a schedule and index each one with its capture time.
@@ -182,14 +242,23 @@ def capture_screenshots(portal, output, delay, interval, count, *,
                         file.write(data)
                     entry.update(file=name, width=size[0], height=size[1], bytes=len(data),
                                  sha256=hashlib.sha256(data).hexdigest())
+                    uniform = png_uniform_color(data)
+                    if uniform:
+                        # Device Portal returns a uniform frame, often white, for surfaces it cannot read,
+                        # such as the Big Picture overlay. Keep it, but mark it as not showing content.
+                        entry['uniform_color'] = uniform
             entry['end_utc'] = utc_text(wall_clock())
             entry['capture_ms'] = round((clock() - began) * 1000)
             index.write(json.dumps(entry) + '\n')
             index.flush()
             entries.append(entry)
             if progress:
-                progress(f'screenshot {number}/{count} {entry.get("file", entry.get("error"))}')
+                note = f' uniform {entry["uniform_color"]}' if 'uniform_color' in entry else ''
+                progress(f'screenshot {number}/{count} {entry.get("file", entry.get("error"))}{note}')
     result = {'screenshots': entries, 'saved': sum('file' in entry for entry in entries)}
+    uniform = sum('uniform_color' in entry for entry in entries)
+    if uniform:
+        result['uniform'] = uniform
     portal_summary = retry.summary()
     if portal_summary:
         result['portal'] = portal_summary
