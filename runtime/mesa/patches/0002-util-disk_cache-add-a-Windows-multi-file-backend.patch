@@ -20,6 +20,12 @@ Upstream Mesa (main at 66e82ef1, 2026-11-25, and 26.2.2) refuses
 - On Windows the meson 'shader-cache' option stays off for 'auto' and is
   built with -Dshader-cache=enabled.
 
+
+- Enabling the cache also builds shaderapi.c's shader-replacement code on
+  Windows for the first time. Its empty replacement table was a zero-length
+  array, which MSVC rejects (C2466); it now holds one entry that never
+  matches.
+
 diff --git a/meson.build b/meson.build
 --- a/meson.build
 +++ b/meson.build
@@ -35,6 +41,23 @@ diff --git a/meson.build b/meson.build
    .allowed()
  
  if with_shader_cache
+diff --git a/src/mesa/main/shaderapi.c b/src/mesa/main/shaderapi.c
+--- a/src/mesa/main/shaderapi.c
++++ b/src/mesa/main/shaderapi.c
+@@ -105,7 +105,12 @@
+    const char *blake3;
+    mesa_shader_stage stage;
+ };
+-struct _shader_replacement shader_replacements[0];
++/* MSVC rejects zero-length arrays (C2466), and this code was never built on
++ * Windows before the shader cache was. Keep one entry that never matches.
++ */
++static struct _shader_replacement shader_replacements[1] = {
++   { NULL, NULL, MESA_SHADER_NONE },
++};
+ 
+ static char *try_direct_replace(const char *app, const char *source)
+ {
 diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
 --- a/src/util/disk_cache.c
 +++ b/src/util/disk_cache.c

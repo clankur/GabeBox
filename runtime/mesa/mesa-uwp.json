@@ -27,7 +27,7 @@
     },
     {
       "file": "patches/0002-util-disk_cache-add-a-Windows-multi-file-backend.patch",
-      "sha256": "1b3a225bc7d80a3bb24102f9b75312ca11d5bcc90e6295b9372c4d3bc13a5803",
+      "sha256": "9678c216831269a9983770f47d21edeb369be4bb94af0891b4362596439d9377",
       "variants": ["shader-cache"]
     },
     {
@@ -37,7 +37,7 @@
     }
   ],
   "variants": {
-    "baseline": ["-Dshader-cache=disabled"],
-    "shader-cache": ["-Dshader-cache=enabled"]
+    "baseline": ["-Dshader-cache=disabled", "-Dvulkan-drivers=[]"],
+    "shader-cache": ["-Dshader-cache=enabled", "-Dvulkan-drivers=[]"]
   }
 }

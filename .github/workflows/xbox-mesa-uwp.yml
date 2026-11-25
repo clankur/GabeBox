@@ -46,6 +46,8 @@ jobs:
           }
           $reference = Join-Path $env:RUNNER_TEMP 'mesa-uwp-release'
           Expand-Archive $release $reference
+          Write-Host 'DLLs in the pinned 26.2.2 release:'
+          Get-ChildItem $reference -Recurse -Filter *.dll | ForEach-Object { Write-Host "  $($_.FullName.Substring($reference.Length + 1))" }
           Write-Host 'Imported modules of the pinned 26.2.2 release:'
           foreach ($name in $pin.libraries) {
             $modules = & "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe" --coff-imports "$reference/$($pin.prebuilt.prefix)$name" |
