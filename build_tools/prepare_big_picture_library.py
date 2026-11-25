@@ -27,6 +27,10 @@ VERIFIED_BASES = {
     BASE_SHA256: "1.0.230.0",
     # The verified recovery package preserves the 1.0.230.0 payload.
     "174a603ec8d3f5452f3474e564c53f739777359f65d240aed4a93fb56541d767": "1.0.231.0",
+    # Reassembled after the 1.0.230.0 APPX was lost: Steam Core template from Build Xbox probe run
+    # 45550462937 with the pinned Valve client, FHD presenter, js-dos and SDL 2.30.9, plus the
+    # pinned Mesa UWP 34732bb and DXIL runtime carried over from a signed 1.0.230.40 build.
+    "b048d049b0c07b0bba3c5b94d0801a50d972217cea512c2b6452a90f22617396": "1.0.232.60",
 }
 
 
