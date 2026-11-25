@@ -7,8 +7,9 @@ joystick, the XAC turns that into a thumbstick, and the package turns the thumbs
 into cursor motion. See the mouse-as-a-controller section of
 `analysis/xbox-mouse-input.md` for why this route exists.
 
-**Status: untested on hardware.** It compiles in CI. Nothing here has run on a Feather,
-an XAC, or the console.
+**Status: untested on hardware.** The firmware compiles in CI, and the tuner's encoder,
+protocol and simulator have Node tests. Nothing here has run on a Feather, an XAC, or the
+console, including the settings storage and the config channel.
 
 Forked from [touchgadget/mouse2xac](https://github.com/touchgadget/mouse2xac) at
 `081f1ca`, with the joystick layout from
@@ -70,25 +71,93 @@ Also:
 
 - A click shorter than one output period is still held for one period.
 - The hat switch rests at null instead of 0 ("up").
+- The encoding is set at runtime over a vendor feature report and kept in flash. See
+  [Settings](#settings).
+
+## Settings
+
+The board starts with the settings saved in flash, or with the defaults when flash holds
+no valid record. Settings take effect at the next output period after they are written.
+
+| ID | Setting | Default | Range |
+| --- | --- | --- | --- |
+| `0x01` | Output period, µs | 8000 | 2000–100000. The joystick endpoint is polled every 2 ms. |
+| `0x02` | Full scale, mouse counts per second at full deflection | 8000 | 1–2000000 |
+| `0x03` | Backlog, in periods of full deflection, including the current one | 6 | 1–64 |
+| `0x04` | Invert X | 0 | 0 or 1 |
+| `0x05` | Invert Y | 0 | 0 or 1 |
+| `0x06` | Wheel buttons | 1 | 0 or 1. With 0, wheel motion is discarded. |
+
+The record in flash, written with arduino-pico's `EEPROM` library, holds a magic number
+(`M2XC`), a record version, its size, the six values, and an FNV-1a checksum. The board
+falls back to the defaults if any of those is wrong or a value is out of range. Saving
+erases a 4 KB flash sector with both cores paused, which stops the mouse host for tens
+of milliseconds.
+
+## Config protocol
+
+Tune the board with it plugged into a computer. The console never sends feature reports,
+so the channel is idle while the board is on the XAC.
+
+The channel is the 4-byte vendor feature report (usage page `0xFF00`, usage `0x01`, no
+report ID) that the upstream report descriptor already declares. The descriptor is
+unchanged.
+
+`SET_FEATURE` sends `{command, value bits 0–7, bits 8–15, bits 16–23}`. Each command also
+selects the register that the next `GET_FEATURE` returns as `{register, value bits 0–7,
+bits 8–15, bits 16–23}`. To read a register, select it and then get it.
+
+| Command | Value | Effect | Next GET returns |
+| --- | --- | --- | --- |
+| `0x00` select | Register | — | That register |
+| `0x01` save | Ignored | Writes the settings to flash from the output loop | Status |
+| `0x02` restore defaults | Ignored | Sets the defaults in RAM. Save to keep them. | Status |
+| `0x03` reload | Ignored | Discards unsaved changes | Status |
+| `0x04` clear counters | Ignored | Zeroes the report and clip counters | Mouse reports |
+| `0x80` + setting ID | New value | Writes one setting if it is in range | That setting |
+
+| Register | Contents |
+| --- | --- |
+| `0x01`–`0x06` | Settings, as above |
+| `0x10` | Firmware version: major, minor, patch from the high byte down. Currently 0.1.0. |
+| `0x11` | Protocol version, currently 1. Selected at boot. |
+| `0x12` | Mouse reports received since boot or the last clear, modulo 2^24 |
+| `0x13` | Mice connected |
+| `0x14` | Counts dropped by the backlog cap since boot or the last clear, saturating at 2^24 − 1 |
+| `0x15` | Status: bit 0 flash holds valid settings, bit 1 save pending, bit 2 unsaved changes, bit 3 last save failed |
+| `0x16` | Flash saves since boot |
+| `0xFF` | Last error: byte 0 code, byte 1 command, byte 2 low byte of the value |
+
+A rejected command selects `0xFF`. Error codes are 1 for an unknown command, 2 for an
+unknown register or setting, and 3 for a value out of range. A rejected write leaves the
+setting unchanged.
+
+After a save, poll the status register until bit 1 clears.
+
+TinyUSB can run the feature-report callbacks from a core 0 interrupt that preempts the
+output loop. The callbacks therefore only change the settings in RAM and set flags. The
+output loop copies the settings with interrupts disabled and writes flash itself. The
+callbacks never take the mutex that guards motion shared with core 1.
 
 ## Decoding contract
 
-The package must decode with these values; they are the constants at the top of
-[mouse2xac.ino](mouse2xac.ino).
+The output period, full scale, backlog and inversion are now settings (see
+[Settings](#settings)). The package must decode with the values the board holds. The
+values below are the defaults.
 
-| Item | Value |
+| Item | Default |
 | --- | --- |
 | Output period | 8 ms. Each stick value is held for one period. |
 | Full deflection | 8000 mouse counts per second (5 in/s on a 1600 CPI mouse) |
-| Joystick axis | 10-bit, center 512, reach ±511. X right is positive. Y down is positive. |
-| Counts per stick unit per period | 8000 × 0.008 / 511 ≈ 0.125 |
-| Backlog limit | 6 periods of full deflection (about 383 counts). Motion above it is dropped. |
+| Joystick axis | 10-bit, center 512, reach ±511. X right is positive. Y down is positive, unless inverted. |
+| Counts per stick unit per period | full scale × period / 511; 8000 × 0.008 / 511 ≈ 0.125 |
+| Backlog limit | 6 periods of full deflection (384 counts). Motion above it is dropped. |
 | Buttons 1-5 | Left, right, middle, back, forward |
 | Button 6 | Wheel up, one press per detent |
 | Button 7 | Wheel down, one press per detent |
 
-The package recovers displacement by integrating `deflection × 8000 counts/s × elapsed`,
-where deflection is the normalized stick value from -1 to 1. It then applies its own
+The package recovers displacement by integrating `deflection × full scale × elapsed`
+(8000 counts/s by default), where deflection is the normalized stick value from -1 to 1. It then applies its own
 cursor gain. Integrating over the time it actually observed each value keeps the result
 correct whatever rate it samples at, provided it samples at least once per period.
 
@@ -105,8 +174,9 @@ it has.
 - The XAC reads only the first 8 joystick buttons, so the wheel uses buttons 6 and 7 and
   button 8 is unused.
 - The output period must be at least the console's controller reading interval, or values
-  are skipped and motion lost. Set `OUTPUT_PERIOD_US` from the probe's measured
-  interval.
+  are skipped and motion lost. Set the output period from the probe's measured interval.
+- A boot report carries at most 127 counts per axis, so a 1000 Hz mouse tops out at
+  127,000 counts/s. What a mouse does with motion above that varies.
 - Fidelity is below a real mouse: a 10-bit axis, the XAC's own processing, and the
   console's controller update rate all sit in between.
 
@@ -117,7 +187,10 @@ it has.
 2. Run the controller pointer probe with the board attached. Record the reading interval,
    the smallest axis step, the resting values, and any deadzone between the raw and
    typed readings.
-3. Set the output period and full-scale constants from those results and update the
-   decoding contract to match.
-4. Add a pointer-stick profile to the hosted presenter that decodes this contract, then
+3. Write and save settings over the config channel from a computer, then confirm they
+   survive a power cycle, that a corrupt or empty record falls back to the defaults, and
+   that the XAC still accepts the board.
+4. Set the output period and full scale from the probe results and update the decoding
+   contract to match.
+5. Add a pointer-stick profile to the hosted presenter that decodes this contract, then
    check cursor feel on the console.
