@@ -29,6 +29,10 @@ BOOL WINAPI XboxDestroyWindow(HWND handle);
 BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam);
 BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int width, int height, UINT flags);
 void XboxPollWglHostEvents(void);
+/* Hosted SDL input as desktop window messages. usage is a USB HID keyboard usage (SDL scancode). */
+void XboxPostHostedKey(HWND window, UINT usage, BOOL down, BOOL repeat);
+void XboxPostHostedText(HWND window, const char *utf8);
+void XboxPostHostedPointer(HWND window, UINT message, LONG x, LONG y, int wheel);
 BOOL XboxWglHostEventsActive(void);
 void XboxResizeCurrentContext(XboxWindow *window);
 RECT XboxDesktopBounds(void);

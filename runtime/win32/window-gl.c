@@ -9,12 +9,28 @@
 #define SDL_WINDOW_HIDDEN 8u
 #define SDL_WINDOWEVENT 0x200u
 #define SDL_WINDOWEVENT_CLOSE 14u
+#define SDL_KEYDOWN 0x300u
+#define SDL_KEYUP 0x301u
+#define SDL_TEXTINPUT 0x303u
+#define SDL_MOUSEMOTION 0x400u
+#define SDL_MOUSEBUTTONDOWN 0x401u
+#define SDL_MOUSEBUTTONUP 0x402u
+#define SDL_MOUSEWHEEL 0x403u
+#define SDL_MOUSEWHEEL_FLIPPED 1u
 #define SDL_GETEVENT 2
 
+/* SDL 2.x x64 event ABI. */
 typedef union SdlWindowEvent {
+    UINT type;
     struct { UINT type, timestamp, windowId; BYTE event; } window;
-    ULONG64 padding[7];  /* SDL 2.x x64 event ABI */
+    struct { UINT type, timestamp, windowId; BYTE state, repeat, padding2, padding3; int scancode, sym; } key;
+    struct { UINT type, timestamp, windowId; char text[32]; } text;
+    struct { UINT type, timestamp, windowId, which, state; int x, y, xrel, yrel; } motion;
+    struct { UINT type, timestamp, windowId, which; BYTE button, state, clicks, padding; int x, y; } button;
+    struct { UINT type, timestamp, windowId, which; int x, y; UINT direction; } wheel;
+    ULONG64 padding[7];
 } SdlWindowEvent;
+_Static_assert(sizeof(SdlWindowEvent) == 56, "SDL_Event size");
 
 typedef struct SdlGl {
     void (*ready)(void);
@@ -139,6 +155,71 @@ fail:
     return FALSE;
 }
 
+static HWND EventWindow(UINT windowId, BOOL exact) {
+    for (UINT i = 0; i < CONTEXT_COUNT; ++i) {
+        const Context *context = &contexts[i];
+        if (context->handle && sdl.windowId(context->sdlWindow) == windowId) return context->window->handle;
+    }
+    /* The host binds one SDL window. Input without that window goes to the first GL window. */
+    for (UINT i = 0; !exact && i < CONTEXT_COUNT; ++i) {
+        if (contexts[i].handle) return contexts[i].window->handle;
+    }
+    return NULL;
+}
+
+/* The hosted SDL backend turns the host mailbox into SDL events. Deliver them in
+   queue order as the window close, keyboard, text and pointer messages of the GL window. */
+static void DeliverHostEvent(const SdlWindowEvent *event) {
+    static const UINT down[] = {WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN};
+    static const UINT up[] = {WM_LBUTTONUP, WM_MBUTTONUP, WM_RBUTTONUP};
+    static LONG pointerX, pointerY; /* SDL reports a wheel without a position */
+    HWND window;
+    switch (event->type) {
+    case SDL_WINDOWEVENT:
+        window = event->window.event == SDL_WINDOWEVENT_CLOSE ? EventWindow(event->window.windowId, TRUE) : NULL;
+        if (window) XboxPostMessageW(window, WM_CLOSE, 0, 0);
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        window = EventWindow(event->key.windowId, FALSE);
+        if (window && event->key.scancode > 0)
+            XboxPostHostedKey(window, (UINT)event->key.scancode, event->type == SDL_KEYDOWN, event->key.repeat != 0);
+        break;
+    case SDL_TEXTINPUT: {
+        char text[sizeof(event->text.text) + 1];
+        for (UINT i = 0; i < sizeof(event->text.text); ++i) text[i] = event->text.text[i];
+        text[sizeof(event->text.text)] = 0;
+        window = EventWindow(event->text.windowId, FALSE);
+        if (window) XboxPostHostedText(window, text);
+        break;
+    }
+    case SDL_MOUSEMOTION:
+        window = EventWindow(event->motion.windowId, FALSE);
+        pointerX = event->motion.x;
+        pointerY = event->motion.y;
+        if (window) XboxPostHostedPointer(window, WM_MOUSEMOVE, pointerX, pointerY, 0);
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        window = EventWindow(event->button.windowId, FALSE);
+        pointerX = event->button.x;
+        pointerY = event->button.y;
+        if (window && event->button.button >= 1 && event->button.button <= 3)
+            XboxPostHostedPointer(window, (event->type == SDL_MOUSEBUTTONDOWN ? down : up)[event->button.button - 1],
+                event->button.x, event->button.y, 0);
+        break;
+    case SDL_MOUSEWHEEL: {
+        const int sign = event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+        window = EventWindow(event->wheel.windowId, FALSE);
+        if (window && event->wheel.y) XboxPostHostedPointer(window, WM_MOUSEWHEEL, pointerX, pointerY, sign * event->wheel.y);
+        if (window && event->wheel.x) XboxPostHostedPointer(window, WM_MOUSEHWHEEL, pointerX, pointerY, sign * event->wheel.x);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 void XboxPollWglHostEvents(void) {
     if (!hostEvents) return;
     const BOOL trace = startupHostPoll == HostPollPending;
@@ -148,17 +229,11 @@ void XboxPollWglHostEvents(void) {
     }
     sdl.pumpEvents();
     SdlWindowEvent events[32];
-    const int count = sdl.peepEvents(events, ARRAYSIZE(events), SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT);
-    for (int index = 0; index < count; ++index) {
-        if (events[index].window.event != SDL_WINDOWEVENT_CLOSE) continue;
-        for (UINT i = 0; i < CONTEXT_COUNT; ++i) {
-            const Context *context = &contexts[i];
-            if (context->handle && sdl.windowId(context->sdlWindow) == events[index].window.windowId) {
-                XboxPostMessageW(context->window->handle, WM_CLOSE, 0, 0);
-                break;
-            }
-        }
-    }
+    int count;
+    do {
+        count = sdl.peepEvents(events, ARRAYSIZE(events), SDL_GETEVENT, SDL_WINDOWEVENT, SDL_MOUSEWHEEL);
+        for (int index = 0; index < count; ++index) DeliverHostEvent(&events[index]);
+    } while (count == ARRAYSIZE(events));
     if (trace) XboxWindowTrace("win32_wgl_post_swap_events=returned\n");
 }
 
