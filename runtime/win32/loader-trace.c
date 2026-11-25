@@ -912,6 +912,47 @@ static void EnableDeviceRemovedData(void) {
     AppendTrace(line, (DWORD)(out - line));
 }
 
+/* Godot and other Agility SDK callers create devices from an ID3D12DeviceFactory,
+   whose configuration is separate from the global D3D12GetDebugInterface state.
+   GetConfigurationInterface is the eighth method, after IUnknown,
+   InitializeFromGlobalState, ApplyToGlobalState, SetFlags and GetFlags. */
+typedef HRESULT (WINAPI *GetD3D12Interface)(REFCLSID, REFIID, void **);
+static PVOID volatile d3d12GetInterface;
+static const GUID deviceFactoryClass =
+    {0x114863BF, 0xC386, 0x4AEE, {0xB3, 0x9D, 0x8F, 0x0B, 0xBB, 0x06, 0x29, 0x55}};
+static const GUID removedDataClass =
+    {0x4A75BBC4, 0x9FF4, 0x4AD8, {0x9F, 0x18, 0xAB, 0xAE, 0x84, 0xDC, 0x5F, 0xF2}};
+
+static BOOL SameGuid(const GUID *left, const GUID *right) {
+    const unsigned char *a = (const unsigned char *)left, *b = (const unsigned char *)right;
+    for (unsigned i = 0; i < sizeof(GUID); ++i) if (a[i] != b[i]) return FALSE;
+    return TRUE;
+}
+
+static HRESULT WINAPI TraceD3D12GetInterface(REFCLSID clsid, REFIID iid, void **out) {
+    const GetD3D12Interface get = (GetD3D12Interface)InterlockedCompareExchangePointer(&d3d12GetInterface, NULL, NULL);
+    const HRESULT result = get(clsid, iid, out);
+    if (SUCCEEDED(result) && out && *out && clsid && SameGuid(clsid, &deviceFactoryClass)) {
+        const DWORD previous = GetLastError();
+        typedef HRESULT (STDMETHODCALLTYPE *GetConfiguration)(void *, REFCLSID, REFIID, void **);
+        void **methods = *(void ***)*out;
+        DredSettings *settings = NULL;
+        const HRESULT configured = ((GetConfiguration)methods[7])(*out, &removedDataClass, &dredSettingsIid,
+            (void **)&settings);
+        if (SUCCEEDED(configured) && settings) {
+            settings->lpVtbl->SetAutoBreadcrumbsEnablement(settings, 2);
+            settings->lpVtbl->SetPageFaultEnablement(settings, 2);
+            settings->lpVtbl->Release(settings);
+        }
+        char line[80];
+        char *text = Hex(Text(line, "asset d3d12-factory-dred result=0x"), (DWORD)configured, 8);
+        text = Text(text, "\r\n");
+        AppendTrace(line, (DWORD)(text - line));
+        SetLastError(previous);
+    }
+    return result;
+}
+
 static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, const IID *iid, void **device) {
     const DWORD previous = GetLastError();
     if (HostedDxgiEnabled()) EnableDeviceRemovedData();
@@ -1018,6 +1059,11 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 module == GetModuleHandleW(L"d3d12.dll")) {
             const PVOID first = InterlockedCompareExchangePointer(&d3d12CreateDevice, (PVOID)result, NULL);
             if (!first || first == (PVOID)result) result = (FARPROC)(PVOID)TraceD3D12CreateDevice;
+        } else if (name[0] == 'D' && SameName(name, "D3D12GetInterface") && HostedDxgiEnabled() &&
+                module == GetModuleHandleW(L"d3d12.dll")) {
+            EnableDeviceRemovedData();
+            const PVOID first = InterlockedCompareExchangePointer(&d3d12GetInterface, (PVOID)result, NULL);
+            if (!first || first == (PVOID)result) result = (FARPROC)(PVOID)TraceD3D12GetInterface;
         } else if (name[0] == 'C' || name[0] == 'D') {
             const FARPROC hosted = HostedDxgiFactory(module, name);
             if (hosted) {
