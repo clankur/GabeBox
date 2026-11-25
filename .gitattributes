@@ -1,2 +1,5 @@
 # Preserve the exact bytes covered by the Valve release pin on Windows checkouts.
 runtime/steam/pins/steam_client_win64.manifest -text
+
+# Mesa patches are pinned by SHA-256 of their exact bytes; keep LF on Windows runners.
+runtime/mesa/patches/*.patch -text
