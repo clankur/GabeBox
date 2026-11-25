@@ -45,7 +45,7 @@ class MesaComponentPinTests(unittest.TestCase):
             touched = [line.split()[2][2:] for line in (COMPONENT / entry["file"]).read_text().splitlines()
                        if line.startswith("diff --git ")]
             if "baseline" in entry["variants"]:
-                self.assertEqual(touched, ["meson.build"])
+                self.assertTrue(all(path.endswith("meson.build") for path in touched), touched)
             self.assertTrue(touched)
 
 

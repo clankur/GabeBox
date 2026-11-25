@@ -22,7 +22,7 @@
   "patches": [
     {
       "file": "patches/0001-meson-select-UWP-from-the-host-machine-subsystem.patch",
-      "sha256": "fd1cef483fca290078b5db8ae96504a397c8b0187198e939f9566feae6fd5560",
+      "sha256": "a954935a111fbe8a07ff7307b680cc5c762ce9898744f7aafc1e7c446037ecab",
       "variants": ["baseline", "shader-cache"]
     },
     {

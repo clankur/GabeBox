@@ -52,6 +52,10 @@ jobs:
               Select-String '^\s*Name: (.+\.dll)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
             Write-Host "  $name -> $($modules -join ', ')"
           }
+          # The linker version identifies the toolset the maintainers used (14.4x is VS 2022, 14.5x VS 18).
+          $linker = & "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe" --file-headers "$reference/$($pin.prebuilt.prefix)libgallium_wgl.dll" |
+            Select-String 'LinkerVersion' | ForEach-Object { $_.Line.Trim() }
+          Write-Host "Pinned release linker: $($linker -join ', ')"
           "MESA_REFERENCE=$reference" | Out-File -Append $env:GITHUB_ENV
           foreach ($patch in $pin.patches) {
             $hash = (Get-FileHash "runtime/mesa/$($patch.file)" -Algorithm SHA256).Hash.ToLowerInvariant()

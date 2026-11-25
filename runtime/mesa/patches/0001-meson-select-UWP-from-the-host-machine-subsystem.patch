@@ -11,6 +11,11 @@ models UWP as a host machine subsystem instead, set in a machine file:
 That fork also adds /DWINAPI_FAMILY=WINAPI_FAMILY_APP and the AppContainer
 project settings, so with_uwp follows the machine file. Build-only change.
 
+
+The C++/WinRT helper (src/util/uwp_util.cpp) is built as C++20: under
+C++17, C++/WinRT uses MSVC's experimental /await coroutines, which the
+VS 18 STL rejects (STL1011).
+
 diff --git a/meson.build b/meson.build
 --- a/meson.build
 +++ b/meson.build
@@ -25,3 +30,22 @@ diff --git a/meson.build b/meson.build
  if with_tools.contains('all')
    with_tools = [
      'amd',
+diff --git a/src/util/meson.build b/src/util/meson.build
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -451,10 +451,14 @@
+     'uwp_util.h'
+   ]
+ 
++  # C++/WinRT needs coroutines. Under C++17 it falls back to the MSVC
++  # <experimental/coroutine> (/await) support that VS 18's STL rejects
++  # (STL1011), so build this helper with standard C++20 coroutines.
+   _libuwputil = static_library(
+     'uwputil',
+     files_uwp_util,
+-    dependencies: idep_mesautil
++    dependencies: idep_mesautil,
++    override_options : ['cpp_std=vc++20'],
+   )
+ 
+   idep_uwputil = declare_dependency(
