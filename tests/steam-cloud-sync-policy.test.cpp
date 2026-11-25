@@ -85,21 +85,41 @@ int main() {
     assert(AcceptLocal(Choice::Local));
 
     // Conflicts are held whatever the download reported.
-    assert(Classify(conflict, Finished(ResultOk, 3)) == Decision::HeldConflict);
-    assert(Classify(both, Finished(ResultOk)) == Decision::HeldConflict);
-    assert(Classify(conflict, WaitResult{}) == Decision::HeldConflict);
-    // A synchronized result needs no callback.
-    assert(Classify(synchronized, WaitResult{}) == Decision::Synchronized);
+    assert(Classify(local, conflict, true, Finished(ResultOk, 3)) == Decision::HeldConflict);
+    assert(Classify(synchronized, both, true, Finished(ResultOk)) == Decision::HeldConflict);
+    assert(Classify(conflict, conflict, true, WaitResult{}) == Decision::HeldConflict);
+    // Synchronized counts once the download job was seen to run and finished in time,
+    // with or without a callback.
+    WaitResult ranOnly;
+    ranOnly.ran = true;
+    assert(Classify(local, synchronized, true, ranOnly) == Decision::Synchronized);
+    assert(Classify(cloud, synchronized, true, Finished(ResultOk, 2)) == Decision::Synchronized);
+    assert(std::string(SynchronizedBy(ranOnly)) == "job");
+    // A first launch whose job was never seen is not proof: the client's state is cached.
+    for (auto before : {1, local, cloud, 8, 0}) assert(Classify(before, synchronized, true, WaitResult{}) == Decision::Unconfirmed);
+    // Narrow exception: synchronized before and after, request accepted, no timeout.
+    assert(Classify(synchronized, synchronized, true, WaitResult{}) == Decision::Synchronized);
+    assert(std::string(SynchronizedBy(WaitResult{})) == "already-synchronized");
+    WaitResult idleTimedOut;
+    idleTimedOut.timedOut = true;
+    assert(Classify(synchronized, synchronized, true, idleTimedOut) == Decision::Unconfirmed);
+    assert(Classify(synchronized, synchronized, false, WaitResult{}) == Decision::Unconfirmed);
+    WaitResult ranTimedOut = ranOnly;
+    ranTimedOut.timedOut = true;
+    assert(Classify(local, synchronized, true, ranTimedOut) == Decision::Unconfirmed);
+    // A failed completion is never accepted, even with a synchronized state.
+    assert(Classify(synchronized, synchronized, true, Finished(2)) == Decision::Unconfirmed);
     // Local-only changes count only with a successful completion.
-    assert(Classify(local, Finished(ResultOk)) == Decision::LocalChanges);
-    assert(Classify(local, Finished(2)) == Decision::Unconfirmed);
-    assert(Classify(local, WaitResult{}) == Decision::Unconfirmed);
+    assert(Classify(local, local, true, Finished(ResultOk)) == Decision::LocalChanges);
+    assert(Classify(local, local, true, Finished(2)) == Decision::Unconfirmed);
+    assert(Classify(local, local, true, WaitResult{}) == Decision::Unconfirmed);
+    assert(Classify(local, local, true, ranOnly) == Decision::Unconfirmed);
     WaitResult timedOut = Finished(ResultOk);
     timedOut.timedOut = true;
-    assert(Classify(local, timedOut) == Decision::Unconfirmed);
+    assert(Classify(local, local, true, timedOut) == Decision::Unconfirmed);
     // Cloud changes still pending after the download are not a settled sync.
-    assert(Classify(cloud, Finished(ResultOk)) == Decision::Unconfirmed);
-    assert(Classify(1, Finished(ResultOk)) == Decision::Unconfirmed);
+    assert(Classify(cloud, cloud, true, Finished(ResultOk)) == Decision::Unconfirmed);
+    assert(Classify(1, 1, true, Finished(ResultOk)) == Decision::Unconfirmed);
 
     // The exit upload never runs on an unsettled or held launch sync.
     assert(UploadAllowed(Decision::Synchronized));
@@ -132,6 +152,79 @@ int main() {
     assert(AfterResolution(Choice::None, true, both, ranUnobserved) == Decision::HeldConflict);
     assert(AfterResolution(Choice::Local, true, local, Finished(ResultOk)) == Decision::HeldConflict);
     assert(AfterResolution(Choice::Cloud, true, cloud, Finished(ResultOk)) == Decision::HeldConflict);
+    // Only a resolved decision consumes the one-shot choice.
+    assert(IsResolved(Decision::ResolvedCloudAuto) && IsResolved(Decision::ResolvedCloud) &&
+           IsResolved(Decision::ResolvedLocal));
+    assert(!IsResolved(Decision::HeldConflict) && !IsResolved(Decision::Synchronized) &&
+           !IsResolved(Decision::Unconfirmed));
+
+    // The choice file is bound to one account and an expiry.
+    std::int64_t when = 0;
+    assert(ParseUtc("1970-01-01T00:00:00Z", when) && when == 0);
+    assert(ParseUtc("2026-11-26T21:13:45Z", when) && when == 1795727625);
+    assert(ParseUtc("2028-02-29T00:00:00Z", when) && when == 1835395200);
+    for (auto bad : {"2027-02-29T00:00:00Z", "2026-13-01T00:00:00Z", "2026-11-26T24:00:00Z", "2026-11-26 21:13:45Z",
+                     "2026-11-26T21:13:45", "2026-11-26T21:13:45+00:00", "1969-12-31T23:59:59Z", "2026-1a-26T21:13:45Z"})
+        assert(!ParseUtc(bad, when));
+    assert(UnixSeconds(FileTimeUnixEpoch) == 0);
+    assert(UnixSeconds(134401124177058934ull) == 1795638817);
+    constexpr std::uint32_t account = 22202;
+    const std::int64_t now = 1795727625 - 3600;  // an hour before the expiry below
+    const auto pending = EvaluateChoice("local account=22202 expires=2026-11-26T21:13:45Z\n", account, now);
+    assert(pending.status == ChoiceStatus::Pending && pending.choice == Choice::Local &&
+           pending.Effective() == Choice::Local && pending.account == account && !DiscardAtLaunch(pending.status));
+    assert(EvaluateChoice(" CLOUD  account=22202\texpires=2026-11-26T21:13:45Z\r\n", account, now).Effective() ==
+           Choice::Cloud);
+    const auto otherAccount = EvaluateChoice("local account=22203 expires=2026-11-26T21:13:45Z\n", account, now);
+    assert(otherAccount.status == ChoiceStatus::OtherAccount && otherAccount.Effective() == Choice::None &&
+           DiscardAtLaunch(otherAccount.status));
+    const auto expired = EvaluateChoice("local account=22202 expires=2026-11-26T21:13:45Z\n", account, 1795727625);
+    assert(expired.status == ChoiceStatus::Expired && expired.Effective() == Choice::None);
+    const auto tooFar = EvaluateChoice("local account=22202 expires=2026-12-04T21:13:46Z\n", account, now + 3600);
+    assert(tooFar.status == ChoiceStatus::TooFar && tooFar.Effective() == Choice::None);
+    assert(EvaluateChoice("local account=22202 expires=2026-12-03T21:13:45Z\n", account, now + 3600).status ==
+           ChoiceStatus::Pending);
+    // The old bare format no longer applies anywhere.
+    assert(EvaluateChoice("local\n", account, now).status == ChoiceStatus::Unbound);
+    assert(EvaluateChoice("cloud", account, now).Effective() == Choice::None);
+    for (auto bad : {"", "\r\n", "both account=22202 expires=2026-11-26T21:13:45Z",
+                     "local expires=2026-11-26T21:13:45Z account=22202", "local account=22202",
+                     "local account=022202 expires=2026-11-26T21:13:45Z", "local account=0 expires=2026-11-26T21:13:45Z",
+                     "local account=4294967296 expires=2026-11-26T21:13:45Z",
+                     "local account=22202 expires=2026-11-26T21:13:45Z extra",
+                     "local account=22202 expires=1795727625", "local account=2x202 expires=2026-11-26T21:13:45Z"}) {
+        const auto invalid = EvaluateChoice(bad, account, now);
+        assert(invalid.status == ChoiceStatus::Invalid && invalid.Effective() == Choice::None);
+        assert(DiscardAtLaunch(invalid.status));
+    }
+    assert(!DiscardAtLaunch(ChoiceStatus::Absent) && DiscardAtLaunch(ChoiceStatus::Used));
+    assert(std::string(ChoiceStatusName(ChoiceStatus::OtherAccount)) == "other-account");
+    assert(std::string(ChoiceStatusName(ChoiceStatus::TooFar)) == "expiry-too-far");
+
+    // Backups: keep the newest five and anything under a week old, never the current run.
+    std::uint64_t run = 0;
+    assert(ParseRun(L"134401124177058934", run) && run == 134401124177058934ull);
+    for (auto bad : {L"", L"0", L"0134401124177058934", L"1344011241770589x", L"12345678901234567890", L"-1"})
+        assert(!ParseRun(bad, run));
+    constexpr std::uint64_t day = 86400ull * FileTimeTicksPerSecond;
+    const std::uint64_t today = 134401124177058934ull;
+    assert(BackupsToPrune({}, today, today).empty());
+    // Eight backups, all over a week old, plus today's: today's and four more stay.
+    std::vector<std::uint64_t> runs{today};
+    for (std::uint64_t i = 1; i <= 8; ++i) runs.push_back(today - (7 + i) * day);
+    auto pruned = BackupsToPrune(runs, today, today);
+    assert((pruned == std::vector<std::uint64_t>{today - 12 * day, today - 13 * day, today - 14 * day, today - 15 * day}));
+    // Recent backups beyond the newest five stay.
+    std::vector<std::uint64_t> recent;
+    for (std::uint64_t i = 0; i < 9; ++i) recent.push_back(today - i * day / 2);
+    assert(BackupsToPrune(recent, today, today).empty());
+    // The current run is never pruned, even when it is old by the clock and not among the newest.
+    std::vector<std::uint64_t> skewed{today - 30 * day};
+    for (std::uint64_t i = 0; i < 6; ++i) skewed.push_back(today - (8 + i) * day);
+    pruned = BackupsToPrune(skewed, today - 30 * day, today);
+    assert((pruned == std::vector<std::uint64_t>{today - 13 * day}));
+    // A clock behind the backups prunes nothing that looks newer than now.
+    assert(BackupsToPrune(runs, today, today - 20 * day).empty());
 
     Report report;
     report.Add("app", "2868840").Flag("account_enabled", true).StateField("state_before", local)
