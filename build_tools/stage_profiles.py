@@ -125,6 +125,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     storage_trace = False
     hashed_companions = False
     system_companions = False
+    pipeline_cache = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -183,6 +184,12 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:
                     raise ValueError(f"The {option} option needs an empty marker, source profile and loader trace for AppID {app}.")
                 files[marker] = b""
+        cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
+        if (root / cache_marker).is_file():
+            if (root / cache_marker).stat().st_size or fields[6:7] != ["loader-trace"]:
+                raise ValueError(f"The D3D12 pipeline cache needs an empty marker and the loader trace for AppID {app}.")
+            files[cache_marker] = b""
+            pipeline_cache = True
         release_marker = f"steam-win32-release-renderer-{app}.txt"
         if (root / release_marker).is_file():
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
@@ -419,6 +426,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_STEAM_HANDOFF_LEGACY\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32SteamDiscovery.dll"]:
             raise ValueError("Use a Steam Core artifact with legacy Steam SDK support.")
+    if pipeline_cache:
+        variable = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
+            raise ValueError("Use a Steam Core artifact with the persistent Direct3D 12 pipeline cache.")
     if system_companions:
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:

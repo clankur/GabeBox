@@ -2275,6 +2275,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowLocalLow = false;
     bool shadowHostedXInput = false;
     bool shadowJitTrace = false;
+    bool shadowPipelineCache = false;
     bool shadowDxgi = false;
     bool shadowD3d12DefaultAdapter = false;
     bool shadowStreamlineUnavailable = false;
@@ -2392,6 +2393,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     }
                     shadowJitTrace = true;
                 }
+                // Persistent Direct3D 12 pipeline cache, kept per AppID and build in LocalState.
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-d3d12-pipeline-cache-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowPipelineCache = true;
+                }
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
                 shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -2458,6 +2468,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         ((shadowWorkingDirectory || shadowOriginalExecutable) && (!shadowRecipe ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
+                        (shadowPipelineCache && (!shadowRecipe || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         (shadowDynamicCompanions && (!shadowOriginalExecutable || !shadowFiles || !shadowTrace)) ||
                         (!accessibility.empty() && (!shadowAccessibilityDisabled || !shadowRecipe ||
@@ -3238,6 +3250,19 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             const auto crashReport = shadowLocalCrashReports ? shadowRoaming + L"\\xbox-crash-receipts.bin" : std::wstring{};
             const auto discoveryHive = shadowSteamSdkPath.empty() ? std::wstring{} : trialRoot + L"\\steam-discovery.dat";
             const auto appId = std::to_wstring(app);
+            // The loader-trace adapter appends the driver identity to this prefix.
+            std::wstring pipelineCache;
+            if (shadowPipelineCache) {
+                try {
+                    auto folder = co_await ApplicationData::Current().LocalFolder().CreateFolderAsync(
+                        L"D3D12PipelineCache", CreationCollisionOption::OpenIfExists);
+                    pipelineCache = std::wstring(folder.Path()) + L"\\" + appId + L"-" + shadowBuild;
+                } catch (winrt::hresult_error const&) {
+                    pipelineCache.clear();
+                }
+                report += pipelineCache.empty() ? L"steam_shadow_pipeline_cache=unavailable\r\n" :
+                    L"steam_shadow_pipeline_cache=profile\r\n";
+            }
             const std::pair<std::wstring, std::wstring> variables[] = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
                 {L"XBOX_WIN32_DOCUMENTS", shadowDocumentsPath},
@@ -3258,6 +3283,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 // directory is removed when the game exits.
                 {L"DOTNET_EnableEventPipe", shadowJitTrace ? L"1" : L""},
                 {L"XBOX_WIN32_PSO_TRACE", shadowJitTrace && shadowTrace ? L"1" : L""},
+                {L"XBOX_WIN32_PSO_CACHE", pipelineCache},
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},
