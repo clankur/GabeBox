@@ -1142,6 +1142,100 @@ void WINAPI XboxPostQuitMessage(int exitCode) {
     if (native) native(exitCode);
 }
 
+/* Timers on virtual windows. User32 cannot target these handles, so each timer
+   becomes a WM_TIMER in this backend's queue. As in Windows, at most one WM_TIMER per
+   timer waits in the queue, a callback timer is delivered through DispatchMessage, and
+   timers end with KillTimer or their window. Godot completes its first window
+   activation, and so its keyboard and controller focus, from such a timer. */
+#define TIMER_COUNT 32
+typedef struct HostedTimer {
+    HWND window;
+    UINT_PTR id;
+    UINT interval;
+    DWORD due;
+    TIMERPROC procedure;
+} HostedTimer;
+static HostedTimer timers[TIMER_COUNT];
+
+static BOOL TimerQueued(HWND window, UINT_PTR id) {
+    for (UINT i = 0; i < messageCount; ++i)
+        if (messages[i].hwnd == window && messages[i].message == WM_TIMER && messages[i].wParam == id) return TRUE;
+    return FALSE;
+}
+
+static void PostDueTimers(void) {
+    const DWORD now = GetTickCount();
+    for (UINT i = 0; i < TIMER_COUNT; ++i) {
+        HostedTimer *timer = &timers[i];
+        if (!timer->window) continue;
+        if (!XboxFindWindow(timer->window)) {
+            timer->window = NULL;
+            continue;
+        }
+        if ((LONG)(now - timer->due) < 0 || TimerQueued(timer->window, timer->id)) continue;
+        if (messageCount == MESSAGE_COUNT) return;
+        messages[messageCount++] = (MSG){timer->window, WM_TIMER, timer->id, (LPARAM)timer->procedure, now, {0, 0}};
+        timer->due = now + timer->interval;
+    }
+}
+
+static BOOL HostedTimersActive(void) {
+    for (UINT i = 0; i < TIMER_COUNT; ++i) if (timers[i].window) return TRUE;
+    return FALSE;
+}
+
+UINT_PTR WINAPI XboxSetTimer(HWND handle, UINT_PTR id, UINT interval, TIMERPROC procedure) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef UINT_PTR (WINAPI *Native)(HWND, UINT_PTR, UINT, TIMERPROC);
+        Native native = (Native)(void *)NativeWindowProcedure("SetTimer");
+        return native ? native(handle, id, interval, procedure) : 0;
+    }
+    if (!XboxFindWindow(handle)) {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    if (interval < USER_TIMER_MINIMUM) interval = USER_TIMER_MINIMUM;
+    if (interval > USER_TIMER_MAXIMUM) interval = USER_TIMER_MAXIMUM;
+    HostedTimer *slot = NULL;
+    for (UINT i = 0; i < TIMER_COUNT && !slot; ++i)
+        if (timers[i].window == handle && timers[i].id == id) slot = &timers[i];
+    for (UINT i = 0; i < TIMER_COUNT && !slot; ++i)
+        if (!timers[i].window) slot = &timers[i];
+    if (!slot) {
+        SetLastError(ERROR_NO_SYSTEM_RESOURCES);
+        return 0;
+    }
+    *slot = (HostedTimer){handle, id, interval, GetTickCount() + interval, procedure};
+    HANDLE wake = WindowWake();
+    if (wake) SetEvent(wake);
+    return id ? id : 1;
+}
+
+BOOL WINAPI XboxKillTimer(HWND handle, UINT_PTR id) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef BOOL (WINAPI *Native)(HWND, UINT_PTR);
+        Native native = (Native)(void *)NativeWindowProcedure("KillTimer");
+        return native ? native(handle, id) : FALSE;
+    }
+    BOOL found = FALSE;
+    for (UINT i = 0; i < TIMER_COUNT; ++i) {
+        if (timers[i].window == handle && timers[i].id == id) {
+            timers[i].window = NULL;
+            found = TRUE;
+        }
+    }
+    for (UINT i = 0; i < messageCount;) {
+        if (messages[i].hwnd == handle && messages[i].message == WM_TIMER && messages[i].wParam == id) {
+            for (UINT j = i + 1; j < messageCount; ++j) messages[j - 1] = messages[j];
+            --messageCount;
+        } else {
+            ++i;
+        }
+    }
+    if (!found) SetLastError(ERROR_INVALID_PARAMETER);
+    return found;
+}
+
 static BOOL PeekHostedMessage(MSG *message, HWND filter, UINT first, UINT last, UINT remove, LPCSTR name) {
     if (!XboxWindowThread() || !message) return FALSE;
     DispatchSentMessages();
@@ -1161,6 +1255,7 @@ static BOOL PeekHostedMessage(MSG *message, HWND filter, UINT first, UINT last, 
     XboxPollWglHostEvents();
     const DWORD error = GetLastError();
     PollHostedPointer();
+    PostDueTimers();
     SetLastError(error);
     HWND close = InterlockedExchangePointer(&hostClose, NULL);
     if (close && XboxFindWindow(close) && !XboxPostMessageW(close, WM_CLOSE, 0, 0))
@@ -1208,7 +1303,7 @@ static BOOL GetHostedMessage(MSG *message, HWND filter, UINT first, UINT last, L
     HANDLE wake[] = {windowWake, sendWake};
     while (!XboxPeekMessageW(message, filter, first, last, PM_REMOVE)) {
         // SDL's offscreen backend supplies close events from its mailbox when pumped.
-        const DWORD delay = XboxWglHostEventsActive() ? 8 : INFINITE;
+        const DWORD delay = XboxWglHostEventsActive() ? 8 : HostedTimersActive() ? USER_TIMER_MINIMUM : INFINITE;
         if (WaitForMultipleObjectsEx(ARRAYSIZE(wake), wake, FALSE, delay, FALSE) == WAIT_FAILED) return -1;
     }
     return message->message != WM_QUIT;
@@ -1236,6 +1331,10 @@ static LRESULT DispatchHostedMessage(const MSG *message, LPCSTR name) {
         typedef LRESULT (WINAPI *Native)(const MSG *);
         Native native = (Native)(void *)NativeWindowProcedure(name);
         return native ? native(message) : 0;
+    }
+    if (message->message == WM_TIMER && message->lParam) {
+        ((TIMERPROC)(void *)message->lParam)(message->hwnd, WM_TIMER, message->wParam, GetTickCount());
+        return 0;
     }
     XboxWindow *window = XboxFindWindow(message->hwnd);
     return window ? window->procedure(message->hwnd, message->message, message->wParam, message->lParam) : 0;

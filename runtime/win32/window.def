@@ -62,3 +62,5 @@ EXPORTS
     GetParent=XboxGetParent @60
     CreateDIBSection=XboxCreateDIBSection @61
     DeleteObject=XboxDeleteObject @62
+    SetTimer=XboxSetTimer @63
+    KillTimer=XboxKillTimer @64
