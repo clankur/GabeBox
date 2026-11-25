@@ -24,6 +24,19 @@ checks, record what was observed, and name what was not. A verification that end
 is a success. A verification that rounds that up to "verified" is a failure, and it costs
 the project a title in the coverage report that will not survive the next recheck.
 
+Everything the implementing session tells you is a claim, not a finding — including its
+summary, its numbers and its confidence. Reproduce each one from the raw artifacts
+yourself: re-measure the trace rather than quoting its FPS, read the observation and
+loader records rather than its description of them, and confirm the package version,
+Steam build and commit you are actually looking at match the ones it says it tested. A
+claim you cannot reproduce is unverified, however plausible it sounds, and a claim that
+quietly swaps one thing for another — an import that resolved for a function that
+behaves, a first frame for a playable game, input delivered for input acted on — is the
+most common way a title gets counted that should not have been. Where you can choose,
+choose the scene most likely to break the claim rather than the one that was
+demonstrated to you, and be especially careful with a result produced by tooling written
+in the same change: prefer the project's shared commands or an independent caller.
+
 Never implement the fix you are verifying. If you find the cause, report it; let the
 implementer change the code, and verify the next build.
 
@@ -60,9 +73,10 @@ does not reload, a pad that goes dead after a focus change.
 
 `scripts/verify-session.py` runs that plan: for each phase it drives the game with
 `tools.xbox_remote_input`, samples the hosted input and GPU mailboxes while that input is
-in flight, takes a screenshot at the start of the gameplay phases, records each phase's
-UTC window, collects the run artifacts at the end, measures the settled windows, and
-writes `verification.json`, a coverage-shaped `trial.json` and `report.md`. Start with
+in flight, brackets each scene phase with screenshots, records each phase's UTC window,
+collects the run artifacts at the end, measures the settled windows, screens every
+capture with `scripts/inspect-frames.py`, and writes `verification.json`, a
+coverage-shaped `trial.json` and `report.md`. Start with
 `--plan`, and `--dry-run` to see the exact commands without touching the console.
 
 ```sh
@@ -73,6 +87,7 @@ python3 "$verify" --version "$package_version" --app-id "$app_id" \
     --image-name "$exe_basename" --env-file "$xbox_env" \
     --internal-resolution 1920x1080 --output-resolution 1920x1080 \
     --input-script wander=scripts/"$title"-wander.txt \
+    --reference analysis/"$title"-reference \
     --output verify-$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
@@ -114,6 +129,7 @@ delivery, audio, save and reload, and return to the library. In short:
 | --- | --- |
 | Frame rate | `tools.measure` over a settled 30 s window: the average should be about 60 FPS, and the weakest gameplay window decides. Hitches are recorded as issues, not folded into the average |
 | Gameplay is visible | a screenshot taken during play (`shot:` step or the endpoint — it does return real TV content), or the package's game capture; the startup BMP is a startup frame and persists all launch, so it is not evidence of the live scene |
+| The picture is the game | captures from several scenes, screened with `scripts/inspect-frames.py` for black, flat, magenta, noisy, frozen or unlike-reference frames, and then looked at: objects, scenery, UI and colour all present and correct |
 | Controller | `inspect-input` showing `host-activity` and an acknowledged serial while a named input was held, plus the on-screen response |
 | Keyboard | the same, for the key queue, plus the text actually appearing in the game |
 | Audio | initialization from the SDL audio checkpoints or the loader trace's `asset xaudio27-activation` record, plus a person confirming a named sound — this project measures no audio signal |
@@ -142,8 +158,14 @@ Write the report as `report.md` beside the artifacts, and keep it to what happen
 - The numbers, in full, per measured window: average FPS, lowest rolling one-second
   count, longest frame interval, how many intervals ran past 33.33 ms, internal and
   output resolution, and whether frames used shared GPU textures or CPU uploads.
+- The captures, and what they show: which scenes were photographed, what the screen
+  flagged, and what you saw when you opened them. A rendering defect belongs in the
+  verdicts with its capture attached, not as a footnote under a passing frame rate.
+- Where your observation and the implementing session's claim disagree, both, quoted:
+  their sentence, your evidence, and which raw artifact settles it. Do not split the
+  difference or quietly adopt their wording.
 - An issues list separate from the verdicts: every hitch, every rolling-second dip, every
-  CPU upload, each tied to the phase it happened in. A title that averages 60 and stalls
+  CPU upload, every flagged frame, each tied to the phase it happened in. A title that averages 60 and stalls
   for 450 ms in combat passes the frame-rate check and still has a defect worth fixing —
   both facts belong in the report, and burying either one makes it useless.
 - What remains unobserved and exactly what would settle it — a package feature, another
@@ -173,5 +195,7 @@ console checks named and pending. Report once; do not send repeated waiting mess
 | File | Read it for |
 | --- | --- |
 | `references/metrics.md` | Per-check commands, field meanings, pass criteria, and what each check does not establish |
-| `references/gameplay-plan.md` | The phase-by-phase play plan, per-genre adaptation, and the capability contracts for input playback and audio reporting |
-| `scripts/verify-session.py` | Runs the plan, samples each phase, measures the windows, writes the report |
+| `references/gameplay-plan.md` | The phase-by-phase play plan, per-genre adaptation, and the audio capability gap |
+| `references/visual-checks.md` | Capturing and screening frames, the artifact taxonomy, reference sets, and judging whether the scene is the game |
+| `scripts/verify-session.py` | Runs the plan, drives and samples each phase, measures the windows, screens the captures, writes the report |
+| `scripts/inspect-frames.py` | Screens PNG and BMP captures for artifacts, frozen scenes and unlike-reference frames |

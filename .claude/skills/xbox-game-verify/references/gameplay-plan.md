@@ -40,8 +40,11 @@ plan:
 - **A measured window must fit inside the play window.** The 30 s frame window starts
   8 s after the phase begins, so the phase has to keep playing for at least 38 s — hence
   42 s for `wander` and `interact`.
-- **Screenshots cost the game about half a second**, so the plan takes one at the start
-  of a phase, before the measured window opens.
+- **Screenshots cost the game about half a second**, so each scene phase is bracketed
+  rather than interrupted: one capture as the phase opens, one as it closes, both
+  outside the measured window. Those captures are the evidence for whether the picture
+  is the game at all — see `visual-checks.md` for the screening and the artifact
+  taxonomy.
 
 Capture a frame early — during `title` or `world`, not at the end. If it is black or
 wrong, stop and report; the later phases cannot be interpreted anyway.
@@ -103,13 +106,16 @@ With remote input, an unattended session genuinely verifies:
 - that controller and keyboard input were **delivered** — published by the host and
   acknowledged by the game-side adapter,
 - presentation cadence, frame pacing and transport over a settled window,
-- what the screen looked like, from screenshots taken during play,
+- what the screen looked like, from screenshots taken during play, screened for black,
+  flat, magenta, noisy, frozen and unlike-reference frames,
 - the loader trace and the child's exit code for a staged Win32 trial.
 
 It cannot settle, without someone watching or a later reading of the captures:
 
 - whether the game **responded correctly** to the input — delivery is not response, and
-  a screenshot per phase is a thin proxy for it,
+  a pair of screenshots per phase is a thin proxy for it,
+- whether anything is missing from a scene that otherwise screens clean: a character, a
+  prop, a lighting pass, a UI layer,
 - audio output,
 - whether a reloaded save really matches the state that was saved,
 - anything on a pointer-driven title.

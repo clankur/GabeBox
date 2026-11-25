@@ -85,8 +85,13 @@ SMOKE = ('launch', 'world', 'wander', 'return')
 
 # Coverage counts a title on these five checks (tools/steam_compatibility.py CHECKS).
 COVERAGE_CHECKS = ('gameplay', 'controller', 'audio', 'save-reload', 'return-to-library')
-CHECKS = ('gameplay_visible', 'controller', 'keyboard', 'audio', 'fps_average',
-          'save_reload', 'return_to_library')
+CHECKS = ('gameplay_visible', 'scene_fidelity', 'controller', 'keyboard', 'audio',
+          'fps_average', 'save_reload', 'return_to_library')
+# Phases whose captures are of the running game, so worth screening for artifacts.
+SCENE_PHASES = ('world', 'wander', 'interact', 'systems', 'reload')
+# A frame screen flag that means the picture itself is wrong.
+SCENE_FAILURES = ('black-frame', 'flat-frame', 'blown-out', 'magenta-blocks', 'noise',
+                  'low-detail', 'static-scene', 'unlike-reference')
 
 
 def repo_root(start: Path) -> Path:
@@ -166,10 +171,12 @@ class Session:
         else:
             cycle, seconds = CYCLES[name]
             steps = fill_steps(list(cycle), seconds, play_seconds)
-            # One screenshot at the start of the phase: it costs the game about half a
-            # second, so it stays outside the measured window, which begins at +8 s.
-            if phase_dir is not None and name in ('title', 'world', 'wander', 'interact', 'reload'):
-                steps = [f'shot:{phase_dir}/{name}.png'] + steps
+            # Screenshots cost the game about half a second, so they bracket the
+            # measured window (which runs from +8 s) rather than falling inside it:
+            # one before it opens, one after it closes.
+            if phase_dir is not None and name in ('title',) + SCENE_PHASES:
+                steps = ([f'shot:{phase_dir}/{name}-open.png'] + steps
+                         + [f'shot:{phase_dir}/{name}-close.png'])
         command += steps
         printable = self.show(command + ([] if steps else []))
         if self.args.dry_run:
@@ -265,6 +272,24 @@ class Session:
         if driver:
             record['input_driver'] = driver
 
+    def screen_frames(self) -> dict:
+        """Screen every capture for rendering artifacts and missing content."""
+        if self.output is None:
+            return {'state': 'unobserved', 'reason': 'no --output directory, so no captures were kept'}
+        script = Path(__file__).with_name('inspect-frames.py')
+        command = ['python3', str(script), str(self.output),
+                   '--json', str(self.output / 'frames.json')]
+        if self.args.reference:
+            command += ['--reference', self.args.reference]
+        step = self.run(command)
+        report = self.output / 'frames.json'
+        if report.exists():
+            try:
+                step['screen'] = json.loads(report.read_text(encoding='utf-8'))
+            except ValueError:
+                step['screen'] = None
+        return step
+
     def collect(self) -> dict:
         record = {'phase': 'collect', 'started_utc': utc_now(), 'steps': []}
         run_id = self.run_id or 'RUN_ID'
@@ -346,7 +371,31 @@ def phase_screenshots(record: dict, output: Path | None) -> list[str]:
     return sorted(path.name for path in folder.glob('*.png')) if folder.is_dir() else []
 
 
-def verdicts(records: list[dict], measured: list[dict], sdl_trace: str, output: Path | None) -> dict:
+def scene_verdict(screen: dict, answers: dict) -> tuple:
+    """Did the captures look like this game, or like a broken rendering of it?"""
+    report = (screen or {}).get('screen')
+    if not report or not report.get('captures'):
+        return ('unobserved', 'no captures were screened for artifacts')
+    serious = [item for item in report.get('issues', ())
+               if item.get('flag') in SCENE_FAILURES
+               and any(phase in item.get('file', '') or phase == item.get('phase')
+                       for phase in SCENE_PHASES + ('title',))]
+    counted = f"{report['captures']} capture(s) screened"
+    if serious:
+        listed = '; '.join(f"{item['flag']} in {item['file']}" for item in serious[:4])
+        return ('fail', f'{counted}; the picture itself is wrong: {listed}')
+    if answers.get('scene') == 'no':
+        return ('fail', f'{counted} with no flags, but the operator reported the scene does not '
+                        'represent the game')
+    if answers.get('scene') == 'yes':
+        return ('pass', f'{counted} with no artifact flags, and the operator confirmed the scene, '
+                        'its objects and its scenery look like the game')
+    return ('unobserved', f'{counted} with no artifact flags, but nobody confirmed the captures '
+                          'represent the game — open them and say')
+
+
+def verdicts(records: list[dict], measured: list[dict], sdl_trace: str, output: Path | None,
+             screen: dict | None = None) -> dict:
     by_name = {record['phase']: record for record in records}
     answers = {name: (record.get('operator') or {}).get('answer') for name, record in by_name.items()}
     out = {}
@@ -389,6 +438,8 @@ def verdicts(records: list[dict], measured: list[dict], sdl_trace: str, output: 
         out['gameplay_visible'] = ('fail', 'the operator did not see the scene respond')
     else:
         out['gameplay_visible'] = ('unobserved', 'no gameplay capture and no operator confirmation')
+
+    out['scene_fidelity'] = scene_verdict(screen or {}, answers)
 
     sampled = [entry for entry in measured if (entry.get('result') or {}).get('fps') is not None]
     if sampled:
@@ -464,10 +515,19 @@ def pacing_issues(measured: list[dict]) -> list[dict]:
     return issues
 
 
+def frame_issues(screen: dict | None) -> list[dict]:
+    """Capture problems, reported beside the pacing ones."""
+    report = (screen or {}).get('screen') or {}
+    return [{'phase': item.get('phase') or 'captures', 'kind': item['flag'],
+             'detail': f"{item['file']}: {item['detail']}"}
+            for item in report.get('issues', ())]
+
+
 def coverage_trial(payload: dict) -> dict:
     """A trial record in the shape tools.steam_compatibility coverage --evidence reads."""
     checks = payload['checks']
-    gameplay = checks.get('gameplay_visible', {}).get('verdict') == 'pass'
+    gameplay = (checks.get('gameplay_visible', {}).get('verdict') == 'pass'
+                and checks.get('scene_fidelity', {}).get('verdict') != 'fail')
     best = max((entry.get('result') or {} for entry in payload['measured']),
                key=lambda result: result.get('fps', 0), default={})
     return {
@@ -523,6 +583,19 @@ def write_report(output: Path, payload: dict) -> Path:
                          f"{result.get('intervals_over_33_33ms', '—')} | {transport} |")
     else:
         lines.append('No window was measured.')
+    screen = payload.get('frame_screen') or {}
+    if screen:
+        lines += ['', '## Captures', '',
+                  f"{screen.get('captures', 0)} screened, {screen.get('flagged', 0)} flagged. "
+                  'A clean screen is not proof the scene is right: it cannot see a missing object, '
+                  'the wrong scenery, or a UI layer that failed to draw.', '']
+        for frame in screen.get('frames', ())[:24]:
+            marks = ', '.join(item['flag'] for item in frame.get('flags', ())) or 'clean'
+            reference = (f" · nearest reference {frame['nearest_reference']} "
+                         f"({frame['reference_distance']})" if 'reference_distance' in frame else '')
+            lines.append(f"- `{frame['phase']}/{frame['file']}` {frame['width']}x{frame['height']}, "
+                         f"detail {frame['detail']}, {frame['distinct_colours']} colours: "
+                         f"{marks}{reference}")
     lines += ['', '## Issues', '']
     lines += ([f"- **{issue['kind']}** in `{issue['phase']}`: {issue['detail']}"
                for issue in payload['issues']] or ['- None recorded in the measured windows.'])
@@ -560,6 +633,8 @@ def main() -> int:
     parser.add_argument('--skip', action='append', default=[], metavar='PHASE')
     parser.add_argument('--input-script', action='append', default=[], metavar='PHASE=FILE',
                         help='drive this phase from a tools.xbox_remote_input script file')
+    parser.add_argument('--reference', metavar='DIR',
+                        help='directory of known-good captures for this title, to compare against')
     parser.add_argument('--no-drive', dest='drive', action='store_false',
                         help='do not send input; a person plays each phase instead')
     parser.add_argument('--require-checkpoint', action='append', default=[], metavar='TRACE')
@@ -629,6 +704,16 @@ def main() -> int:
     session.records.append(session.collect())
     measured = session.measure(windows)
 
+    print('[frames] Screening the captures for artifacts and missing content.')
+    screen = session.screen_frames()
+    scene_answer = None
+    if not args.dry_run and not args.non_interactive:
+        scene_answer = session.ask('Open the captures: do the scene, its objects, its scenery and '
+                                   'its UI look like this game?')
+        session.records.append({'phase': 'scene', 'prompt': 'review the captures',
+                                'started_utc': utc_now(), 'ended_utc': utc_now(),
+                                'steps': [], 'operator': scene_answer})
+
     sdl_path = None if session.output is None else session.output / 'sdl-startup.txt'
     sdl_trace = sdl_path.read_text(encoding='utf-8') if sdl_path and sdl_path.exists() else ''
 
@@ -638,8 +723,9 @@ def main() -> int:
         'image_name': args.image_name, 'run_id': session.run_id, 'started_utc': started,
         'ended_utc': utc_now(), 'phase_set': args.phase_set, 'driven': args.drive,
         'interactive': not args.non_interactive, 'phases': session.records, 'measured': measured,
-        'checks': verdicts(session.records, measured, sdl_trace, session.output),
-        'issues': pacing_issues(measured), 'commands': session.commands,
+        'checks': verdicts(session.records, measured, sdl_trace, session.output, screen),
+        'issues': pacing_issues(measured) + frame_issues(screen),
+        'frame_screen': (screen or {}).get('screen'), 'commands': session.commands,
     }
     payload['trial'] = coverage_trial(payload)
     if args.dry_run:
