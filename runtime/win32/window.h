@@ -20,6 +20,7 @@ typedef struct XboxWindow {
     BOOL destroying;
     HICON smallIcon;
     HICON largeIcon;
+    BOOL sizeMoveSent;
 } XboxWindow;
 
 BOOL XboxWindowThread(void);

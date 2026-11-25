@@ -504,7 +504,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     const RECT bounds = {x, y, x + width, y + height};
     AcquireSRWLockExclusive(&windowGeometryLock);
     *window = (XboxWindow){handle, entry->procedure, classInstance, bounds, style, exStyle, 0,
-        (ATOM)(entry - classes + 1), 0, 0, FALSE, NULL, NULL};
+        (ATOM)(entry - classes + 1), 0, 0, FALSE, NULL, NULL, FALSE};
     ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
@@ -651,6 +651,16 @@ BOOL WINAPI XboxShowWindow(HWND handle, int command) {
         else window->style &= ~WS_VISIBLE;
         window->procedure(handle, WM_SHOWWINDOW, showing, 0);
         if (!showing && window->handle == handle && !(window->style & WS_VISIBLE)) ClearWindowActivation(handle);
+        // Windows sends WM_SIZE and WM_MOVE the first time a window is shown; engines such as Unity
+        // take their render size from them.
+        if (showing && window->handle == handle && !window->destroying && !window->sizeMoveSent) {
+            window->sizeMoveSent = TRUE;
+            const RECT bounds = window->bounds;
+            window->procedure(handle, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(bounds.right - bounds.left, bounds.bottom - bounds.top));
+            if (window->handle == handle) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(bounds.left, bounds.top));
+            if (window->handle != handle) return previous;
+        }
     }
     if (activationChange == change && window->handle == handle && !window->destroying &&
             (window->style & WS_VISIBLE) && (command == SW_SHOW || command == SW_SHOWNORMAL ||
@@ -681,12 +691,14 @@ BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int wi
     AcquireSRWLockExclusive(&windowGeometryLock);
     window->bounds = (RECT){x, y, x + width, y + height};
     ReleaseSRWLockExclusive(&windowGeometryLock);
-    if (width != previous.right - previous.left || height != previous.bottom - previous.top) {
-        XboxResizeCurrentContext(window);
+    // As DefWindowProc does for WM_WINDOWPOSCHANGED, report size and position unless the caller excluded them.
+    if (width != previous.right - previous.left || height != previous.bottom - previous.top) XboxResizeCurrentContext(window);
+    if (!(flags & SWP_NOSIZE)) {
+        window->sizeMoveSent = TRUE;
         window->procedure(handle, WM_SIZE, SIZE_RESTORED, MAKELPARAM(width, height));
     }
     if (window->handle != handle) return FALSE;
-    if (x != previous.left || y != previous.top) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(x, y));
+    if (!(flags & SWP_NOMOVE)) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(x, y));
     if (window->handle != handle) return FALSE;
     if (flags & SWP_SHOWWINDOW) XboxShowWindow(handle, (flags & SWP_NOACTIVATE) ? SW_SHOWNA : SW_SHOW);
     if (flags & SWP_HIDEWINDOW) XboxShowWindow(handle, SW_HIDE);
