@@ -30,7 +30,8 @@ Big Picture closes its WebView when the renderer reports `process-error:...`, in
 - `game-kept-foreground`
 - `game-overlay-unavailable`
 - `webview-restart-after-game` or `webview-restart-for-game`
-- `game-adopted`
+- `game-adopted`, or `game-exited-before-adopt` when the game exited during the restart or its process is gone when Big Picture is ready. Big Picture then adopts nothing and leaves the library free for another title.
+- `game-exited-unreported`, when a configured Play finds that the current game's process is gone but its exit was never reported, and releases the game
 
 The report keeps the first renderer script failure as `renderer_error`. When more follow, it also writes `renderer_error_count` and `renderer_error_latest`, which records the latest failure with the status it arrived in. Valve's audio store sends `Audio.GetSupportedFeatures` once at startup and has no rejection handler. The bridge now answers that request as an unavailable service, so it no longer fills `renderer_error`.
 

@@ -184,6 +184,9 @@
                             // Shown again: frames and the native panel's hosted input must flow.
                             if (!runner.steamSdlRunning()) return {ok: false, reason: "game-exited"};
                             return nativeView && nativeView.confirmInput ? nativeView.confirmInput(3000) : {ok: true};
+                        }, function () {
+                            // Liveness only: lets a restarted Big Picture skip a game that exited meanwhile.
+                            return runner.steamSdlRunning();
                         });
                     }).then(function (shown) {
                         menuOpening = false;

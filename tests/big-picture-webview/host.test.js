@@ -804,6 +804,97 @@ test("a game that cannot be shown again is handed to a restarted Big Picture wit
     assert.match(app.reports.at(-1), /status=game-returned-to-steam/);
 });
 
+// Plays a game, covers it with Valve's overlay, fails the renderer, and lets both restore
+// attempts fail, so Big Picture restarts for the game. Stops while the new session warms.
+async function restartingForGame(appId, running) {
+    const played = await playingPrimaryGame(appId), {app} = played;
+    let attempts = 0;
+    const restore = async () => { attempts++; return false; };
+    assert.equal(await app.shell.showForGame(appId, 3, restore, () => true, undefined, running), true);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    await drain();
+    app.expire();
+    await drain();
+    assert.equal(attempts, 2);
+    assert.equal(app.owners.length, 2);
+    assert.match(app.reports.at(-1), /webview_recovery_5=webview-restart-for-game appid=42\r\n/);
+    return {...played, overlayEvents: () => app.replies.filter(e => e.event === "xbox-game" && e.overlay).length};
+}
+
+test("a game that exits while Big Picture restarts for it is not adopted and leaves the library usable", async () => {
+    const appId = 42, {app, failure, overlayEvents} = await restartingForGame(appId);
+    const overlays = overlayEvents();
+    // The exit reaches the warming session, which cannot return to Steam yet.
+    await app.shell.resume(appId);
+    await drain();
+    await app.advance("gamepad-ready");
+    assert.equal(failure(), undefined);
+    const report = app.reports.at(-1);
+    assert.match(report, /webview_recovery_6=game-exited-before-adopt appid=42\r\n/);
+    assert.doesNotMatch(report, /game-adopted/);
+    assert.match(report, /\r\ngame-exited-before-adopt\r\n/);
+    assert.equal(overlayEvents(), overlays, "Valve is never told the exited game is running");
+    app.incoming.push(JSON.stringify({method: "resume-game", id: 2, appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(app.replies.find(reply => reply.id === 2), {id: 2, result: "unavailable"});
+    assert.equal(await app.shell.playConfiguredTrial(43), "presented");
+});
+
+test("an exit reported before the restarted session starts warming still prevents adoption", async () => {
+    const appId = 42, app = fixture({primary: true, xaml: true, hostedApps: [appId]});
+    let releaseIdentity, attempts = 0, sessions = 0;
+    const ready = app.start({
+        session: () => ++sessions < 2 ? Promise.resolve({steamId: "76561198000000001"}) :
+            new Promise(resolve => { releaseIdentity = () => resolve({steamId: "76561198000000001"}); }),
+        async play(_id, handoff) { await handoff(); return "presented"; }
+    });
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    app.incoming.push(JSON.stringify({method: "play", id: 1, appId}));
+    await app.advance("gamepad-ready");
+    assert.equal(await app.shell.showForGame(appId, 3, async () => { attempts++; return false; }, () => true), true);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    await drain();
+    app.expire();
+    await drain();
+    assert.equal(attempts, 2);
+    assert.equal(app.owners.length, 1, "the restarted session is still verifying the account");
+    await app.shell.resume(appId);
+    releaseIdentity();
+    await drain();
+    assert.equal(app.owners.length, 2);
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /game-exited-before-adopt appid=42/);
+    assert.doesNotMatch(app.reports.at(-1), /game-adopted/);
+});
+
+test("a restarted Big Picture checks the game is alive before adopting it", async () => {
+    let alive = true;
+    const appId = 42, {app, overlayEvents} = await restartingForGame(appId, () => alive);
+    const overlays = overlayEvents();
+    // No exit is reported, but the process is gone by the time Valve is ready.
+    alive = false;
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /webview_recovery_6=game-exited-before-adopt appid=42\r\n/);
+    assert.equal(overlayEvents(), overlays);
+    assert.equal(await app.shell.playConfiguredTrial(43), "presented");
+});
+
+test("an adopted game that dies without an exit report does not hold the library busy", async () => {
+    let alive = true;
+    const appId = 42, {app} = await restartingForGame(appId, () => alive);
+    await app.advance("gamepad-ready");
+    assert.match(app.reports.at(-1), /webview_recovery_6=game-adopted appid=42\r\n/);
+    assert.equal(await app.shell.playConfiguredTrial(43), "busy");
+    alive = false;
+    assert.equal(await app.shell.playConfiguredTrial(43), "presented");
+    const report = app.reports.at(-1);
+    assert.match(report, /webview_recovery_7=game-exited-unreported appid=42\r\n/);
+    assert.match(report, /\r\ngame-returned-to-steam\r\n/);
+    assert.deepEqual(app.replies.filter(e => e.event === "xbox-game").at(-1), {event: "xbox-game", appId: 0, overlay: false});
+});
+
 test("a signed hosted profile releases the primary renderer and reopens it for the owning game", async () => {
     const appId = 42, lookups = [];
     const app = fixture({primary: true, xaml: true, async findInstalled(name) {

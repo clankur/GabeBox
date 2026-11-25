@@ -138,6 +138,7 @@ class ObserverTests(unittest.TestCase):
             'webview_recovery_11': f'game-input-resume-failed appid={APP_ID} reason=input-background',
             'webview_recovery_12': f'game-input-resume-failed appid={APP_ID} reason=Input_Background',
             'webview_recovery_10': f'game-overlay-unavailable appid={APP_ID}',
+            'webview_recovery_13': f'game-exited-before-adopt appid={APP_ID}',
             'webview_recovery_1': f'game-webview-lost appid={APP_ID} covered=1 '
                                   'cause=process-error:owner:2:unresponsive:259:none',
             'webview_recovery_3': 'game-restored appid=1 account=76561198000000001',
@@ -147,7 +148,8 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(web['webview_recovery'], [
             f'game-webview-lost appid={APP_ID} covered=1 cause=process-error:owner:2:unresponsive:259:none',
             f'game-restored appid={APP_ID}', f'game-overlay-unavailable appid={APP_ID}',
-            f'game-input-resume-failed appid={APP_ID} reason=input-background'])
+            f'game-input-resume-failed appid={APP_ID} reason=input-background',
+            f'game-exited-before-adopt appid={APP_ID}'])
         self.assertEqual(web['game_frame_latest_sample'], {
             'visible': '1', 'native_menu_chords': '1', 'native_menu_chords_ignored': '2',
             'native_menu_chords_expired': '0', 'native_menu_requests': '1', 'native_input_active': '1',

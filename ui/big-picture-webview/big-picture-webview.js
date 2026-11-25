@@ -1,6 +1,9 @@
 (function () {
     "use strict";
     var session, releasedGame;
+    // A running game handed to a restarting Big Picture. Its exit can arrive before the new
+    // session is ready to adopt it, so the exit is kept here until adoption.
+    var pendingAdoption;
     // Valve's controls must run script and draw within this bound once they are requested
     // over a game. A renderer that cannot (it showed only white and ignored the controller
     // on Slay the Spire 2) is treated as failed, which hands the game back.
@@ -24,6 +27,13 @@
             game.returning.then(clear, clear);
         }
         return game.returning;
+    }
+
+    // running: optional liveness hook for a game's process. A game without one counts as
+    // running until its exit is reported.
+    function gameAlive(running) {
+        if (typeof running !== "function") return true;
+        try { return !!running(); } catch (_) { return false; }
     }
 
     function switchView(to, from) {
@@ -141,7 +151,7 @@
         function show(to, from) {
             return switchView(to, from);
         }
-        var playingApp = 0, presented = false, returnToGame, quitGame, confirmGame, raising, overlayTimer;
+        var playingApp = 0, presented = false, returnToGame, quitGame, confirmGame, gameRunning, raising, overlayTimer;
         function recordGameFrame(appId, stage, stats) {
             if (failed || !playing || appId !== playingApp || typeof stats !== "string" ||
                 (stage !== "first" && stage !== "sample" && stage !== "fallback" && stage !== "media" &&
@@ -228,12 +238,14 @@
             }).catch(fail);
         }
         // confirmInput: optional; resolves {ok, reason} once the game's frames and hosted
-        // input are flowing again after it is shown.
-        function showForGame(appId, from, restore, requestExit, confirmInput) {
+        // input are flowing again after it is shown. running: optional; reports whether the
+        // game's process is still alive.
+        function showForGame(appId, from, restore, requestExit, confirmInput, running) {
             if (raising || !played(appId) || !from || typeof restore !== "function")
                 return Promise.resolve(false);
             returnToGame = restore; quitGame = requestExit;
             confirmGame = typeof confirmInput === "function" ? confirmInput : null;
+            if (typeof running === "function") gameRunning = running;
             return showValve(from).then(function () {
                 if (failed || !playing || playingApp !== appId) return false;
                 sampleMemory("overlay"); gameEvent(true); record("game-switch-to-steam");
@@ -353,9 +365,20 @@
                 return resume().then(function () { return outcome; });
             }, function (err) { return resume().then(function () { throw err; }); });
         }
+        // A game whose process is gone but whose exit never reached this session must not
+        // hold the library busy. Only a game with a liveness hook can be judged this way.
+        function releaseExitedGame() {
+            if (!playing || raising || typeof gameRunning !== "function" || gameAlive(gameRunning)) return null;
+            noteRecovery("game-exited-unreported appid=" + playingApp);
+            return resume(playingApp).then(function () { return "released"; });
+        }
         function playConfiguredTrial(appId) {
             return Promise.resolve().then(function () {
                 if (!broker || !settled || !visible || failed) return "unavailable";
+                if (playing) return releaseExitedGame() || "busy";
+            }).then(function (blocked) {
+                if (blocked === "unavailable" || blocked === "busy") return blocked;
+                if (failed || !visible) return "unavailable";
                 if (playing) return "busy";
                 if (!Number.isInteger(appId) || appId <= 0 || appId > 0x00ffffff) return "invalid-app";
                 markStartup("configured_play");
@@ -370,7 +393,7 @@
             if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
             var returning = playing;
             playing = presented = false;
-            playingApp = 0; returnToGame = quitGame = confirmGame = null;
+            playingApp = 0; returnToGame = quitGame = confirmGame = gameRunning = null;
             clearTimeout(overlayTimer);
             overlayTimer = null;
             return Promise.resolve(raising).then(function () { return showValve(mainId); }).then(function () {
@@ -663,8 +686,10 @@
                         releasedGame = null;
                         noteGame("game-restore-failed appid=" + game.appId);
                         noteRecovery("webview-restart-for-game appid=" + game.appId);
-                        open(broker, onFailure, undefined,
-                            {appId: game.appId, restore: game.restore, quit: game.quit, confirm: game.confirm})
+                        // An exit reported from here until adoption marks this record.
+                        pendingAdoption = {appId: game.appId, restore: game.restore, quit: game.quit,
+                                           confirm: game.confirm, running: game.running, exited: false};
+                        open(broker, onFailure, undefined, pendingAdoption)
                             .catch(function (error) { if (typeof onFailure === "function") onFailure(error); });
                     });
             }
@@ -672,11 +697,20 @@
         }
         function adoptGame(game) {
             if (failed || playing || !game) return;
+            if (pendingAdoption === game) pendingAdoption = null;
+            // The game may have exited while Big Picture restarted for it. Adopting it then
+            // would show Valve a dead game and hold every other title busy.
+            if (game.exited || !gameAlive(game.running)) {
+                noteRecovery("game-exited-before-adopt appid=" + game.appId);
+                record("game-exited-before-adopt");
+                return;
+            }
             playing = presented = true;
             playingApp = game.appId;
             returnToGame = game.restore;
             quitGame = game.quit;
             confirmGame = game.confirm || null;
+            gameRunning = typeof game.running === "function" ? game.running : null;
             gameEvent(true);
             noteRecovery("game-adopted appid=" + game.appId);
             record("game-adopted");
@@ -685,8 +719,9 @@
             if (failed) return session && session.cleanup || Promise.resolve();
             var lostGame = !intentional && broker && playing && presented && playingApp ?
                 {appId: playingApp, restore: returnToGame, quit: quitGame, confirm: confirmGame,
-                 covered: typeof returnToGame === "function"} : null;
+                 running: gameRunning, covered: typeof returnToGame === "function"} : null;
             failed = true;
+            if (adopted && pendingAdoption === adopted) pendingAdoption = null;
             clearTimeout(overlayTimer);
             overlayTimer = null;
             if (network) network.close();
@@ -851,6 +886,7 @@
             if (session && (stage === "presenter_created" || stage === "presenter_foreground")) session.sampleMemory(stage);
         },
         resume: function (appId) {
+            if (pendingAdoption && pendingAdoption.appId === appId) pendingAdoption.exited = true;
             return reopenReleasedGame(appId) || (session ? session.resume(appId) : Promise.resolve());
         },
         playConfiguredTrial: function (appId) {
@@ -866,14 +902,14 @@
             }
             return !!session && session.overlayAvailable(appId);
         },
-        showForGame: function (appId, viewId, restore, requestExit, confirmInput) {
+        showForGame: function (appId, viewId, restore, requestExit, confirmInput, running) {
             // While Big Picture is down after a renderer failure the game keeps the
             // foreground. The caller resumes the game when the switch is declined.
             if (releasedGame && releasedGame.appId === appId && releasedGame.note) {
                 releasedGame.note("game-overlay-unavailable appid=" + appId);
                 return Promise.resolve(false);
             }
-            return session ? session.showForGame(appId, viewId, restore, requestExit, confirmInput) : Promise.resolve(false);
+            return session ? session.showForGame(appId, viewId, restore, requestExit, confirmInput, running) : Promise.resolve(false);
         }
     };
 }());

@@ -149,6 +149,7 @@ test("pointer delivery follows package configuration for any hosted AppID", () =
 test("the primary video polls the controller independently and a quick mouse click reaches SDL in order", async () => {
     const elements = new Map(), listeners = {}, edges = [], overlays = [], samples = [];
     let now = 100, pump, ack = 0, buttons = 0, serial = 0, padSerial = 0, rejectPad = false, covers = 0, resumes = 0;
+    let running = true, liveness;
     function element(id) {
         if (!elements.has(id)) elements.set(id, {
             hidden: true, handlers: {}, getAttribute: name => name === "data-apps" ? "646570" : null, getContext: () => ({}), focus() {},
@@ -174,10 +175,12 @@ test("the primary video polls the controller independently and a quick mouse cli
             events.presented("width=1920");
             return {primary: true, cover() { covers++; }, resume() { resumes++; return true; }};
         }},
-        steamBigPictureHost: {async showForGame(id, view) { overlays.push([id, view]); return true; }}
+        steamBigPictureHost: {async showForGame(id, view, restore, quit, confirm, alive) {
+            overlays.push([id, view]); liveness = alive; return true;
+        }}
     };
     const runner = {
-        launchSteamSdlGame: () => "steam_sdl_host=ready\r\n", steamSdlRunning: () => true,
+        launchSteamSdlGame: () => "steam_sdl_host=ready\r\n", steamSdlRunning: () => running,
         sendSteamSdlGamepad(mask) {
             samples.push(mask);
             if (rejectPad) { rejectPad = false; return 0; }
@@ -223,6 +226,11 @@ test("the primary video polls the controller independently and a quick mouse cli
     sample(gamepad.connected); sample(gamepad.connected);
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(overlays, [[646570, 7]]);
+    // Big Picture gets a liveness hook that reports only whether the game's process runs.
+    assert.equal(liveness(), true);
+    running = false;
+    assert.equal(liveness(), false);
+    running = true;
     sample(both);
     listeners.blur();
     sample(0); listeners.focus(); sample(both); sample(gamepad.connected);
