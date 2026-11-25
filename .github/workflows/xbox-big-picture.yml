@@ -69,7 +69,7 @@ jobs:
           $layout = Join-Path $work 'layout'
           $out = Join-Path $work 'artifact'
           New-Item -ItemType Directory -Path $layout,$out | Out-Null
-          Copy-Item -Recurse probe/Assets $layout
+          Copy-Item -Recurse probe/big-picture/Assets $layout
           Copy-Item probe/big-picture/AppxManifest.xml,probe/big-picture/big-picture.html,probe/big-picture/big-picture.js $layout
           & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
             /out $work /winmd "$layout\BigPicture.Native.winmd" probe/big-picture/BigPicture.Native.idl

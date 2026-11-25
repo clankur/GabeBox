@@ -35,7 +35,7 @@ BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
 PROBE_LABELS = {PROBE_NAME: 'Packaged process test',
                 PROBE_CONTROL_NAME: 'Packaged process startup control',
                 PROBE_STEAM_CORE_NAME: 'Steam Core Loader Probe',
-                BIG_PICTURE_NAME: 'Steam Big Picture'}
+                BIG_PICTURE_NAME: 'GabeBox'}
 PROBE_REPORT = 'probe-report.txt'
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
