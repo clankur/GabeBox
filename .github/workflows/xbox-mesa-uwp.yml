@@ -1,7 +1,8 @@
 name: Build Mesa UWP runtime
 
 # Builds the pinned mesa-uwp revision (runtime/mesa/mesa-uwp.json) with the
-# UWP Meson fork and the Visual Studio backend, as the upstream README does.
+# UWP Meson fork and the Ninja backend. The upstream README uses the Visual
+# Studio backend; the build step explains why this workflow does not.
 #   baseline      patch 0001 only; checked against the pinned 26.2.2 release
 #   shader-cache  patches 0001-0003; published for the packager
 # The packager consumes an artifact by the SHA-256 of its SHA256SUMS file:
@@ -38,6 +39,20 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $pin = Get-Content runtime/mesa/mesa-uwp.json -Raw | ConvertFrom-Json
+          $release = Join-Path $env:RUNNER_TEMP 'mesa-uwp-release.zip'
+          Invoke-WebRequest $pin.prebuilt.url -OutFile $release
+          if ((Get-FileHash $release -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.prebuilt.sha256) {
+            throw 'Unexpected Mesa UWP release archive.'
+          }
+          $reference = Join-Path $env:RUNNER_TEMP 'mesa-uwp-release'
+          Expand-Archive $release $reference
+          Write-Host 'Imported modules of the pinned 26.2.2 release:'
+          foreach ($name in $pin.libraries) {
+            $modules = & "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe" --coff-imports "$reference/$($pin.prebuilt.prefix)$name" |
+              Select-String '^\s*Name: (.+\.dll)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+            Write-Host "  $name -> $($modules -join ', ')"
+          }
+          "MESA_REFERENCE=$reference" | Out-File -Append $env:GITHUB_ENV
           foreach ($patch in $pin.patches) {
             $hash = (Get-FileHash "runtime/mesa/$($patch.file)" -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne $patch.sha256) { throw "Patch $($patch.file) differs from its pin." }
@@ -64,9 +79,16 @@ jobs:
             Write-Host "Applied $($patch.file)"
           }
           python -m pip install --disable-pip-version-check @($pin.python)
-          choco install winflexbison3 --version $pin.win_flex_bison --no-progress -y
+          # Chocolatey checks the package's own checksums; retry its transient gateway errors.
+          $PSNativeCommandUseErrorActionPreference = $false
+          for ($attempt = 1; ; $attempt++) {
+            choco install winflexbison3 --version $pin.win_flex_bison --no-progress -y
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge 5) { throw 'Could not install win_flex_bison.' }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
           "MESA_WORK=$work" | Out-File -Append $env:GITHUB_ENV
-      - name: Configure, build and install with the Visual Studio backend
+      - name: Configure, build and install with the UWP toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -75,7 +97,9 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # -app_platform=UWP puts the Store libraries (vcruntime140_app) on LIB, the same
+          # runtime the Visual Studio backend's Windows Store projects link against.
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -app_platform=UWP'
           $env:PATH = "$env:ChocolateyInstall\lib\winflexbison3\tools;$env:PATH"
           $meson = Join-Path $env:MESA_WORK 'meson/meson.py'
           $source = Join-Path $env:MESA_WORK 'mesa'
@@ -83,9 +107,14 @@ jobs:
           $prefix = Join-Path $env:MESA_WORK 'install'
           $machine = Resolve-Path "runtime/mesa/$($pin.meson.machine_file)"
           # Options from the mesa-uwp README, with the UWP machine file in place of --uwp.
-          python $meson setup $build $source --backend=vs --cross-file $machine --buildtype=release `
+          # The fork's Visual Studio backend generates Windows Store projects that turn on
+          # C++/CX (/ZW), precompiled headers and XAML compilation for every target, which
+          # VS 18 rejects for Mesa's C sources. The Ninja backend takes the same UWP settings
+          # from the machine file (WINAPI_FAMILY_APP, /APPCONTAINER, WindowsApp.lib) without
+          # them. mesa-uwp uses C++/WinRT, not C++/CX, so /ZW is not needed.
+          python $meson setup $build $source --backend=ninja --cross-file $machine --buildtype=release `
             --prefix $prefix -Dcpp_std=vc++17 "-Dc_args=['/D_XBOX_UWP']" "-Dcpp_args=['/D_XBOX_UWP']" `
-            -Db_pch=false "-Dc_winlibs=[]" "-Dcpp_winlibs=[]" @($pin.variants.$env:VARIANT)
+            -Db_pch=false @($pin.variants.$env:VARIANT)
           python $meson compile -C $build
           python $meson install -C $build
       - name: Check the runtime and stage the artifact
@@ -116,13 +145,7 @@ jobs:
           }
 
           # Compare imports and exports with the pinned 26.2.2 release built by the mesa-uwp maintainers.
-          $release = Join-Path $env:MESA_WORK 'release.zip'
-          Invoke-WebRequest $pin.prebuilt.url -OutFile $release
-          if ((Get-FileHash $release -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.prebuilt.sha256) {
-            throw 'Unexpected Mesa UWP release archive.'
-          }
-          $reference = Join-Path $env:MESA_WORK 'release'
-          Expand-Archive $release $reference
+          $reference = $env:MESA_REFERENCE
           $differences = 0
           foreach ($name in $pin.libraries) {
             $old = Join-Path $reference "$($pin.prebuilt.prefix)$name"
