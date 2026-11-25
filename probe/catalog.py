@@ -15,6 +15,7 @@ WEBVIEW_REPORT = 'big-picture-webview-report.txt'
 NATIVE_MOUSE_CAPTURE_REPORT = 'mouse-capture.txt'
 NATIVE_MOUSE_DEVICE_REPORT = 'mouse-gameinput.txt'
 NATIVE_MOUSE_INDEPENDENT_REPORT = 'mouse-independent.txt'
+NATIVE_MOUSE_ROUTE_REPORT = 'mouse-routes.txt'
 NATIVE_MOUSE_STARTUP_REPORT = 'mouse-startup.txt'
 
 CHILD_EXIT = (('exit_code_matches', 'yes'),)
@@ -89,6 +90,12 @@ CASES = {
         (('status', 'independent-mouse-ready'), ('visible', '1'), ('presented', '1'), ('registered', '0xf')),
         filename=NATIVE_MOUSE_INDEPENDENT_REPORT, report_kind='native-independent-mouse', require_run_id=True,
         terminal_status='independent-mouse-ready',
+    ),
+    'native-mouse-routes': ProbeCase(
+        NATIVE_MOUSE_PROBE_NAME, 'Xbox mouse route matrix',
+        'Verify the standalone app enumerated every physical mouse delivery route in the foreground.',
+        (('stage', 'routes-ready'),), filename=NATIVE_MOUSE_ROUTE_REPORT, report_kind='native-mouse-routes',
+        require_run_id=True, terminal_status='routes-ready',
     ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',
@@ -181,7 +188,7 @@ CASES = {
 
 PACKAGE_CASES = {
     case.package: key for key, case in CASES.items()
-    if key not in ('named-pipe', 'native-independent-mouse-ready', 'steam-loader',
+    if key not in ('named-pipe', 'native-independent-mouse-ready', 'native-mouse-routes', 'steam-loader',
                    'wasapi-hosted', 'profile-folders', 'steam-sdk-versioned',
                    'dxgi-present-commit', 'dxgi-output-native', 'dxgi-output-hosted', 'd3d11-hosted-output',
                    'dxgi-d3d11-resize', 'd3d11-nonblocking-present', 'window-geometry', 'window-frame',

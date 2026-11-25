@@ -1,0 +1,95 @@
+name: Build Xbox mouse route probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: four-component APPX version for the capability build
+        required: true
+        default: 1.0.1.1
+  push:
+    paths:
+      - 'probe/mouse-source/**'
+      - 'build_tools/prepare_mouse_capture.py'
+      - '.github/workflows/xbox-mouse-routes.yml'
+  pull_request:
+    paths:
+      - 'probe/mouse-source/**'
+      - 'build_tools/prepare_mouse_capture.py'
+      - '.github/workflows/xbox-mouse-routes.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and sign the standalone mouse route probe
+        shell: pwsh
+        env:
+          CAPABILITY_VERSION: ${{ inputs.version || '1.0.1.1' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $sdkVersion = (Get-ChildItem "$sdk\bin" -Directory |
+            Where-Object { $_.Name -match '^10\.' -and
+              (Test-Path "$($_.FullName)\x64\MakeAppx.exe") -and
+              (Test-Path "$($_.FullName)\x64\MakePri.exe") -and
+              (Test-Path "$sdk\Include\$($_.Name)\cppwinrt\winrt\base.h") -and
+              (Test-Path "$sdk\Lib\$($_.Name)\um\x64\WindowsApp.lib") } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$sdkVersion) { throw 'No Windows SDK with MakeAppx, C++/WinRT headers and WindowsApp.lib was found.' }
+          $bin = "$sdk\bin\$sdkVersion\x64"
+          $lib = "$sdk\Lib\$sdkVersion\um\x64\WindowsApp.lib"
+          $work = Join-Path $env:RUNNER_TEMP 'mouse-routes'
+          $artifacts = Join-Path $work 'artifacts'
+          New-Item -ItemType Directory -Path $work, $artifacts | Out-Null
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          # The route matrix needs only the Windows projection, so no midl or
+          # cppwinrt run is required for this executable.
+          & cl.exe /nologo /O2 /EHsc /MD /std:c++20 /DNOMINMAX /DUNICODE /D_UNICODE `
+            /DWINAPI_FAMILY=WINAPI_FAMILY_APP /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DMOUSE_PROBE_ROUTES `
+            "/I$sdk\Include\$sdkVersion\cppwinrt" "/Fo$work\native-app.obj" "/Fe$work\MouseSource.exe" `
+            probe/mouse-source/native-app.cpp $lib /link /APPCONTAINER /SUBSYSTEM:WINDOWS /DYNAMICBASE /NXCOMPAT
+
+          & "$bin\MakePri.exe" createconfig /cf "$work/priconfig.xml" /dq lang-en-US /pv 10.0.0
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            Export-Certificate -Cert $cert -FilePath "$artifacts/XboxMouseRoutes.cer" | Out-Null
+            # The baseline build keeps the existing capability set. The capability
+            # build adds the restricted raw input declarations and the HID
+            # collections, so one run separates the two.
+            $builds = @(
+              @{ Name = 'baseline'; Version = '1.0.1.0'; Options = @() },
+              @{ Name = 'capability'; Version = $env:CAPABILITY_VERSION; Options = @('--input-observation') }
+            )
+            foreach ($build in $builds) {
+              $layout = Join-Path $work "layout-$($build.Name)"
+              & python -m build_tools.prepare_mouse_capture "$work\MouseSource.exe" $build.Version $layout @($build.Options)
+              & "$bin\MakePri.exe" new /cf "$work/priconfig.xml" /pr $layout /of "$layout/resources.pri"
+              $appx = "$artifacts/XboxMouseRoutes-$($build.Name)-$($build.Version).appx"
+              & "$bin\MakeAppx.exe" pack /d $layout /p $appx
+              & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 $appx
+              Get-Content "$layout/AppxManifest.xml"
+            }
+          } finally {
+            Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force
+          }
+          $hashes = Get-ChildItem $artifacts -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          }
+          [IO.File]::WriteAllText("$artifacts/SHA256SUMS", ($hashes -join "`n") + "`n")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-mouse-routes-x64
+          path: ${{ runner.temp }}/mouse-routes/artifacts
+          if-no-files-found: error

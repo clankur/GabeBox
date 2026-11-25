@@ -44,12 +44,19 @@ void checkpoint(char const* name, char const* text) noexcept {
 #ifdef MOUSE_PROBE_INDEPENDENT
 #include "native-independent.h"
 #endif
+#ifdef MOUSE_PROBE_ROUTES
+#include "native-routes.h"
+#endif
 namespace {
 struct MouseApp : ApplicationT<MouseApp> {
 #ifdef MOUSE_PROBE_INDEPENDENT
     std::shared_ptr<IndependentMouseProbe> independent = std::make_shared<IndependentMouseProbe>();
 #endif
     std::shared_ptr<NativePanelMouseProbe> probe = std::make_shared<NativePanelMouseProbe>();
+#ifdef MOUSE_PROBE_ROUTES
+    std::shared_ptr<RawInputWindow> rawInput = std::make_shared<RawInputWindow>();
+    DispatcherTimer drain{nullptr};
+#endif
     DispatcherTimer timer{nullptr};
     Grid target{nullptr};
     TextBlock status{nullptr};
@@ -77,7 +84,20 @@ struct MouseApp : ApplicationT<MouseApp> {
             FhdFrameTrace::suffix(path, ARRAYSIZE(path), L"\\mouse-controller-control.txt")) {
             marker.attach(CreateFile2(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, nullptr));
         }
-        RequiresPointerMode(marker ? ApplicationRequiresPointerMode::Auto : ApplicationRequiresPointerMode::WhenRequested);
+        // Mouse mode keeps the XAML and CoreWindow pointer pipeline live, the
+        // configuration the console's own browser runs with. The route matrix
+        // always selects it so a dead pointer path cannot explain its result.
+#ifdef MOUSE_PROBE_ROUTES
+        const bool pointerMode = true;
+        marker.close();
+#else
+        const bool pointerMode = static_cast<bool>(marker);
+#endif
+        RequiresPointerMode(pointerMode ? ApplicationRequiresPointerMode::Auto
+                                        : ApplicationRequiresPointerMode::WhenRequested);
+#ifdef MOUSE_PROBE_ROUTES
+        InterlockedExchange(&rawInput->state.pointerMode, pointerMode ? 1 : 0);
+#endif
     }
     void snapshot() {
         const bool visible = core.Visible() && core.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground;
@@ -93,6 +113,9 @@ struct MouseApp : ApplicationT<MouseApp> {
             ready = true;
 #ifdef MOUSE_PROBE_GAMEINPUT_V0
             NativeMouseDevices::start(runId, probe);
+#endif
+#ifdef MOUSE_PROBE_ROUTES
+            NativeMouseRoutes::start(runId, rawInput->state, probe);
 #endif
         }
         if (!visible && captured) target.ReleasePointerCaptures();
@@ -125,6 +148,9 @@ struct MouseApp : ApplicationT<MouseApp> {
             startup("mouse-capture-starting", false, S_OK);
             core = view.CoreWindow();
             probe->open(core);
+#ifdef MOUSE_PROBE_ROUTES
+            rawInput->open(core);
+#endif
             try {
                 core.KeyDown([this](auto const& sender, auto const&) {
                     if (sender.Visible() && sender.ActivationMode() == CoreWindowActivationMode::ActivatedInForeground) ++keyDown;
@@ -222,6 +248,13 @@ struct MouseApp : ApplicationT<MouseApp> {
             timer.Interval(std::chrono::seconds(1));
             timer.Tick([this](auto const&, auto const&) { snapshot(); });
             timer.Start();
+#ifdef MOUSE_PROBE_ROUTES
+            // WM_INPUT belongs to this window's thread queue, so drain it here.
+            drain = DispatcherTimer{};
+            drain.Interval(std::chrono::milliseconds(16));
+            drain.Tick([state = rawInput](auto const&, auto const&) { state->drain(); });
+            drain.Start();
+#endif
 
         } catch (...) {
             startup("mouse-capture-error", false, to_hresult());

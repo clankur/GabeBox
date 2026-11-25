@@ -14,9 +14,32 @@ from probe.catalog import NATIVE_MOUSE_PROBE_NAME
 MANIFEST = ROOT / 'probe/Package.appxmanifest'
 DISPLAY_NAME = 'Xbox Mouse Capture'
 MICROSOFT = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+RESTRICTED = 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities'
+# Raw input observation and suppression are restricted capabilities. Sideloading
+# a package that declares them needs no store approval, so a Dev Mode package
+# can test whether they change physical mouse delivery.
+OBSERVATION = ('inputObservation', 'inputForegroundObservation', 'inputSuppression',
+               'inputInjectionBrokered')
+# The mouse and keyboard collections are reserved for the system. Declare them
+# with the unreserved consumer-control and vendor-defined pages so one run
+# records the result for each.
+USAGES = ('0001 0002', '0001 0006', '000c 0001', 'ff00 0001')
 
 
-def prepare(layout, executable, version, *, controller_control=False):
+def declare_capabilities(root, ns):
+    ET.register_namespace('rescap', RESTRICTED)
+    root.set('IgnorableNamespaces', ' '.join(
+        part for part in (root.get('IgnorableNamespaces', ''), 'rescap') if part))
+    capabilities = ET.SubElement(root, ns + 'Capabilities')
+    for name in OBSERVATION:
+        ET.SubElement(capabilities, '{' + RESTRICTED + '}Capability', Name=name)
+    device = ET.SubElement(capabilities, ns + 'DeviceCapability', Name='humaninterfacedevice')
+    collection = ET.SubElement(device, ns + 'Device', Id='any')
+    for usage in USAGES:
+        ET.SubElement(collection, ns + 'Function', Type='usage:' + usage)
+
+
+def prepare(layout, executable, version, *, controller_control=False, input_observation=False):
     if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', version) or any(
             int(part) > 65535 for part in version.split('.')):
         raise ValueError('Use a four-component APPX version with components from 0 to 65535.')
@@ -42,6 +65,8 @@ def prepare(layout, executable, version, *, controller_control=False):
                           ('Microsoft.VCLibs.140.00', '14.0.33519.0')):
         ET.SubElement(dependencies, ns + 'PackageDependency', Name=name, Publisher=MICROSOFT, MinVersion=minimum)
     root.remove(root.find(ns + 'Capabilities'))
+    if input_observation:
+        declare_capabilities(root, ns)
 
     layout.mkdir()
     manifest.write(layout / 'AppxManifest.xml', encoding='utf-8', xml_declaration=True)
@@ -58,9 +83,12 @@ def main():
     parser.add_argument('version', help='four-component APPX version')
     parser.add_argument('layout', type=Path, help='new layout directory')
     parser.add_argument('--controller-control', action='store_true', help='enable Xbox controller pointer emulation')
+    parser.add_argument('--input-observation', action='store_true',
+                        help='declare the restricted raw input capabilities and the HID mouse collections')
     args = parser.parse_args()
     try:
-        prepare(args.layout, args.executable, args.version, controller_control=args.controller_control)
+        prepare(args.layout, args.executable, args.version, controller_control=args.controller_control,
+                input_observation=args.input_observation)
     except (OSError, ValueError) as error:
         parser.exit(1, f'Error: {error}\n')
 
