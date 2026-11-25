@@ -196,16 +196,17 @@ both wheel axes, client coordinates for motion, and screen coordinates for the w
 Deleting the probes removed the measurement of physical mouse hardware, not cursor
 delivery.
 
-To retest on a future console build, restore `probe/mouse-source` and
-`build_tools/prepare_mouse_capture.py` from `f4e1e01`, run the route matrix workflow,
-and deploy the `capability` layout. The route matrix is the one probe worth restoring
+To retest on a future console build, restore `probe/mouse-source`,
+`build_tools/prepare_mouse_capture.py`, and `.github/workflows/xbox-mouse-routes.yml`
+from `f4e1e01`, run that workflow, and deploy the `capability` layout. The route matrix is the one probe worth restoring
 first: it covers every route in a single foreground run, and the field meanings are in
 that revision's `probe/README.md`.
 
 ## Open items
 
-- A `baseline` layout at `1.0.1.0` (no restricted capabilities, same binary) is built
-  and not yet run. It would confirm that the capability declaration is inert rather than
-  merely insufficient. Nothing depends on the answer.
+- A `baseline` layout at `1.0.1.0` (no restricted capabilities, same binary) was built
+  and never run. It would separate an inert capability declaration from a merely
+  insufficient one. Answering it now means restoring the probe, and nothing depends on
+  the answer: the capability build already recorded zero on every counter.
 - Whether the free Partner Center path reaches the console extensions is unresolved and
   only answerable from inside that program.

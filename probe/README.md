@@ -81,7 +81,7 @@ Run a signed graphics control with `python3 -m tools.xbox_deploy probe --case gr
 ## Physical mouse input
 
 The physical mouse probes are removed. A sideloaded Dev Mode package cannot read an
-attached Xbox mouse on any documented route, so no probe is left to measure: Dev Mode
+attached Xbox mouse on any documented route, so nothing is left to measure: Dev Mode
 runs in the console's `SystemOS` partition while the mouse-capable GameInput runtime
 ships inside a GDK title's `GameOs.xvd`, the remaining Win32 raw input entry points are
 either unexported or return `ERROR_CALL_NOT_IMPLEMENTED`, no HID collection enumerates
