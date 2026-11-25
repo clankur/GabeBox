@@ -420,6 +420,38 @@ int main() {
     assert(!remotePad[0xC5 - remotePadFirst]);
     FhdResumeHostedInput();
     assert(!poll(16) && !(box.gamepad.buttons & (1 << 2)));
+    // Big Picture failed while it covered the game after a chord, and recovery shows the game
+    // again. The pause ends with no held or pending chord, key events delivered meanwhile are
+    // counted but not applied, the next sample is published under a fresh serial although it
+    // is unchanged, and remote buttons reach the game again.
+    physical.buttons = 3;
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld());
+    FhdPauseHostedInput();
+    assert(FhdHostedInputPaused() && !FhdHostedInputForeground() && !FhdHostedMenuHeld());
+    const UINT keysBefore = FhdHostedKeyEvents();
+    key(0xC3, true);
+    key(0xC3, false);
+    assert(FhdHostedKeyEvents() == keysBefore + 2 && !remotePad[0]);
+    physical.buttons = 0;
+    FhdResumeHostedInput();
+    assert(!FhdHostedInputPaused() && FhdHostedInputForeground() && !FhdHostedMenuHeld());
+    const LONG resumedSerial = box.gamepad.serial;
+    assert(!poll(16) && box.gamepad.serial != resumedSerial && box.gamepad.buttons == SDL_HOST_PAD_CONNECTED);
+    const LONG idleSerial = box.gamepad.serial;
+    assert(!poll(16) && box.gamepad.serial == idleSerial);
+    key(0xC3, true);
+    assert(!poll(16) && (box.gamepad.buttons & 1) && FhdHostedKeyEvents() == keysBefore + 3);
+    key(0xC3, false);
+    assert(!poll(16) && !(box.gamepad.buttons & 1));
+    // A new chord after recovery still opens the menu.
+    key(0xCF, true);
+    key(0xD0, true);
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld());
+    key(0xCF, false);
+    key(0xD0, false);
+    assert(poll(16) == 1 && FhdHostedInputPaused());
+    FhdResumeHostedInput();
+    assert(!poll(16));
     FhdEndHostedInput();
     static_assert(FhdPointer::pixel(0, 1024) == 0 && FhdPointer::pixel(4095, 1024) == 1023);
     static_assert(FhdPointer::pixel(2048, 768) == 383);

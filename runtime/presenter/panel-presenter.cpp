@@ -42,6 +42,11 @@ struct Status {
     UINT64 menuChords = 0;
     UINT64 chordsIgnored = 0, chordsExpired = 0;
     bool nativeInput = false;
+    // Whether hosted input reaches the game now: unpaused, and the window focused, visible
+    // and accepting input. Key events count CoreWindow key delivery for remote and keyboard input.
+    bool inputActive = false, inputPaused = false;
+    UINT keyEvents = 0;
+    UINT64 focusRestores = 0;
     HRESULT inputError = S_OK;
     HRESULT error = S_OK;
 };
@@ -57,6 +62,7 @@ struct Presenter {
     CoreWindow window{nullptr};
     Grid root{nullptr};
     Canvas steam{nullptr};
+    WebView account{nullptr};
     SwapChainPanel panel{nullptr};
     com_ptr<ID3D11Device> device;
     com_ptr<ID3D11DeviceContext> context;
@@ -68,6 +74,8 @@ struct Presenter {
     FhdHostedChordCounts chords{};
     bool nativePad = false, attached = false, inserted = false;
     bool inputPaused = false;
+    bool hostedPaused = false, watchingKeys = false, shown = false;
+    UINT keysAtShow = 0;
     SdlHostMailbox *inputMailbox = nullptr;
     bool watchingFrames = false, watchingVisibility = false, watchingActivation = false;
     event_token frames{}, visibility{}, activation{};
@@ -84,8 +92,50 @@ struct Presenter {
     void updateVisibility() {
         status.visible = visible();
         if (!status.visible) queuedSequence = 0;
+        noteShown();
         updateInputVisibility();
+        snapshotInput();
         publish(status);
+    }
+    void snapshotInput() noexcept {
+        if (!status.nativeInput) return;
+        status.inputPaused = FhdHostedInputPaused() != FALSE;
+        status.inputActive = FhdHostedInputForeground() != FALSE;
+        status.keyEvents = FhdHostedKeyEvents();
+        if (hostedPaused && !status.inputPaused) {
+            constexpr char record[] = "panel_input=resumed\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
+        hostedPaused = status.inputPaused;
+        if (watchingKeys && status.keyEvents != keysAtShow) {
+            watchingKeys = false;
+            constexpr char record[] = "panel_keys=after-show\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
+    }
+    // Gameplay keeps keyboard focus on the account host, where the CoreWindow still raises
+    // the key events that carry remote controller input, the keyboard and the remote chord.
+    // Big Picture moves focus into its WebView while it covers the game. If that WebView
+    // closes or hangs while it holds focus, nothing returns it, so take it back each time
+    // the game becomes visible (the Steam shell is then collapsed).
+    void noteShown() noexcept {
+        if (status.visible && !shown) restoreFocus();
+        shown = status.visible;
+    }
+    void restoreFocus() noexcept {
+        if (!status.nativeInput) return;
+        bool focused = false;
+        try { focused = account && account.Focus(FocusState::Programmatic); } catch (...) {}
+        if (focused) {
+            ++status.focusRestores;
+            constexpr char record[] = "panel_focus=restored\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        } else {
+            constexpr char record[] = "panel_focus=declined\r\n";
+            inputCheckpoint(record, sizeof(record) - 1);
+        }
+        keysAtShow = FhdHostedKeyEvents();
+        watchingKeys = true;
     }
     void updateInputVisibility() {
         const bool pause = !status.visible;
@@ -151,6 +201,7 @@ struct Presenter {
         try {
             fit();
             status.visible = visible();
+            noteShown();
             updateInputVisibility();
             if (!status.visible) {
                 queuedSequence = 0;
@@ -191,6 +242,7 @@ struct Presenter {
             status.error = to_hresult();
             status.visible = false;
         }
+        snapshotInput();
         publish(status);
     }
     void create(HSTRING path, bool pad) {
@@ -198,7 +250,7 @@ struct Presenter {
         auto xaml = Window::Current();
         if (!xaml || !(root = xaml.Content().try_as<Grid>()) || root.Children().Size() != 2)
             throw hresult_error(E_UNEXPECTED);
-        auto account = root.Children().GetAt(0).try_as<WebView>();
+        account = root.Children().GetAt(0).try_as<WebView>();
         steam = root.Children().GetAt(1).try_as<Canvas>();
         if (!account || account.Name() != L"SteamAccountHost" || !steam || steam.Name() != L"SteamCompositionHost")
             throw hresult_error(E_ACCESSDENIED);
@@ -314,6 +366,8 @@ IAsyncAction setVisible(bool show) {
     active->panel.Visibility(show ? Visibility::Visible : Visibility::Collapsed);
     active->updateVisibility();
     if (show && active->status.nativeInput && active->status.visible) FhdResumeHostedInput();
+    active->snapshotInput();
+    publish(active->status);
 }
 IAsyncAction closePanel() {
     co_await resume_foreground(dispatcher());
@@ -365,6 +419,10 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"native_menu_chords", s.menuChords);
         field(L"native_menu_chords_ignored", s.chordsIgnored);
         field(L"native_menu_chords_expired", s.chordsExpired);
+        if (s.nativeInput) {
+            field(L"native_input_active", s.inputActive); field(L"native_input_paused", s.inputPaused);
+            field(L"native_key_events", s.keyEvents); field(L"native_focus_restores", s.focusRestores);
+        }
         if (FAILED(s.inputError)) field(L"native_input_hresult", static_cast<uint32_t>(s.inputError));
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);

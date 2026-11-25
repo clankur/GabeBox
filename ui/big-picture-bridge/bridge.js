@@ -72,6 +72,12 @@
                     if (!alreadyOpen) showGameOverlay(requested);
                 }
                 if (exited && !activeApp) returnToLibrary(exited);
+                // The host waits for this before it trusts the overlay with the game: two
+                // animation frames after the controls were requested show that this renderer
+                // runs script and draws. A renderer that does neither gets the game back.
+                if (requested) requestAnimationFrame(() => requestAnimationFrame(() => {
+                    if (controlsApp === requested) host.postMessage({method: 'overlay-ready', appId: requested});
+                }));
             }
             if (changed) refresh().then(updateControls, error => console.error('Steam library unavailable', error.message));
             else updateControls();

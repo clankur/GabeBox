@@ -8,7 +8,8 @@ const drain = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture({hostedApps = [], activationError = false, primary = false, xaml = false, warm = false, earlyLibrary = false,
                   expected = 0, findRequest, findInstalled = async () => null, openReport = async () => ({})} = {}) {
-    let stage = "closed", poll, timeout;
+    let stage = "closed", poll, timeout, timerId = 2;
+    const timers = new Map();
     const reports = [], replies = [], incoming = [], switches = [];
     let opens = 0, warmOpens = 0, now = 100000;
     const memoryRequests = [], owners = [];
@@ -49,7 +50,8 @@ function fixture({hostedApps = [], activationError = false, primary = false, xam
             }}
         },
         setInterval(callback) { poll = callback; return 1; }, clearInterval() {},
-        setTimeout(callback) { timeout = callback; return 2; }, clearTimeout() {}
+        setTimeout(callback, delay) { timeout = callback; timers.set(++timerId, {callback, delay}); return timerId; },
+        clearTimeout(id) { timers.delete(id); }
     });
     return {
         start(broker, failure, timing) {
@@ -64,6 +66,11 @@ function fixture({hostedApps = [], activationError = false, primary = false, xam
             stage = nextStage; poll(); await drain();
         },
         expire() { timeout(); },
+        // Runs each pending timer with this delay that was not cleared.
+        fire(delay) {
+            for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); }
+        },
+        pending: delay => [...timers.values()].some(timer => timer.delay === delay),
         elapse(ms) { now += ms; }, warmOpens: () => warmOpens, memoryRequests, memory,
         shell: window.steamBigPictureHost, opens: () => opens, owners, switches, incoming, reports, replies
     };
@@ -481,8 +488,9 @@ test("timeout retains the first script failure and last native milestone", async
     await drain();
     const report = app.reports.at(-1);
     assert.match(report, /status=gamepad-timeout:gamepad-window-created/);
-    assert.match(report, /renderer_error=First failure/);
-    assert.doesNotMatch(report, /Second failure/);
+    assert.match(report, /renderer_error=First failure\r\n/);
+    // The latest failure is kept beside the first, with the stage it arrived in.
+    assert.match(report, /renderer_error_count=2\r\nrenderer_error_latest=document-loaded Second failure\r\n/);
 });
 
 test("the uncredentialed smoke host never dispatches a broker operation", async () => {
@@ -663,6 +671,88 @@ test("an unresponsive renderer under the game overlay returns to the game and re
     assert.match(app.reports.at(-1), /webview_recovery_5=webview-restart-after-game appid=2868840\r\n/);
     assert.match(app.reports.at(-1), /status=gamepad-ready/);
     assert.equal(failure(), undefined);
+});
+
+test("an overlay whose renderer never draws hands the game back with its input", async () => {
+    // Slay the Spire 2 on 1.0.246.2: the chord switched to Steam, the overlay stayed white,
+    // A did nothing, and the owner renderer was reported unresponsive only ~75 s later.
+    const appId = 2868840, {app, failure} = await playingPrimaryGame(appId);
+    const restores = [];
+    let confirms = 0;
+    const confirm = async () => { confirms++; return {ok: true}; };
+    assert.equal(await app.shell.showForGame(appId, 3, async view => { restores.push(view); return true; }, () => true, confirm), true);
+    await drain();
+    assert.ok(app.pending(10000));
+    // A confirmation for another game does not count.
+    app.incoming.push(JSON.stringify({method: "overlay-ready", appId: 42}));
+    await app.advance("gamepad-ready");
+    assert.ok(app.pending(10000));
+    app.fire(10000);
+    for (let i = 0; i < 4; i++) await drain();
+    assert.deepEqual(restores, [3]);
+    assert.equal(confirms, 1);
+    assert.equal(failure(), undefined);
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), [
+        "webview_recovery_1=game-webview-lost appid=2868840 covered=1 cause=overlay-unresponsive",
+        "webview_recovery_2=game-restore-started appid=2868840",
+        "webview_recovery_3=game-restored appid=2868840"
+    ]);
+    // A chord while Big Picture is down stays with the game and is recorded.
+    assert.equal(app.shell.overlayAvailable(appId), false);
+    await drain();
+    assert.match(app.reports.at(-1), /webview_recovery_4=game-overlay-unavailable appid=2868840/);
+    assert.equal(app.owners.length, 1);
+});
+
+test("an overlay that draws in time stays open for Resume", async () => {
+    const appId = 2868840, {app} = await playingPrimaryGame(appId);
+    let raises = 0;
+    assert.equal(app.shell.overlayAvailable(appId), true);
+    assert.equal(await app.shell.showForGame(appId, 3, async () => { raises++; return true; }, () => true), true);
+    app.incoming.push(JSON.stringify({method: "overlay-ready", appId}));
+    await app.advance("gamepad-ready");
+    assert.equal(app.pending(10000), false);
+    assert.match(app.reports.at(-1), /\r\ngame-overlay-ready\r\n/);
+    app.fire(10000);
+    await drain();
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), []);
+    app.incoming.push(JSON.stringify({method: "resume-game", id: 2, appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(app.replies.find(reply => reply.id === 2), {id: 2, result: "presented"});
+    assert.equal(raises, 1);
+});
+
+test("a Resume whose hosted input stays paused is recorded", async () => {
+    const appId = 2868840, {app} = await playingPrimaryGame(appId);
+    const confirm = async () => ({ok: false, reason: "input-paused"});
+    assert.equal(await app.shell.showForGame(appId, 3, async () => true, () => true, confirm), true);
+    app.incoming.push(JSON.stringify({method: "resume-game", id: 2, appId}));
+    await app.advance("gamepad-ready");
+    await drain();
+    assert.deepEqual(app.replies.find(reply => reply.id === 2), {id: 2, result: "presented"});
+    assert.match(app.reports.at(-1), /\r\ngame-input-resume-failed:input-paused\r\n/);
+});
+
+test("recovery that shows frames without input retries once and then records why", async () => {
+    const appId = 42, {app, failure} = await playingPrimaryGame(appId);
+    let restores = 0;
+    const confirm = async () => ({ok: false, reason: "input-background"});
+    assert.equal(await app.shell.showForGame(appId, 3, async () => { restores++; return true; }, () => true, confirm), true);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    await drain();
+    assert.equal(restores, 1);
+    app.fire(1000);
+    for (let i = 0; i < 4; i++) await drain();
+    assert.equal(restores, 2);
+    assert.equal(failure(), undefined);
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), [
+        "webview_recovery_1=game-webview-lost appid=42 covered=1 cause=process-error:owner:2:unresponsive:259:none",
+        "webview_recovery_2=game-restore-started appid=42",
+        "webview_recovery_3=game-restore-retry appid=42",
+        "webview_recovery_4=game-input-resume-failed appid=42 reason=input-background"
+    ]);
+    // The game stays on screen: Big Picture is not restarted over it.
+    assert.equal(app.owners.length, 1);
 });
 
 test("a renderer failure while the game is in the foreground leaves it there", async () => {

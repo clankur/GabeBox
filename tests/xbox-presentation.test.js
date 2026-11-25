@@ -108,3 +108,30 @@ test('Valve game actions track a real launch promise and clear on rejection', as
     assert.equal((await client.Apps.GetActiveGameActions()).length, 0);
     assert.equal(log[1], 1);
 });
+
+test('Valve feature probes without an Xbox service resolve as unavailable instead of rejecting', async () => {
+    let transport;
+    const replies = [];
+    const message = {InitFromObject(response, body) {
+        const reply = {response, body, eresult: 0, Hdr: () => ({set_eresult(value) { reply.eresult = value; }})};
+        replies.push(reply);
+        return reply;
+    }};
+    const runtime = id => ({
+        52660: {OI: () => ({GetDefaultTransport: () => transport, SetDefaultTransport(value) { transport = value; }})},
+        98237: {w: message}
+    })[id];
+    runtime.m = {45121: true};
+    vm.runInNewContext(source('big-picture-bridge/xbox-controller-service.js') +
+        '\ninstallXboxControllerService(runtime, {enumerate: async () => []})', {runtime, getXboxGamepadWindow: () => ({})});
+    // Valve's audio store sends this once at startup (site 1) and reads nothing unless BSuccess().
+    const audio = await transport.SendMsg('Audio.GetSupportedFeatures#1', {}, 'features', {ePrivilege: 1, eClientExecutionSite: 1});
+    assert.equal(audio.eresult, 20);
+    assert.equal(audio.response, 'features');
+    assert.equal(Object.keys(audio.body).length, 0);
+    // Other client services stay unavailable transport errors, and controller reads still succeed.
+    await assert.rejects(transport.SendMsg('Audio.GetDevices#1', {}, 'devices', {eClientExecutionSite: 1}),
+        /Steam client service unavailable: Audio.GetDevices#1/);
+    const list = await transport.SendMsg('SteamInputManager.GetControllerList#1', {}, 'list', {eClientExecutionSite: 2});
+    assert.equal(list.eresult, 1);
+});

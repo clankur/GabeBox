@@ -118,7 +118,35 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         }).catch(fail);
-        return {primary: true, ownsInput: function () { return !closed && (!opened || nativeInput); }, close: close, cover: function () {
+        // After the game is shown again, wait until the panel presents new frames and its
+        // hosted input is live: unpaused, and the window focused, visible and accepting input.
+        function confirmInput(timeoutMs) {
+            var deadline = performance.now() + timeoutMs, start;
+            return new Promise(function (resolve) {
+                function check() {
+                    if (closed || owner !== activeSession) return resolve({ok: false, reason: "panel-closed"});
+                    var stats;
+                    try { stats = host.panelStatus(); } catch (_) { return resolve({ok: false, reason: "panel-status"}); }
+                    var count = /^presented=([0-9]+)\r?$/m.exec(stats);
+                    var frames = count ? +count[1] : 0;
+                    if (start === undefined) start = frames;
+                    var shown = !covered && /^visible=1\r?$/m.test(stats);
+                    var hosted = /^native_input=1\r?$/m.test(stats);
+                    var paused = hosted && /^native_input_paused=1\r?$/m.test(stats);
+                    var active = !hosted || !/^native_input_active=/m.test(stats) ||
+                        /^native_input_active=1\r?$/m.test(stats);
+                    if (shown && frames > start && !paused && active) return resolve({ok: true});
+                    if (performance.now() >= deadline) {
+                        return resolve({ok: false, reason: !shown ? "panel-hidden" : frames <= start ? "no-frames" :
+                            paused ? "input-paused" : "input-background"});
+                    }
+                    setTimeout(check, 100);
+                }
+                check();
+            });
+        }
+        return {primary: true, ownsInput: function () { return !closed && (!opened || nativeInput); }, close: close,
+            confirmInput: confirmInput, cover: function () {
             if (closed || covered) return covering;
             covered = true;
             resetSample();

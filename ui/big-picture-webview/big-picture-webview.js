@@ -1,6 +1,10 @@
 (function () {
     "use strict";
     var session, releasedGame;
+    // Valve's controls must run script and draw within this bound once they are requested
+    // over a game. A renderer that cannot (it showed only white and ignored the controller
+    // on Slay the Spire 2) is treated as failed, which hands the game back.
+    var overlayReadyMs = 10000;
     // Recovery transitions outlive the failed renderer session, so the report written by
     // the restarted Big Picture still shows how the running game was kept on screen.
     var recoveryLog = [];
@@ -53,7 +57,7 @@
         var storeStages = [];
         var storeJsStages = [];
         var file, report = Promise.resolve();
-        var messages = [], last = "", servedGames, rendererError, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
+        var messages = [], last = "", servedGames, rendererError, rendererErrorLatest, rendererErrors = 0, surfaceState, startupRoute, popupPhase, captures = {}, memory = {}, gameFrames = {};
         var surfaceSizing = "", startupMovieOverride = "";
         var startupServices = {}, startupCloudReads = {};
         var warmReport = "", memoryRequest = "", triedMemory = false;
@@ -120,6 +124,7 @@
                 Object.keys(captures).map(function (kind) { return kind + "_capture=" + captures[kind] + "\r\n"; }).join("") +
                 Object.keys(gameFrames).map(function (key) { return "game_frame_" + key + "=" + gameFrames[key] + "\r\n"; }).join("") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
+                (rendererErrors > 1 ? "renderer_error_count=" + rendererErrors + "\r\nrenderer_error_latest=" + rendererErrorLatest + "\r\n" : "") +
                 recoveryLog.map(function (entry, i) { return "webview_recovery_" + (i + 1) + "=" + entry + "\r\n"; }).join("") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
             // Device Portal may be reading the report during a cold launch. Its
@@ -136,7 +141,7 @@
         function show(to, from) {
             return switchView(to, from);
         }
-        var playingApp = 0, presented = false, returnToGame, quitGame, raising;
+        var playingApp = 0, presented = false, returnToGame, quitGame, confirmGame, raising, overlayTimer;
         function recordGameFrame(appId, stage, stats) {
             if (failed || !playing || appId !== playingApp || typeof stats !== "string" ||
                 (stage !== "first" && stage !== "sample" && stage !== "fallback" && stage !== "media" &&
@@ -144,6 +149,7 @@
             var fields = stats.split(/\r?\n/).filter(function (line) {
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|primary_panel|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
                     /^(native_input|native_input_hresult|native_menu_requests|native_menu_chords|native_menu_chords_ignored|native_menu_chords_expired)=[0-9]{1,16}$/.test(line) ||
+                    /^(native_input_active|native_input_paused|native_key_events|native_focus_restores)=[0-9]{1,16}$/.test(line) ||
                     /^menu_switch=(requested|shown|declined|failed)$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
                     /^sample_(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=[0-9]{1,16}$/.test(line) ||
@@ -221,13 +227,17 @@
                 host.reply(JSON.stringify({nativeWarmupComplete: true}));
             }).catch(fail);
         }
-        function showForGame(appId, from, restore, requestExit) {
+        // confirmInput: optional; resolves {ok, reason} once the game's frames and hosted
+        // input are flowing again after it is shown.
+        function showForGame(appId, from, restore, requestExit, confirmInput) {
             if (raising || !played(appId) || !from || typeof restore !== "function")
                 return Promise.resolve(false);
             returnToGame = restore; quitGame = requestExit;
+            confirmGame = typeof confirmInput === "function" ? confirmInput : null;
             return showValve(from).then(function () {
                 if (failed || !playing || playingApp !== appId) return false;
                 sampleMemory("overlay"); gameEvent(true); record("game-switch-to-steam");
+                watchOverlay(appId, restore);
                 // Xbox can revise the budget after the view switch resolves.
                 [500, 2000, 5000].forEach(function (delay) {
                     setTimeout(function () {
@@ -239,9 +249,38 @@
                 return true;
             });
         }
+        function watchOverlay(appId, restore) {
+            clearTimeout(overlayTimer);
+            overlayTimer = setTimeout(function () {
+                overlayTimer = null;
+                if (failed || !visible || !played(appId) || returnToGame !== restore) return;
+                // The renderer never confirmed Valve's controls. Close it as failed: the
+                // lost-game path shows the game again with its input, and Big Picture
+                // reopens when the game exits.
+                finish("overlay-unresponsive");
+            }, overlayReadyMs);
+        }
+        function overlayReady(appId) {
+            if (!overlayTimer || failed || !played(appId) || !visible) return;
+            clearTimeout(overlayTimer);
+            overlayTimer = null;
+            record("game-overlay-ready");
+        }
+        // Normalizes a confirmInput result. A game without a confirmation hook counts as resumed.
+        function confirmResumedInput(confirm) {
+            if (typeof confirm !== "function") return Promise.resolve({ok: true});
+            return Promise.resolve().then(confirm).then(function (result) {
+                if (result === true || (result && result.ok === true)) return {ok: true};
+                var reason = result && typeof result.reason === "string" && /^[a-z][a-z-]{0,31}$/.test(result.reason) ?
+                    result.reason : "unconfirmed";
+                return {ok: false, reason: reason};
+            }, function () { return {ok: false, reason: "failed"}; });
+        }
         function raiseGame(appId) {
             if (raising || !visible || !played(appId) || !returnToGame) return Promise.resolve("unavailable");
-            var restore = returnToGame;
+            var restore = returnToGame, confirm = confirmGame;
+            clearTimeout(overlayTimer);
+            overlayTimer = null;
             raising = Promise.resolve().then(function () { return restore(viewId); }).then(function (shown) {
                 if (shown) visible = false;
                 if (!played(appId)) return "unavailable";
@@ -249,9 +288,12 @@
                     record("game-resume-declined");
                     return "unavailable";
                 }
-                returnToGame = quitGame = null;
+                returnToGame = quitGame = confirmGame = null;
                 setGameForeground(true);
                 sampleMemory("resume_game"); gameEvent(false); record("game-switch-to-game");
+                confirmResumedInput(confirm).then(function (input) {
+                    if (!input.ok && played(appId)) record("game-input-resume-failed:" + input.reason);
+                });
                 return "presented";
             }, function () {
                 if (played(appId)) record("game-resume-failed");
@@ -328,7 +370,9 @@
             if (exitedApp && playingApp && exitedApp !== playingApp) return Promise.resolve();
             var returning = playing;
             playing = presented = false;
-            playingApp = 0; returnToGame = quitGame = null;
+            playingApp = 0; returnToGame = quitGame = confirmGame = null;
+            clearTimeout(overlayTimer);
+            overlayTimer = null;
             return Promise.resolve(raising).then(function () { return showValve(mainId); }).then(function () {
                 if (returning && !playing && !failed) {
                     sampleMemory("return"); gameEvent(false); return record("game-returned-to-steam");
@@ -384,13 +428,21 @@
                 return;
             }
             if (request.method === "renderer-error") {
-                // Keep only the first short script failure. Exclude URLs or sign-in tokens.
-                if (!rendererError) {
-                    rendererError = String(request.message || "script error").slice(0, 180)
-                        .replace(/https?:\/\/\S+/gi, "[url]").replace(/[\r\n]/g, " ");
-                    // Independent stores can fail while the gamepad window goes on to render.
-                    record(last, true);
-                }
+                // Keep the first short script failure, and the latest with the stage it arrived
+                // in: a startup failure must not hide one raised under a game's overlay.
+                // Exclude URLs or sign-in tokens.
+                var scriptError = String(request.message || "script error").slice(0, 180)
+                    .replace(/https?:\/\/\S+/gi, "[url]").replace(/[\r\n]/g, " ");
+                if (!rendererError) rendererError = scriptError;
+                rendererErrors++;
+                rendererErrorLatest = last + " " + scriptError;
+                // Independent stores can fail while the gamepad window goes on to render. A
+                // repeating failure is still counted, but stops rewriting the report itself.
+                if (rendererErrors <= 16) record(last, true);
+                return;
+            }
+            if (request.method === "overlay-ready") {
+                if (Number.isInteger(request.appId)) overlayReady(request.appId);
                 return;
             }
             if (request.method === "surface-sizing") {
@@ -577,14 +629,27 @@
                 return;
             }
             noteGame("game-restore-started appid=" + game.appId);
+            // game-restored means the game presents frames and its hosted input is live again.
             function attempt(remaining) {
+                var shown = false;
                 return Promise.resolve().then(function () { return game.restore(mainId); })
-                    .then(function (shown) { return shown === true; }, function () { return false; })
-                    .then(function (shown) {
+                    .then(function (result) { return result === true; }, function () { return false; })
+                    .then(function (result) {
+                        shown = result;
+                        if (shown && gameStillLost(game)) return confirmResumedInput(game.confirm);
+                    })
+                    .then(function (input) {
                         if (!gameStillLost(game)) return;
-                        if (shown) {
+                        if (shown && input.ok) {
                             announceGameForeground(true);
                             noteGame("game-restored appid=" + game.appId);
+                            return;
+                        }
+                        if (shown && !remaining) {
+                            // The game is on screen but its input did not come back. Keep it
+                            // there and record why, rather than restarting over a visible game.
+                            announceGameForeground(true);
+                            noteGame("game-input-resume-failed appid=" + game.appId + " reason=" + input.reason);
                             return;
                         }
                         if (remaining) {
@@ -598,7 +663,8 @@
                         releasedGame = null;
                         noteGame("game-restore-failed appid=" + game.appId);
                         noteRecovery("webview-restart-for-game appid=" + game.appId);
-                        open(broker, onFailure, undefined, {appId: game.appId, restore: game.restore, quit: game.quit})
+                        open(broker, onFailure, undefined,
+                            {appId: game.appId, restore: game.restore, quit: game.quit, confirm: game.confirm})
                             .catch(function (error) { if (typeof onFailure === "function") onFailure(error); });
                     });
             }
@@ -610,6 +676,7 @@
             playingApp = game.appId;
             returnToGame = game.restore;
             quitGame = game.quit;
+            confirmGame = game.confirm || null;
             gameEvent(true);
             noteRecovery("game-adopted appid=" + game.appId);
             record("game-adopted");
@@ -617,8 +684,11 @@
         function finish(stage, intentional) {
             if (failed) return session && session.cleanup || Promise.resolve();
             var lostGame = !intentional && broker && playing && presented && playingApp ?
-                {appId: playingApp, restore: returnToGame, quit: quitGame, covered: typeof returnToGame === "function"} : null;
+                {appId: playingApp, restore: returnToGame, quit: quitGame, confirm: confirmGame,
+                 covered: typeof returnToGame === "function"} : null;
             failed = true;
+            clearTimeout(overlayTimer);
+            overlayTimer = null;
             if (network) network.close();
             clearInterval(timer);
             clearTimeout(readinessTimer);
@@ -767,6 +837,7 @@
                 record(last, true);
             },
             resume: resume, showForGame: showForGame, playConfiguredTrial: playConfiguredTrial,
+            overlayAvailable: function (appId) { return played(appId); },
             sampleMemory: sampleMemory, recordGameFrame: recordGameFrame,
             ready: broker ? ready : startup};
         return session.ready;
@@ -785,14 +856,24 @@
         playConfiguredTrial: function (appId) {
             return session ? session.playConfiguredTrial(appId) : Promise.resolve("unavailable");
         },
-        showForGame: function (appId, viewId, restore, requestExit) {
+        // Whether the Menu + View chord can show Valve's controls over this game now. While
+        // Big Picture is down after a renderer failure, or released for the game, it cannot:
+        // the caller then keeps the game shown and resumes its input without covering it.
+        overlayAvailable: function (appId) {
+            if (releasedGame && releasedGame.appId === appId) {
+                if (releasedGame.note) releasedGame.note("game-overlay-unavailable appid=" + appId);
+                return false;
+            }
+            return !!session && session.overlayAvailable(appId);
+        },
+        showForGame: function (appId, viewId, restore, requestExit, confirmInput) {
             // While Big Picture is down after a renderer failure the game keeps the
             // foreground. The caller resumes the game when the switch is declined.
             if (releasedGame && releasedGame.appId === appId && releasedGame.note) {
                 releasedGame.note("game-overlay-unavailable appid=" + appId);
                 return Promise.resolve(false);
             }
-            return session ? session.showForGame(appId, viewId, restore, requestExit) : Promise.resolve(false);
+            return session ? session.showForGame(appId, viewId, restore, requestExit, confirmInput) : Promise.resolve(false);
         }
     };
 }());

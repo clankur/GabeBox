@@ -18,8 +18,16 @@ typedef struct FhdHostedChordCounts {
 void FhdReadHostedChordCounts(FhdHostedChordCounts *out);
 void FhdPauseHostedInput(void);
 BOOL FhdHostedInputForeground(void);
+/* TRUE while an overlay request or a covered panel holds the game's input. */
+BOOL FhdHostedInputPaused(void);
+/* CoreWindow key events (KeyDown/KeyUp) received since Begin, in any input state. Remote
+   controller input, the keyboard and the remote Menu + View chord all arrive this way, so a
+   count that stays put while keys are sent to a shown game means the window lost key focus. */
+UINT FhdHostedKeyEvents(void);
 int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow); /* 1 requests library overlay */
-void FhdResumeHostedInput(void); /* on the view thread following a switch back or a failed switch away */
+/* On the view thread following a switch back or a failed switch away. Clears held and
+   suppressed chord state and republishes the next controller sample under a new serial. */
+void FhdResumeHostedInput(void);
 void FhdEndHostedInput(void);
 #ifdef __cplusplus
 }
