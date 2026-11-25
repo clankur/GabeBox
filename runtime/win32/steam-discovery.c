@@ -153,6 +153,15 @@ DWORD WINAPI XboxSteamInitialize(BOOL retain) {
     HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
     DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL, retain);
     if (client) FreeLibrary(client);
+    /* Steam publishes the controllers it virtualizes for SDL titles to ignore when the SDK
+       starts. A hosted game has no Steam virtual gamepad, and the hosted XInput pad would
+       match those entries, so the lists are withdrawn for titles that use it. */
+    WCHAR hosted[2];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", hosted, ARRAYSIZE(hosted)) == 1 && hosted[0] == L'1') {
+        SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", NULL);
+        SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", NULL);
+        SetEnvironmentVariableW(L"SteamVirtualGamepadInfo", NULL);
+    }
     return report | (result & 0xffffu);
 }
 
