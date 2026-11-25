@@ -42,7 +42,8 @@
     "GetSystemMetrics": "XboxWin32Window.dll",
     "GetDisplayConfigBufferSizes": "XboxWin32HostedDisplay.dll",
     "QueryDisplayConfig": "XboxWin32HostedDisplay.dll",
-    "DisplayConfigGetDeviceInfo": "XboxWin32HostedDisplay.dll"
+    "DisplayConfigGetDeviceInfo": "XboxWin32HostedDisplay.dll",
+    "GetCursorPos": "XboxWin32Window.dll"
   },
   "kernel32.dll": {
     "GetModuleFileNameW": "XboxWin32LoaderTrace.dll",
