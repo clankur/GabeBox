@@ -206,7 +206,8 @@ Both ends are ours, so the package does not have to treat the stick the way a ga
   stick (`map(report[1], SCHAR_MIN, SCHAR_MAX, 0, 1023)`) and recenters after 32 ms
   without a report. Deflection is therefore proportional to mouse speed. Integrating
   `deflection × gain × elapsed` in the package recovers displacement independently of
-  how often the package or the XAC samples.
+  how often the package or the XAC samples. Upstream loses motion in three ways when
+  used as a cursor; see [upstream mouse2xac as a cursor](#upstream-mouse2xac-as-a-cursor).
 - **A separate pointer stick profile.** The hosted presenter's existing stick cursor
   ([hosted-input.cpp](../runtime/presenter/hosted-input.cpp)) uses a 20% deadzone
   (`6500/32768`) and a fixed 1.25-second full-screen traverse. An adapter needs a
@@ -229,12 +230,37 @@ Expected fidelity is below a real mouse: a 10-bit axis, the console's controller
 rate, and whatever deadzone the XAC or the typed `Gamepad` reading applies. The
 controller pointer probe measures all three before any presenter work starts.
 
+### Upstream mouse2xac as a cursor
+
+Read from [mouse2xac.ino](https://github.com/touchgadget/mouse2xac/blob/081f1cafb8c13df16a23d0ed2052255fcf8d7fac/mouse2xac.ino)
+at `081f1ca`. Nothing here has run on hardware.
+
+| Behavior | Effect on a cursor |
+| --- | --- |
+| A single-slot buffer holds the latest mouse report. Reports arriving before the joystick sends it are counted as drops and discarded. | On a 500 or 1000 Hz mouse, most motion never leaves the board. |
+| One report's ±127 counts map to the full 0–1023 axis. | The scale depends on the mouse's report rate, so the package cannot use a fixed gain. A fast move on a high-CPI mouse saturates the stick and the excess is lost. |
+| The wheel byte is not read. | No scrolling. |
+| The report is zero-initialized, so the hat switch sends 0, which means "up", rather than null. | Harmless only if the XAC ignores the hat. |
+
+The fix happens in the firmware, not the package:
+
+- Accumulate motion from every report.
+- Write the stick once per fixed output period, encoding velocity on a fixed scale.
+- Carry motion beyond full deflection into later periods, up to a bounded backlog.
+- Pulse two spare buttons per wheel detent. The XAC reads only the first eight.
+
+The package then needs only one documented constant to recover counts. A fork that does
+this, with its decoding contract, is staged separately until hardware is available. Its
+output period must be at least the console's controller reading interval, which the
+controller pointer probe measures.
+
 ### Sequence
 
 1. Run the controller pointer probe with a generic HID joystick board. If it enumerates,
    the XAC is unnecessary and the board can expose more axes and buttons.
-2. Run it with the XAC and a mouse2xac board. Record identity, `step`, update interval,
-   resting values, and the raw-versus-typed axis comparison.
+2. Run it with the XAC and a board running the mouse2xac fork. Record identity, `step`,
+   update interval, resting values, and the raw-versus-typed axis comparison, then set
+   the fork's output period and full-scale constants from them.
 3. Add a declarative pointer stick profile and identity routing to the hosted presenter,
    verify cursor feel and latency on the console, and have a separate verifier review the
    raw reports.
