@@ -2274,6 +2274,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowLocalCrashReports = false;
     bool shadowLocalLow = false;
     bool shadowHostedXInput = false;
+    bool shadowJitTrace = false;
     bool shadowDxgi = false;
     bool shadowD3d12DefaultAdapter = false;
     bool shadowStreamlineUnavailable = false;
@@ -2383,6 +2384,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 shadowHostedXInput = static_cast<bool>(hostedXInput);
                 if (hostedXInput && (co_await hostedXInput.GetBasicPropertiesAsync()).Size())
                     co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-managed-jit-trace-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowJitTrace = true;
+                }
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
                 shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -3243,6 +3252,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
+                // Diagnostic: CoreCLR lists each method it compiles, so first-use stalls can be
+                // matched against JIT activity. Needs loader tracing for the trial directory.
+                {L"DOTNET_JitDisasmSummary", shadowJitTrace && shadowTrace ? L"1" : L""},
+                {L"DOTNET_JitStdOutFile", shadowJitTrace && shadowTrace ? trialRoot + L"\\jit-summary.txt" : std::wstring{}},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_ORIGINAL_EXECUTABLE", shadowOriginalExecutablePath},
