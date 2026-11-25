@@ -297,7 +297,12 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
     InterlockedExchange(&mailbox_->heartbeat_ms,static_cast<LONG>(GetTickCount64()));
     auto &r=*resources_;
     UINT64 seq[SDL_GPU_SLOTS]{};
-    int newest=-1;
+    // Draw the oldest completed frame newer than the last one shown and keep a
+    // newer one for the next refresh. When producer and display clocks drift,
+    // two frames can complete within one refresh; showing the newest would drop
+    // the other and repeat a frame on the following refresh. The producer skips
+    // a slot until it is released, so at most one frame waits here.
+    int next=-1;
     for (int i=0;i<SDL_GPU_SLOTS;i++) {
         const UINT64 value=load64(&mailbox_->sequence[i]);
         if (!value || value<=r.slots[i].retired) continue;
@@ -308,14 +313,17 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
         }
         if (ready<value) continue;
         seq[i]=value;
-        if (value>r.latest && (newest<0 || value>seq[newest])) newest=i;
+        if (value>r.latest && (next<0 || value<seq[next])) next=i;
     }
     if (load(&mailbox_->generation)!=generation) { Disconnect(); return S_FALSE; }
-    if (!load(&mailbox_->gpu_active)) newest=-1;
+    const bool active=load(&mailbox_->gpu_active)!=0;
+    if (!active) next=-1;
     for (int i=0;i<SDL_GPU_SLOTS;i++) {
         if (!seq[i]) continue;
+        // Hold a newer completed frame for the next refresh.
+        if (active && i!=next && seq[i]>r.latest) continue;
         auto &slot=r.slots[i];
-        if (i==newest) {
+        if (i==next) {
             HRESULT wait=r.fences->Wait(slot.ready.Get(),seq[i]);
             if (FAILED(wait)) { stage_="consumer-fence-wait"; failedGeneration_=generation; Disconnect(); return wait; }
             const auto &cursor=mailbox_->cursor[i];
@@ -329,9 +337,9 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
     }
     if (!seq[0] && !seq[1]) return S_FALSE;
     context->Flush();
-    if (newest<0) return S_FALSE;
+    if (next<0) return S_FALSE;
     lastWidth_=r.width; lastHeight_=r.height;
-    sequence=r.latest=seq[newest]; stage_="gpu-drew-frame";
+    sequence=r.latest=seq[next]; stage_="gpu-drew-frame";
     return S_OK;
 }
 

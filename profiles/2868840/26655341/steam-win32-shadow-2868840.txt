@@ -1,6 +1,6 @@
 26655341
 SlayTheSpire2.exe
-d3d12
+opengl3
 godot
 
 
