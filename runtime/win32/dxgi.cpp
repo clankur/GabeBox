@@ -196,7 +196,7 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
     bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
-    bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false;
+    bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedOccluded_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
         if (flags & DXGI_PRESENT_TEST) return interval;
@@ -298,8 +298,17 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         if (timing.entered) timing.locked = cadence_.Timestamp();
         const UINT nativeInterval = PreparePresent(interval, flags, timing);
         if (timing.entered) timing.prepared = cadence_.Timestamp();
-        const HRESULT result = present(nativeInterval);
+        HRESULT result = present(nativeInterval);
         if (timing.entered) timing.returned = cadence_.Timestamp();
+        // The native composition swap chain is never attached to a visual; the presenter shows the published
+        // frames. Its occlusion status would make engines such as Unity stop rendering, so report visibility.
+        if (result == DXGI_STATUS_OCCLUDED) {
+            if (!tracedOccluded_) {
+                Trace("present-occluded-masked", result);
+                tracedOccluded_ = true;
+            }
+            result = S_OK;
+        }
         TracePresent(interval, nativeInterval, flags, result);
         if (measure) cadence_.RecordPresent(timing, publisher_.IsActive());
         ReleaseSRWLockExclusive(&lock_);
