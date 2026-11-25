@@ -345,9 +345,10 @@ I dropped some branch pieces instead of porting them:
 
 The [build-pinned profile](../profiles/1229490/22957324) and [source fingerprints](../profiles/1229490/source.json) bind build `22957324`. `ULTRAKILL_Data/app.info` on the console reads `Hakita` / `ULTRAKILL`, which confirms the PlayerPrefs key. Device Portal exported the three images with matching hashes. `python3 -m build_tools.redirect_pe_imports --recipe` produced the launcher, engine (signed source `3beae3d0…`) and Mono (signed source `43b9e110…`) recipes from them, which confirms every binding names a real import. Each bound symbol is exported by its target adapter `.def`.
 
+Build Xbox probe run `45525796116` compiled every adapter, ProbeNative and the Steam Core template from commit `27f625c`. The profile staged against that exact `xbox-steam-core-template` artifact through `stage_win32_trial_profiles`. That staging checks the compiled ProbeNative, Desktop and LoaderTrace binaries for the `-force-d3d11`, LocalLow, hosted-XInput and PlayerPrefs hints. `llvm-objdump` confirmed that the compiled adapters export all 60 symbols the recipes bind or Unity resolves dynamically.
+
 **Still pending a console run:**
 
-- the Windows build of these adapters;
-- a signed package carrying the profile;
+- a signed package carrying the profile, which needs the pinned base APPX, `makemsix` and `osslsigncode`;
 - the `--display-config`, `--hosted-display`, `--known-folders`, `--player-prefs` and `--win32-opengl` controls;
 - an observed Big Picture Play of build `22957324`.
