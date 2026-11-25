@@ -30,6 +30,61 @@ DXIL_FILES = {
     'LICENSE.DXIL-LLVM.txt': 'LICENSE-LLVM.txt',
     'LICENSE.DXIL-MIT.txt': 'LICENSE-MIT.txt',
 }
+# Workflow builds of the same revision (.github/workflows/xbox-mesa-uwp.yml, runtime/mesa).
+RUNTIME_SOURCE = 'https://github.com/XboxEmulationHub/mesa-uwp/tree/34732bbc207daea10bdf2fb969a4a0f7769ea1de'
+RUNTIME_LICENSE_SHA256 = '0d1a0472ecc81830e75c20d59b0ea02841e3db21255e0ebad97ab682c54d6615'
+RUNTIME_FILES = (*LIBRARIES, 'LICENSE.mesa-uwp', 'mesa-uwp-source.txt')
+RUNTIME_LIMIT = 128 * 1024 * 1024
+# D3D12_SHADER_CACHE_STATS only exists in builds with runtime/mesa/patches/0003.
+SHADER_CACHE_MARKER = b'D3D12_SHADER_CACHE_STATS'
+
+
+def has_shader_cache(driver):
+    """Whether a libgallium_wgl.dll image carries the persistent d3d12 shader cache."""
+    return SHADER_CACHE_MARKER in driver
+
+
+def load_mesa_runtime(directory, checksum):
+    """Read a Mesa UWP workflow artifact pinned by the SHA-256 of its SHA256SUMS file."""
+    if not re.fullmatch(r'[0-9a-f]{64}', checksum or ''):
+        raise ValueError('Pin the Mesa UWP runtime with the SHA-256 of its SHA256SUMS file.')
+    sums = (directory / 'SHA256SUMS').read_bytes()
+    if hashlib.sha256(sums).hexdigest() != checksum:
+        raise ValueError('The Mesa UWP runtime artifact differs from its pinned SHA256SUMS digest.')
+    expected = {}
+    for line in sums.decode('ascii').splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  ([A-Za-z0-9._-]+)', line)
+        if not match or match[2] in expected:
+            raise ValueError('Invalid Mesa UWP runtime SHA256SUMS.')
+        expected[match[2]] = match[1]
+    if sorted(expected) != sorted(RUNTIME_FILES):
+        raise ValueError('The Mesa UWP runtime artifact must list exactly: ' + ', '.join(RUNTIME_FILES))
+    files = {}
+    for name, digest in expected.items():
+        path = directory / name
+        if path.stat().st_size > RUNTIME_LIMIT:
+            raise ValueError(f'Mesa UWP runtime file {name} is too large.')
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError(f'Mesa UWP runtime file {name} differs from SHA256SUMS.')
+        if name.endswith('.dll') and (data[:2] != b'MZ' or b'PE\0\0\x64\x86' not in data[:4096]):
+            raise ValueError(f'Mesa UWP runtime file {name} is not an x64 PE image.')
+        files[name] = data
+    if hashlib.sha256(files['LICENSE.mesa-uwp']).hexdigest() != RUNTIME_LICENSE_SHA256:
+        raise ValueError('Use the Mesa UWP license from the pinned source revision.')
+    if files['mesa-uwp-source.txt'].decode('ascii').splitlines()[:1] != [RUNTIME_SOURCE]:
+        raise ValueError('The Mesa UWP runtime artifact was not built from the pinned source revision.')
+    return files
+
+
+def stage_mesa_runtime(layout, directory, checksum):
+    """Replace the base package's prebuilt Mesa UWP runtime with a pinned workflow build."""
+    files = load_mesa_runtime(directory, checksum)
+    if any(not (layout / name).is_file() for name in LIBRARIES):
+        raise ValueError('The base package does not carry the Mesa UWP runtime to replace.')
+    for name, data in files.items():
+        (layout / name).write_bytes(data)
+    return has_shader_cache(files['libgallium_wgl.dll'])
 
 
 def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, slay_mesa_jni=None,

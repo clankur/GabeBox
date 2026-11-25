@@ -1,0 +1,27 @@
+Subject: meson: select UWP from the host machine subsystem
+
+mesa-uwp 34732bb reads get_option('uwp'), a builtin option of an unpublished
+Meson fork. The published UWP Meson fork (SternXD/meson uwp-subsystem)
+models UWP as a host machine subsystem instead, set in a machine file:
+
+  [host_machine]
+  system = 'windows'
+  subsystem = 'uwp'
+
+That fork also adds /DWINAPI_FAMILY=WINAPI_FAMILY_APP and the AppContainer
+project settings, so with_uwp follows the machine file. Build-only change.
+
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -114,7 +114,9 @@
+ with_vulkan_vram_report_limit_layer = get_option('vulkan-layers').contains('vram-report-limit')
+ with_vulkan_anti_lag_layer = get_option('vulkan-layers').contains('anti-lag')
+ with_tools = get_option('tools')
+-with_uwp = get_option('uwp')
++# The UWP Meson fork selects an AppContainer build from the host machine file
++# (system = 'windows', subsystem = 'uwp') rather than a builtin option.
++with_uwp = host_machine.system() == 'windows' and host_machine.subsystem() == 'uwp'
+ if with_tools.contains('all')
+   with_tools = [
+     'amd',

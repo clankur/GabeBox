@@ -2282,6 +2282,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowJitTrace = false;
     bool shadowPipelineCache = false;
     std::wstring shadowManagedWarmup;
+    bool shadowGlTrace = false;
+    bool shadowMesaShaderCache = false;
     bool shadowDxgi = false;
     bool shadowD3d12DefaultAdapter = false;
     bool shadowStreamlineUnavailable = false;
@@ -2428,6 +2430,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                 }
+                // Diagnostic: time GL compiles, links, program loads and slow draws in the
+                // hosted OpenGL route, alongside driver pipeline creation, without the JIT trace.
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-gl-trace-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowGlTrace = true;
+                }
+                // Mesa's persistent shader cache (program cache, program binaries and DXIL
+                // variants) in a per-account, per-title folder under LocalState.
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-mesa-shader-cache-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowMesaShaderCache = true;
+                }
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
                 shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -2498,6 +2520,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (shadowPipelineCache && (!shadowRecipe || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         (shadowDynamicCompanions && (!shadowOriginalExecutable || !shadowFiles || !shadowTrace)) ||
+                        ((shadowGlTrace || shadowMesaShaderCache) && (!shadowRecipe || shadowRenderer != L"opengl3")) ||
+                        (shadowGlTrace && !shadowTrace) ||
                         (!accessibility.empty() && (!shadowAccessibilityDisabled || !shadowRecipe ||
                             !hostedSurfaceless || shadowRuntime != L"godot" || (shadowRenderer != L"opengl3" && !godotDxgi))) ||
                         (!shadowImage.empty() && !steam_win32_stage::IsImageName(shadowImage, L".dll") &&
@@ -2912,6 +2936,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     steam_win32_stage::StageFolder shadowStage;
     std::wstring shadowRoaming;
     std::wstring shadowCache;
+    std::wstring shadowMesaCache;
     std::wstring shadowDocumentsPath;
     std::wstring shadowLow;
     std::wstring shadowPrefsHive;
@@ -2937,6 +2962,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto cache = co_await profile.CreateFolderAsync(L"Local", CreationCollisionOption::OpenIfExists);
         shadowRoaming = roaming.Path().c_str();
         shadowCache = cache.Path().c_str();
+        if (shadowMesaShaderCache) {
+            auto mesa = co_await profile.CreateFolderAsync(L"MesaShaderCache", CreationCollisionOption::OpenIfExists);
+            shadowMesaCache = mesa.Path().c_str();
+        }
         if (shadowDocuments) {
             try {
                 auto documents = co_await profile.CreateFolderAsync(L"Documents", CreationCollisionOption::OpenIfExists);
@@ -3309,6 +3338,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     L"steam_shadow_pipeline_cache=profile\r\n";
             }
             const auto managedWarmup = packageRoot + L"\\XboxManagedWarmup.dll";
+            std::wstring mesaStats;
+            if (!shadowMesaCache.empty()) {
+                const auto stamp = (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                    launchTime.dwLowDateTime;
+                const auto name = L"mesa-shader-cache-" + appId + L"-" + std::to_wstring(stamp) + L".txt";
+                mesaStats = dataRoot + L"\\" + name;
+                report += L"steam_shadow_mesa_shader_cache=profile\r\nsteam_shadow_mesa_cache_stats=" + name + L"\r\n";
+            }
+            if (shadowGlTrace) report += L"steam_shadow_gl_trace=loader-trace\r\n";
             const std::pair<std::wstring, std::wstring> variables[] = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
                 {L"XBOX_WIN32_DOCUMENTS", shadowDocumentsPath},
@@ -3328,8 +3366,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 // against JIT activity. The trace goes to LocalState because the trial
                 // directory is removed when the game exits.
                 {L"DOTNET_EnableEventPipe", shadowJitTrace ? L"1" : L""},
-                {L"XBOX_WIN32_PSO_TRACE", shadowJitTrace && shadowTrace ? L"1" : L""},
+                {L"XBOX_WIN32_PSO_TRACE", (shadowJitTrace || shadowGlTrace) && shadowTrace ? L"1" : L""},
                 {L"XBOX_WIN32_PSO_CACHE", pipelineCache},
+                {L"XBOX_WIN32_GL_TRACE", shadowGlTrace && shadowTrace ? L"1" : L""},
+                // Mesa reads these through GetEnvironmentVariableA. Without a directory the
+                // patched Mesa keeps its disk cache and program-binary formats off.
+                {L"MESA_SHADER_CACHE_DIR", shadowMesaCache},
+                {L"MESA_SHADER_CACHE_MAX_SIZE", shadowMesaCache.empty() ? L"" : L"512M"},
+                {L"D3D12_SHADER_CACHE_STATS", mesaStats},
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},

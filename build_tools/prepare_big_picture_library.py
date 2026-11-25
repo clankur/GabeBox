@@ -14,6 +14,7 @@ from build_tools.appx import APPX_FOOTPRINT
 from build_tools.bundle_big_picture import bundle
 from build_tools.paths import DOS_RUNTIME, SIGNIN
 from build_tools.presenter import stage_native_presenter
+from build_tools.stage_mesa_uwp import stage_mesa_runtime
 from build_tools.stage_pinned_client import stage_client
 from build_tools.stage_primary import stage_primary
 from build_tools.stage_profiles import stage_legacy_pointer_mode, stage_surfaceless_profiles, stage_win32_trial_profiles
@@ -103,7 +104,8 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
                    win32_trial_profiles=(), migrate_legacy_library=False,
-                   early_library_reveal=False, win32_source_profiles=(), play_installed_app_id=None):
+                   early_library_reveal=False, win32_source_profiles=(), play_installed_app_id=None,
+                   mesa_runtime=None):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if early_library_reveal and primary_xaml is None:
@@ -116,6 +118,10 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         staged = Path(temp) / "layout"
         staged.mkdir()
         release_layout(base, staged, version)
+        if mesa_runtime is not None:
+            # Without it the base package keeps its prebuilt Mesa UWP 34732bb runtime.
+            artifact, digest = mesa_runtime
+            stage_mesa_runtime(staged, Path(artifact), digest)
         if dwarf_sdl or shared_sdl:
             for profile, app_id in ((dwarf_sdl, 975370), (shared_sdl, 413150)):
                 if not profile:
@@ -203,13 +209,16 @@ def main():
                         help="request a verified one-time move of existing app-local Steam games to Xbox internal storage")
     parser.add_argument("--play-installed-app-id", type=int, metavar="APPID",
                         help="run one authenticated Big Picture Play trial for a locally installed game")
+    parser.add_argument("--mesa-runtime", nargs=2, metavar=("ARTIFACT", "SUMS_SHA256"),
+                        help="replace the base package's prebuilt Mesa UWP runtime with a pinned "
+                             "xbox-mesa-uwp workflow artifact")
     args = parser.parse_args()
     prepare_layout(args.base, args.host_artifact, args.layout, args.version, args.archive_cache,
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
                    args.surfaceless_profile, args.win32_trial_profile,
                    args.migrate_legacy_library, args.early_library_reveal, args.win32_source_profile,
-                   args.play_installed_app_id)
+                   args.play_installed_app_id, args.mesa_runtime)
 
 
 if __name__ == "__main__":
