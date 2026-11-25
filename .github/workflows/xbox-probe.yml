@@ -185,7 +185,7 @@ jobs:
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
                                     @{ Module = 'transactions'; Name = 'ktmw32'; Sources = @('transactions') },
                                     @{ Module = 'steam-discovery'; Name = 'XboxWin32SteamDiscovery'; Sources = @('steam-discovery') },
-                                    @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
+                                    @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor', 'window-gdi') })) {
               $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"
                 & "$llvm\clang.exe" --target=x86_64-pc-windows-msvc -O2 -ffreestanding -Wall -Wextra -Werror `

@@ -195,11 +195,11 @@ child_output="$layout/child.exe"
 if $dxgi_window || $win32_opengl || $hosted_display; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
-    for source in window window-gl window-monitor; do
+    for source in window window-gl window-monitor window-gdi; do
         "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
     done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/window.def" "/out:$layout/XboxWin32Window.dll" \
-        "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
+        "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$build/window-gdi.obj" "$windows_app"
 fi
 if $hosted_display; then
     "${win32_compiler[@]}" -c "$repo/runtime/win32/hosted-display.c" -o "$build/hosted-display.obj"

@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #define XBOX_DESKTOP_DC ((HDC)(ULONG_PTR)0x584244000001ULL)
+#define XBOX_DISPLAY_DC ((HDC)(ULONG_PTR)0x584244000002ULL)
 
 /* Private HWND and HDC values belong to this backend. */
 typedef struct XboxWindow {

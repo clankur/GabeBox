@@ -1,6 +1,8 @@
 {
   "gdi32.dll": {
+    "CreateDIBSection": "XboxWin32Window.dll",
     "DeleteDC": "XboxWin32Window.dll",
+    "DeleteObject": "XboxWin32Window.dll",
     "GetDeviceCaps": "XboxWin32Window.dll"
   },
   "kernel32.dll": {

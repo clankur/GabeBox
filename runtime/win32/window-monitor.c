@@ -2,7 +2,6 @@
 #include "hosted-display.h"
 
 #define XBOX_MONITOR ((HMONITOR)(ULONG_PTR)0x58424D000001ULL)
-#define XBOX_DISPLAY_DC ((HDC)(ULONG_PTR)0x584244000002ULL)
 
 static BOOL SameDisplayName(LPCWSTR name) {
     return name && CompareStringOrdinal(name, -1, hostedDisplayName, -1, TRUE) == CSTR_EQUAL;

@@ -60,3 +60,5 @@ EXPORTS
     GetWindowLongA=XboxGetWindowLongA @58
     SetWindowLongA=XboxSetWindowLongA @59
     GetParent=XboxGetParent @60
+    CreateDIBSection=XboxCreateDIBSection @61
+    DeleteObject=XboxDeleteObject @62
