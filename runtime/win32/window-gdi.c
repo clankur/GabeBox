@@ -26,6 +26,15 @@ static FallbackBitmap fallback[FALLBACK_SLOTS];
 static SRWLOCK fallbackLock = SRWLOCK_INIT;
 static volatile LONG tracedSystem, tracedFallback, tracedFailure;
 
+/* WindowsApp.lib has no GDI exports; the game process already loaded gdi32. */
+typedef HBITMAP (WINAPI *CreateSection)(HDC, const BITMAPINFO *, UINT, void **, HANDLE, DWORD);
+typedef BOOL (WINAPI *DeleteGdiObject)(HGDIOBJ);
+
+static FARPROC SystemGdi(const char *name) {
+    const HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+    return gdi ? GetProcAddress(gdi, name) : NULL;
+}
+
 static BOOL BackendDc(HDC dc) {
     return dc == XBOX_DESKTOP_DC || dc == XBOX_DISPLAY_DC || (dc && XboxFindWindow((HWND)dc));
 }
@@ -56,7 +65,9 @@ HBITMAP WINAPI XboxCreateDIBSection(HDC dc, const BITMAPINFO *info, UINT usage, 
         }
         dc = NULL;
     }
-    HBITMAP bitmap = CreateDIBSection(dc, info, usage, bits, section, offset);
+    const CreateSection create = (CreateSection)(void *)SystemGdi("CreateDIBSection");
+    HBITMAP bitmap = create ? create(dc, info, usage, bits, section, offset) : NULL;
+    if (!create) SetLastError(ERROR_PROC_NOT_FOUND);
     if (bitmap) {
         if (!InterlockedExchange(&tracedSystem, 1)) XboxWindowTrace("win32_gdi_dib=system\n");
         return bitmap;
@@ -96,7 +107,12 @@ HBITMAP WINAPI XboxCreateDIBSection(HDC dc, const BITMAPINFO *info, UINT usage, 
 
 BOOL WINAPI XboxDeleteObject(HGDIOBJ object) {
     const int slot = FallbackIndex(object);
-    if (slot < 0) return DeleteObject(object);
+    if (slot < 0) {
+        const DeleteGdiObject release = (DeleteGdiObject)(void *)SystemGdi("DeleteObject");
+        if (release) return release(object);
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
     AcquireSRWLockExclusive(&fallbackLock);
     void *pixels = fallback[slot].pixels;
     fallback[slot].pixels = NULL;
