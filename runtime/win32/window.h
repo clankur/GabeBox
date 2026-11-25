@@ -18,6 +18,8 @@ typedef struct XboxWindow {
     UINT contexts;
     int pixelFormat;
     BOOL destroying;
+    HICON smallIcon;
+    HICON largeIcon;
 } XboxWindow;
 
 BOOL XboxWindowThread(void);
@@ -26,6 +28,7 @@ BOOL WINAPI XboxDestroyWindow(HWND handle);
 BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam);
 BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int width, int height, UINT flags);
 void XboxPollWglHostEvents(void);
+BOOL XboxWglHostEventsActive(void);
 void XboxResizeCurrentContext(XboxWindow *window);
 RECT XboxDesktopBounds(void);
 void XboxWindowTrace(const char *line);

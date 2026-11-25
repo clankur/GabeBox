@@ -3,6 +3,7 @@
 #define COBJMACROS
 #include "loader-trace-output.h"
 #include "hosted-xinput-load.h"
+#include "shell-lookup.h"
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
@@ -467,11 +468,18 @@ HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     RestoreWorkingDirectory();
     StartFaultTrace();
     WCHAR wide[512], staged[512];
-    const BOOL companion = name && DynamicCompanionsEnabled() &&
-        MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) &&
-        FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
+    const BOOL converted = name && MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide));
+    HANDLE result = converted ? LoadHostedXInput(wide) : NULL;
+    if (result) {
+        const char trace[] = "input xinput-library=hosted\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        Record(name, result, 1, TRUE, previous);
+        SetLastError(previous);
+        return result;
+    }
+    const BOOL companion = converted && DynamicCompanionsEnabled() && FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
     SetLastError(previous);
-    HANDLE result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
+    result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
     DWORD error = GetLastError();
     Record(name, result, 1, result != 0, error);
     SetLastError(error);
@@ -699,6 +707,13 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 const char trace[] = "asset dxgi-factory=hosted\r\n";
                 AppendTrace(trace, sizeof(trace) - 1);
                 result = hosted;
+            }
+        } else if (name[0] == 'S') {
+            const FARPROC scoped = ScopedShellExport((HMODULE)module, name);
+            if (scoped) {
+                const char trace[] = "asset known-folder=scoped\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
+                result = scoped;
             }
         }
     }

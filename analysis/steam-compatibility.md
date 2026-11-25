@@ -296,3 +296,31 @@ Build `1.0.230.132` captured both immediate Unity module-relative return address
 The downloaded Unity publisher PDB matched the installed engine's GUID and age. It identifies the paged calls as `MemoryManager::VirtualAllocator::ReserveMemoryBlock` and `MemoryManager::VirtualAllocator::CommitMemory`, both invoked by `DynamicHeapAllocator::RequestLargeAllocMemory`. Signed trial `1.0.230.138` adds a bounded walk using the installed engine's x64 unwind metadata to identify the upstream caller on Xbox. It preserves the allocator result and records only engine-relative offsets. The trial needs a console run. [Unity Windows debug symbols](https://docs.unity3d.com/Manual/WindowsDebugging-instructions.html)
 
 The matching Unity engine allocates 64 bytes per `DISPLAYCONFIG_MODE_INFO` entry at the same allocator source line as the crash. Three callers read counts from `GetDisplayConfigBufferSizes` and trust both outputs on success. The observed 32,722,834,112-byte request equals `0x1e79bb4b` entries, which is consistent with an invalid count. Signed trial `1.0.230.140` changes that one import. Its adapter passes through written counts and native errors. If native success leaves a count untouched across two initial values, the adapter returns `ERROR_NOT_SUPPORTED` so Unity can use its existing fallback. Run the `.138` unwind control first and compare its call path and allocation with `.140`. The console still needs to demonstrate that the display API returns unwritten counts and that handling them advances startup. [Display-count adapter](../runtime/win32/display-config.c)
+
+### Console state and display-count callers, 2026-11-24
+
+Read-only Device Portal reads of the Series X on OS `26100.9673.amd64fre.xb_flt_2610ge.261116-2200` found ULTRAKILL build `22957324` fully installed on the developer `D:` library (`StateFlags=4`, 3,144,432,800 bytes). The installed source images match the recorded hashes and have these sizes:
+
+| Path | Size | SHA-256 |
+| --- | --- | --- |
+| `ULTRAKILL.exe` | 666,624 | `e047d3bf…2f94` |
+| `UnityPlayer.dll` | 30,979,776 | `3beae3d0…5652` |
+| `MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll` | 7,895,744 | `43b9e110…af13` |
+
+The installed SteamCore package `1.0.232.50` comes from the mouse-input branch and carries no 1229490 profile. Its last report shows Big Picture Play run `1795560104370` for AppID 1229490 reaching `steam_launch_phase=game-running`. That run left no Unity log or shadow exit file.
+
+The newest Unity log on the console is `steam-unity-1229490-134398680774806809.log`, written 2026-11-23. It reports Unity `2022.3.29f1` and an OpenGL 4.6 Core device on Mesa 26.2.2 over D3D12. After assembly reload it fails a `TempOverflow` allocation of 32,412,455,616 bytes, which is 506,444,619 × 64 bytes. The earlier runs requested 32,722,834,112 bytes. The changing count fits uninitialized data better than a fixed topology value.
+
+Disassembly of the pinned `UnityPlayer.dll` finds three `GetDisplayConfigBufferSizes` calls through IAT slot `0x18186fbc0`:
+
+| Call | Flags | Count outputs |
+| --- | --- | --- |
+| `0x1809857c7` | `QDC_ONLY_ACTIVE_PATHS`, inside a COM/DXGI method | `[rsp+0x30]`, `[rbp+0xb8]` |
+| `0x1810d6664` | `QDC_DATABASE_CURRENT` | `[rbp+0x460]`, `[rsp+0x70]` |
+| `0x1810d83bd` | `QDC_ONLY_ACTIVE_PATHS` | `[rbp+0x130]`, `[rbp+0x138]` |
+
+None of the three writes its count slots before the call. On a zero return, each caller sizes a path vector (`0x1809861b0`) and a 64-byte mode vector (`0x180986130`) directly from those slots.
+
+So if Xbox User32 returns `ERROR_SUCCESS` without writing the counts, stack contents become the allocation size. That would explain this failure, but it remains inference until the read-only `--display-config` control runs on the console and reports a `3xx` result. Exit `0x51A7` with plausible counts would instead point at the hosted-display topology from `codex/unity-compatibility`, which does not depend on native counts.
+
+A focused reproduction must not run against `1.0.232.50`, because that package has no ULTRAKILL profile. The port plan from `codex/unity-compatibility` covers the profile, recipes, hosted-display adapter and display control.

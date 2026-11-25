@@ -16,6 +16,18 @@ typedef struct WindowClass {
     WCHAR name[256];
 } WindowClass;
 
+typedef struct WindowSend {
+    struct WindowSend *previous, *next;
+    HWND window;
+    UINT message;
+    WPARAM wparam;
+    LPARAM lparam;
+    CONDITION_VARIABLE completed;
+    BOOL queued, done;
+    LRESULT result;
+    DWORD error;
+} WindowSend;
+
 static volatile LONG windowThread;
 static WindowClass classes[CLASS_COUNT];
 static XboxWindow windows[WINDOW_COUNT];
@@ -23,6 +35,14 @@ static SRWLOCK windowGeometryLock = SRWLOCK_INIT;
 static ULONG_PTR nextHandle = WINDOW_HANDLE_BASE + 1;
 static MSG messages[MESSAGE_COUNT];
 static UINT messageCount;
+static BOOL quitPending;
+static int quitCode;
+static INIT_ONCE wakeInitialized = INIT_ONCE_STATIC_INIT;
+static HANDLE windowWake;
+static HANDLE sendWake;
+static SRWLOCK sendLock = SRWLOCK_INIT;
+static WindowSend *firstSend, *lastSend;
+static UINT sendCount;
 static void* volatile hostClose;
 static volatile LONG hostExitChecked;
 static void* volatile foregroundWindow;
@@ -274,6 +294,25 @@ static FARPROC NativeWindowProcedure(LPCSTR name) {
     return procedure;
 }
 
+static BOOL CALLBACK InitWindowWake(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once;
+    (void)parameter;
+    (void)context;
+    windowWake = CreateEventExW(NULL, NULL, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+    if (!windowWake) return FALSE;
+    sendWake = CreateEventExW(NULL, NULL, CREATE_EVENT_MANUAL_RESET, EVENT_MODIFY_STATE | SYNCHRONIZE);
+    if (sendWake) return TRUE;
+    const DWORD error = GetLastError();
+    CloseHandle(windowWake);
+    windowWake = NULL;
+    SetLastError(error);
+    return FALSE;
+}
+
+static HANDLE WindowWake(void) {
+    return InitOnceExecuteOnce(&wakeInitialized, InitWindowWake, NULL, NULL) ? windowWake : NULL;
+}
+
 HWND WINAPI XboxGetForegroundWindow(void) {
     const HWND foreground = VirtualForegroundWindow();
     if (foreground) return foreground;
@@ -287,6 +326,17 @@ HWND WINAPI XboxGetActiveWindow(void) {
     typedef HWND (WINAPI *Native)(void);
     Native native = (Native)(void *)NativeWindowProcedure("GetActiveWindow");
     return native ? native() : NULL;
+}
+
+HWND WINAPI XboxGetParent(HWND handle) {
+    if (IsVirtualWindowHandle(handle)) {
+        // CreateWindowExW only accepts parentless hosted windows.
+        (void)XboxFindWindow(handle);
+        return NULL;
+    }
+    typedef HWND (WINAPI *Native)(HWND);
+    Native native = (Native)(void *)NativeWindowProcedure("GetParent");
+    return native ? native(handle) : NULL;
 }
 
 BOOL WINAPI XboxSetForegroundWindow(HWND handle) {
@@ -454,7 +504,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     const RECT bounds = {x, y, x + width, y + height};
     AcquireSRWLockExclusive(&windowGeometryLock);
     *window = (XboxWindow){handle, entry->procedure, classInstance, bounds, style, exStyle, 0,
-        (ATOM)(entry - classes + 1), 0, 0, FALSE};
+        (ATOM)(entry - classes + 1), 0, 0, FALSE, NULL, NULL};
     ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
@@ -501,10 +551,18 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
 }
 
 LRESULT WINAPI XboxDefWindowProcW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
-    (void)wparam;
-    (void)lparam;
     if (message == WM_NCCREATE || message == WM_NCACTIVATE) return TRUE;
     if (message == WM_CLOSE) XboxDestroyWindow(handle);
+    if ((message == WM_SETICON || message == WM_GETICON) &&
+            (wparam == ICON_BIG || wparam == ICON_SMALL || (message == WM_GETICON && wparam == ICON_SMALL2))) {
+        XboxWindow *window = XboxFindWindow(handle);
+        if (window) {
+            HICON *icon = wparam == ICON_BIG ? &window->largeIcon : &window->smallIcon;
+            const HICON previous = *icon;
+            if (message == WM_SETICON) *icon = (HICON)lparam;
+            return (LRESULT)previous;
+        }
+    }
     return 0;
 }
 
@@ -666,6 +724,26 @@ LONG_PTR WINAPI XboxSetWindowLongPtrW(HWND handle, int index, LONG_PTR value) {
     return previous;
 }
 
+LONG WINAPI XboxGetWindowLongA(HWND handle, int index) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LONG (WINAPI *Native)(HWND, int);
+        Native native = (Native)(void *)NativeWindowProcedure("GetWindowLongA");
+        return native ? native(handle, index) : 0;
+    }
+    if (index != GWL_STYLE && index != GWL_EXSTYLE) { SetLastError(ERROR_INVALID_INDEX); return 0; }
+    return (LONG)XboxGetWindowLongPtrW(handle, index);
+}
+
+LONG WINAPI XboxSetWindowLongA(HWND handle, int index, LONG value) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LONG (WINAPI *Native)(HWND, int, LONG);
+        Native native = (Native)(void *)NativeWindowProcedure("SetWindowLongA");
+        return native ? native(handle, index, value) : 0;
+    }
+    if (index != GWL_STYLE && index != GWL_EXSTYLE) { SetLastError(ERROR_INVALID_INDEX); return 0; }
+    return (LONG)XboxSetWindowLongPtrW(handle, index, value);
+}
+
 BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
     if (!XboxFindWindow(handle)) return FALSE;
     if (messageCount == MESSAGE_COUNT) {
@@ -768,8 +846,153 @@ BOOL WINAPI XboxGetPhysicalCursorPos(LPPOINT position) {
     return ReadCursorPosition(position, "GetPhysicalCursorPos");
 }
 
-BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+/* The sender owns this request until the window thread completes it. */
+static void RemoveSend(WindowSend *send) {
+    if (send->previous) send->previous->next = send->next;
+    else firstSend = send->next;
+    if (send->next) send->next->previous = send->previous;
+    else lastSend = send->previous;
+    --sendCount;
+    send->queued = FALSE;
+    if (!firstSend) ResetEvent(sendWake);
+}
+
+static void DispatchSentMessages(void) {
+    const DWORD previousError = GetLastError();
+    for (;;) {
+        AcquireSRWLockExclusive(&sendLock);
+        WindowSend *send = firstSend;
+        if (send) RemoveSend(send);
+        ReleaseSRWLockExclusive(&sendLock);
+        if (!send) break;
+
+        XboxWindow *window = XboxFindWindow(send->window);
+        LRESULT result = 0;
+        DWORD error = ERROR_SUCCESS;
+        if (window) result = window->procedure(send->window, send->message, send->wparam, send->lparam);
+        else error = GetLastError();
+
+        AcquireSRWLockExclusive(&sendLock);
+        send->result = result;
+        send->error = error;
+        send->done = TRUE;
+        WakeConditionVariable(&send->completed);
+        ReleaseSRWLockExclusive(&sendLock);
+    }
+    SetLastError(previousError);
+}
+
+LRESULT WINAPI XboxSendMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LRESULT (WINAPI *Native)(HWND, UINT, WPARAM, LPARAM);
+        Native native = (Native)(void *)NativeWindowProcedure("SendMessageW");
+        return native ? native(handle, message, wparam, lparam) : 0;
+    }
+    const LONG owner = InterlockedCompareExchange(&windowThread, 0, 0);
+    if (!owner) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return 0; }
+    if (owner == (LONG)GetCurrentThreadId()) {
+        XboxWindow *window = XboxFindWindow(handle);
+        return window ? window->procedure(handle, message, wparam, lparam) : 0;
+    }
+
+    const DWORD previousError = GetLastError();
+    if (!WindowWake()) return 0;
+    HANDLE ownerHandle = OpenThread(SYNCHRONIZE, FALSE, (DWORD)owner);
+    if (!ownerHandle) return 0;
+    WindowSend send = {.window = handle, .message = message, .wparam = wparam, .lparam = lparam,
+        .completed = CONDITION_VARIABLE_INIT, .queued = TRUE};
+    AcquireSRWLockExclusive(&sendLock);
+    if (sendCount == MESSAGE_COUNT || !SetEvent(sendWake)) {
+        const DWORD error = sendCount == MESSAGE_COUNT ? ERROR_NOT_ENOUGH_QUOTA : GetLastError();
+        ReleaseSRWLockExclusive(&sendLock);
+        CloseHandle(ownerHandle);
+        SetLastError(error);
+        return 0;
+    }
+    send.previous = lastSend;
+    if (lastSend) lastSend->next = &send;
+    else firstSend = &send;
+    lastSend = &send;
+    ++sendCount;
+    while (!send.done) {
+        if (SleepConditionVariableSRW(&send.completed, &sendLock, 250, 0) || send.done) continue;
+        const DWORD waitError = GetLastError();
+        const DWORD ownerState = WaitForSingleObject(ownerHandle, 0);
+        if (ownerState == WAIT_OBJECT_0) {
+            if (send.queued) RemoveSend(&send);
+            send.error = ERROR_INVALID_WINDOW_HANDLE;
+            break;
+        }
+        if (ownerState == WAIT_TIMEOUT && waitError == ERROR_TIMEOUT) continue;
+        if (send.queued) {
+            send.error = ownerState == WAIT_FAILED ? GetLastError() : waitError;
+            RemoveSend(&send);
+            break;
+        }
+        // The window procedure already owns the message arguments. Keep them alive.
+        ReleaseSRWLockExclusive(&sendLock);
+        Sleep(1);
+        AcquireSRWLockExclusive(&sendLock);
+    }
+    ReleaseSRWLockExclusive(&sendLock);
+    CloseHandle(ownerHandle);
+    SetLastError(send.error ? send.error : previousError);
+    return send.result;
+}
+
+DWORD WINAPI XboxMsgWaitForMultipleObjects(DWORD count, const HANDLE *handles, BOOL waitAll, DWORD timeout, DWORD mask) {
+    const DWORD previousError = GetLastError();
+    typedef DWORD (WINAPI *Native)(DWORD, const HANDLE *, BOOL, DWORD, DWORD);
+    Native native = (Native)(void *)NativeWindowProcedure("MsgWaitForMultipleObjects");
+    if ((LONG)GetCurrentThreadId() != windowThread || !(mask & QS_SENDMESSAGE) ||
+            (waitAll && count) || count >= MAXIMUM_WAIT_OBJECTS - 1 || (count && !handles))
+        return native ? native(count, handles, waitAll, timeout, mask) : WAIT_FAILED;
+    if (!native && mask != QS_SENDMESSAGE) { SetLastError(ERROR_NOT_SUPPORTED); return WAIT_FAILED; }
+
+    if (!WindowWake()) return WAIT_FAILED;
+    HANDLE combined[MAXIMUM_WAIT_OBJECTS - 1];
+    for (DWORD i = 0; i < count; ++i) combined[i] = handles[i];
+    combined[count] = sendWake;
+    if (native) {
+        const DWORD result = native(count + 1, combined, FALSE, timeout, mask);
+        if (result != WAIT_FAILED) return result == WAIT_OBJECT_0 + count + 1 ? WAIT_OBJECT_0 + count : result;
+        const DWORD error = GetLastError();
+        if (error != ERROR_NOT_SUPPORTED && error != ERROR_CALL_NOT_IMPLEMENTED) return result;
+    }
+    // A send-only wait can use kernel handles when USER32 has no message wait.
+    if (mask != QS_SENDMESSAGE) return WAIT_FAILED;
+    SetLastError(previousError);
+    return WaitForMultipleObjectsEx(count + 1, combined, FALSE, timeout, FALSE);
+}
+
+void WINAPI XboxPostQuitMessage(int exitCode) {
+    if ((LONG)GetCurrentThreadId() == windowThread) {
+        // A quit request coalesces and is delivered after the posted messages.
+        quitCode = exitCode;
+        quitPending = TRUE;
+        return;
+    }
+    typedef void (WINAPI *Native)(int);
+    Native native = (Native)(void *)NativeWindowProcedure("PostQuitMessage");
+    if (native) native(exitCode);
+}
+
+static BOOL PeekHostedMessage(MSG *message, HWND filter, UINT first, UINT last, UINT remove, LPCSTR name) {
     if (!XboxWindowThread() || !message) return FALSE;
+    DispatchSentMessages();
+    const UINT categories = HIWORD(remove);
+    if (categories && !(categories & (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE))) {
+        if (!(categories & QS_SENDMESSAGE)) return FALSE;
+        typedef BOOL (WINAPI *Native)(MSG *, HWND, UINT, UINT, UINT);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        if (!native || !native(message, IsVirtualWindowHandle(filter) ? NULL : filter, first, last, remove)) return FALSE;
+        // A nested send-only pump must leave a quit request for the main loop.
+        if (message->message == WM_QUIT) {
+            if (remove & PM_REMOVE) XboxPostQuitMessage((int)message->wParam);
+            return FALSE;
+        }
+        return TRUE;
+    }
     XboxPollWglHostEvents();
     const DWORD error = GetLastError();
     PollHostedPointer();
@@ -788,14 +1011,75 @@ BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, U
         }
         return TRUE;
     }
+    if (!messageCount && quitPending) {
+        *message = (MSG){NULL, WM_QUIT, (WPARAM)(INT_PTR)quitCode, 0, GetTickCount(), {0, 0}};
+        if (remove & PM_REMOVE) quitPending = FALSE;
+        return TRUE;
+    }
     return FALSE;
 }
 
+BOOL WINAPI XboxPeekMessageA(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+    return PeekHostedMessage(message, filter, first, last, remove, "PeekMessageA");
+}
+
+BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+    return PeekHostedMessage(message, filter, first, last, remove, "PeekMessageW");
+}
+
+static BOOL GetHostedMessage(MSG *message, HWND filter, UINT first, UINT last, LPCSTR name) {
+    if ((LONG)GetCurrentThreadId() != windowThread ||
+            (filter && filter != (HWND)(INT_PTR)-1 && !IsVirtualWindowHandle(filter))) {
+        typedef BOOL (WINAPI *Native)(MSG *, HWND, UINT, UINT);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        return native ? native(message, filter, first, last) : -1;
+    }
+    if (!message || first > last) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    if (IsVirtualWindowHandle(filter) && !XboxFindWindow(filter)) return -1;
+    if (!WindowWake()) return -1;
+    HANDLE wake[] = {windowWake, sendWake};
+    while (!XboxPeekMessageW(message, filter, first, last, PM_REMOVE)) {
+        // SDL's offscreen backend supplies close events from its mailbox when pumped.
+        const DWORD delay = XboxWglHostEventsActive() ? 8 : INFINITE;
+        if (WaitForMultipleObjectsEx(ARRAYSIZE(wake), wake, FALSE, delay, FALSE) == WAIT_FAILED) return -1;
+    }
+    return message->message != WM_QUIT;
+}
+
+BOOL WINAPI XboxGetMessageA(MSG *message, HWND filter, UINT first, UINT last) {
+    return GetHostedMessage(message, filter, first, last, "GetMessageA");
+}
+
+BOOL WINAPI XboxGetMessageW(MSG *message, HWND filter, UINT first, UINT last) {
+    return GetHostedMessage(message, filter, first, last, "GetMessageW");
+}
+
 void WINAPI XboxRequestWindowClose(HWND window) {
+    const DWORD error = GetLastError();
     InterlockedExchangePointer(&hostClose, window);
+    HANDLE wake = WindowWake();
+    if (wake) SetEvent(wake);
+    SetLastError(error);
+}
+
+static LRESULT DispatchHostedMessage(const MSG *message, LPCSTR name) {
+    if (!message || message->message == WM_QUIT) return 0;
+    if (!IsVirtualWindowHandle(message->hwnd)) {
+        typedef LRESULT (WINAPI *Native)(const MSG *);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        return native ? native(message) : 0;
+    }
+    XboxWindow *window = XboxFindWindow(message->hwnd);
+    return window ? window->procedure(message->hwnd, message->message, message->wParam, message->lParam) : 0;
+}
+
+LRESULT WINAPI XboxDispatchMessageA(const MSG *message) {
+    return DispatchHostedMessage(message, "DispatchMessageA");
 }
 
 LRESULT WINAPI XboxDispatchMessageW(const MSG *message) {
-    XboxWindow *window = message ? XboxFindWindow(message->hwnd) : NULL;
-    return window ? window->procedure(message->hwnd, message->message, message->wParam, message->lParam) : 0;
+    return DispatchHostedMessage(message, "DispatchMessageW");
 }

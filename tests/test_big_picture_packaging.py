@@ -450,6 +450,81 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / nested_recipe).read_bytes(), (profile / nested_recipe).read_bytes())
         self.assertFalse((self.layout / nested_runtime).exists())
 
+    def test_configured_play_uses_the_one_shot_big_picture_marker(self):
+        self.layout.mkdir()
+        library_builder.stage_configured_play(self.layout, None)
+        for app_id in (0, 0x1000000, "1229490"):
+            with self.subTest(app_id=app_id), self.assertRaisesRegex(ValueError, "Steam AppID"):
+                library_builder.stage_configured_play(self.layout, app_id)
+        self.assertEqual(list(self.layout.iterdir()), [])
+        library_builder.stage_configured_play(self.layout, 1229490)
+        self.assertEqual({path.name: path.read_bytes() for path in self.layout.iterdir()},
+                         {"steam-launch-via-big-picture.txt": b"1229490\n"})
+
+    def test_win32_unity_direct3d_profile_stages_scoped_storage_and_input(self):
+        self.layout.mkdir()
+        app, build = "1229490", "22957324"
+        profile = self.work / "unity-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\nunity\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-files-{app}.txt").write_text("UnityPlayer.dll\n")
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+        names = ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Window.dll", "XboxWin32Dxgi.dll",
+                 "XboxWin32Unity.dll", "XboxWin32PlayerPrefs.dll", "XboxWin32HostedDisplay.dll")
+        hints = "".join(f"{name}\0" for name in ("XBOX_WIN32_LOCAL_LOW", "XBOX_WIN32_HOST_XINPUT",
+                                                   "XBOX_WIN32_PREFS_KEY", "XBOX_WIN32_PREFS_HIVE"))
+
+        def runtime(native, desktop, loader):
+            template = self.work / f"unity-runtime-{len(list(self.work.glob('unity-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", native)
+                archive.writestr("XboxWin32Desktop.dll", desktop)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                archive.writestr("XboxWin32XInput910.dll", b"runtime fixture")
+                for name in names:
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        complete = runtime((" -force-d3d11" + hints).encode("utf-16le"), "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"),
+                           "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 requires the DXGI marker"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        (profile / f"steam-win32-dxgi-{app}.txt").touch()
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\ngodot\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "Invalid Win32 trial profile"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\nunity\n\n\nloader-trace\n")
+        for marker in ("local-low", "host-xinput"):
+            (profile / f"steam-win32-{marker}-{app}.txt").touch()
+        prefs = profile / f"steam-win32-player-prefs-{app}.txt"
+        prefs.write_text("Software\\Hakita\\ULTRAKILL\\Extra\n")
+        with self.assertRaisesRegex(ValueError, "preference key"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        prefs.write_text("Software\\Hakita\\ULTRAKILL\r\n")
+        old_runtime = runtime(b"old", b"old", b"old")
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 launch path"):
+            stage_trials(self.layout, [f"{app}={profile}"], old_runtime)
+        stage_trials(self.layout, [f"{app}={profile}"], complete)
+        self.assertEqual((self.layout / f"steam-win32-player-prefs-{app}.txt").read_bytes(), b"Software\\Hakita\\ULTRAKILL")
+        for marker in ("local-low", "host-xinput", "dxgi"):
+            self.assertEqual((self.layout / f"steam-win32-{marker}-{app}.txt").read_bytes(), b"")
+        for name in ("XboxWin32PlayerPrefs.dll", "XboxWin32HostedDisplay.dll", "XboxWin32XInput910.dll",
+                     "XboxWin32Dxgi.dll", "XboxWin32Unity.dll"):
+            self.assertTrue((self.layout / name).is_file(), name)
+        without_local_low = runtime((" -force-d3d11" + hints).encode("utf-16le"), b"old",
+                                    "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "scoped LocalLow support"):
+            stage_trials(self.layout, [f"{app}={profile}"], without_local_low)
+        without_xinput = runtime((" -force-d3d11" + hints).encode("utf-16le"),
+                                 "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"), b"old")
+        with self.assertRaisesRegex(ValueError, "hosted XInput support"):
+            stage_trials(self.layout, [f"{app}={profile}"], without_xinput)
+
     def test_win32_source_profile_requires_verifier_and_stages_only_fingerprints(self):
         self.layout.mkdir()
         profile = ROOT / "profiles/1817070/source.json"

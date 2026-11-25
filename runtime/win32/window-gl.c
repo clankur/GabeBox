@@ -1,6 +1,8 @@
 #include "window.h"
 #include "../shared/steam-handoff-control.h"
 #include <appmodel.h>
+#include "shell-lookup.h"
+#include "xinput-lookup.h"
 
 #define CONTEXT_COUNT 16
 #define SDL_INIT_VIDEO 0x20u
@@ -159,6 +161,10 @@ void XboxPollWglHostEvents(void) {
         }
     }
     if (trace) XboxWindowTrace("win32_wgl_post_swap_events=returned\n");
+}
+
+BOOL XboxWglHostEventsActive(void) {
+    return hostEvents;
 }
 
 static Context *FindContext(HGLRC handle) {
@@ -391,6 +397,10 @@ PROC WINAPI XboxWglGetProcAddress(LPCSTR name) {
 }
 
 FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
+    const FARPROC adapted = ScopedShellExport(module, name);
+    if (adapted) return adapted;
+    const FARPROC xinput = HostedXInputExport(module, name);
+    if (xinput) return xinput;
     if ((ULONG_PTR)name > 0xffffu && module && module == GetModuleHandleW(L"opengl32.dll")) {
         if (Equals(name, "wglCreateContext")) return (FARPROC)(void *)XboxWglCreateContext;
         if (Equals(name, "wglMakeCurrent")) return (FARPROC)(void *)XboxWglMakeCurrent;

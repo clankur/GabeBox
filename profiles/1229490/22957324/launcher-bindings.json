@@ -1,0 +1,5 @@
+{
+  "unityplayer.dll": {
+    "UnityMain": "XboxWin32Unity.dll"
+  }
+}
