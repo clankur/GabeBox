@@ -59,7 +59,9 @@ Everything that overlapped came from one thread compiling the game's card-play p
 | Direct3D 12 route (ubershaders) | `1.0.240.2` enabled DRED on Godot's `ID3D12DeviceFactory`. The device was removed 2.6 s in with `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after one present, with no incomplete breadcrumbs and no page fault: a driver-side failure (`SraKmd_arden`) during startup pipeline creation, not a GPU hang. Godot 4.5's D3D12 driver also has no PSO cache (`pipeline_cache_create`: "PSO caching is not implemented yet"), so this route would compile pipelines on every launch too |
 | ReadyToRun `sts2.dll` via crossgen2 | Removes only the JIT share, about a quarter; would ship a rebuilt publisher assembly |
 
-Until one of these lands, the first combat of each launch has stalls up to 167 ms on this route. Gameplay after first use holds 60 FPS.
+On `1.0.242.1` the same marker also wrapped the shared `ID3D12Device` pipeline-creation methods, timing the device Mesa creates. During the first turn, starting `10:48:53Z`, frame gaps added 650 ms over a steady 60 FPS. Driver pipeline creation overlapped 82 ms of it: 34 ms and 44 ms at the first card play. The combat load itself created pipelines of 119–189 ms each. Taken with the JIT measurement, about 13% of the first-turn stall is the Xbox driver compiling pipelines and about a quarter is the game's JIT. The rest, including a 217 ms gap at `10:48:59.018` with neither, is Mesa's GLSL → NIR → DXIL translation or the game's own scene setup. An `ID3D12PipelineLibrary` cache in the layer would therefore remove only the driver share.
+
+Until one of these lands, the first combat of each launch has stalls up to 217 ms on this route. Gameplay after first use holds 60 FPS.
 - **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
 - **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
 - **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
