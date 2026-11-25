@@ -324,3 +324,30 @@ None of the three writes its count slots before the call. On a zero return, each
 So if Xbox User32 returns `ERROR_SUCCESS` without writing the counts, stack contents become the allocation size. That would explain this failure, but it remains inference until the read-only `--display-config` control runs on the console and reports a `3xx` result. Exit `0x51A7` with plausible counts would instead point at the hosted-display topology from `codex/unity-compatibility`, which does not depend on native counts.
 
 A focused reproduction must not run against `1.0.232.50`, because that package has no ULTRAKILL profile. The port plan from `codex/unity-compatibility` covers the profile, recipes, hosted-display adapter and display control.
+
+### Unity port onto the current runtime
+
+The Unity work from `codex/unity-compatibility` (`436addc`) now sits on the reorganized tree. The shared changes are listed below.
+
+- **Display:** the hosted display adapter supplies one virtual CCD path for `GetDisplayConfigBufferSizes`, `QueryDisplayConfig` and `DisplayConfigGetDeviceInfo`. It matches the legacy monitor exposed by the window adapter, so Unity never sizes an array from an unwritten count. [Hosted display adapter](../runtime/win32/hosted-display.c)
+- **Window adapter:** it gains `MonitorFromRect`, `PostQuitMessage`, `GetMessageA/W`, `SendMessageW`, `MsgWaitForMultipleObjects`, `GetWindowLongA`, `SetWindowLongA` and `GetParent` at ordinals 52–60. HEAD's activation, cursor and coordinate exports keep ordinals 47–51. ANSI and wide message pumps now share one hosted queue, with cross-thread sends and quit coalescing. [Window adapter](../runtime/win32/window.c)
+- **Scoped storage:** `SHGetKnownFolderPath(FOLDERID_LocalAppDataLow)` returns a per-account, per-title `LocalLow` when the profile selects it. Unity resolves the function dynamically, so the loader-trace `GetProcAddress` hands back the desktop adapter's export. PlayerPrefs registry calls for the profile's `Software\company\product` key use an app hive under the same profile. [Desktop adapter](../runtime/win32/desktop.c) · [PlayerPrefs adapter](../runtime/win32/player-prefs.c)
+- **XInput:** Unity 2022.3 calls `LoadLibraryA` for `xinput1_4.dll`, then `xinput1_3.dll`, then `xinput9_1_0.dll`. When a profile adds `steam-win32-host-xinput-APPID.txt`, the loader trace serves all three from the hosted controller mailbox. Without the marker only `xinput9_1_0.dll` is hosted, as before. [Hosted XInput loader](../runtime/win32/hosted-xinput-load.h)
+- **Packaging:** `stage_profiles.py` accepts the `d3d11`+`unity` renderer pair, which requires the DXGI marker. It also validates the LocalLow, host-XInput and PlayerPrefs markers against hints in the Steam Core artifact. ProbeNative adds Unity's `-force-d3d11` for that pair.
+- **Diagnostics:** the observer extracts Unity's renderer and allocation lines into `unity-startup.txt`.
+- **Configured Play:** `--play-installed-app-id` requests one Big Picture Play for an installed title.
+
+I dropped some branch pieces instead of porting them:
+
+- **Superseded by HEAD:** the branch's DXGI factory `GetProcAddress` (loader-trace now swaps hosted DXGI factories) and its XInput lookup header.
+- **Not ported:** the separate allocation-trace DLL, its `HeapAlloc` hook, and the branch's export-derived adapter staging. HEAD's declared `required_adapters` replaces that staging.
+- **Window control:** it keeps HEAD's activation-redirect checks and adds the branch's style, icon and cross-thread send checks (`0x6e1b`). The branch's close-to-quit `GetMessage` check conflicts with the activation teardown, so it is not in this control yet.
+
+The [build-pinned profile](../profiles/1229490/22957324) and [source fingerprints](../profiles/1229490/source.json) bind build `22957324`. `ULTRAKILL_Data/app.info` on the console reads `Hakita` / `ULTRAKILL`, which confirms the PlayerPrefs key. Device Portal exported the three images with matching hashes. `python3 -m build_tools.redirect_pe_imports --recipe` produced the launcher, engine (signed source `3beae3d0…`) and Mono (signed source `43b9e110…`) recipes from them, which confirms every binding names a real import. Each bound symbol is exported by its target adapter `.def`.
+
+**Still pending a console run:**
+
+- the Windows build of these adapters;
+- a signed package carrying the profile;
+- the `--display-config`, `--hosted-display`, `--known-folders`, `--player-prefs` and `--win32-opengl` controls;
+- an observed Big Picture Play of build `22957324`.

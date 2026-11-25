@@ -92,7 +92,7 @@ def stage_configured_play(layout, app_id):
         return
     if type(app_id) is not int or not 1 <= app_id <= 0xffffff:
         raise ValueError("--play-installed-app-id requires a Steam AppID from 1 to 16777215.")
-    (layout / "steam-launch-via-big-picture.txt").write_text(str(app_id) + "\n", encoding="ascii")
+    (layout / "steam-launch-via-big-picture.txt").write_bytes(f"{app_id}\n".encode("ascii"))
 
 
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
