@@ -1,11 +1,23 @@
 #include "dxgi-frame.h"
 
-void AppendTrace(const char* text, DWORD size);
 
 #include <utility>
 
 extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
     LPCWSTR, DWORD, DWORD, DWORD, LPCREATEFILE2_EXTENDED_PARAMETERS);
+
+namespace {
+void AppendProbeTrace(const char* text, DWORD size) {
+    WCHAR path[512];
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
+    if (!length || length >= ARRAYSIZE(path)) return;
+    const HANDLE file = CreateFile2FromAppW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, text, size, &written, nullptr);
+    CloseHandle(file);
+}
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -344,7 +356,7 @@ void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE
     put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
     put(" format="); number(desc.Format);
     put("\r\n");
-    AppendTrace(text, static_cast<DWORD>(out - text));
+    AppendProbeTrace(text, static_cast<DWORD>(out - text));
     SetLastError(previous);
 }
 
