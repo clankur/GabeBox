@@ -490,9 +490,9 @@ class BigPicturePackageTests(unittest.TestCase):
                     archive.writestr(name, b"runtime fixture")
             return template
 
-        complete = runtime((" -force-d3d11" + hints).encode("utf-16le"), "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"),
+        complete = runtime((" -force-d3d11 -force-d3d12" + hints).encode("utf-16le"), "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"),
                            "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
-        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 requires the DXGI marker"):
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D requires the DXGI marker"):
             stage_trials(self.layout, [f"{app}={profile}"], complete)
         (profile / f"steam-win32-dxgi-{app}.txt").touch()
         shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\ngodot\n\n\nloader-trace\n")
@@ -507,7 +507,7 @@ class BigPicturePackageTests(unittest.TestCase):
             stage_trials(self.layout, [f"{app}={profile}"], complete)
         prefs.write_text("Software\\Hakita\\ULTRAKILL\r\n")
         old_runtime = runtime(b"old", b"old", b"old")
-        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 launch path"):
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D launch paths"):
             stage_trials(self.layout, [f"{app}={profile}"], old_runtime)
         stage_trials(self.layout, [f"{app}={profile}"], complete)
         self.assertEqual((self.layout / f"steam-win32-player-prefs-{app}.txt").read_bytes(), b"Software\\Hakita\\ULTRAKILL")
@@ -516,11 +516,11 @@ class BigPicturePackageTests(unittest.TestCase):
         for name in ("XboxWin32PlayerPrefs.dll", "XboxWin32HostedDisplay.dll", "XboxWin32XInput910.dll",
                      "XboxWin32Dxgi.dll", "XboxWin32Unity.dll"):
             self.assertTrue((self.layout / name).is_file(), name)
-        without_local_low = runtime((" -force-d3d11" + hints).encode("utf-16le"), b"old",
+        without_local_low = runtime((" -force-d3d11 -force-d3d12" + hints).encode("utf-16le"), b"old",
                                     "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
         with self.assertRaisesRegex(ValueError, "scoped LocalLow support"):
             stage_trials(self.layout, [f"{app}={profile}"], without_local_low)
-        without_xinput = runtime((" -force-d3d11" + hints).encode("utf-16le"),
+        without_xinput = runtime((" -force-d3d11 -force-d3d12" + hints).encode("utf-16le"),
                                  "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"), b"old")
         with self.assertRaisesRegex(ValueError, "hosted XInput support"):
             stage_trials(self.layout, [f"{app}={profile}"], without_xinput)

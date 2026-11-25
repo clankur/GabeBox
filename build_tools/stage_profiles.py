@@ -202,14 +202,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             crash_reports = True
         dxgi_marker = f"steam-win32-dxgi-{app}.txt"
         has_dxgi = (root / dxgi_marker).is_file()
-        unity_dxgi = fields[2:4] == ["d3d11", "unity"]
+        unity_dxgi = fields[3:4] == ["unity"] and fields[2:3] in (["d3d11"], ["d3d12"])
         if has_dxgi:
             if (root / dxgi_marker).stat().st_size or (any(fields[2:4]) and not unity_dxgi):
                 raise ValueError(f"The DXGI marker requires the game's default native renderer or Unity Direct3D 11 for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
         elif unity_dxgi:
-            raise ValueError(f"Unity Direct3D 11 requires the DXGI marker for AppID {app}.")
+            raise ValueError(f"Unity Direct3D requires the DXGI marker for AppID {app}.")
         graphics_adapter = has_dxgi or fields[2:3] == ["opengl3"]
         local_low_marker = f"steam-win32-local-low-{app}.txt"
         if (root / local_low_marker).is_file():
@@ -269,7 +269,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         unity = fields[3:4] == ["unity"]
         if unity:
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
-            if (fields[2] not in ("opengl3", "d3d11") or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
+            if (fields[2] not in ("opengl3", "d3d11", "d3d12") or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
                     or not companions.is_file() or not hosted.is_file()
                     or hosted.read_text(encoding="ascii") != fields[0]):
                 raise ValueError(f"The Unity option needs a matching hosted launcher and loader trace for AppID {app}.")
@@ -391,8 +391,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Desktop.dll"]:
             raise ValueError("Use a Steam Core artifact with profile Documents support.")
-    if unity_direct3d and " -force-d3d11".encode("utf-16le") not in native:
-        raise ValueError("Use a Steam Core artifact with the Unity Direct3D 11 launch path.")
+    if unity_direct3d and " -force-d3d12".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact with the Unity Direct3D launch paths.")
     if local_low:
         variable = "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Desktop.dll"]:

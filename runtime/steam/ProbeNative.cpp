@@ -2412,7 +2412,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 if (!shadowRecipe && shadowRuntime.empty()) shadowRuntime = L"godot";
                 const bool unity = shadowRuntime == L"unity";
-                const bool unityDxgi = unity && shadowRenderer == L"d3d11";
+                const bool unityDxgi = unity && (shadowRenderer == L"d3d11" || shadowRenderer == L"d3d12");
                 if (shadowBuild.empty() || shadowBuild.size() > 20 ||
                         shadowBuild.find_first_not_of(L"0123456789") != std::wstring::npos ||
                         !steam_win32_stage::IsImageName(shadowExecutable, L".exe") ||
@@ -3214,6 +3214,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (!shadowArguments.empty()) command += L" " + shadowArguments;
             if (shadowRuntime == L"unity" && shadowTrace) {
                 if (shadowRenderer == L"d3d11") command += L" -force-d3d11";
+                else if (shadowRenderer == L"d3d12") command += L" -force-d3d12";
                 const auto stamp = (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
                     launchTime.dwLowDateTime;
                 const auto log = L"steam-unity-" + std::to_wstring(app) + L"-" + std::to_wstring(stamp) + L".log";
