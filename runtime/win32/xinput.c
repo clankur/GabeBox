@@ -1,4 +1,10 @@
-/* Bridge XInput callers to the controller already owned by the Xbox host. */
+/* Bridge XInput callers to the controller already owned by the Xbox host.
+
+   While the host mailbox is open, user index 0 stays attached for the whole
+   session, with neutral state until the host publishes a connected pad. A
+   console session always has a controller, and callers such as SDL query
+   XInputGetCapabilities once at startup and re-scan only on device-change
+   notifications, which a hosted pad never raises. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <xinput.h>
@@ -113,10 +119,11 @@ DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
 
     AcquireSRWLockExclusive(&stateLock);
     UpdateController(&mailbox->gamepad);
-    const DWORD result = connected ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    const DWORD result = ERROR_SUCCESS;
+    *state = latest;
+    if (!connected) state->Gamepad = (XINPUT_GAMEPAD){0};
     BOOL firstConnection = FALSE, firstActivity = FALSE;
     if (connected) {
-        *state = latest;
         firstConnection = !connectionObserved;
         connectionObserved = TRUE;
         const XINPUT_GAMEPAD pad = latest.Gamepad;
@@ -136,8 +143,13 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
         return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeGetCapabilities) return nativeGetCapabilities(index, flags, capabilities);
-    if (index || !mailbox || SdlHostLoad(&mailbox->quit) ||
-            !(SdlHostLoad(&mailbox->gamepad.buttons) & SDL_HOST_PAD_CONNECTED)) return ERROR_DEVICE_NOT_CONNECTED;
+    static volatile LONG traced;
+    if (!InterlockedExchange(&traced, 1)) {
+        if (index) TRACE("input xinput-capabilities=other-slot");
+        else if (mailbox) TRACE("input xinput-capabilities=hosted-slot");
+        else TRACE("input xinput-capabilities=mailbox-unavailable");
+    }
+    if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return ERROR_DEVICE_NOT_CONNECTED;
 
     *capabilities = (XINPUT_CAPABILITIES){
         XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD, 0,
@@ -155,8 +167,7 @@ DWORD WINAPI XboxXInputSetState(DWORD index, XINPUT_VIBRATION *vibration) {
     if (!vibration || index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeSetState) return nativeSetState(index, vibration);
-    if (index || !mailbox || SdlHostLoad(&mailbox->quit) ||
-            !(SdlHostLoad(&mailbox->gamepad.buttons) & SDL_HOST_PAD_CONNECTED)) return ERROR_DEVICE_NOT_CONNECTED;
+    if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return ERROR_DEVICE_NOT_CONNECTED;
     // The hosted capabilities advertise zero motor speeds until the host supports vibration.
     return vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
 }

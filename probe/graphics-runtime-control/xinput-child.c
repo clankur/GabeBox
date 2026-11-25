@@ -40,10 +40,11 @@ static unsigned CheckInput(SdlHostGamepad *pad) {
     const LONG moved[SDL_HOST_PAD_AXES] = {12345, -32768, -23456, 32767, -32768, 32767};
     XINPUT_STATE state;
     XINPUT_CAPABILITIES caps;
-    if (XInputGetState(0, &state) != ERROR_DEVICE_NOT_CONNECTED ||
-            XInputGetCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != ERROR_DEVICE_NOT_CONNECTED ||
-            XInputGetState(XUSER_MAX_COUNT, &state) != ERROR_BAD_ARGUMENTS) return 0x6f02;
-    CHECKPOINT("initial-disconnected");
+    // The hosted slot is attached for the whole session and neutral until the host publishes.
+    if (XInputGetState(0, &state) != ERROR_SUCCESS || !IsNeutral(&state.Gamepad) ||
+            XInputGetCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != ERROR_SUCCESS ||
+            SdlHostLoad(&pad->ack) || XInputGetState(XUSER_MAX_COUNT, &state) != ERROR_BAD_ARGUMENTS) return 0x6f02;
+    CHECKPOINT("initial-attached");
 
     BeginInput(pad, SDL_HOST_PAD_CONNECTED, neutral);
     const LONG initial = InterlockedIncrement(&pad->serial);
@@ -78,10 +79,10 @@ static unsigned CheckInput(SdlHostGamepad *pad) {
 
     BeginInput(pad, 0, neutral);
     const LONG disconnected = InterlockedIncrement(&pad->serial);
-    if (XInputGetCapabilities(0, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED ||
-            XInputGetState(0, &state) != ERROR_DEVICE_NOT_CONNECTED ||
+    if (XInputGetCapabilities(0, 0, &caps) != ERROR_SUCCESS ||
+            XInputGetState(0, &state) != ERROR_SUCCESS || !IsNeutral(&state.Gamepad) ||
             SdlHostLoad(&pad->ack) != disconnected) return 0x6f07;
-    CHECKPOINT("disconnect-ack");
+    CHECKPOINT("host-idle-neutral");
     return PROBE_EXPECTED_CHILD_EXIT;
 }
 
