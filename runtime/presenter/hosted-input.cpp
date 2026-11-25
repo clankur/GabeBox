@@ -75,6 +75,40 @@ UINT pointerEdgeRead, pointerEdgeSize;
 double cursorX, cursorY;
 bool physicalClick, padClick, freshPointer;
 LONG heldVirtual[256];
+// Device Portal's /ext/remoteinput delivers gamepad presses as VK_GAMEPAD_* key
+// events (0xC3-0xDA) on the host window rather than through Windows.Gaming.Input.
+// They are merged into the hosted pad so a remote operator drives hosted games
+// the same way a controller does. A physical pad also raises these key events
+// for its own presses. Buttons merge with OR, and a key-derived stick or trigger
+// only replaces an axis that the physical reading leaves at rest, so a partly
+// deflected physical stick keeps its analog value.
+constexpr UINT remotePadFirst = 0xC3, remotePadLast = 0xDA;
+bool remotePad[remotePadLast - remotePadFirst + 1];
+bool remotePadSeen;
+bool remotePadActive() {
+    for (bool held : remotePad)
+        if (held) return true;
+    return false;
+}
+void mergeRemotePad(SdlHostGamepadState &value) {
+    if (remotePadActive()) remotePadSeen = true;
+    if (!remotePadSeen) return;
+    value.buttons |= SDL_HOST_PAD_CONNECTED;
+    // VK_GAMEPAD_* order: A B X Y RB LB LT RT Up Down Left Right Menu View LS RS (SDL_GameController indices).
+    static const int buttons[] = {0, 1, 2, 3, 10, 9, -1, -1, 11, 12, 13, 14, 6, 4, 7, 8};
+    for (unsigned i = 0; i < ARRAYSIZE(buttons); ++i)
+        if (remotePad[i] && buttons[i] >= 0) value.buttons |= 1 << buttons[i];
+    // Triggers rest at -32768. A trigger key reports a full pull.
+    for (unsigned i = 0; i < 2; ++i)
+        if (remotePad[6 + i] && value.axes[4 + i] <= -32768 + 8192) value.axes[4 + i] = 32767;
+    // Left stick up/down/right/left, then the right stick. Host axes point down and right.
+    static const int axes[] = {1, 1, 0, 0, 3, 3, 2, 2};
+    static const int signs[] = {-1, 1, 1, -1, -1, 1, 1, -1};
+    for (unsigned i = 0; i < ARRAYSIZE(axes); ++i) {
+        LONG &axis = value.axes[axes[i]];
+        if (remotePad[16 + i] && axis > -8192 && axis < 8192) axis = signs[i] < 0 ? -32768 : 32767;
+    }
+}
 SdlHostGamepadState previousPad;
 bool sentPad;
 
@@ -135,6 +169,9 @@ void neutral() {
     blockedMenuButtons = 3;
     for (auto &key : heldVirtual)
         key = 0;
+    // Key releases are not delivered while the game is in the background.
+    for (auto &held : remotePad)
+        held = false;
     highSurrogate = 0;
     padClick = false;
     physicalClick = false;
@@ -196,7 +233,13 @@ UINT scanFor(UINT vk, KeyStatus s) {
                              13,  14, 15,  51, 52, 53, 225, 49, 29, 27, 6,  25,  5,  17, 16,  54, 55, 56,
                              229, 85, 226, 44, 57, 58, 59,  60, 61, 62, 63, 64,  65, 66, 67,  83, 71, 95,
                              96,  97, 86,  92, 93, 94, 87,  89, 90, 91, 98, 99,  0,  0,  100, 68, 69};
-    if (!s.extended && s.scan && s.scan < sizeof(mainKeys) && mainKeys[s.scan]) {
+    // A navigation key without the extended flag shares its scancode with the keypad.
+    // Injected input (SendInput by virtual key, Device Portal key codes) arrives this
+    // way, so the navigation key wins over the keypad position.
+    const bool keypadNavigation = vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
+                                  vk == VK_HOME || vk == VK_END || vk == VK_PRIOR || vk == VK_NEXT ||
+                                  vk == VK_INSERT || vk == VK_DELETE;
+    if (!s.extended && s.scan && s.scan < sizeof(mainKeys) && mainKeys[s.scan] && !keypadNavigation) {
         if (vk == VK_PAUSE)
             return 72;
         return mainKeys[s.scan];
@@ -377,7 +420,11 @@ void event(unsigned type, IUnknown *args) {
             character(key);
         return;
     }
-    if (key >= 256 || (key >= 136 && key <= 143) || (key >= 195 && key <= 218))
+    if (key >= remotePadFirst && key <= remotePadLast) {
+        remotePad[key - remotePadFirst] = type == KeyDown;
+        return;
+    }
+    if (key >= 256 || (key >= 136 && key <= 143))
         return;
     KeyStatus status = {};
     if (FAILED(method(args, 7, &status)))
@@ -535,6 +582,7 @@ extern "C" void FhdEndHostedInput() {
         pads = nullptr;
     }
     mail = nullptr;
+    remotePadSeen = false;
     overlay = Playing;
     menuOnRelease = false;
     sentPad = false;
@@ -608,6 +656,8 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         value.axes[4] = axis(2 * reading.lt - 1);
         value.axes[5] = axis(2 * reading.rt - 1);
     }
+    mergeRemotePad(value);
+    const bool padPresent = (value.buttons & SDL_HOST_PAD_CONNECTED) != 0;
     blockedMenuButtons &= value.buttons;
     value.buttons &= ~blockedMenuButtons;
     const LONG chord = (1 << 4) | (1 << 6);
@@ -620,7 +670,7 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         }
         value.buttons &= ~chord;
     } else {
-        if (!connected) chordPending = false;
+        if (!padPresent) chordPending = false;
         if (!(value.buttons & chord)) {
             if (chordPending) {
                 requestOverlay();

@@ -828,6 +828,161 @@ static void PollHostedPointer(void) {
     InterlockedExchange(&mailbox->input_ack, serial);
 }
 
+/* Keyboard, text and pointer input that a hosted SDL window read from the host
+   mailbox, delivered as the messages a desktop window would receive. */
+typedef struct HostedKey {
+    BYTE usage, vk;
+    USHORT scan; /* Set-1 scancode; 0xE0xx marks an extended key. */
+} HostedKey;
+
+static const HostedKey hostedKeys[] = {
+    {40, VK_RETURN, 0x1C}, {41, VK_ESCAPE, 0x01}, {42, VK_BACK, 0x0E}, {43, VK_TAB, 0x0F},
+    {44, VK_SPACE, 0x39}, {45, VK_OEM_MINUS, 0x0C}, {46, VK_OEM_PLUS, 0x0D}, {47, VK_OEM_4, 0x1A},
+    {48, VK_OEM_6, 0x1B}, {49, VK_OEM_5, 0x2B}, {50, VK_OEM_5, 0x2B}, {51, VK_OEM_1, 0x27},
+    {52, VK_OEM_7, 0x28}, {53, VK_OEM_3, 0x29}, {54, VK_OEM_COMMA, 0x33}, {55, VK_OEM_PERIOD, 0x34},
+    {56, VK_OEM_2, 0x35}, {57, VK_CAPITAL, 0x3A}, {68, VK_F11, 0x57}, {69, VK_F12, 0x58},
+    {70, VK_SNAPSHOT, 0xE037}, {71, VK_SCROLL, 0x46}, {72, VK_PAUSE, 0x45}, {73, VK_INSERT, 0xE052},
+    {74, VK_HOME, 0xE047}, {75, VK_PRIOR, 0xE049}, {76, VK_DELETE, 0xE053}, {77, VK_END, 0xE04F},
+    {78, VK_NEXT, 0xE051}, {79, VK_RIGHT, 0xE04D}, {80, VK_LEFT, 0xE04B}, {81, VK_DOWN, 0xE050},
+    {82, VK_UP, 0xE048}, {83, VK_NUMLOCK, 0xE045}, {84, VK_DIVIDE, 0xE035}, {85, VK_MULTIPLY, 0x37},
+    {86, VK_SUBTRACT, 0x4A}, {87, VK_ADD, 0x4E}, {88, VK_RETURN, 0xE01C}, {89, VK_NUMPAD1, 0x4F},
+    {90, VK_NUMPAD2, 0x50}, {91, VK_NUMPAD3, 0x51}, {92, VK_NUMPAD4, 0x4B}, {93, VK_NUMPAD5, 0x4C},
+    {94, VK_NUMPAD6, 0x4D}, {95, VK_NUMPAD7, 0x47}, {96, VK_NUMPAD8, 0x48}, {97, VK_NUMPAD9, 0x49},
+    {98, VK_NUMPAD0, 0x52}, {99, VK_DECIMAL, 0x53}, {100, VK_OEM_102, 0x56}, {101, VK_APPS, 0xE05D},
+    {224, VK_CONTROL, 0x1D}, {225, VK_SHIFT, 0x2A}, {226, VK_MENU, 0x38}, {227, VK_LWIN, 0xE05B},
+    {228, VK_CONTROL, 0xE01D}, {229, VK_SHIFT, 0x36}, {230, VK_MENU, 0xE038}, {231, VK_RWIN, 0xE05C},
+};
+static BYTE hostedModifiers; /* usages 224-231 held, bit (usage - 224) */
+static WPARAM hostedButtons;
+
+/* Maps a USB HID keyboard usage (SDL scancode) to a virtual key and set-1 scancode. */
+static BOOL HostedKeyCode(UINT usage, UINT *vk, UINT *scan) {
+    static const BYTE letters[26] = {0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                                     0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C};
+    if (usage >= 4 && usage <= 29) {
+        *vk = 'A' + usage - 4;
+        *scan = letters[usage - 4];
+    } else if (usage >= 30 && usage <= 39) {
+        *vk = usage == 39 ? '0' : '1' + usage - 30;
+        *scan = 0x02 + usage - 30;
+    } else if (usage >= 58 && usage <= 67) {
+        *vk = VK_F1 + usage - 58;
+        *scan = 0x3B + usage - 58;
+    } else if (usage >= 104 && usage <= 115) {
+        *vk = VK_F13 + usage - 104;
+        *scan = 0;
+    } else {
+        for (UINT i = 0; i < ARRAYSIZE(hostedKeys); ++i) {
+            if (hostedKeys[i].usage != usage) continue;
+            *vk = hostedKeys[i].vk;
+            *scan = hostedKeys[i].scan;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL QueueHostedInput(HWND handle, UINT message, WPARAM wparam, LPARAM lparam, POINT screen) {
+    if (!XboxFindWindow(handle)) return FALSE;
+    if (messageCount == MESSAGE_COUNT) {
+        SetLastError(ERROR_NOT_ENOUGH_QUOTA);
+        return FALSE;
+    }
+    messages[messageCount++] = (MSG){handle, message, wparam, lparam, GetTickCount(), screen};
+    return TRUE;
+}
+
+static POINT HostedCursor(void) {
+    AcquireSRWLockShared(&windowGeometryLock);
+    const POINT screen = hostPointerScreen;
+    ReleaseSRWLockShared(&windowGeometryLock);
+    return screen;
+}
+
+/* Keyboard messages go to the focused window, as on the desktop. */
+static HWND HostedKeyboardWindow(HWND window) {
+    return focusWindow && XboxFindWindow(focusWindow) ? focusWindow : window;
+}
+
+void XboxPostHostedKey(HWND window, UINT usage, BOOL down, BOOL repeat) {
+    UINT vk, scan;
+    if (!HostedKeyCode(usage, &vk, &scan)) return;
+    const DWORD error = GetLastError();
+    if (usage >= 224 && usage <= 231) {
+        if (down) hostedModifiers |= (BYTE)(1u << (usage - 224));
+        else hostedModifiers &= (BYTE)~(1u << (usage - 224));
+    }
+    const BOOL alt = (hostedModifiers & 0x44) != 0, control = (hostedModifiers & 0x11) != 0;
+    /* Alt, F10 and keys pressed with Alt alone are system keys. */
+    const BOOL system = (vk == VK_MENU || vk == VK_F10 || alt) && !control;
+    const UINT message = system ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP);
+    LPARAM lparam = 1 | (LPARAM)(scan & 0xFF) << 16;
+    if (scan & 0xE000) lparam |= (LPARAM)1 << 24;
+    if (alt) lparam |= (LPARAM)1 << 29;
+    if (!down || repeat) lparam |= (LPARAM)1 << 30;
+    if (!down) lparam |= (LPARAM)1 << 31;
+    QueueHostedInput(HostedKeyboardWindow(window), message, vk, (LPARAM)(DWORD)lparam, HostedCursor());
+    SetLastError(error);
+}
+
+void XboxPostHostedText(HWND window, const char *utf8) {
+    const DWORD error = GetLastError();
+    const HWND target = HostedKeyboardWindow(window);
+    const POINT screen = HostedCursor();
+    const BYTE *text = (const BYTE *)utf8;
+    while (text && *text) {
+        UINT cp = *text++, extra = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+        if (extra) cp &= 0x3F >> extra;
+        else if (cp >= 0x80) continue;
+        for (; extra && (*text & 0xC0) == 0x80; --extra) cp = cp << 6 | (*text++ & 0x3F);
+        if (extra || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) continue;
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            QueueHostedInput(target, WM_CHAR, 0xD800 | cp >> 10, 1, screen);
+            cp = 0xDC00 | (cp & 0x3FF);
+        }
+        QueueHostedInput(target, WM_CHAR, cp, 1, screen);
+    }
+    SetLastError(error);
+}
+
+/* x and y are client pixels. WM_MOUSEWHEEL takes its wheel delta in units of WHEEL_DELTA. */
+void XboxPostHostedPointer(HWND window, UINT message, LONG x, LONG y, int wheel) {
+    const DWORD error = GetLastError();
+    if (!hostPointerConfigured) OpenHostedPointer();
+    RECT bounds;
+    /* With hosted DXGI the window adapter reads the pointer from the mailbox itself. */
+    if (hostPointerMailbox || !HostedWindowBounds(window, &bounds)) {
+        SetLastError(error);
+        return;
+    }
+    const POINT screen = {bounds.left + x, bounds.top + y};
+    switch (message) {
+    case WM_LBUTTONDOWN: hostedButtons |= MK_LBUTTON; break;
+    case WM_LBUTTONUP: hostedButtons &= ~(WPARAM)MK_LBUTTON; break;
+    case WM_RBUTTONDOWN: hostedButtons |= MK_RBUTTON; break;
+    case WM_RBUTTONUP: hostedButtons &= ~(WPARAM)MK_RBUTTON; break;
+    case WM_MBUTTONDOWN: hostedButtons |= MK_MBUTTON; break;
+    case WM_MBUTTONUP: hostedButtons &= ~(WPARAM)MK_MBUTTON; break;
+    default: break;
+    }
+    WPARAM keys = hostedButtons;
+    if (hostedModifiers & 0x22) keys |= MK_SHIFT;
+    if (hostedModifiers & 0x11) keys |= MK_CONTROL;
+    AcquireSRWLockExclusive(&windowGeometryLock);
+    hostPointerScreen = screen;
+    hostPointerWindow = window;
+    ReleaseSRWLockExclusive(&windowGeometryLock);
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+        QueueHostedInput(window, message, keys | (WPARAM)(WORD)(SHORT)(wheel * WHEEL_DELTA) << 16,
+            MAKELPARAM(screen.x, screen.y), screen);
+    } else {
+        QueueHostedInput(window, message, keys, MAKELPARAM(x, y), screen);
+    }
+    SetLastError(error);
+}
+
 static BOOL ReadCursorPosition(LPPOINT position, const char *nativeName) {
     if (!position) {
         SetLastError(ERROR_INVALID_PARAMETER);
