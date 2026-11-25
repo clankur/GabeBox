@@ -463,6 +463,62 @@ static HMODULE LoadVerifiedSystemCompanion(LPCWSTR name, DWORD *error) {
     return NULL;
 }
 
+
+// SetDllDirectoryW has no effect inside the app container, so bare plugin names that an engine expects
+// to find in its plugin directory fail with ERROR_MOD_NOT_FOUND. Remember the directory and retry there.
+static SRWLOCK dllDirectoryLock = SRWLOCK_INIT;
+static WCHAR dllDirectory[512];
+
+BOOL WINAPI XboxSetDllDirectoryW(LPCWSTR path) {
+    const DWORD previous = GetLastError();
+    AcquireSRWLockExclusive(&dllDirectoryLock);
+    DWORD length = 0;
+    while (path && path[length] && length + 1 < ARRAYSIZE(dllDirectory)) {
+        dllDirectory[length] = path[length] == L'/' ? L'\\' : path[length];
+        ++length;
+    }
+    if (path && path[length]) length = 0;  // Too long to retry safely.
+    while (length && dllDirectory[length - 1] == L'\\') --length;
+    dllDirectory[length] = 0;
+    ReleaseSRWLockExclusive(&dllDirectoryLock);
+    const BOOL native = SetDllDirectoryW(path);
+    const char trace[] = "asset dll-directory=recorded\r\n";
+    AppendTrace(trace, sizeof(trace) - 1);
+    SetLastError(native ? GetLastError() : previous);
+    return TRUE;
+}
+
+static HMODULE LoadFromDllDirectory(LPCWSTR name, DWORD *error) {
+    if (!name || !*name) return NULL;
+    for (LPCWSTR p = name; *p; ++p) {
+        if (*p == L'\\' || *p == L'/' || *p == L':') return NULL;
+    }
+    WCHAR path[600], staged[600];
+    AcquireSRWLockShared(&dllDirectoryLock);
+    DWORD length = 0;
+    while (dllDirectory[length]) { path[length] = dllDirectory[length]; ++length; }
+    ReleaseSRWLockShared(&dllDirectoryLock);
+    if (!length) return NULL;
+    path[length++] = L'\\';
+    DWORD i = 0;
+    while (name[i] && length + 5 < ARRAYSIZE(path)) path[length++] = name[i++];
+    if (name[i]) return NULL;
+    path[length] = 0;
+    if (length < 4 || CompareStringOrdinal(path + length - 4, 4, L".dll", 4, TRUE) != CSTR_EQUAL) {
+        path[length++] = L'.'; path[length++] = L'd'; path[length++] = L'l'; path[length++] = L'l';
+        path[length] = 0;
+    }
+    const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(path, staged, ARRAYSIZE(staged));
+    HMODULE result = LoadLibraryExW(companion ? staged : path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (result) {
+        const char trace[] = "asset dll-directory=loaded\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+    } else {
+        *error = GetLastError();
+    }
+    return result;
+}
+
 HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     DWORD previous = GetLastError();
     RestoreWorkingDirectory();
@@ -481,6 +537,7 @@ HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     SetLastError(previous);
     result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
     DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND && converted) result = LoadFromDllDirectory(wide, &error);
     Record(name, result, 1, result != 0, error);
     SetLastError(error);
     return result;
@@ -519,7 +576,8 @@ HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
     result = LoadLibraryW(companion ? staged : name);
-    const DWORD error = GetLastError();
+    DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND) result = LoadFromDllDirectory(name, &error);
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
@@ -534,6 +592,8 @@ HMODULE WINAPI XboxLoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
     DWORD error = GetLastError();
     if (!result && error == ERROR_MOD_NOT_FOUND && !file && flags == LOAD_LIBRARY_SEARCH_SYSTEM32)
         result = LoadVerifiedSystemCompanion(name, &error);
+    if (!result && error == ERROR_MOD_NOT_FOUND && !file && !(flags & (LOAD_LIBRARY_AS_DATAFILE |
+            LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE))) result = LoadFromDllDirectory(name, &error);
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;

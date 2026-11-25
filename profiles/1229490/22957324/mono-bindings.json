@@ -2,5 +2,9 @@
   "winmm.dll": {
     "timeSetEvent": "XboxWin32Timer.dll",
     "timeKillEvent": "XboxWin32Timer.dll"
+  },
+  "kernel32.dll": {
+    "LoadLibraryW": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryExW": "XboxWin32LoaderTrace.dll"
   }
 }

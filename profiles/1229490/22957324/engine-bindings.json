@@ -51,7 +51,8 @@
     "LoadLibraryW": "XboxWin32LoaderTrace.dll",
     "LoadLibraryExW": "XboxWin32LoaderTrace.dll",
     "GetProcAddress": "XboxWin32LoaderTrace.dll",
-    "VirtualAlloc": "XboxWin32LoaderTrace.dll"
+    "VirtualAlloc": "XboxWin32LoaderTrace.dll",
+    "SetDllDirectoryW": "XboxWin32LoaderTrace.dll"
   },
   "gdi32.dll": {
     "GetDeviceCaps": "XboxWin32Window.dll"
