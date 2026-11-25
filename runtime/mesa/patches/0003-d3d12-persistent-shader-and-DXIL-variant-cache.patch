@@ -1,0 +1,501 @@
+Subject: d3d12: persistent shader cache and DXIL variant cache
+
+At 34732bb (and upstream main) the d3d12 driver never implements
+pipe_screen::get_disk_shader_cache, so the GL front end has no program
+cache and GL_ARB_get_program_binary reports no formats. Every Godot
+shader is therefore translated GLSL -> NIR -> DXIL and validated again on
+every launch, at its first draw.
+
+- get_disk_shader_cache returns a disk cache keyed by the Mesa revision and
+  build time, the adapter IDs and UMD version, and the capabilities that
+  shape NIR and DXIL. On Windows it is created only when
+  MESA_SHADER_CACHE_DIR (or MESA_GLSL_CACHE_DIR) is set, so a process that
+  does not opt in behaves exactly as before. With the cache, st/mesa's
+  shader cache skips GLSL compile, link and GLSL -> NIR for programs it has
+  seen, and program binaries get a format.
+- compile_nir() keys each variant on its serialized pre-compile NIR plus
+  every nir_to_dxil option. A hit restores the validated, signed DXIL and
+  the NIR as nir_to_dxil() left it, skipping nir_to_dxil() and DXIL.dll
+  validation. Only validated DXIL is stored; DXIL dumps, disassembly,
+  experimental (unvalidated) mode and verbose debugging bypass the cache.
+- D3D12_SHADER_CACHE_STATS=<path> writes variant counts (hits, misses,
+  uncached) and time spent creating variants, hashing, loading, in
+  nir_to_dxil and in validation, at most once a second and at exit.
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/d3d12/d3d12_compiler.cpp
+--- a/src/gallium/drivers/d3d12/d3d12_compiler.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_compiler.cpp
+@@ -33,17 +33,22 @@
+ #include "pipe/p_state.h"
+ 
+ #include "nir.h"
++#include "nir_serialize.h"
+ #include "nir/nir_draw_helpers.h"
+ #include "nir/tgsi_to_nir.h"
+ #include "compiler/nir/nir_builder.h"
+ 
++#include "util/blob.h"
++#include "util/disk_cache.h"
+ #include "util/hash_table.h"
++#include "util/os_time.h"
+ #include "util/u_memory.h"
+ #include "util/u_prim.h"
+ #include "util/u_simple_shaders.h"
+ #include "util/u_dl.h"
+ 
+ #include <dxguids/dxguids.h>
++#include <inttypes.h>
+ 
+ #ifdef _WIN32
+ #include "dxil_validator.h"
+@@ -71,6 +76,167 @@
+ {
+    const struct glsl_type *base_type = glsl_without_array(var->type);
+    return glsl_type_is_sampler(base_type) && !glsl_type_is_bare_sampler(base_type);
++}
++
++/* Persistent DXIL variant cache.
++ *
++ * A variant's DXIL depends only on the NIR handed to nir_to_dxil() and on the
++ * nir_to_dxil options, so the key is the serialized pre-compile NIR plus every
++ * option field.  The variant key (d3d12_shader_key) is already reflected in
++ * that NIR through the lowering passes it selects.  The screen's disk cache
++ * adds the build and device identity.
++ *
++ * nir_to_dxil() also rewrites the NIR that the driver keeps for bindings,
++ * root signatures and later stages, so an entry stores the validated
++ * (signed) DXIL together with the NIR as nir_to_dxil() left it.  A hit
++ * restores both and continues exactly as a compile would.
++ */
++#define D3D12_DXIL_CACHE_VERSION 1
++
++static int64_t
++d3d12_shader_cache_now(void)
++{
++   return os_time_get_nano();
++}
++
++void
++d3d12_shader_cache_write_stats(struct d3d12_screen *screen, bool force)
++{
++   if (!screen->shader_cache_stats_path)
++      return;
++
++   mtx_lock(&screen->shader_cache_mutex);
++   struct d3d12_shader_cache_stats *stats = &screen->shader_cache_stats;
++   const int64_t now = d3d12_shader_cache_now();
++   if (force || now - stats->last_write_ns >= 1000000000ll) {
++      stats->last_write_ns = now;
++      FILE *file = fopen(screen->shader_cache_stats_path, "w");
++      if (file) {
++         fprintf(file,
++                 "d3d12_shader_cache=%s\n"
++                 "variants=%" PRIu64 "\n"
++                 "hits=%" PRIu64 "\n"
++                 "misses=%" PRIu64 "\n"
++                 "uncached=%" PRIu64 "\n"
++                 "variant_us=%" PRIu64 "\n"
++                 "key_us=%" PRIu64 "\n"
++                 "load_us=%" PRIu64 "\n"
++                 "nir_to_dxil_us=%" PRIu64 "\n"
++                 "validate_us=%" PRIu64 "\n",
++                 screen->disk_cache ? "enabled" : "disabled",
++                 stats->variants, stats->hits, stats->misses, stats->uncached,
++                 stats->variant_ns / 1000, stats->key_ns / 1000,
++                 stats->load_ns / 1000, stats->nir_to_dxil_ns / 1000,
++                 stats->validate_ns / 1000);
++         fclose(file);
++      }
++   }
++   mtx_unlock(&screen->shader_cache_mutex);
++}
++
++static void
++d3d12_shader_cache_count(struct d3d12_screen *screen, uint64_t *counter,
++                         int64_t start)
++{
++   if (!screen->shader_cache_stats_path)
++      return;
++
++   const int64_t elapsed = d3d12_shader_cache_now() - start;
++   mtx_lock(&screen->shader_cache_mutex);
++   *counter += elapsed > 0 ? (uint64_t)elapsed : 0;
++   mtx_unlock(&screen->shader_cache_mutex);
++}
++
++static bool
++d3d12_dxil_cache_usable(struct d3d12_context *ctx)
++{
++   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
++
++#ifdef _WIN32
++   /* Debug output and unvalidated DXIL always go through the compiler. */
++   return screen->disk_cache && ctx->dxil_validator &&
++          !(d3d12_debug & (D3D12_DEBUG_EXPERIMENTAL | D3D12_DEBUG_DXIL |
++                           D3D12_DEBUG_DISASS | D3D12_DEBUG_VERBOSE));
++#else
++   return false;
++#endif
++}
++
++static bool
++d3d12_dxil_cache_key(struct d3d12_screen *screen, const nir_shader *nir,
++                     const struct nir_to_dxil_options *opts, cache_key key)
++{
++   struct blob blob;
++   blob_init(&blob);
++   blob_write_uint32(&blob, D3D12_DXIL_CACHE_VERSION);
++   blob_write_uint8(&blob, opts->interpolate_at_vertex);
++   blob_write_uint8(&blob, opts->lower_int16);
++   blob_write_uint8(&blob, opts->disable_math_refactoring);
++   blob_write_uint8(&blob, opts->last_ubo_is_not_arrayed);
++   blob_write_uint8(&blob, opts->advanced_texture_ops);
++   blob_write_uint32(&blob, opts->provoking_vertex);
++   blob_write_uint32(&blob, opts->num_kernel_globals);
++   blob_write_uint32(&blob, opts->input_clip_size);
++   blob_write_uint32(&blob, (uint32_t)opts->environment);
++   blob_write_uint32(&blob, (uint32_t)opts->shader_model_max);
++   blob_write_uint32(&blob, (uint32_t)opts->validator_version_max);
++   nir_serialize(&blob, nir, false);
++
++   const bool ok = !blob.out_of_memory;
++   if (ok)
++      disk_cache_compute_key(screen->disk_cache, blob.data, blob.size, key);
++   blob_finish(&blob);
++   return ok;
++}
++
++/* On a hit, returns the cached NIR (allocated on 'mem_ctx') and fills in the
++ * DXIL; otherwise returns NULL.
++ */
++static nir_shader *
++d3d12_dxil_cache_load(struct d3d12_screen *screen, void *mem_ctx,
++                      const nir_shader_compiler_options *options,
++                      const cache_key key, struct blob *dxil)
++{
++   size_t size = 0;
++   void *entry = disk_cache_get(screen->disk_cache, key, &size);
++   if (!entry)
++      return NULL;
++
++   struct blob_reader reader;
++   blob_reader_init(&reader, entry, size);
++   nir_shader *nir = NULL;
++   const uint32_t version = blob_read_uint32(&reader);
++   const uint32_t dxil_size = blob_read_uint32(&reader);
++   const void *dxil_data = blob_read_bytes(&reader, dxil_size);
++   if (!reader.overrun && version == D3D12_DXIL_CACHE_VERSION && dxil_size) {
++      nir = nir_deserialize(mem_ctx, options, &reader);
++      if (nir && (reader.overrun || reader.current != reader.end)) {
++         ralloc_free(nir);
++         nir = NULL;
++      }
++      if (nir && !blob_write_bytes(dxil, dxil_data, dxil_size)) {
++         ralloc_free(nir);
++         nir = NULL;
++      }
++   }
++
++   free(entry);
++   return nir;
++}
++
++static void
++d3d12_dxil_cache_store(struct d3d12_screen *screen, const cache_key key,
++                       const nir_shader *nir, const void *dxil, size_t dxil_size)
++{
++   struct blob entry;
++   blob_init(&entry);
++   blob_write_uint32(&entry, D3D12_DXIL_CACHE_VERSION);
++   blob_write_uint32(&entry, (uint32_t)dxil_size);
++   blob_write_bytes(&entry, dxil, dxil_size);
++   nir_serialize(&entry, nir, false);
++   if (!entry.out_of_memory)
++      disk_cache_put(screen->disk_cache, key, entry.data, entry.size, NULL);
++   blob_finish(&entry);
+ }
+ 
+ static struct d3d12_shader *
+@@ -137,9 +303,38 @@
+ #endif
+ 
+    struct blob tmp;
+-   if (!nir_to_dxil(nir, &opts, NULL, &tmp)) {
+-      debug_printf("D3D12: nir_to_dxil failed\n");
+-      return NULL;
++   cache_key dxil_key;
++   bool cacheable = false;
++   nir_shader *cached = NULL;
++   if (d3d12_dxil_cache_usable(ctx)) {
++      int64_t start = d3d12_shader_cache_now();
++      cacheable = d3d12_dxil_cache_key(screen, nir, &opts, dxil_key);
++      d3d12_shader_cache_count(screen, &screen->shader_cache_stats.key_ns, start);
++      if (cacheable) {
++         start = d3d12_shader_cache_now();
++         blob_init(&tmp);
++         cached = d3d12_dxil_cache_load(screen, sel, nir->options, dxil_key, &tmp);
++         if (!cached)
++            blob_finish(&tmp);
++         d3d12_shader_cache_count(screen, &screen->shader_cache_stats.load_ns, start);
++      }
++   }
++
++   if (cached) {
++      /* Continue with the NIR as nir_to_dxil() left it on the miss that
++       * stored this entry.  d3d12_lower_state_vars() has already filled in
++       * the shader's state variables from the pre-compile NIR.
++       */
++      ralloc_free(nir);
++      nir = cached;
++      shader->nir = nir;
++   } else {
++      const int64_t start = d3d12_shader_cache_now();
++      if (!nir_to_dxil(nir, &opts, NULL, &tmp)) {
++         debug_printf("D3D12: nir_to_dxil failed\n");
++         return NULL;
++      }
++      d3d12_shader_cache_count(screen, &screen->shader_cache_stats.nir_to_dxil_ns, start);
+    }
+ 
+    // Non-ubo variables
+@@ -173,10 +368,13 @@
+ 
+ #ifdef _WIN32
+    if (ctx->dxil_validator) {
+-      if (!(d3d12_debug & D3D12_DEBUG_EXPERIMENTAL)) {
+-         char *err;
+-         if (!dxil_validate_module(ctx->dxil_validator, tmp.data,
+-                                   tmp.size, &err) && err) {
++      if (!cached && !(d3d12_debug & D3D12_DEBUG_EXPERIMENTAL)) {
++         char *err = NULL;
++         const int64_t start = d3d12_shader_cache_now();
++         const bool valid = dxil_validate_module(ctx->dxil_validator, tmp.data,
++                                                 tmp.size, &err);
++         d3d12_shader_cache_count(screen, &screen->shader_cache_stats.validate_ns, start);
++         if (!valid && err) {
+             debug_printf(
+                "== VALIDATION ERROR =============================================\n"
+                "%s\n"
+@@ -184,6 +382,9 @@
+                err);
+             ralloc_free(err);
+          }
++         /* Only validated, signed DXIL is worth keeping. */
++         if (valid && cacheable)
++            d3d12_dxil_cache_store(screen, dxil_key, nir, tmp.data, tmp.size);
+       }
+ 
+       if (d3d12_debug & D3D12_DEBUG_DISASS) {
+@@ -200,6 +401,17 @@
+ #endif
+ 
+    blob_finish_get_buffer(&tmp, &shader->bytecode, &shader->bytecode_length);
++
++   if (screen->shader_cache_stats_path) {
++      mtx_lock(&screen->shader_cache_mutex);
++      if (cached)
++         screen->shader_cache_stats.hits++;
++      else if (cacheable)
++         screen->shader_cache_stats.misses++;
++      else
++         screen->shader_cache_stats.uncached++;
++      mtx_unlock(&screen->shader_cache_mutex);
++   }
+ 
+    if (d3d12_debug & D3D12_DEBUG_DXIL) {
+       char buf[256];
+@@ -1070,6 +1282,9 @@
+       }
+    }
+ 
++   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
++   const int64_t variant_start = d3d12_shader_cache_now();
++
+    /* Clone the NIR shader */
+    new_nir_variant = nir_shader_clone(sel, sel->initial);
+ 
+@@ -1206,6 +1421,14 @@
+    /* prepend the new shader in the selector chain and pick it */
+    new_variant->next_variant = sel->first;
+    sel->current = sel->first = new_variant;
++
++   if (screen->shader_cache_stats_path) {
++      d3d12_shader_cache_count(screen, &screen->shader_cache_stats.variant_ns, variant_start);
++      mtx_lock(&screen->shader_cache_mutex);
++      screen->shader_cache_stats.variants++;
++      mtx_unlock(&screen->shader_cache_mutex);
++      d3d12_shader_cache_write_stats(screen, false);
++   }
+ }
+ 
+ static d3d12_shader_selector *
+diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.h b/src/gallium/drivers/d3d12/d3d12_compiler.h
+--- a/src/gallium/drivers/d3d12/d3d12_compiler.h
++++ b/src/gallium/drivers/d3d12/d3d12_compiler.h
+@@ -70,6 +70,12 @@
+ void
+ d3d12_varying_cache_destroy(struct d3d12_screen *ctx);
+ 
++/* Write the DXIL variant cache counters to D3D12_SHADER_CACHE_STATS, at most
++ * once a second unless forced.
++ */
++void
++d3d12_shader_cache_write_stats(struct d3d12_screen *screen, bool force);
++
+ 
+ struct d3d12_varying_info {
+    struct {
+diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -47,6 +47,7 @@
+ #include "util/u_screen.h"
+ #include "util/u_dl.h"
+ #include "util/mesa-blake3.h"
++#include "util/disk_cache.h"
+ 
+ #include "frontend/sw_winsys.h"
+ 
+@@ -686,6 +687,10 @@
+ #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+    d3d12_varying_cache_destroy(screen);
+    mtx_destroy(&screen->varying_info_mutex);
++   d3d12_shader_cache_write_stats(screen, true);
++   disk_cache_destroy(screen->disk_cache);
++   free(screen->shader_cache_stats_path);
++   mtx_destroy(&screen->shader_cache_mutex);
+ #endif // HAVE_GALLIUM_D3D12_GRAPHICS
+ 
+    if (screen->d3d12_mod)
+@@ -1137,6 +1142,67 @@
+    screen->dev->CreateRenderTargetView(NULL, &rtv, screen->null_rtv.cpu_handle);
+ }
+ 
++#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
++static struct disk_cache *
++d3d12_get_disk_shader_cache(struct pipe_screen *pscreen)
++{
++   return d3d12_screen(pscreen)->disk_cache;
++}
++
++/* The persistent shader cache backs both the GL front end's program cache
++ * (and with it GL_ARB_get_program_binary) and the DXIL variant cache in
++ * d3d12_compiler.cpp.
++ */
++static void
++d3d12_init_disk_cache(struct d3d12_screen *screen)
++{
++#ifdef ENABLE_SHADER_CACHE
++#ifdef _WIN32
++   /* Windows has no per-user default cache location.  Leave the cache, and
++    * the program binary formats that depend on it, off unless the host
++    * names a directory.
++    */
++   if (!os_get_option("MESA_SHADER_CACHE_DIR") &&
++       !os_get_option("MESA_GLSL_CACHE_DIR"))
++      return;
++#endif
++
++   /* Identify the build by its revision and build time, and the device by
++    * its IDs, driver version and the capabilities that shape NIR and DXIL.
++    */
++   static const char build_id[] =
++      "d3d12 shader cache 1 " PACKAGE_VERSION MESA_GIT_SHA1 " " __DATE__ " " __TIME__;
++   const uint32_t caps[] = {
++      (uint32_t)screen->max_shader_model,
++      (uint32_t)screen->max_feature_level,
++      screen->have_load_at_vertex,
++      screen->support_shader_images,
++      (uint32_t)screen->opts.DoublePrecisionFloatShaderOps,
++      (uint32_t)screen->opts1.Int64ShaderOps,
++      (uint32_t)screen->opts4.Native16BitShaderOpsSupported,
++      (uint32_t)screen->opts14.AdvancedTextureOpsSupported,
++   };
++   blake3_hasher hasher;
++   blake3_hash hash;
++   _mesa_blake3_init(&hasher);
++   _mesa_blake3_update(&hasher, build_id, sizeof(build_id));
++   _mesa_blake3_update(&hasher, &screen->vendor_id, sizeof(screen->vendor_id));
++   _mesa_blake3_update(&hasher, &screen->device_id, sizeof(screen->device_id));
++   _mesa_blake3_update(&hasher, &screen->subsys_id, sizeof(screen->subsys_id));
++   _mesa_blake3_update(&hasher, &screen->revision, sizeof(screen->revision));
++   _mesa_blake3_update(&hasher, &screen->driver_version, sizeof(screen->driver_version));
++   _mesa_blake3_update(&hasher, caps, sizeof(caps));
++   _mesa_blake3_final(&hasher, hash);
++
++   char driver_id[BLAKE3_HEX_LEN];
++   _mesa_blake3_format(driver_id, hash);
++   screen->disk_cache = disk_cache_create("d3d12", driver_id, 0);
++   if (screen->disk_cache)
++      screen->shader_cache_stats_path = os_get_option_dup("D3D12_SHADER_CACHE_STATS");
++#endif
++}
++#endif // HAVE_GALLIUM_D3D12_GRAPHICS
++
+ static void
+ d3d12_get_adapter_luid(struct pipe_screen *pscreen, char *luid)
+ {
+@@ -1412,6 +1478,8 @@
+ #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+    d3d12_varying_cache_init(screen);
+    mtx_init(&screen->varying_info_mutex, mtx_plain);
++   mtx_init(&screen->shader_cache_mutex, mtx_plain);
++   screen->base.get_disk_shader_cache = d3d12_get_disk_shader_cache;
+ 
+    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
+       screen->base.nir_options[i] = &screen->nir_options;
+@@ -1889,5 +1957,10 @@
+    d3d12_init_compute_caps(screen);
+    d3d12_init_screen_caps(screen);
+ 
++#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
++   if (screen->max_feature_level >= D3D_FEATURE_LEVEL_11_0)
++      d3d12_init_disk_cache(screen);
++#endif // HAVE_GALLIUM_D3D12_GRAPHICS
++
+    return true;
+ }
+diff --git a/src/gallium/drivers/d3d12/d3d12_screen.h b/src/gallium/drivers/d3d12/d3d12_screen.h
+--- a/src/gallium/drivers/d3d12/d3d12_screen.h
++++ b/src/gallium/drivers/d3d12/d3d12_screen.h
+@@ -39,8 +39,25 @@
+ 
+ #include "d3d12_common.h"
+ 
++struct disk_cache;
+ struct pb_manager;
+ struct util_dl_library;
++
++/* Counters for the persistent DXIL variant cache (d3d12_compiler.cpp).
++ * Times are in nanoseconds and guarded by d3d12_screen::shader_cache_mutex.
++ */
++struct d3d12_shader_cache_stats {
++   uint64_t variants;        /* variants created, cached or not */
++   uint64_t hits;            /* variants loaded from the disk cache */
++   uint64_t misses;          /* variants compiled and stored */
++   uint64_t uncached;        /* variants compiled without the cache */
++   uint64_t variant_ns;      /* creating variants, end to end */
++   uint64_t key_ns;          /* serializing and hashing the variant NIR */
++   uint64_t load_ns;         /* disk cache lookups, hits and misses */
++   uint64_t nir_to_dxil_ns;  /* nir_to_dxil, when compiled */
++   uint64_t validate_ns;     /* DXIL validation and signing, when compiled */
++   int64_t last_write_ns;
++};
+ 
+ enum resource_dimension
+ {
+@@ -161,6 +178,14 @@
+    bool support_create_not_resident;
+    bool supports_dynamic_queue_priority;
+ 
++#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
++   /* Persistent shader cache; NULL unless a cache directory is named. */
++   struct disk_cache *disk_cache;
++   mtx_t shader_cache_mutex;
++   struct d3d12_shader_cache_stats shader_cache_stats;
++   char *shader_cache_stats_path;
++#endif // HAVE_GALLIUM_D3D12_GRAPHICS
++
+ #ifdef _GAMING_XBOX
+    UINT64 frame_token;
+ #endif
