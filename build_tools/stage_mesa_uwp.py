@@ -123,12 +123,39 @@ def stage_mesa(layout, archive, license_file, framework, sdl_surfaceless=False, 
             output.write(jni_library)
 
 
+def write_control_runtime(directory, archive, license_file, dxil_archive):
+    """Extract the pinned Mesa and DXIL files into the flat MESA_LAYOUT that
+    probe/graphics-runtime-control/build.sh copies into a control package."""
+    release = RELEASES.get(hashlib.sha256(archive.read_bytes()).hexdigest())
+    if release is None:
+        raise ValueError('Use a pinned, unchanged Mesa UWP release archive.')
+    source, license_hash, prefix, extra_libraries = release
+    license_data = license_file.read_bytes()
+    if hashlib.sha256(license_data).hexdigest() != license_hash:
+        raise ValueError('Use the Mesa UWP license from the pinned source revision.')
+    if hashlib.sha256(dxil_archive.read_bytes()).hexdigest() != DXIL_ARCHIVE_SHA256:
+        raise ValueError('Use the pinned Microsoft DirectX Shader Compiler v1.8.2505.1 archive.')
+    directory.mkdir()
+    with ZipFile(archive) as mesa:
+        files = {name: mesa.read(prefix + name) for name in LIBRARIES + extra_libraries}
+    with ZipFile(dxil_archive) as dxc:
+        files.update({name: dxc.read(entry) for name, entry in DXIL_FILES.items()})
+    files['LICENSE.mesa-uwp'] = license_data
+    files['mesa-uwp-source.txt'] = (source + '\n').encode('ascii')
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    return sorted(files)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('layout', type=Path)
+    parser.add_argument('layout', type=Path, nargs='?')
     parser.add_argument('--archive', required=True, type=Path)
     parser.add_argument('--license', required=True, type=Path)
-    parser.add_argument('--framework', required=True, type=Path)
+    parser.add_argument('--framework', type=Path, help='signed Microsoft.VCLibs.140.00 x64 framework APPX')
+    parser.add_argument('--control-runtime', type=Path, metavar='NEW_DIR',
+                        help='instead of staging a layout, write the MESA_LAYOUT directory for the graphics runtime control; '
+                             'requires --dxil-archive')
     parser.add_argument('--sdl-surfaceless', action='store_true', help='enable the SDL offscreen context trial')
     parser.add_argument('--slay-mesa-jni', type=Path, help='verified Mesa JNI control workflow artifact')
     parser.add_argument('--dxil-archive', type=Path, help='pinned Microsoft DXC validator archive for indexed rendering')
@@ -136,6 +163,15 @@ def main():
     parser.add_argument('--desktop-gl-runtime', action='store_true',
                         help='stage the shared desktop OpenGL runtime for a Steam sign-in package')
     args = parser.parse_args()
+    if args.control_runtime:
+        if args.layout or args.framework or not args.dxil_archive or args.sdl_surfaceless or args.slay_mesa_jni \
+                or args.indexed_control or args.desktop_gl_runtime:
+            parser.error('--control-runtime takes only --archive, --license and --dxil-archive')
+        names = write_control_runtime(args.control_runtime, args.archive, args.license, args.dxil_archive)
+        print(f'Wrote {len(names)} pinned Mesa and DXIL files to {args.control_runtime}.')
+        return
+    if not args.layout or not args.framework:
+        parser.error('Give a diagnostic layout and --framework, or use --control-runtime')
     stage_mesa(args.layout, args.archive, args.license, args.framework, args.sdl_surfaceless, args.slay_mesa_jni,
                args.dxil_archive, args.indexed_control, args.desktop_gl_runtime)
     print('Staged the pinned Mesa UWP runtime and framework dependency.')

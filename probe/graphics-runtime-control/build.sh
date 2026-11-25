@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Build an isolated Xbox control using the same Mesa DLLs as the game runtime.
 set -euo pipefail
+# Under Git Bash on Windows (CI), hand native tools drive-letter paths and run with
+# MSYS_NO_PATHCONV=1 so options such as /out: and /def: reach lld-link unchanged.
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+}
 load_only=false
 loader_order=false
 sdl_video=false
@@ -84,7 +89,7 @@ case ${1:-} in
         if [[ $1 == --loader-order ]]; then loader_order=true; fi
         if [[ $1 == --sdl-video ]]; then sdl_video=true; fi
         if [[ $1 == --win32-opengl ]]; then win32_opengl=true; fi
-        sdl_artifact=$(realpath "${2:?Supply an SDL2 artifact directory}")
+        sdl_artifact=$(native_path "$(realpath "${2:?Supply an SDL2 artifact directory}")")
         sdl_version=${3:?Supply the SDL2 version}
         shift 3
         ;;
@@ -93,14 +98,14 @@ if (( $# != 5 )); then
     echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --d3d12-pipeline-cache | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
-src=$(cd "$(dirname "$0")" && pwd)
+src=$(native_path "$(cd "$(dirname "$0")" && pwd)")
 probe=$(dirname "$src")
 repo=$(dirname "$probe")
-windows_app=$(realpath "$1")
-mesa=$(realpath "$2")
-template=$(realpath "$3")
+windows_app=$(native_path "$(realpath "$1")")
+mesa=$(native_path "$(realpath "$2")")
+template=$(native_path "$(realpath "$3")")
 mkdir "$5"
-build=$(cd "$5" && pwd)
+build=$(native_path "$(cd "$5" && pwd)")
 layout="$build/package"
 mkdir "$layout"
 

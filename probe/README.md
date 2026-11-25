@@ -57,10 +57,48 @@ The top process makes no D3D12 call. It starts one round process for the `ID3D12
 
 The round installs the shared hooks and selects the path as a profile would. It creates a root signature and a trivial compute pipeline. That first creation is a miss, which the cache handles with the calls the title path makes: the bind, the store and the serialization. The cache checks `GetDeviceRemovedReason` after each of them. A reload process then loads the file from TempState and creates the same pipeline, which must be a hit. The shader is a hand-assembled, checksummed `cs_5_0` container from [`pipeline-cache-shader.h`](graphics-runtime-control/pipeline-cache-shader.h), generated and verified by `tests/test_d3d12_pipeline_control.py`. The control covers compute pipelines only; graphics `Load` and `CachedPSO` calls on Mesa's DXIL are checked by the title run.
 
+### Build, deploy and run
+
+The `pipeline-cache-control` job of the [Build Xbox probe workflow](../.github/workflows/xbox-probe.yml) builds this control after the Windows SDK package job. It runs on pushes that touch `probe/`, `runtime/` or `build_tools/`, and on a manual dispatch, which can set the package version. The job runs `build.sh --d3d12-pipeline-cache` under Git Bash with the same LLVM, Windows SDK `WindowsApp.lib` and `xbox-steam-core-template` artifact as the rest of the workflow. It downloads three pinned inputs: Mesa UWP release `26.2.2`, the Mesa license at source revision `34732bb`, and the DirectX Shader Compiler `v1.8.2505.1` archive for `dxil.dll`. `python3 -m build_tools.stage_mesa_uwp --control-runtime` checks their digests before it writes `MESA_LAYOUT`. The control does not load Mesa. `build.sh` copies the same files into every graphics control.
+
+The `xbox-graphics-control-pipeline-cache` artifact contains:
+
+| File | Contents |
+| --- | --- |
+| `PackagedProcessProbe-x64.appx`, `PackagedProcessProbe.cer` | The control, identity `XboxPortabilityProbe.ChildProcess.GraphicsControl`, version `1.1.RUN_NUMBER.0` unless the dispatch sets one. `child.exe` and the package are signed with a certificate created for the run. |
+| `GraphicsControl-layout.zip` | The unsigned layout, for signing locally with `build_tools/package.sh` |
+| `control-build.txt` | Version, source commit, workflow run, digest of the template's `SHA256SUMS`, Mesa source, Windows SDK and clang versions |
+| `SHA256SUMS` | LF-terminated SHA-256 of every file above |
+
+Check the artifact, install the control and run it. Record `control-build.txt` with the result.
+
 ```sh
-WIN32_CC=… probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx 1.0.0.0 build-dir
-python3 -m tools.xbox_deploy probe --case graphics-control --version 1.0.0.0 --json
+python3 -m tools.artifacts verify "$artifact"     # or: (cd "$artifact" && shasum -a 256 -c SHA256SUMS)
+version=$(sed -n 's/^version=//p' "$artifact/control-build.txt")
+python3 -m tools.xbox_deploy deploy "$artifact/PackagedProcessProbe-x64.appx" \
+    --certificate "$artifact/PackagedProcessProbe.cer"
+python3 -m tools.xbox_deploy probe --case graphics-control --version "$version" --timeout 60 --json
 ```
+
+The package declares `Microsoft.VCLibs.140.00`. If the console lacks that framework, add `--dependency` with Microsoft's signed x64 framework APPX. A version that is not higher than the installed graphics control fails to install. Remove the installed control first, or dispatch the workflow with a higher version. Every graphics control uses this identity.
+
+To sign the layout with your own development key instead:
+
+```sh
+unzip -q "$artifact/GraphicsControl-layout.zip" -d graphics-control-layout
+bash build_tools/package.sh --layout --sign-child graphics-control-layout graphics-control-signed
+```
+
+The `graphics-control` case checks for the generic helper code `0x000051A7`, which this control never returns. A completed run therefore ends with `outcome: failed`, the message that the helper did not return its expected exit code, and a nonzero exit status. Read the verdict from `observed.child_exit_code`, with `create_process=success`. The packaged helper waits 15 seconds for `child.exe`. The control's round processes allow up to 90 seconds each, so a round that stalls leaves `wait_result=0x00000102` and `child_exit_code=0x00000000` in `probe-report.txt`, and the control's own code is lost.
+
+To build locally, install LLVM (`clang`, `lld-link`, `llvm-dlltool`) and the Windows SDK. Set `WIN32_CC` to a clang driver that targets `x86_64-pc-windows-msvc` with the SDK headers. Supply `WindowsApp.lib`, the `--control-runtime` directory and the template APPX:
+
+```sh
+WIN32_CC=… bash probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache \
+    WindowsApp.lib MESA_LAYOUT PackagedProcessProbe-x64.appx "$version" build-dir
+```
+
+### Read the result
 
 Read `child_exit_code`:
 
