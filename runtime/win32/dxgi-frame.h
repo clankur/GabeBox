@@ -41,7 +41,8 @@ private:
     HRESULT Publish12(IDXGISwapChain1* chain, UINT backBuffer);
     HRESULT FailedAt(const char* stage, HRESULT error);
     void PublishSequence(unsigned index);
-    void ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc);
+    void ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc);
+    void ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer);
 
     SdlHostMailbox* base_ = nullptr;
     SdlGpuMailbox* gpu_ = nullptr;

@@ -296,7 +296,7 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
     if (done == UINT64_MAX) return FailedAt("gpu-frame-consumer-fence-error", DXGI_ERROR_DEVICE_REMOVED);
     if (ready < slot.submitted || done < slot.submitted) return S_FALSE;
     context_->CopyResource(slot.texture.Get(), source.Get());
-    ProbeFrame(source.Get(), desc);
+    ProbeFrame(chain, desc);
     error = context_->Signal(slot.ready.Get(), next_);
     if (FAILED(error)) return FailedAt("gpu-frame-signal-error", error);
     context_->Flush();
@@ -305,13 +305,23 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
 }
 
 // Scan a few published frames to tell an all-black game image apart from a transport fault.
-void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc) {
+void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc) {
     static const UINT64 samples[] = {120, 600, 1800, 3600, 7200};
     const UINT64 count = ++published_;
     bool sample = false;
     for (UINT64 at : samples) sample |= count == at;
     if (!sample || (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
             desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) return;
+    // Scan every buffer: a renderer that writes a buffer other than 0 shows up as a lit buffer here.
+    DXGI_SWAP_CHAIN_DESC1 chainDesc{};
+    const UINT buffers = SUCCEEDED(chain->GetDesc1(&chainDesc)) && chainDesc.BufferCount <= 8 ? chainDesc.BufferCount : 1;
+    for (UINT buffer = 0; buffer < buffers; ++buffer) {
+        ComPtr<ID3D11Texture2D> texture;
+        if (SUCCEEDED(chain->GetBuffer(buffer, IID_PPV_ARGS(&texture)))) ProbeBuffer(texture.Get(), desc, count, buffer);
+    }
+}
+
+void DxgiFramePublisher::ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer) {
     const DWORD previous = GetLastError();
     if (!probe_) {
         ComPtr<ID3D11Device> device;
@@ -359,7 +369,7 @@ void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE
         do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
         while (length) *out++ = digits[--length];
     };
-    put("dxgi frame-probe frame="); number(count);
+    put("dxgi frame-probe frame="); number(count); put(" buffer="); number(buffer);
     put(" nonblack="); number(nonblack); put("/"); number(total);
     put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
     put(" peak="); number(peak);
