@@ -56,7 +56,7 @@ Everything that overlapped came from one thread compiling the game's card-play p
 | --- | --- |
 | Rebuild pinned Mesa with `-Dshader-cache=enabled` | Would not help: the d3d12 driver has no cache hook |
 | Implement a d3d12 disk cache (NIR plus variant key → DXIL) in a Mesa fork | Driver change in Mesa; not started |
-| Direct3D 12 route (Godot pipeline cache and ubershaders) | Device removed about 2.2 s after the first frames (`1.0.232.130`–`.170`); open |
+| Direct3D 12 route (ubershaders) | `1.0.240.2` enabled DRED on Godot's `ID3D12DeviceFactory`. The device was removed 2.6 s in with `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after one present, with no incomplete breadcrumbs and no page fault: a driver-side failure (`SraKmd_arden`) during startup pipeline creation, not a GPU hang. Godot 4.5's D3D12 driver also has no PSO cache (`pipeline_cache_create`: "PSO caching is not implemented yet"), so this route would compile pipelines on every launch too |
 | ReadyToRun `sts2.dll` via crossgen2 | Removes only the JIT share, about a quarter; would ship a rebuilt publisher assembly |
 
 Until one of these lands, the first combat of each launch has stalls up to 167 ms on this route. Gameplay after first use holds 60 FPS.
