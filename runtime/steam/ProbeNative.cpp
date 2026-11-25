@@ -3257,6 +3257,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 // against JIT activity. The trace goes to LocalState because the trial
                 // directory is removed when the game exits.
                 {L"DOTNET_EnableEventPipe", shadowJitTrace ? L"1" : L""},
+                {L"XBOX_WIN32_PSO_TRACE", shadowJitTrace && shadowTrace ? L"1" : L""},
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},
