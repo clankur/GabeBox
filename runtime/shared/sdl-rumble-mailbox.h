@@ -1,11 +1,23 @@
 #pragma once
 #include "sdl-rumble-protocol.h"
 
+// The Windows SDK declares this with its own exception specification, so a
+// local declaration beside it is a redefinition for MSVC. Prefer the SDK
+// header wherever it exists and keep the declaration for toolchains without it.
+#if defined(__has_include)
+#if __has_include(<fileapifromapp.h>)
+#define SDL_RUMBLE_SDK_FILEAPIFROMAPP 1
+#endif
+#endif
+#ifdef SDL_RUMBLE_SDK_FILEAPIFROMAPP
+#include <fileapifromapp.h>
+#else
 #ifdef __cplusplus
 extern "C"
 #endif
 DECLSPEC_IMPORT HANDLE WINAPI CreateFile2FromAppW(LPCWSTR, DWORD, DWORD, DWORD,
     LPCREATEFILE2_EXTENDED_PARAMETERS);
+#endif
 
 static inline SdlRumbleMailbox *MapSdlRumbleMailbox(LPCWSTR path) {
     HANDLE file = CreateFile2FromAppW(path, GENERIC_READ | GENERIC_WRITE,
