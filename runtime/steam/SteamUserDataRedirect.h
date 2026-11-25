@@ -78,8 +78,9 @@ inline Fn Load(std::atomic<void*>& original) {
     return reinterpret_cast<Fn>(original.load());
 }
 
-// Records the first failed redirected operation once, outside Steam's paths.
-inline void ReportFailure(const wchar_t* operation, DWORD error) {
+// Records the first failed redirected operation once, outside Steam's paths,
+// with the failing path below the userdata folder.
+inline void ReportFailure(const wchar_t* operation, DWORD error, LPCWSTR path) {
     auto& state = State();
     state.failed.fetch_add(1);
     if (state.reported.exchange(1) || state.reportPath.empty()) return;
@@ -87,7 +88,7 @@ inline void ReportFailure(const wchar_t* operation, DWORD error) {
     if (!create) return;
     HANDLE file = create(state.reportPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
-    char text[160];
+    char text[400];
     int length = 0;
     for (const wchar_t* c = L"steam_userdata=redirect-failed\r\noperation="; *c; ++c) text[length++] = static_cast<char>(*c);
     for (const wchar_t* c = operation; *c && length < 100; ++c) text[length++] = static_cast<char>(*c);
@@ -97,6 +98,14 @@ inline void ReportFailure(const wchar_t* operation, DWORD error) {
     for (int shift = 28; shift >= 0; shift -= 4) text[length++] = digits[(error >> shift) & 0xF];
     text[length++] = '\r';
     text[length++] = '\n';
+    const std::size_t skip = state.target.size();
+    if (path && std::wstring_view(path).size() >= skip) {
+        for (const char* c = "path=userdata"; *c; ++c) text[length++] = *c;
+        for (const wchar_t* c = path + skip; *c && length < 380; ++c)
+            text[length++] = *c >= L' ' && *c <= L'~' ? static_cast<char>(*c) : '?';
+        text[length++] = '\r';
+        text[length++] = '\n';
+    }
     DWORD written = 0;
     WriteFile(file, text, static_cast<DWORD>(length), &written, nullptr);
     CloseHandle(file);
@@ -138,13 +147,13 @@ private:
 };
 
 template <class Result>
-inline Result Finish(Result result, bool failed, bool redirected, const wchar_t* operation) {
+inline Result Finish(Result result, bool failed, bool redirected, const wchar_t* operation, LPCWSTR path) {
     if (failed && redirected) {
         const DWORD error = GetLastError();
         // Steam probes for files it has not written yet and creates folders that
         // may already exist; only other errors are failures.
         if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_FILE_EXISTS &&
-                error != ERROR_ALREADY_EXISTS) ReportFailure(operation, error);
+                error != ERROR_ALREADY_EXISTS) ReportFailure(operation, error, path);
         SetLastError(error);
     }
     return result;
@@ -154,13 +163,14 @@ inline HANDLE WINAPI CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECU
                                  DWORD disposition, DWORD flags, HANDLE source) {
     MappedPath path(name);
     HANDLE result = Load<CreateFileWFn>(Original().createFile)(path.get(), access, share, security, disposition, flags, source);
-    return Finish(result, result == INVALID_HANDLE_VALUE, path.redirected(), L"CreateFileW");
+    return Finish(result, result == INVALID_HANDLE_VALUE, path.redirected(), L"CreateFileW", path.get());
 }
 
 inline BOOL WINAPI CreateDirectoryW(LPCWSTR name, LPSECURITY_ATTRIBUTES security) {
     MappedPath path(name);
     BOOL result = Load<CreateDirectoryWFn>(Original().createDirectory)(path.get(), security);
-    return Finish(result, !result && GetLastError() != ERROR_ALREADY_EXISTS, path.redirected(), L"CreateDirectoryW");
+    return Finish(result, !result && GetLastError() != ERROR_ALREADY_EXISTS, path.redirected(), L"CreateDirectoryW",
+                  path.get());
 }
 
 inline BOOL WINAPI RemoveDirectoryW(LPCWSTR name) {
@@ -197,13 +207,15 @@ inline HANDLE WINAPI FindFirstFileExW(LPCWSTR name, FINDEX_INFO_LEVELS level, LP
 inline BOOL WINAPI MoveFileW(LPCWSTR from, LPCWSTR to) {
     MappedPath source(from), destination(to);
     BOOL result = Load<MoveFileWFn>(Original().move)(source.get(), destination.get());
-    return Finish(result, !result, source.redirected() || destination.redirected(), L"MoveFileW");
+    return Finish(result, !result, source.redirected() || destination.redirected(), L"MoveFileW",
+                  source.redirected() ? source.get() : destination.get());
 }
 
 inline BOOL WINAPI MoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
     MappedPath source(from), destination(to);
     BOOL result = Load<MoveFileExWFn>(Original().moveEx)(source.get(), destination.get(), flags);
-    return Finish(result, !result, source.redirected() || destination.redirected(), L"MoveFileExW");
+    return Finish(result, !result, source.redirected() || destination.redirected(), L"MoveFileExW",
+                  source.redirected() ? source.get() : destination.get());
 }
 
 inline BOOL WINAPI CopyFileW(LPCWSTR from, LPCWSTR to, BOOL failIfExists) {
@@ -221,7 +233,8 @@ inline BOOL WINAPI ReplaceFileW(LPCWSTR replaced, LPCWSTR replacement, LPCWSTR b
                                 LPVOID reserved) {
     MappedPath target(replaced), source(replacement), saved(backup);
     BOOL result = Load<ReplaceFileWFn>(Original().replace)(target.get(), source.get(), saved.get(), flags, exclude, reserved);
-    return Finish(result, !result, target.redirected() || source.redirected(), L"ReplaceFileW");
+    return Finish(result, !result, target.redirected() || source.redirected(), L"ReplaceFileW",
+                  target.redirected() ? target.get() : source.get());
 }
 
 inline UINT WINAPI GetTempFileNameW(LPCWSTR directory, LPCWSTR prefix, UINT unique, LPWSTR name) {
@@ -319,6 +332,8 @@ inline std::wstring InstallRedirect(HMODULE client, std::wstring const& localSta
         state.reportPath = localState + L"\\steam-userdata-report.txt";
         if (!CreateDirectoryFromAppW(state.target.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
             return L"steam_userdata=target-error\r\n";
+        // The report holds the first failure of this client load only.
+        DeleteFileFromAppW(state.reportPath.c_str());
         state.root = module.substr(0, slash);
     }
 
