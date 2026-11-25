@@ -155,6 +155,27 @@ fail:
     return FALSE;
 }
 
+DECLSPEC_IMPORT HANDLE WINAPI CreateFile2FromAppW(LPCWSTR, DWORD, DWORD, DWORD,
+    LPCREATEFILE2_EXTENDED_PARAMETERS);
+
+/* Record the first delivery of each host input kind in the run's loader trace. */
+static void TraceFirstInput(volatile LONG *seen, const char *line) {
+    if (InterlockedExchange(seen, 1)) return;
+    const DWORD error = GetLastError();
+    WCHAR path[1024];
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
+    if (length && length < ARRAYSIZE(path)) {
+        const HANDLE file = CreateFile2FromAppW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            DWORD count = 0, written;
+            while (line[count]) ++count;
+            WriteFile(file, line, count, &written, NULL);
+            CloseHandle(file);
+        }
+    }
+    SetLastError(error);
+}
+
 static HWND EventWindow(UINT windowId, BOOL exact) {
     for (UINT i = 0; i < CONTEXT_COUNT; ++i) {
         const Context *context = &contexts[i];
@@ -182,8 +203,11 @@ static void DeliverHostEvent(const SdlWindowEvent *event) {
     case SDL_KEYDOWN:
     case SDL_KEYUP:
         window = EventWindow(event->key.windowId, FALSE);
-        if (window && event->key.scancode > 0)
+        if (window && event->key.scancode > 0) {
+            static volatile LONG keySeen;
+            TraceFirstInput(&keySeen, "input wgl-key=delivered\r\n");
             XboxPostHostedKey(window, (UINT)event->key.scancode, event->type == SDL_KEYDOWN, event->key.repeat != 0);
+        }
         break;
     case SDL_TEXTINPUT: {
         char text[sizeof(event->text.text) + 1];
@@ -204,6 +228,10 @@ static void DeliverHostEvent(const SdlWindowEvent *event) {
         window = EventWindow(event->button.windowId, FALSE);
         pointerX = event->button.x;
         pointerY = event->button.y;
+        if (window && event->button.button >= 1 && event->button.button <= 3) {
+            static volatile LONG buttonSeen;
+            TraceFirstInput(&buttonSeen, "input wgl-pointer-button=delivered\r\n");
+        }
         if (window && event->button.button >= 1 && event->button.button <= 3)
             XboxPostHostedPointer(window, (event->type == SDL_MOUSEBUTTONDOWN ? down : up)[event->button.button - 1],
                 event->button.x, event->button.y, 0);
