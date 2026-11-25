@@ -8,7 +8,7 @@
 #include <dxgi1_2.h>
 #include <objbase.h>
 
-static volatile LONG64 loaderEvents[128];
+static volatile LONG64 loaderEvents[1024];
 static volatile LONG faultTraceStarted;
 static volatile LONG workingDirectoryStarted;
 static volatile LONG originalImageObserved;
