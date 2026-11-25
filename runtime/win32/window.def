@@ -17,9 +17,9 @@ EXPORTS
     SetWindowLongPtrW=XboxSetWindowLongPtrW @31
     PostMessageW=XboxPostMessageW @26
     PeekMessageW=XboxPeekMessageW @25
-    PeekMessageA=XboxPeekMessageW @24
+    PeekMessageA=XboxPeekMessageA @24
     DispatchMessageW=XboxDispatchMessageW @8
-    DispatchMessageA=XboxDispatchMessageW @7
+    DispatchMessageA=XboxDispatchMessageA @7
     MonitorFromWindow=XboxMonitorFromWindow @23
     MonitorFromPoint=XboxMonitorFromPoint @22
     EnumDisplayMonitors=XboxEnumDisplayMonitors @10
@@ -51,3 +51,12 @@ EXPORTS
     ScreenToClient=XboxScreenToClient @49
     GetCursorPos=XboxGetCursorPos @50
     GetPhysicalCursorPos=XboxGetPhysicalCursorPos @51
+    MonitorFromRect=XboxMonitorFromRect @52
+    PostQuitMessage=XboxPostQuitMessage @53
+    GetMessageA=XboxGetMessageA @54
+    GetMessageW=XboxGetMessageW @55
+    SendMessageW=XboxSendMessageW @56
+    MsgWaitForMultipleObjects=XboxMsgWaitForMultipleObjects @57
+    GetWindowLongA=XboxGetWindowLongA @58
+    SetWindowLongA=XboxSetWindowLongA @59
+    GetParent=XboxGetParent @60
