@@ -38,6 +38,7 @@ inline constexpr std::uint64_t DownloadTimeoutMs = 20000;
 inline constexpr std::uint64_t UploadTimeoutMs = 30000;
 inline constexpr std::uint64_t PreviousUploadWaitMs = 30000;
 inline constexpr std::uint64_t StartGraceMs = 2000;
+inline constexpr std::uint64_t SettleMs = 1000;
 inline constexpr std::uint32_t MaxBackupFiles = 4096;
 inline constexpr std::uint64_t MaxBackupBytes = 512ull * 1024 * 1024;
 
@@ -256,8 +257,10 @@ static winrt::Windows::Foundation::IAsyncAction WaitForJob(std::shared_ptr<Plan>
         std::uint64_t mark, std::uint64_t timeoutMs, bool alreadyRunning, std::shared_ptr<JobWait> out) {
     const auto started = GetTickCount64();
     bool seenRunning = alreadyRunning;
+    std::uint64_t idleSince = 0;
     for (;;) {
-        const auto elapsed = GetTickCount64() - started;
+        const auto now = GetTickCount64();
+        const auto elapsed = now - started;
         out->elapsedMs = elapsed;
         bool done = false;
         {
@@ -274,9 +277,13 @@ static winrt::Windows::Foundation::IAsyncAction WaitForJob(std::shared_ptr<Plan>
                 out->result.observed = true;
                 out->result.completion = event;
             }
+            if (const auto other = session->cloudCompletions.OtherSince(mark)) out->result.other = other;
             const bool running = !seen && plan->storage.InProgress(plan->app);
             seenRunning |= running;
-            done = WaitFinished(seen, running, seenRunning, elapsed, StartGraceMs);
+            out->result.ran = seen || seenRunning;
+            if (running || !idleSince) idleSince = running ? 0 : now;
+            done = WaitFinished(seen, running, seenRunning, elapsed, StartGraceMs, running ? 0 : now - idleSince,
+                SettleMs);
         }
         if (done) co_return;
         if (elapsed >= timeoutMs) {
@@ -379,16 +386,23 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
         plan->detail = DecisionName(plan->decision);
     }
 
+    // Conflict policy: the cloud copy wins, unless the player left a one-shot
+    // "local" choice for this launch. Nothing is resolved without a complete
+    // backup of the local files, and only a confirmed synchronized state counts.
     if (plan->decision == Decision::HeldConflict) {
         const auto choicePath = localState + L"\\steam-cloud-resolve-" + std::to_wstring(plan->app) + L".txt";
         const auto choice = ReadChoice(choicePath);
-        report.Add("choice", choice == Choice::Cloud ? "cloud" : choice == Choice::Local ? "local" :
-            choice == Choice::Invalid ? "invalid" : "none");
-        if ((choice == Choice::Cloud || choice == Choice::Local) && (backedUp || backupLocal())) {
-            // One-shot: a later conflict needs a new choice.
-            const auto applied = choicePath + L".applied-" + std::to_wstring(plan->runId);
-            report.Flag("choice_consumed", MoveFileFromAppW(choicePath.c_str(), applied.c_str()) != FALSE);
-            const auto direction = choice == Choice::Cloud ? Download : Upload;
+        const bool acceptLocal = AcceptLocal(choice);
+        report.Add("choice", ChoiceName(choice)).Add("resolve_side", acceptLocal ? "local" : "cloud");
+        if (!(backedUp || backupLocal())) {
+            report.Add("resolve", "skipped-backup-failed");
+        } else {
+            // One-shot: a later conflict follows the policy again.
+            if (choice != Choice::None) {
+                const auto applied = choicePath + L".applied-" + std::to_wstring(plan->runId);
+                report.Flag("choice_consumed", MoveFileFromAppW(choicePath.c_str(), applied.c_str()) != FALSE);
+            }
+            const auto direction = acceptLocal ? Upload : Download;
             bool accepted = false;
             {
                 std::lock_guard lock(steamSessionMutex);
@@ -396,7 +410,7 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
                 if (!session) co_return skip("session-lost");
                 session->PumpCallbacks();
                 mark = session->cloudCompletions.Mark();
-                accepted = plan->storage.Resolve(plan->app, choice == Choice::Local);
+                accepted = plan->storage.Resolve(plan->app, acceptLocal);
                 report.Flag("resolve_accepted", accepted);
                 // The resolve may start the job itself; a refused duplicate request is
                 // then expected, and the state after the wait decides.
@@ -418,9 +432,7 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
             report.StateField("state_after_resolve", stateAfter);
             plan->decision = AfterResolution(choice, accepted, stateAfter, wait->result);
             plan->detail = DecisionName(plan->decision);
-        } else if (plan->decision == Decision::HeldConflict) {
-            report.Add("conflict_hint", "write cloud or local to LocalState\\steam-cloud-resolve-" +
-                std::to_string(plan->app) + ".txt to choose at the next launch");
+            if (plan->decision == Decision::HeldConflict) report.Add("resolve", "unconfirmed");
         }
     }
     report.Add("decision", DecisionName(plan->decision)).Add("upload_policy", UploadPolicy(*plan))

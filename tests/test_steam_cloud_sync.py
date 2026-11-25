@@ -60,8 +60,9 @@ class CloudSyncReportTests(unittest.TestCase):
         return portal, output.getvalue()
 
     def test_reads_the_cloud_sync_report_from_local_state(self):
-        text = ('steam_cloud_sync_run_id=134401\r\nsteam_cloud_sync_decision=held-conflict\r\n'
-                'steam_cloud_sync_upload_policy=blocked:conflict-held\r\n')
+        text = ('steam_cloud_sync_run_id=134401\r\nsteam_cloud_sync_choice=none\r\n'
+                'steam_cloud_sync_resolve_side=cloud\r\nsteam_cloud_sync_state_after_resolve=synchronized (2)\r\n'
+                'steam_cloud_sync_decision=resolved-cloud-auto\r\nsteam_cloud_sync_upload_policy=allowed\r\n')
         portal, output = self.run_report(text)
         self.assertIn('filename=steam-cloud-sync-report.txt', portal.request.call_args.args[1])
         self.assertEqual(output, text)
@@ -71,11 +72,13 @@ class ObserverTests(unittest.TestCase):
     def test_launch_report_cloud_fields_reach_the_observer(self):
         from tools.xbox_diagnostics import game_snapshot
 
-        probe = {'steam_cloud_sync': 'held-conflict', 'steam_cloud_sync_upload_policy': 'blocked:conflict-held',
+        probe = {'steam_cloud_sync': 'resolved-cloud-auto', 'steam_cloud_sync_upload_policy': 'allowed',
                  'steam_cloud_sync_exit_watch': 'started', 'steam_cloud_sync_run': '134401'}
         native = game_snapshot(probe, {}, {}, 2868840)['probe']
-        self.assertEqual(native['steam_cloud_sync'], 'held-conflict')
-        self.assertEqual(native['steam_cloud_sync_upload_policy'], 'blocked:conflict-held')
+        self.assertEqual(native['steam_cloud_sync'], 'resolved-cloud-auto')
+        self.assertEqual(native['steam_cloud_sync_upload_policy'], 'allowed')
+        held = game_snapshot({'steam_cloud_sync_upload_policy': 'blocked:conflict-held'}, {}, {}, 2868840)['probe']
+        self.assertEqual(held['steam_cloud_sync_upload_policy'], 'blocked:conflict-held')
         self.assertEqual(native['steam_cloud_sync_exit_watch'], 'started')
 
 
@@ -90,6 +93,22 @@ class NativeContractTests(unittest.TestCase):
                      'GetLastKnownSyncState{72, 0x7a1d10}', 'ResolveSyncConflict{77, 0x889c10}',
                      'SynchronizeApp{78, 0x8b36e0}', 'IsAppSyncInProgress{79, 0x86cc60}'):
             self.assertIn(slot, native)
+
+    def test_conflicts_resolve_to_the_cloud_only_after_a_backup(self):
+        native = (ROOT / 'runtime/steam/SteamCloudSync.h').read_text()
+        policy = (ROOT / 'runtime/steam/steam-cloud-sync-policy.h').read_text()
+        block = native[native.index('if (plan->decision == Decision::HeldConflict) {'):]
+        backup = block.index('if (!(backedUp || backupLocal())) {')
+        resolve = block.index('plan->storage.Resolve(plan->app, acceptLocal)')
+        self.assertLess(backup, block.index('} else {'))
+        self.assertLess(block.index('} else {'), resolve)
+        self.assertIn('const bool acceptLocal = AcceptLocal(choice);', block)
+        self.assertIn('return choice == Choice::Local;', policy)
+        self.assertIn('return "resolved-cloud-auto";', policy)
+        # Confirmation is the client's synchronized state, never a callback alone.
+        after = policy[policy.index('inline Decision AfterResolution'):]
+        self.assertIn('!wait.ran', after[:after.index('}')])
+        self.assertIn('stateAfter != static_cast<std::int32_t>(State::Synchronized)', after[:after.index('}')])
 
     def test_every_win32_trial_launch_syncs_before_create_process(self):
         source = (ROOT / 'runtime/steam/ProbeNative.cpp').read_text()

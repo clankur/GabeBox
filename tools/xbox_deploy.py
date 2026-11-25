@@ -785,7 +785,7 @@ def write_cloud_resolve(portal, app, app_id, keep):
                    {'Content-Type': f'multipart/form-data; boundary={boundary}'})
     if read_probe_report(portal, app, filename).strip() != keep:
         raise ValueError(f'{filename} did not read back as {keep}.')
-    print(f'{filename}={keep}. The next launch of {app_id} applies it if Steam Cloud reports a conflict.')
+    print(f'{filename}={keep}. The next launch of {app_id} applies it once if Steam Cloud reports a conflict.')
 
 
 def run_lifetime(portal, version, dwell, timeout, portal_return):
@@ -956,7 +956,7 @@ def main():
     game.add_argument('--source-profile', type=Path, help='trusted Win32 fingerprint file for exporting owned inputs')
     game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
     resolve = commands.add_parser('cloud-resolve',
-                                  help='choose which side wins a held Steam Cloud conflict at the next Win32 trial launch')
+                                  help='override which side wins a Steam Cloud conflict at the next Win32 trial launch (default: cloud)')
     resolve.add_argument('--version', required=True, help='installed Steam package version')
     resolve.add_argument('--app-id', type=int, required=True, help='Steam AppID')
     resolve.add_argument('--keep', required=True, choices=CLOUD_CHOICES,

@@ -7,6 +7,7 @@ using namespace steam_cloud_sync;
 static WaitResult Finished(std::int32_t result, std::int32_t files = 0) {
     WaitResult wait;
     wait.observed = true;
+    wait.ran = true;
     wait.completion = {2868840, result, files};
     return wait;
 }
@@ -46,14 +47,26 @@ int main() {
     assert(!log.Since(Download, 2868840, mark, seen));
     assert(log.Observe(UploadComplete, &downloaded, sizeof(downloaded)));
     assert(log.Since(Upload, 2868840, mark, seen));
+    // Other remote-storage callbacks are kept for diagnosis, other ranges ignored.
+    mark = log.Mark();
+    assert(log.OtherSince(mark) == 0);
+    assert(!log.Observe(1250017, nullptr, 0));
+    assert(log.OtherSince(mark) == 1250017);
+    assert(!log.Observe(1270027, nullptr, 0));
+    assert(log.OtherSince(mark) == 1250017);
+    assert(log.OtherSince(log.Mark()) == 0);
 
-    // A job is done on its callback, or when it stops running after it started
-    // or after the start grace; it is not done while still running.
-    assert(WaitFinished(true, true, true, 0, 2000));
-    assert(!WaitFinished(false, true, true, 9000, 2000));
-    assert(WaitFinished(false, false, true, 10, 2000));
-    assert(!WaitFinished(false, false, false, 10, 2000));
-    assert(WaitFinished(false, false, false, 2000, 2000));
+    // A job is done on its callback, or once it has stopped running (after it
+    // started or after the start grace) for the settle period. Stopping alone
+    // does not end the wait: the console's conflicting download stopped within
+    // 297 ms, before a completion could be seen.
+    assert(WaitFinished(true, true, true, 0, 2000, 0, 1000));
+    assert(!WaitFinished(false, true, true, 9000, 2000, 0, 1000));
+    assert(!WaitFinished(false, false, true, 297, 2000, 0, 1000));
+    assert(!WaitFinished(false, false, true, 1200, 2000, 999, 1000));
+    assert(WaitFinished(false, false, true, 1300, 2000, 1000, 1000));
+    assert(!WaitFinished(false, false, false, 1500, 2000, 1500, 1000));
+    assert(WaitFinished(false, false, false, 2000, 2000, 2000, 1000));
 
     assert(ParseChoice("cloud") == Choice::Cloud);
     assert(ParseChoice(" Local\r\n") == Choice::Local);
@@ -63,6 +76,13 @@ int main() {
     assert(ParseChoice("both") == Choice::Invalid);
     assert(ParseChoice("cloud local") == Choice::Invalid);
     assert(ParseChoice("clouds") == Choice::Invalid);
+    assert(std::string(ChoiceName(Choice::None)) == "none");
+
+    // The cloud wins a conflict unless the player chose local for this launch.
+    assert(!AcceptLocal(Choice::None));
+    assert(!AcceptLocal(Choice::Cloud));
+    assert(!AcceptLocal(Choice::Invalid));
+    assert(AcceptLocal(Choice::Local));
 
     // Conflicts are held whatever the download reported.
     assert(Classify(conflict, Finished(ResultOk, 3)) == Decision::HeldConflict);
@@ -84,6 +104,7 @@ int main() {
     // The exit upload never runs on an unsettled or held launch sync.
     assert(UploadAllowed(Decision::Synchronized));
     assert(UploadAllowed(Decision::LocalChanges));
+    assert(UploadAllowed(Decision::ResolvedCloudAuto));
     assert(UploadAllowed(Decision::ResolvedCloud));
     assert(UploadAllowed(Decision::ResolvedLocal));
     assert(!UploadAllowed(Decision::HeldConflict));
@@ -91,12 +112,26 @@ int main() {
     assert(!UploadAllowed(Decision::Skipped));
     assert(std::string(UploadBlockReason(Decision::HeldConflict)) == "conflict-held");
 
-    // A player's choice resolves only when the follow-up sync settles.
-    assert(AfterResolution(Choice::Cloud, true, synchronized, WaitResult{}) == Decision::ResolvedCloud);
-    assert(AfterResolution(Choice::Local, true, local, Finished(ResultOk)) == Decision::ResolvedLocal);
-    assert(AfterResolution(Choice::Cloud, false, synchronized, Finished(ResultOk)) == Decision::HeldConflict);
-    assert(AfterResolution(Choice::Cloud, true, conflict, Finished(ResultOk)) == Decision::HeldConflict);
-    assert(AfterResolution(Choice::Local, true, local, WaitResult{}) == Decision::Unconfirmed);
+    // A resolution counts only when its job ran, finished in time and the
+    // client then reports synchronized. The decision names who chose the side.
+    WaitResult ranUnobserved;
+    ranUnobserved.ran = true;
+    assert(std::string(DecisionName(Decision::ResolvedCloudAuto)) == "resolved-cloud-auto");
+    assert(AfterResolution(Choice::None, true, synchronized, ranUnobserved) == Decision::ResolvedCloudAuto);
+    assert(AfterResolution(Choice::Invalid, true, synchronized, Finished(ResultOk)) == Decision::ResolvedCloudAuto);
+    assert(AfterResolution(Choice::Cloud, true, synchronized, Finished(ResultOk, 4)) == Decision::ResolvedCloud);
+    assert(AfterResolution(Choice::Local, true, synchronized, Finished(ResultOk)) == Decision::ResolvedLocal);
+    // Not confirmed: refused, never seen running, timed out, failed or not synchronized.
+    assert(AfterResolution(Choice::None, false, synchronized, Finished(ResultOk)) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::None, true, synchronized, WaitResult{}) == Decision::HeldConflict);
+    WaitResult resolveTimedOut = ranUnobserved;
+    resolveTimedOut.timedOut = true;
+    assert(AfterResolution(Choice::None, true, synchronized, resolveTimedOut) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::None, true, synchronized, Finished(2)) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::None, true, conflict, Finished(ResultOk)) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::None, true, both, ranUnobserved) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::Local, true, local, Finished(ResultOk)) == Decision::HeldConflict);
+    assert(AfterResolution(Choice::Cloud, true, cloud, Finished(ResultOk)) == Decision::HeldConflict);
 
     Report report;
     report.Add("app", "2868840").Flag("account_enabled", true).StateField("state_before", local)
@@ -109,6 +144,16 @@ int main() {
            "steam_cloud_sync_note=a?b\r\n"
            "steam_cloud_sync_download_wait=complete\r\n"
            "steam_cloud_sync_download_wait_ms=1250\r\n"
+           "steam_cloud_sync_download_ran=yes\r\n"
            "steam_cloud_sync_download_result=1\r\n"
            "steam_cloud_sync_download_files=3\r\n");
+    WaitResult diagnosed = ranUnobserved;
+    diagnosed.other = 1250017;
+    Report unobserved;
+    unobserved.Wait("download", diagnosed, 297);
+    assert(unobserved.Text() ==
+           "steam_cloud_sync_download_wait=complete-unobserved\r\n"
+           "steam_cloud_sync_download_wait_ms=297\r\n"
+           "steam_cloud_sync_download_ran=yes\r\n"
+           "steam_cloud_sync_download_other_callback=1250017\r\n");
 }

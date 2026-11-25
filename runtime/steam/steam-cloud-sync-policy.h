@@ -78,6 +78,12 @@ class CompletionLog {
 public:
     bool Observe(std::int32_t message, const void* data, std::int32_t length) {
         Entry* entry = message == DownloadComplete ? &download_ : message == UploadComplete ? &upload_ : nullptr;
+        if (!entry && message / 1000 == DownloadComplete / 1000) {
+            // Other remote-storage callbacks are kept for diagnosis only.
+            other_ = message;
+            otherSequence_ = ++sequence_;
+            return false;
+        }
         if (!entry || !data || length != static_cast<std::int32_t>(sizeof(Completion))) return false;
         std::memcpy(&entry->event, data, sizeof(Completion));
         entry->sequence = ++sequence_;
@@ -94,6 +100,9 @@ public:
         return true;
     }
 
+    // The last other remote-storage callback posted after mark, or 0.
+    std::int32_t OtherSince(std::uint64_t mark) const { return otherSequence_ > mark ? other_ : 0; }
+
 private:
     struct Entry {
         Completion event{};
@@ -101,26 +110,34 @@ private:
     };
     Entry download_;
     Entry upload_;
+    std::int32_t other_ = 0;
+    std::uint64_t otherSequence_ = 0;
     std::uint64_t sequence_ = 0;
 };
 
 struct WaitResult {
     bool observed = false;   // a completion callback for this app arrived
     bool timedOut = false;   // the bound elapsed with the job still running
+    bool ran = false;        // the job was seen in progress or completed
+    std::int32_t other = 0;  // another remote-storage callback seen meanwhile
     Completion completion{};
 };
 
-// The job is finished once its completion arrives, or once the client stops
-// reporting it in progress after it was seen running or after a start grace.
+// The job is finished once its completion arrives, or once the client has
+// stopped reporting it in progress (after it was seen running or after a start
+// grace) for a settle period. The settle period lets a completion posted just
+// after the job leaves the in-progress set reach the pipe. A job that ends
+// without one, as the console's conflicting download did after 297 ms, finishes
+// as complete-unobserved and is judged by the client's sync state alone.
 inline bool WaitFinished(bool completionSeen, bool inProgress, bool seenInProgress, std::uint64_t elapsedMs,
-                         std::uint64_t graceMs) {
-    return completionSeen || (!inProgress && (seenInProgress || elapsedMs >= graceMs));
+                         std::uint64_t graceMs, std::uint64_t idleMs, std::uint64_t settleMs) {
+    return completionSeen || (!inProgress && (seenInProgress || elapsedMs >= graceMs) && idleMs >= settleMs);
 }
 
 enum class Choice { None, Cloud, Local, Invalid };
 
-// A one-shot player choice for a held conflict: exactly "cloud" or "local",
-// case-insensitive, surrounding whitespace ignored.
+// A one-shot player override for the next conflict: exactly "cloud" or
+// "local", case-insensitive, surrounding whitespace ignored.
 inline Choice ParseChoice(std::string_view text) {
     while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' || text.front() == '\n'))
         text.remove_prefix(1);
@@ -136,10 +153,27 @@ inline Choice ParseChoice(std::string_view text) {
     return Choice::Invalid;
 }
 
+inline const char* ChoiceName(Choice choice) {
+    switch (choice) {
+    case Choice::None: return "none";
+    case Choice::Cloud: return "cloud";
+    case Choice::Local: return "local";
+    case Choice::Invalid: return "invalid";
+    }
+    return "invalid";
+}
+
+// Conflict policy: the cloud copy wins unless the player chose local for this
+// launch. An unreadable choice falls back to the policy.
+inline bool AcceptLocal(Choice choice) {
+    return choice == Choice::Local;
+}
+
 enum class Decision {
     Synchronized,   // local and cloud agree
     LocalChanges,   // cloud unchanged since the last sync; local changes upload at exit
-    HeldConflict,   // both sides changed; local kept active, cloud untouched
+    HeldConflict,   // both sides changed and no resolution was confirmed; local kept active
+    ResolvedCloudAuto,  // conflict policy took the cloud copy; local backed up first
     ResolvedCloud,  // the player chose the cloud copy; local backed up first
     ResolvedLocal,  // the player chose the local copy; local backed up first
     Unconfirmed,    // the download did not finish with a known result
@@ -151,6 +185,7 @@ inline const char* DecisionName(Decision decision) {
     case Decision::Synchronized: return "synchronized";
     case Decision::LocalChanges: return "local-changes";
     case Decision::HeldConflict: return "held-conflict";
+    case Decision::ResolvedCloudAuto: return "resolved-cloud-auto";
     case Decision::ResolvedCloud: return "resolved-cloud";
     case Decision::ResolvedLocal: return "resolved-local";
     case Decision::Unconfirmed: return "unconfirmed";
@@ -159,10 +194,10 @@ inline const char* DecisionName(Decision decision) {
     return "invalid";
 }
 
-// Policy after the launch-time download. The client only replaces local files
-// when the local side is unchanged since the last sync (ChangesInCloud) and
-// only uploads when the cloud side is unchanged (ChangesLocally). When both
-// sides changed nothing is resolved automatically.
+// Classification after the launch-time download. The client only replaces
+// local files when the local side is unchanged since the last sync
+// (ChangesInCloud) and only uploads when the cloud side is unchanged
+// (ChangesLocally). A conflict is resolved separately, after a backup.
 inline Decision Classify(std::int32_t stateAfter, WaitResult const& wait) {
     if (IsConflict(stateAfter)) return Decision::HeldConflict;
     if (stateAfter == static_cast<std::int32_t>(State::Synchronized)) return Decision::Synchronized;
@@ -177,7 +212,8 @@ inline Decision Classify(std::int32_t stateAfter, WaitResult const& wait) {
 // device's newer files.
 inline bool UploadAllowed(Decision decision) {
     return decision == Decision::Synchronized || decision == Decision::LocalChanges ||
-        decision == Decision::ResolvedCloud || decision == Decision::ResolvedLocal;
+        decision == Decision::ResolvedCloudAuto || decision == Decision::ResolvedCloud ||
+        decision == Decision::ResolvedLocal;
 }
 
 inline const char* UploadBlockReason(Decision decision) {
@@ -189,13 +225,17 @@ inline const char* UploadBlockReason(Decision decision) {
     }
 }
 
-// A resolution only counts when the follow-up sync leaves the sides in agreement.
+// A resolution counts only when the client accepted it, its follow-up job was
+// seen to run and finished within the bound, and the client then reports the
+// sides synchronized. A completion callback alone never confirms it, and a
+// missing one does not either. Anything less keeps the conflict held.
 inline Decision AfterResolution(Choice choice, bool resolveAccepted, std::int32_t stateAfter, WaitResult const& wait) {
-    if (!resolveAccepted || IsConflict(stateAfter)) return Decision::HeldConflict;
-    const bool settled = stateAfter == static_cast<std::int32_t>(State::Synchronized) ||
-        (wait.observed && !wait.timedOut && wait.completion.result == ResultOk);
-    if (!settled) return Decision::Unconfirmed;
-    return choice == Choice::Cloud ? Decision::ResolvedCloud : Decision::ResolvedLocal;
+    if (!resolveAccepted || wait.timedOut || !wait.ran ||
+            stateAfter != static_cast<std::int32_t>(State::Synchronized) ||
+            (wait.observed && wait.completion.result != ResultOk))
+        return Decision::HeldConflict;
+    if (choice == Choice::Local) return Decision::ResolvedLocal;
+    return choice == Choice::Cloud ? Decision::ResolvedCloud : Decision::ResolvedCloudAuto;
 }
 
 // key=value lines in the style of the host's other LocalState reports.
@@ -218,10 +258,12 @@ public:
         const std::string prefix(key);
         Add(prefix + "_wait", wait.timedOut ? "timeout" : wait.observed ? "complete" : "complete-unobserved");
         Number(prefix + "_wait_ms", static_cast<std::int64_t>(elapsedMs));
+        Flag(prefix + "_ran", wait.ran);
         if (wait.observed) {
             Number(prefix + "_result", wait.completion.result);
             Number(prefix + "_files", wait.completion.files);
         }
+        if (wait.other) Number(prefix + "_other_callback", wait.other);
         return *this;
     }
     std::string const& Text() const { return text_; }

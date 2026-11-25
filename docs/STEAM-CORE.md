@@ -136,17 +136,25 @@ The desktop client syncs a title's Steam Cloud files inside `IClientAppManager::
 Before every Win32 trial, if Steam Cloud is enabled for the account and the app:
 
 1. Unless the client's last sync state is `synchronized`, the host first copies the app's userdata folder to `LocalState\SteamCloudSync\<account>\<app>\<run>`. If the copy fails, it does not sync.
-2. It requests a download, then waits up to 20 s for the completion callback or for the job to stop.
-3. It never auto-resolves a conflict. When both sides changed (`conflictingchanges` or `changesincloudandlocally`), the local files stay active and the cloud stays untouched. The exit upload is blocked.
-4. The upload after exit runs only when this launch reached `synchronized`, or reached `changeslocally` with a successful download. Otherwise it could replace another device's newer files.
+2. It requests a download and waits up to 20 s. The wait ends when the completion callback arrives, or when the job has stopped for 1 s. Some job exits post no completion: on the console, a conflicting download stopped after 297 ms without one. So the result is judged by the client's sync state, and the report records `_ran` and any other remote-storage callback.
+3. When both sides changed (`conflictingchanges` or `changesincloudandlocally`), the cloud copy wins. This happens only after a complete local backup, made at this step if step 1 did not need one. The host calls `ResolveSyncConflict(app, acceptLocal=false)`, requests a download, and waits.
 
-To settle a held conflict, choose a side for the next launch:
+   The conflict counts as resolved (`decision=resolved-cloud-auto`) only under all of these conditions:
+   - the client accepted the resolve;
+   - the job was seen running and finished within the bound;
+   - the client then reports `synchronized`;
+   - any completion that arrived reports success.
+
+   Otherwise the decision stays `held-conflict`, the local files stay active and the exit upload is blocked. Restore a backup by copying its folder back into the userdata folder while the title is closed.
+4. The upload after exit runs only when this launch reached `synchronized`, reached `changeslocally` with a successful download, or resolved a conflict. Otherwise it could replace another device's newer files.
+
+To keep this console's copy for one conflict instead, leave an override for the next launch:
 
 ```sh
-python3 -m tools.xbox_deploy --env-file "$xbox_env" cloud-resolve --version VERSION --app-id APPID --keep cloud
+python3 -m tools.xbox_deploy --env-file "$xbox_env" cloud-resolve --version VERSION --app-id APPID --keep local
 ```
 
-`--keep cloud` downloads the cloud copy. `--keep local` uploads this console's copy over the cloud copy. In both cases the local files are backed up first, and the choice file is consumed after one attempt. Read the result with `report --version VERSION --steam-cloud-sync`. The launch writes `steam_cloud_sync_decision` and `steam_cloud_sync_upload_policy`. After the child exits, the host appends `steam_cloud_sync_exit_run_id`, the upload request, its result and file count, and the final state.
+`--keep local` resolves in favour of this console and uploads its copy over the cloud copy. `--keep cloud` records the default explicitly (`decision=resolved-cloud`). The file is consumed once a resolution is attempted after a successful backup; later conflicts follow the cloud-wins policy again. Read the result with `report --version VERSION --steam-cloud-sync`. The launch writes `steam_cloud_sync_choice`, `steam_cloud_sync_resolve_side`, `steam_cloud_sync_state_after_resolve`, `steam_cloud_sync_decision` and `steam_cloud_sync_upload_policy`. After the child exits, the host appends `steam_cloud_sync_exit_run_id`, the upload request, its result and file count, and the final state.
 
 ## Test an owned game download
 
