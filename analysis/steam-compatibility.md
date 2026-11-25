@@ -432,3 +432,17 @@ Later runs, `1.0.233.6` through `1.0.235.2`, ruled out four more causes:
 - **Graphics threading.** With `-force-gfx-direct`, Unity creates its device without a render thread or graphics jobs. The pipeline statistics still show only full-screen passes and one full-resolution compute pass per frame, with no scene geometry.
 
 The game's cameras submit no meshes or UI on either renderer, with or without threading. The remaining cause is above D3D: game or Unity logic that keeps the cameras from drawing anything. `PortalRenderV2`'s occlusion only gates portal visibility, so it does not explain the missing main scene. Reading the camera setup in `CameraController` and the `Bootstrap` and scene flow comes next. The decompiler path is `dotnet` plus `ilspycmd` with `DOTNET_ROLL_FORWARD=Major`.
+
+**ULTRAKILL boot flow.** Decompiled `Assembly-CSharp` shows `Bootstrap.Start` loading `Tutorial` until the tutorial and intro are complete. `IntroText` stops at `WaitForYesNo` prompts and the brightness `calibrationWindows`. It continues only on keyboard `Y`/`N` or Input System `Gamepad.current.buttonSouth`/`buttonEast`.
+
+On Xbox, Unity's Input System selects Windows.Gaming.Input for gamepads and fails to register Raw Input for keyboard and mouse. The child process probably has no input route into the intro. Visible rendering is still unexplained, because the intro text and calibration panels should draw.
+
+Two follow-ups remain:
+
+- Route hosted controller input to Unity's Input System. That needs either a Windows.Gaming.Input source that reports the hosted pad, or Input System XInput with WGI disabled.
+- Find why every camera submits no geometry.
+
+Two more D3D11 results:
+
+- Every engine target format reports render-target and blend support.
+- A vtable counter on the immediate context saw no `Draw` or `DrawIndexed` calls. It probably missed Unity's calls, so it is inconclusive.
