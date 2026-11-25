@@ -42,6 +42,7 @@ private:
     HRESULT FailedAt(const char* stage, HRESULT error);
     void PublishSequence(unsigned index);
     void ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc);
+    void Probe12(ID3D12Resource* source, const D3D12_RESOURCE_DESC& desc);
     void ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer);
 
     SdlHostMailbox* base_ = nullptr;
@@ -57,4 +58,9 @@ private:
     const char* failureStage_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> probe_;
     UINT64 published_ = 0;
+    Microsoft::WRL::ComPtr<ID3D12Resource> probe12_;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> probeAllocator_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> probeCommands_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> probeFence_;
+    UINT64 probeFenceValue_ = 0;
 };

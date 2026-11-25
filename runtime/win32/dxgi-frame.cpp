@@ -19,7 +19,7 @@ void AppendProbeTrace(const char* text, DWORD size) {
 }
 
 // Save a quarter-size BMP beside the loader trace so a run can be checked by eye within seconds.
-void WriteProbeImage(const D3D11_MAPPED_SUBRESOURCE& mapped, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer) {
+void WriteProbeImage(const void* data, UINT pitch, UINT frameWidth, UINT frameHeight, DXGI_FORMAT format, UINT64 count, UINT buffer) {
     WCHAR path[512];
     DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
     if (!length || length >= ARRAYSIZE(path) - 40) return;
@@ -34,7 +34,7 @@ void WriteProbeImage(const D3D11_MAPPED_SUBRESOURCE& mapped, const D3D11_TEXTURE
     path[length++] = static_cast<WCHAR>(L'0' + buffer % 10);
     for (const WCHAR* p = L".bmp"; *p;) path[length++] = *p++;
     path[length] = 0;
-    const UINT width = desc.Width / 4, height = desc.Height / 4, stride = (width * 3 + 3) & ~3u;
+    const UINT width = frameWidth / 4, height = frameHeight / 4, stride = (width * 3 + 3) & ~3u;
     const DWORD image = stride * height;
     BYTE header[54]{};
     auto put32 = [&header](unsigned at, DWORD v) { for (int i = 0; i < 4; ++i) header[at + i] = static_cast<BYTE>(v >> (8 * i)); };
@@ -43,9 +43,9 @@ void WriteProbeImage(const D3D11_MAPPED_SUBRESOURCE& mapped, const D3D11_TEXTURE
     header[26] = 1; header[28] = 24; put32(34, image);
     BYTE* pixels = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, image));
     if (!pixels) return;
-    const bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    const bool rgba = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     for (UINT y = 0; y < height; ++y) {
-        const BYTE* line = static_cast<const BYTE*>(mapped.pData) + static_cast<SIZE_T>(mapped.RowPitch) * (y * 4);
+        const BYTE* line = static_cast<const BYTE*>(data) + static_cast<SIZE_T>(pitch) * (y * 4);
         BYTE* out = pixels + static_cast<SIZE_T>(stride) * (height - 1 - y);
         for (UINT x = 0; x < width; ++x) {
             const BYTE* pixel = line + 16 * x;
@@ -62,6 +62,47 @@ void WriteProbeImage(const D3D11_MAPPED_SUBRESOURCE& mapped, const D3D11_TEXTURE
         CloseHandle(file);
     }
     HeapFree(GetProcessHeap(), 0, pixels);
+}
+
+// Trace the non-black share, mean and lit region of one mapped 8-bit RGBA/BGRA frame.
+void ReportProbe(const void* data, UINT pitch, UINT width, UINT height, DXGI_FORMAT format, UINT64 count, UINT buffer) {
+    UINT64 nonblack = 0, total = 0;
+    UINT64 sum[3]{};
+    UINT left = width, top = height, right = 0, bottom = 0, peak = 0;
+    for (UINT row = 0; row < height; ++row) {
+        const auto* line = static_cast<const BYTE*>(data) + static_cast<SIZE_T>(pitch) * row;
+        for (UINT column = 0; column < width; ++column) {
+            const BYTE* pixel = line + 4 * column;
+            ++total;
+            sum[0] += pixel[0]; sum[1] += pixel[1]; sum[2] += pixel[2];
+            const UINT brightest = pixel[0] > pixel[1] ? (pixel[0] > pixel[2] ? pixel[0] : pixel[2]) : (pixel[1] > pixel[2] ? pixel[1] : pixel[2]);
+            if (brightest > peak) peak = brightest;
+            if (brightest <= 8) continue;
+            ++nonblack;
+            if (column < left) left = column;
+            if (column > right) right = column;
+            if (row < top) top = row;
+            if (row > bottom) bottom = row;
+        }
+    }
+    if (count <= 600) WriteProbeImage(data, pitch, width, height, format, count, buffer);
+    char text[160], *out = text;
+    auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
+    auto number = [&out](UINT64 value) {
+        char digits[24]; int length = 0;
+        do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+        while (length) *out++ = digits[--length];
+    };
+    put("dxgi frame-probe frame="); number(count); put(" buffer="); number(buffer);
+    put(" nonblack="); number(nonblack); put("/"); number(total);
+    put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
+    put(" peak="); number(peak);
+    if (nonblack) {
+        put(" box="); number(left); put(","); number(top); put("-"); number(right); put(","); number(bottom);
+    }
+    put(" format="); number(format);
+    put("\r\n");
+    AppendProbeTrace(text, static_cast<DWORD>(out - text));
 }
 }
 
@@ -388,44 +429,8 @@ void DxgiFramePublisher::ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTUR
         SetLastError(previous);
         return;
     }
-    UINT64 nonblack = 0, total = 0;
-    UINT64 sum[3]{};
-    UINT left = desc.Width, top = desc.Height, right = 0, bottom = 0, peak = 0;
-    for (UINT row = 0; row < desc.Height; ++row) {
-        const auto* line = static_cast<const BYTE*>(mapped.pData) + static_cast<SIZE_T>(mapped.RowPitch) * row;
-        for (UINT column = 0; column < desc.Width; ++column) {
-            const BYTE* pixel = line + 4 * column;
-            ++total;
-            sum[0] += pixel[0]; sum[1] += pixel[1]; sum[2] += pixel[2];
-            const UINT brightest = pixel[0] > pixel[1] ? (pixel[0] > pixel[2] ? pixel[0] : pixel[2]) : (pixel[1] > pixel[2] ? pixel[1] : pixel[2]);
-            if (brightest > peak) peak = brightest;
-            if (brightest <= 8) continue;
-            ++nonblack;
-            if (column < left) left = column;
-            if (column > right) right = column;
-            if (row < top) top = row;
-            if (row > bottom) bottom = row;
-        }
-    }
-    if (count <= 600) WriteProbeImage(mapped, desc, count, buffer);
+    ReportProbe(mapped.pData, mapped.RowPitch, desc.Width, desc.Height, desc.Format, count, buffer);
     context_->Unmap(probe_.Get(), 0);
-    char text[160], *out = text;
-    auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
-    auto number = [&out](UINT64 value) {
-        char digits[24]; int length = 0;
-        do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
-        while (length) *out++ = digits[--length];
-    };
-    put("dxgi frame-probe frame="); number(count); put(" buffer="); number(buffer);
-    put(" nonblack="); number(nonblack); put("/"); number(total);
-    put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
-    put(" peak="); number(peak);
-    if (nonblack) {
-        put(" box="); number(left); put(","); number(top); put("-"); number(right); put(","); number(bottom);
-    }
-    put(" format="); number(desc.Format);
-    put("\r\n");
-    AppendProbeTrace(text, static_cast<DWORD>(out - text));
     SetLastError(previous);
 }
 
@@ -472,8 +477,83 @@ HRESULT DxgiFramePublisher::Publish12(IDXGISwapChain1* chain, UINT backBuffer) {
     queue_->ExecuteCommandLists(ARRAYSIZE(commands), commands);
     error = queue_->Signal(slot.ready12.Get(), next_);
     if (FAILED(error)) return FailedAt("gpu-frame-signal-error", status_ = error);
+    Probe12(slot.source12.Get(), desc);
     PublishSequence(index);
     return S_OK;
+}
+
+// D3D12 counterpart of the D3D11 probe: read the presented back buffer through a readback buffer.
+void DxgiFramePublisher::Probe12(ID3D12Resource* source, const D3D12_RESOURCE_DESC& desc) {
+    static const UINT64 samples[] = {60, 600, 1800, 3600, 7200};
+    const UINT64 count = ++published_;
+    bool sample = false;
+    for (UINT64 at : samples) sample |= count == at;
+    if (!sample || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+             desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) return;
+    const DWORD previous = GetLastError();
+    ComPtr<ID3D12Device> device;
+    if (FAILED(source->GetDevice(IID_PPV_ARGS(&device)))) { SetLastError(previous); return; }
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes = 0;
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    if (!probe12_) {
+        const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = bytes;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr, IID_PPV_ARGS(&probe12_))) ||
+                FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&probeAllocator_))) ||
+                FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, probeAllocator_.Get(), nullptr,
+                    IID_PPV_ARGS(&probeCommands_))) ||
+                FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&probeFence_)))) {
+            probe12_.Reset();
+            SetLastError(previous);
+            return;
+        }
+        probeCommands_->Close();
+    }
+    if (FAILED(probeAllocator_->Reset()) || FAILED(probeCommands_->Reset(probeAllocator_.Get(), nullptr))) {
+        SetLastError(previous);
+        return;
+    }
+    const D3D12_RESOURCE_BARRIER before = Transition(source, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const D3D12_RESOURCE_BARRIER after = Transition(source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = probe12_.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = footprint;
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = source;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    from.SubresourceIndex = 0;
+    probeCommands_->ResourceBarrier(1, &before);
+    probeCommands_->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    probeCommands_->ResourceBarrier(1, &after);
+    if (FAILED(probeCommands_->Close())) { SetLastError(previous); return; }
+    ID3D12CommandList* lists[] = {probeCommands_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    const UINT64 value = ++probeFenceValue_;
+    const HANDLE done = CreateEventExW(nullptr, nullptr, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+    if (done && SUCCEEDED(queue_->Signal(probeFence_.Get(), value)) &&
+            SUCCEEDED(probeFence_->SetEventOnCompletion(value, done)) && WaitForSingleObject(done, 2000) == WAIT_OBJECT_0) {
+        void* data = nullptr;
+        const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+        if (SUCCEEDED(probe12_->Map(0, &range, &data))) {
+            ReportProbe(static_cast<const BYTE*>(data) + footprint.Offset, footprint.Footprint.RowPitch,
+                static_cast<UINT>(desc.Width), desc.Height, desc.Format, count, 0);
+            const D3D12_RANGE none{0, 0};
+            probe12_->Unmap(0, &none);
+        }
+    }
+    if (done) CloseHandle(done);
+    SetLastError(previous);
 }
 
 void DxgiFramePublisher::PublishSequence(unsigned index) {
