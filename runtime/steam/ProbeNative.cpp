@@ -42,6 +42,7 @@
 #include "steam-download-queue.h"
 #include "steam-launch-detail.h"
 #include "steam-session-cache-policy.h"
+#include "steam-cloud-sync-policy.h"
 
 static std::wstring Hex(DWORD value) {
     constexpr wchar_t digits[] = L"0123456789ABCDEF";
@@ -554,11 +555,14 @@ struct SteamSignInHandles {
     enum class DownloadRetry { NotAttempted, Accepted, Declined };
     DownloadRetry downloadRetry = DownloadRetry::NotAttempted;
     std::uint64_t launchCall = 0;
+    // Cloud sync completions survive whichever poller drains the shared pipe.
+    mutable steam_cloud_sync::CompletionLog cloudCompletions;
 
     void PumpCallbacks(bool *credentialRejected = nullptr) const {
         for (unsigned i = 0; i < 32; ++i) {
             SteamCallback event{};
             if (!getCallback(pipe, &event)) break;
+            cloudCompletions.Observe(event.message, event.data, event.length);
             if (credentialRejected && steam_session_cache::credentialRejected(
                     user, event.user, event.message, event.data, event.length)) {
                 *credentialRejected = true;
@@ -597,6 +601,7 @@ static std::atomic_flag steamSignInActive{};
 static std::atomic_flag steamLaunchActive{};
 
 #include "SteamCloudTransfer.h"
+#include "SteamCloudSync.h"
 
 static void SteamSignOut() {
     std::lock_guard lock(steamSessionMutex);
@@ -3003,6 +3008,25 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             co_return winrt::hstring(report + L"steam_launch=sdl-runtime-error\r\nsteam_sdl_hresult=" + Hex(error.code()) + L"\r\n");
         }
     }
+    // A desktop launch syncs Steam Cloud inside IClientAppManager::LaunchApp. A Win32
+    // trial is started with CreateProcessW below, so the host runs the download here
+    // and the upload after the child exits.
+    std::shared_ptr<steam_cloud_sync::Plan> cloudSync;
+    if (!shadowExecutable.empty()) {
+        co_await checkpoint(L"steam-cloud-download");
+        cloudSync = std::make_shared<steam_cloud_sync::Plan>();
+        cloudSync->app = app;
+        FILETIME syncTime{};
+        GetSystemTimeAsFileTime(&syncTime);
+        cloudSync->runId = (static_cast<std::uint64_t>(syncTime.dwHighDateTime) << 32) | syncTime.dwLowDateTime;
+        try {
+            co_await steam_cloud_sync::PrepareLaunch(cloudSync, std::wstring(root.Path()));
+        } catch (winrt::hresult_error const&) {
+            cloudSync->decision = steam_cloud_sync::Decision::Skipped;
+            cloudSync->detail = "launch-sync-error";
+        }
+        report += steam_cloud_sync::LaunchSummary(*cloudSync);
+    }
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -3301,6 +3325,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             }
             shadowProcess.attach(child.hProcess);
             CloseHandle(child.hThread);
+            if (cloudSync) {
+                winrt::handle watched;
+                if (DuplicateHandle(GetCurrentProcess(), shadowProcess.get(), GetCurrentProcess(), watched.put(),
+                        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+                    steam_cloud_sync::UploadAfterExit(std::move(watched), cloudSync);
+                    report += L"steam_cloud_sync_exit_watch=started\r\n";
+                } else {
+                    report += L"steam_cloud_sync_exit_watch=unavailable\r\n";
+                }
+            }
             report += L"steam_shadow_build=" + shadowBuild + L"\r\nsteam_shadow_renderer=" + (mode.empty() ? L"default" : mode) +
                 L"\r\nsteam_shadow_child=created\r\n";
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
@@ -3404,6 +3438,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             for (unsigned i = 0; i < 32; ++i) {
                 SteamCallback callback{};
                 if (!session->getCallback(session->pipe, &callback)) break;
+                session->cloudCompletions.Observe(callback.message, callback.data, callback.length);
                 if (callback.message == callCompleted && callback.length == sizeof(CompletionEvent) && callback.data) {
                     CompletionEvent completion{};
                     std::memcpy(&completion, callback.data, sizeof(completion));
