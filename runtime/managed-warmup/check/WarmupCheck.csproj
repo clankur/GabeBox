@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <WarmupFramework Condition="'$(WarmupFramework)' == ''">net8.0</WarmupFramework>
+    <TargetFramework>$(WarmupFramework)</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="fixture/**" />
+  </ItemGroup>
+</Project>

@@ -615,6 +615,71 @@ class BigPicturePackageTests(unittest.TestCase):
         for name in ("XboxWin32Dxgi.dll", "XboxWin32Window.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll"):
             self.assertTrue((self.layout / name).is_file(), name)
 
+    def test_win32_managed_warmup_stages_the_plan_and_component(self):
+        self.layout.mkdir()
+        app, build = "2868840", "26655341"
+        profile = self.work / "warmup-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nopengl3\ngodot\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        marker = f"steam-win32-managed-warmup-{app}.txt"
+        pinned = (ROOT / "profiles" / app / build / marker).read_text(encoding="ascii")
+        (profile / marker).write_text(pinned, encoding="ascii")
+
+        managed = bytearray(0x400)
+        managed[:2] = b"MZ"
+        struct.pack_into("<I", managed, 0x3c, 128)
+        managed[128:132] = b"PE\0\0"
+        struct.pack_into("<HH", managed, 132, 0x8664, 1)
+        struct.pack_into("<H", managed, 148, 240)
+        struct.pack_into("<H", managed, 152, 0x20B)
+        struct.pack_into("<I", managed, 152 + 108, 16)
+        struct.pack_into("<II", managed, 152 + 112 + 14 * 8, 0x2000, 72)
+        struct.pack_into("<IIII", managed, 392 + 8, 0x200, 0x2000, 0x200, 0x200)
+        struct.pack_into("<I", managed, 0x200, 72)
+        struct.pack_into("<I", managed, 0x200 + 16, 1)
+        supported_probe = b"native fixture" + "XBOX_WIN32_MANAGED_WARMUP_PLAN\0".encode("utf-16le")
+
+        def runtime(probe=supported_probe, window=b"hostfxr_get_runtime_delegate", component=bytes(managed)):
+            template = self.work / f"warmup-runtime-{len(list(self.work.glob('warmup-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", probe)
+                archive.writestr("XboxWin32Window.dll", window)
+                if component is not None:
+                    archive.writestr("XboxManagedWarmup.dll", component)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        with self.assertRaisesRegex(ValueError, "managed warm-up component"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(component=None))
+        with self.assertRaisesRegex(ValueError, "managed warm-up component"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(probe=b"older native fixture"))
+        with self.assertRaisesRegex(ValueError, "loads in the x64 game"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(component=b"not a managed image"))
+        with self.assertRaisesRegex(ValueError, "Win32 adapters start the managed warm-up"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(window=b"older window adapter"))
+        stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        staged = (self.layout / marker).read_text(encoding="ascii")
+        self.assertEqual(staged.splitlines(), [line for line in pinned.splitlines() if not line.startswith("#")])
+        self.assertTrue(staged.startswith("assembly=sts2 mvid=a5742661-f95f-4ba1-8b21-18dedf86422b\n"))
+        self.assertEqual((self.layout / "XboxManagedWarmup.dll").read_bytes(), bytes(managed))
+
+        for invalid in ("assembly=sts2\nassembly=STS2\n", "priority=MegaCrit\n", "assembly=sts2\nmode=all\n",
+                        "assembly=sts2 mvid=A5742661-F95F-4BA1-8B21-18DEDF86422B\n", "assembly=sts2\ndepth=9\n",
+                        "assembly=sts2\nremaining=yes\nremaining=no\n", "assembly=sts2;priority=MegaCrit\n"):
+            (profile / marker).write_text(invalid, encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "Invalid managed warm-up plan"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        (profile / marker).write_text("assembly=sts2\n", encoding="ascii")
+        shadow.write_text(f"{build}\nGame.exe\nopengl3\nunity\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "needs a CoreCLR title"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime())
+
     def test_win32_source_profile_requires_verifier_and_stages_only_fingerprints(self):
         self.layout.mkdir()
         profile = ROOT / "profiles/1817070/source.json"

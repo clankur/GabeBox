@@ -1,0 +1,21 @@
+# Managed first-use warm-up (runtime/managed-warmup) for Slay the Spire 2, Steam build 26655341.
+# data_sts2_windows_x86_64/sts2.dll: 9757184 bytes, SHA-256
+# 3fb1fa1bf0249087b706a5d0f062a60579e2f5b08df4ee477ddd6f2607f654d5, IL-only (CLI flags 0x1,
+# no ReadyToRun header), 51602 methods. The MVID pin makes a changed sts2.dll skip the warm-up.
+# Priorities follow the first-turn main-thread JIT in the 1.0.238.2 EventPipe trace
+# (PlayCardAction, AttackCommand, DamageResult, NCardPlayQueue, async state machines),
+# then first-save serialization; everything else follows.
+assembly=sts2 mvid=a5742661-f95f-4ba1-8b21-18dedf86422b
+priority=MegaCrit.Sts2.Core.GameActions
+priority=MegaCrit.Sts2.Core.Commands
+priority=MegaCrit.Sts2.Core.Entities
+priority=MegaCrit.Sts2.Core.Combat
+priority=MegaCrit.Sts2.Core.Hooks
+priority=MegaCrit.Sts2.Core.Nodes.Combat
+priority=MegaCrit.Sts2.Core.Nodes.Cards
+priority=MegaCrit.Sts2.Core.MonsterMoves
+priority=MegaCrit.Sts2.Core.Models.Powers
+priority=MegaCrit.Sts2.Core.Nodes.Vfx
+priority=MegaCrit.Sts2.Core.Saves
+remaining=yes
+depth=4

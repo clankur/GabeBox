@@ -31,6 +31,17 @@ jobs:
           name: xbox-hosted-monogame
           path: ${{ runner.temp }}/hosted-monogame/StardewStartupDiagnostic.dll
           if-no-files-found: error
+      - name: Build and check the managed first-use warm-up
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet build runtime/managed-warmup/XboxManagedWarmup.csproj --configuration Release --output "$env:RUNNER_TEMP/managed-warmup"
+          # The shipped netstandard2.1 assembly, against an IL-only fixture on the desktop runtime:
+          # no first-use JIT after the warm-up and no type initializer run early.
+          dotnet build runtime/managed-warmup/check/fixture/WarmupFixture.csproj --configuration Release --output "$env:RUNNER_TEMP/warmup-fixture"
+          dotnet build runtime/managed-warmup/check/WarmupCheck.csproj --configuration Release --output "$env:RUNNER_TEMP/warmup-check"
+          dotnet "$env:RUNNER_TEMP/warmup-check/WarmupCheck.dll" "$env:RUNNER_TEMP/managed-warmup/XboxManagedWarmup.dll" "$env:RUNNER_TEMP/warmup-fixture/WarmupFixture.dll"
       - uses: actions/download-artifact@v4
         with:
           name: xbox-fhd-present-x64
@@ -217,6 +228,7 @@ jobs:
               /def:runtime/win32/dxgi.def "/out:$steamLayout/XboxWin32Dxgi.dll" @dxgiObjects $lib
             Copy-Item ui/signin/* $steamLayout
             Copy-Item "$env:RUNNER_TEMP/hosted-monogame/StardewStartupDiagnostic.dll" $steamLayout
+            Copy-Item "$env:RUNNER_TEMP/managed-warmup/XboxManagedWarmup.dll" $steamLayout
             Copy-Item runtime/dos/* $steamLayout
             $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
             Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive

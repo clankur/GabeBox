@@ -5,6 +5,7 @@
 #include "hosted-xinput-load.h"
 #include "shell-lookup.h"
 #include "d3d12-pipeline-cache.h"
+#include "managed-warmup.h"
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
@@ -1072,6 +1073,8 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 else AppendTrace(compositionTrace, sizeof(compositionTrace) - 1);
                 result = hosted;
             }
+        } else if (name[0] == 'h') {
+            result = ManagedWarmupExport((HMODULE)module, name, result);
         } else if (name[0] == 'S' && HostedSteamInput((HMODULE)module, name)) {
             result = HostedSteamInput((HMODULE)module, name);
         } else if (name[0] == 'S') {

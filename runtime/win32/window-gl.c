@@ -2,6 +2,7 @@
 #include "../shared/steam-handoff-control.h"
 #include <appmodel.h>
 #include "shell-lookup.h"
+#include "managed-warmup.h"
 
 #define CONTEXT_COUNT 16
 #define SDL_INIT_VIDEO 0x20u
@@ -509,5 +510,6 @@ FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
         if (Equals(name, "wglGetCurrentContext")) return (FARPROC)(void *)XboxWglGetCurrentContext;
         if (Equals(name, "wglGetCurrentDC")) return (FARPROC)(void *)XboxWglGetCurrentDC;
     }
-    return GetProcAddress(module, name);
+    const FARPROC resolved = GetProcAddress(module, name);
+    return ManagedWarmupExport(module, name, resolved);
 }
