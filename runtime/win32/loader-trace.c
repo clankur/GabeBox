@@ -278,12 +278,18 @@ static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
     const BOOL breakpoint = fault->ExceptionCode == EXCEPTION_BREAKPOINT;
     const BOOL delayModule = fault->ExceptionCode == delayModuleMissing;
     const BOOL delayExport = fault->ExceptionCode == delayExportMissing;
-    if ((!access && !breakpoint && !delayModule && !delayExport) ||
+    /* Other error-severity exceptions (stack overflow, illegal instruction, heap corruption)
+       end a process without an access violation, so record their code as well. */
+    const BOOL severe = (fault->ExceptionCode & 0xF0000000u) == 0xC0000000u;
+    if ((!access && !breakpoint && !delayModule && !delayExport && !severe) ||
             __atomic_fetch_add(&faultTraceCount, 1u, __ATOMIC_RELAXED) >= 8) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD error = GetLastError();
-    char line[150];
+    char line[170];
     char *out = Text(line, access ? "fault access-violation" : breakpoint ? "fault breakpoint" :
-                           delayModule ? "fault delay-load-module" : "fault delay-load-export");
+                           delayModule ? "fault delay-load-module" : delayExport ? "fault delay-load-export" :
+                           "fault exception");
+    if (!access && !breakpoint && !delayModule && !delayExport)
+        out = Hex(Text(out, " code=0x"), fault->ExceptionCode, 8);
     out = RecordImageAddress(out, fault->ExceptionAddress);
     if (access && fault->NumberParameters >= 2) {
         const ULONG_PTR operation = fault->ExceptionInformation[0];
@@ -510,6 +516,8 @@ static HMODULE HostedDxgiAdapter(void);
 
 HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const DWORD previous = GetLastError();
+    StartFaultTrace();
+    SetLastError(previous);
     HMODULE result = LoadHostedXInput(name);
     if (result) {
         const char trace[] = "input xinput-library=hosted\r\n";
@@ -542,6 +550,8 @@ HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
 
 HMODULE WINAPI XboxLoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
     const DWORD previous = GetLastError();
+    StartFaultTrace();
+    SetLastError(previous);
     WCHAR staged[512];
     const BOOL companion = !file && DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
