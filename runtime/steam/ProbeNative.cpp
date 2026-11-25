@@ -3252,10 +3252,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
-                // Diagnostic: CoreCLR lists each method it compiles, so first-use stalls can be
-                // matched against JIT activity. Needs loader tracing for the trial directory.
-                {L"DOTNET_JitDisasmSummary", shadowJitTrace && shadowTrace ? L"1" : L""},
-                {L"DOTNET_JitStdOutFile", shadowJitTrace && shadowTrace ? trialRoot + L"\\jit-summary.txt" : std::wstring{}},
+                // Diagnostic: CoreCLR's EventPipe records each method it compiles with a
+                // timestamp (JIT keyword 0x10, verbose), so first-use stalls can be matched
+                // against JIT activity. The trace goes to LocalState because the trial
+                // directory is removed when the game exits.
+                {L"DOTNET_EnableEventPipe", shadowJitTrace ? L"1" : L""},
+                {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
+                {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
+                    L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_ORIGINAL_EXECUTABLE", shadowOriginalExecutablePath},
