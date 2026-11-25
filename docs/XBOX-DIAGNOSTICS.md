@@ -12,6 +12,24 @@ python3 -m tools.xbox_deploy observe --version "$version" --startup --output sta
 
 The observer waits for both the native sign-in run and the WebView run to change. The result includes the UI checkpoint, game count and startup timings when the package reports them. `setup-ready` records the setup surface. `gamepad-ready` records native gamepad readiness.
 
+### Big Picture renderer failure during a game
+
+Big Picture closes its WebView when the renderer reports `process-error:...`, including an unresponsive render process (`process-error:owner:2:unresponsive:259:none`). If a game is running at that point, Big Picture keeps the game going:
+
+- If the game was covered by the Steam view, Big Picture shows it again and gives it input focus.
+- The Menu + View chord returns straight to the game until it exits.
+- When the game exits, Big Picture reopens through the same path a released renderer uses.
+- If the game cannot be shown again after one retry, Big Picture restarts at once and takes over the running game, so Valve's Resume and Exit Game still reach it.
+
+`big-picture-webview-report.txt` records each transition as a numbered `webview_recovery_N=` line, and the restarted session keeps those lines. The transitions are:
+
+- `game-webview-lost`, with the AppID, whether the game was covered, and the native cause
+- `game-restore-started`, `game-restore-retry`, `game-restored` or `game-restore-failed`
+- `game-kept-foreground`
+- `game-overlay-unavailable`
+- `webview-restart-after-game` or `webview-restart-for-game`
+- `game-adopted`
+
 ## Inspect an active Steam install
 
 ```sh
@@ -74,6 +92,8 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 
 `--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
 
+The presenter accepts Menu + View only when one source holds both buttons: the live Windows.Gaming.Input reading, or the VK_GAMEPAD key events that Device Portal remote input and a physical pad raise. The two presses must land within 400 ms of each other, and the pair must stay held for 50 ms. Big Picture opens when both buttons are released. If one button stays down for more than 1 s after the other is released, the chord is dropped, and that button stays hidden from the game until it is released. `chord_from_keys` counts held chords that came from key events; the rest of `chord_held` came from the pad. `chord_ignored` counts times both buttons were down without a paired press, such as a View held for a game action or a key whose release was lost. `chord_expired` counts dropped chords. The panel status reports the same totals as `native_menu_chords_ignored` and `native_menu_chords_expired`.
+
 ## Drive a hosted game with remote input
 
 `python3 -m tools.xbox_remote_input` sends controller, keyboard and mouse input through Device Portal's `/ext/remoteinput` WebSocket. The presenter merges the controller presses into the hosted pad, so games reading hosted XInput receive them as controller input. Each step can be followed by a screenshot:
@@ -81,6 +101,8 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 ```sh
 python3 -m tools.xbox_remote_input --gap 1.0 A wait:3 shot:after-a.png DOWN Y hold:A:0.5
 ```
+
+`chord:MENU+VIEW` presses both buttons together, holds them for 0.25 s, then releases them. It is the deliberate Big Picture chord. Separate `MENU` and `VIEW` taps never form one.
 
 Run `--help` for the step list. `--check` opens and closes the WebSocket without sending input. Confirm delivery with `inspect-input`: a held button shows `connected: true` and its bit set in the host pad, and the game's `ack` follows once it reads the pad. Device Portal mouse messages do not raise host pointer events, and screenshots of the Big Picture overlay return HTTP 500. [Remote Input API](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/uwp-remoteinput-api) · [Slay the Spire 2 example](../analysis/slay-the-spire-2-compatibility.md#controller-input-chain)
 

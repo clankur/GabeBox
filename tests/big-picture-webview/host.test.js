@@ -620,6 +620,100 @@ test("a game chord keeps both views alive and returns only to the owning game", 
     assert.equal(await app.shell.showForGame(1145360, 90, restore), false);
 });
 
+async function playingPrimaryGame(appId, broker = {}) {
+    const app = fixture({primary: true, xaml: true, hostedApps: [appId]});
+    let failure;
+    const ready = app.start({async play(_id, handoff) { await handoff(); return "presented"; }, ...broker},
+        error => { failure = error; });
+    await drain();
+    await app.advance("gamepad-ready");
+    await ready;
+    app.incoming.push(JSON.stringify({method: "play", id: 1, appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(app.replies.find(reply => reply.id === 1), {id: 1, result: "presented"});
+    return {app, failure: () => failure};
+}
+const recoveryLines = report => report.split("\r\n").filter(line => line.startsWith("webview_recovery_"));
+
+test("an unresponsive renderer under the game overlay returns to the game and reopens Big Picture after it exits", async () => {
+    const appId = 2868840, {app, failure} = await playingPrimaryGame(appId);
+    const restores = [];
+    assert.equal(await app.shell.showForGame(appId, 3, async view => { restores.push(view); return true; }, () => true), true);
+    await drain();
+    assert.match(app.reports.at(-1), /status=game-switch-to-steam/);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    await drain();
+    assert.deepEqual(restores, [3]);
+    assert.equal(failure(), undefined);
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), [
+        "webview_recovery_1=game-webview-lost appid=2868840 covered=1 cause=process-error:owner:2:unresponsive:259:none",
+        "webview_recovery_2=game-restore-started appid=2868840",
+        "webview_recovery_3=game-restored appid=2868840"
+    ]);
+    // The chord now returns straight to the game until it exits.
+    assert.equal(await app.shell.showForGame(appId, 3, async () => true, () => true), false);
+    await drain();
+    assert.match(app.reports.at(-1), /webview_recovery_4=game-overlay-unavailable appid=2868840/);
+    assert.equal(app.owners.length, 1);
+    const returning = app.shell.resume(appId);
+    await drain();
+    await app.advance("gamepad-ready");
+    await returning;
+    assert.equal(app.owners.length, 2);
+    assert.match(app.reports.at(-1), /webview_recovery_5=webview-restart-after-game appid=2868840\r\n/);
+    assert.match(app.reports.at(-1), /status=gamepad-ready/);
+    assert.equal(failure(), undefined);
+});
+
+test("a renderer failure while the game is in the foreground leaves it there", async () => {
+    const appId = 42, {app, failure} = await playingPrimaryGame(appId);
+    await app.advance("process-error:owner:1:crashed:1:none");
+    await drain();
+    assert.equal(failure(), undefined);
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), [
+        "webview_recovery_1=game-webview-lost appid=42 covered=0 cause=process-error:owner:1:crashed:1:none",
+        "webview_recovery_2=game-kept-foreground appid=42"
+    ]);
+    const returning = app.shell.resume(appId);
+    await drain();
+    await app.advance("gamepad-ready");
+    await returning;
+    assert.equal(app.owners.length, 2);
+});
+
+test("a game that cannot be shown again is handed to a restarted Big Picture with Resume and Exit Game", async () => {
+    const appId = 42, {app, failure} = await playingPrimaryGame(appId);
+    let attempts = 0, quits = 0;
+    const restore = async view => { assert.equal(view, 3); return ++attempts > 2; };
+    assert.equal(await app.shell.showForGame(appId, 3, restore, () => { quits++; return true; }), true);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    await drain();
+    assert.equal(attempts, 1);
+    assert.match(app.reports.at(-1), /webview_recovery_3=game-restore-retry appid=42/);
+    app.expire();
+    await drain();
+    assert.equal(attempts, 2);
+    assert.equal(app.owners.length, 2);
+    await app.advance("gamepad-ready");
+    assert.equal(failure(), undefined);
+    const report = app.reports.at(-1);
+    assert.match(report, /webview_recovery_4=game-restore-failed appid=42\r\nwebview_recovery_5=webview-restart-for-game appid=42\r\n/);
+    assert.match(report, /webview_recovery_6=game-adopted appid=42/);
+    assert.deepEqual(app.replies.filter(e => e.event === "xbox-game").at(-1), {event: "xbox-game", appId, overlay: true});
+    app.incoming.push(JSON.stringify({method: "resume-game", id: 2, appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(app.replies.find(reply => reply.id === 2), {id: 2, result: "presented"});
+    assert.equal(attempts, 3);
+    assert.equal(await app.shell.showForGame(appId, 3, restore, () => { quits++; return true; }), true);
+    app.incoming.push(JSON.stringify({method: "quit-game", id: 3, appId}));
+    await app.advance("gamepad-ready");
+    assert.deepEqual(app.replies.find(reply => reply.id === 3), {id: 3, result: "quit-requested"});
+    assert.equal(quits, 1);
+    await app.shell.resume(appId);
+    await drain();
+    assert.match(app.reports.at(-1), /status=game-returned-to-steam/);
+});
+
 test("a signed hosted profile releases the primary renderer and reopens it for the owning game", async () => {
     const appId = 42, lookups = [];
     const app = fixture({primary: true, xaml: true, async findInstalled(name) {

@@ -1,6 +1,15 @@
 (function () {
     "use strict";
     var session, releasedGame;
+    // Recovery transitions outlive the failed renderer session, so the report written by
+    // the restarted Big Picture still shows how the running game was kept on screen.
+    var recoveryLog = [];
+
+    function noteRecovery(stage) {
+        if (recoveryLog[recoveryLog.length - 1] === stage) return;
+        if (recoveryLog.length >= 16) recoveryLog.shift();
+        recoveryLog.push(stage);
+    }
 
     function reopenReleasedGame(appId) {
         if (!releasedGame || releasedGame.appId !== appId) return null;
@@ -24,12 +33,14 @@
         });
     }
 
-    function open(broker, onFailure, timing) {
-        if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure, timing); });
+    // adopted: a game that kept running when the previous renderer failed. The new
+    // session presents it as running so Valve's Resume and Exit Game reach it.
+    function open(broker, onFailure, timing, adopted) {
+        if (session && session.cleanup) return session.cleanup.then(function () { return open(broker, onFailure, timing, adopted); });
         if (session) {
             if (session.broker === broker) return session.ready;
             if (!session.replaceable()) return Promise.reject(new Error("steam-view-busy"));
-            return session.finish("account-changed", true).then(function () { return open(broker, onFailure, timing); });
+            return session.finish("account-changed", true).then(function () { return open(broker, onFailure, timing, adopted); });
         }
         function markStartup(stage) { if (timing) timing.mark(stage); }
         markStartup("shell_open");
@@ -109,6 +120,7 @@
                 Object.keys(captures).map(function (kind) { return kind + "_capture=" + captures[kind] + "\r\n"; }).join("") +
                 Object.keys(gameFrames).map(function (key) { return "game_frame_" + key + "=" + gameFrames[key] + "\r\n"; }).join("") +
                 (rendererError ? "renderer_error=" + rendererError + "\r\n" : "") +
+                recoveryLog.map(function (entry, i) { return "webview_recovery_" + (i + 1) + "=" + entry + "\r\n"; }).join("") +
                 Object.keys(memory).map(function (key) { return memory[key]; }).join("") + messages.join("\r\n") + "\r\n";
             // Device Portal may be reading the report during a cold launch. Its
             // file lifetime must never gate Steam startup, input or foregrounding.
@@ -131,7 +143,7 @@
                  stage !== "media_capture" && stage !== "input")) return;
             var fields = stats.split(/\r?\n/).filter(function (line) {
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|primary_panel|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
-                    /^(native_input|native_input_hresult|native_menu_requests|native_menu_chords)=[0-9]{1,16}$/.test(line) ||
+                    /^(native_input|native_input_hresult|native_menu_requests|native_menu_chords|native_menu_chords_ignored|native_menu_chords_expired)=[0-9]{1,16}$/.test(line) ||
                     /^menu_switch=(requested|shown|declined|failed)$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
                     /^sample_(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=[0-9]{1,16}$/.test(line) ||
@@ -144,11 +156,14 @@
         }
         var gameForeground = false;
         var firstActivation = true;
+        function announceGameForeground(value) {
+            gameForeground = value;
+            if (window.dispatchEvent) window.dispatchEvent(new CustomEvent("steam-game-foreground", {detail: value}));
+        }
         function setGameForeground(value) {
             if (!host || failed || value === gameForeground) return;
-            gameForeground = value;
             host.reply(JSON.stringify({nativeGameForeground: value}));
-            if (window.dispatchEvent) window.dispatchEvent(new CustomEvent("steam-game-foreground", {detail: value}));
+            announceGameForeground(value);
         }
         function gameEvent(overlay) {
             if (!host || failed) return;
@@ -211,7 +226,7 @@
                 return Promise.resolve(false);
             returnToGame = restore; quitGame = requestExit;
             return showValve(from).then(function () {
-                if (!playing || playingApp !== appId) return false;
+                if (failed || !playing || playingApp !== appId) return false;
                 sampleMemory("overlay"); gameEvent(true); record("game-switch-to-steam");
                 // Xbox can revise the budget after the view switch resolves.
                 [500, 2000, 5000].forEach(function (delay) {
@@ -537,13 +552,78 @@
             var code = typeof error.number === "number" ? "0x" + (error.number >>> 0).toString(16) : "unavailable";
             finish(stage || "host-error:" + code);
         }
+        function noteGame(stage) {
+            noteRecovery(stage);
+            record(stage.split(" ")[0]);
+        }
+        // A running game outlives a failed or unresponsive renderer. Take it back from the
+        // Steam view, and reopen Big Picture when it exits through the released-game path.
+        function keepLostGame(game, cause) {
+            game.marker = releasedGame = {appId: game.appId, note: noteGame, reopen: function () {
+                noteRecovery("webview-restart-after-game appid=" + game.appId);
+                return open(broker, onFailure);
+            }};
+            noteGame("game-webview-lost appid=" + game.appId + " covered=" + (game.covered ? 1 : 0) + " cause=" +
+                String(cause).replace(/[^A-Za-z0-9:._-]/g, "_").slice(0, 96));
+        }
+        function gameStillLost(game) {
+            return releasedGame === game.marker && !game.marker.returning;
+        }
+        function restoreLostGame(game) {
+            if (!gameStillLost(game)) return;
+            if (!game.covered) {
+                announceGameForeground(true);
+                noteGame("game-kept-foreground appid=" + game.appId);
+                return;
+            }
+            noteGame("game-restore-started appid=" + game.appId);
+            function attempt(remaining) {
+                return Promise.resolve().then(function () { return game.restore(mainId); })
+                    .then(function (shown) { return shown === true; }, function () { return false; })
+                    .then(function (shown) {
+                        if (!gameStillLost(game)) return;
+                        if (shown) {
+                            announceGameForeground(true);
+                            noteGame("game-restored appid=" + game.appId);
+                            return;
+                        }
+                        if (remaining) {
+                            noteGame("game-restore-retry appid=" + game.appId);
+                            return new Promise(function (resolve) { setTimeout(resolve, 1000); }).then(function () {
+                                return attempt(remaining - 1);
+                            });
+                        }
+                        // The game cannot be shown again from here. Restart Big Picture
+                        // now and hand it the running game so Resume and Exit Game work.
+                        releasedGame = null;
+                        noteGame("game-restore-failed appid=" + game.appId);
+                        noteRecovery("webview-restart-for-game appid=" + game.appId);
+                        open(broker, onFailure, undefined, {appId: game.appId, restore: game.restore, quit: game.quit})
+                            .catch(function (error) { if (typeof onFailure === "function") onFailure(error); });
+                    });
+            }
+            return attempt(1);
+        }
+        function adoptGame(game) {
+            if (failed || playing || !game) return;
+            playing = presented = true;
+            playingApp = game.appId;
+            returnToGame = game.restore;
+            quitGame = game.quit;
+            gameEvent(true);
+            noteRecovery("game-adopted appid=" + game.appId);
+            record("game-adopted");
+        }
         function finish(stage, intentional) {
             if (failed) return session && session.cleanup || Promise.resolve();
+            var lostGame = !intentional && broker && playing && presented && playingApp ?
+                {appId: playingApp, restore: returnToGame, quit: quitGame, covered: typeof returnToGame === "function"} : null;
             failed = true;
             if (network) network.close();
             clearInterval(timer);
             clearTimeout(readinessTimer);
             record(stage);
+            if (lostGame) keepLostGame(lostGame, stage);
             var wasReady = settled;
             if (!settled) { settled = true; rejectReady(new Error(stage)); }
             if (broker) {
@@ -563,6 +643,7 @@
                     return check();
                 }).catch(function () {}).then(function () {
                     if (session === current) session = null;
+                    if (lostGame) return restoreLostGame(lostGame);
                     if (wasReady && !intentional && typeof onFailure === "function") onFailure(new Error(stage));
                 });
                 return current.cleanup;
@@ -628,6 +709,7 @@
                     warming = false;
                     record(last, true);
                     resolveReady();
+                    adoptGame(adopted);
                 }
                 for (var i = 0; i < 16; ++i) {
                     var request = host.read();
@@ -704,6 +786,12 @@
             return session ? session.playConfiguredTrial(appId) : Promise.resolve("unavailable");
         },
         showForGame: function (appId, viewId, restore, requestExit) {
+            // While Big Picture is down after a renderer failure the game keeps the
+            // foreground. The caller resumes the game when the switch is declined.
+            if (releasedGame && releasedGame.appId === appId && releasedGame.note) {
+                releasedGame.note("game-overlay-unavailable appid=" + appId);
+                return Promise.resolve(false);
+            }
             return session ? session.showForGame(appId, viewId, restore, requestExit) : Promise.resolve(false);
         }
     };
