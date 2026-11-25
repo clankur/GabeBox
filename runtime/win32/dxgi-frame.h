@@ -43,6 +43,7 @@ private:
     void PublishSequence(unsigned index);
     void ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc);
     void Probe12(ID3D12Resource* source, const D3D12_RESOURCE_DESC& desc);
+    void ProbeConstantBuffers(UINT64 count);
     void ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer);
 
     SdlHostMailbox* base_ = nullptr;

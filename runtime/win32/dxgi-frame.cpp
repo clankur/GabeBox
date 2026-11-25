@@ -419,6 +419,58 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
     return S_OK;
 }
 
+
+// Scan the constant buffers still bound from the frame's last draw for NaN or infinite floats.
+// A camera with a broken transform or projection fails every frustum test, while post passes still run.
+void DxgiFramePublisher::ProbeConstantBuffers(UINT64 count) {
+    ComPtr<ID3D11Device> device;
+    context_->GetDevice(&device);
+    if (!device) return;
+    for (int stage = 0; stage < 2; ++stage) {
+        ID3D11Buffer* buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT]{};
+        if (stage == 0) context_->VSGetConstantBuffers(0, ARRAYSIZE(buffers), buffers);
+        else context_->PSGetConstantBuffers(0, ARRAYSIZE(buffers), buffers);
+        for (UINT slot = 0; slot < ARRAYSIZE(buffers); ++slot) {
+            ComPtr<ID3D11Buffer> buffer;
+            buffer.Attach(buffers[slot]);
+            if (!buffer) continue;
+            D3D11_BUFFER_DESC desc{};
+            buffer->GetDesc(&desc);
+            if (!desc.ByteWidth || desc.ByteWidth > 65536) continue;
+            D3D11_BUFFER_DESC staging{};
+            staging.ByteWidth = desc.ByteWidth;
+            staging.Usage = D3D11_USAGE_STAGING;
+            staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Buffer> copy;
+            if (FAILED(device->CreateBuffer(&staging, nullptr, &copy))) continue;
+            context_->CopyResource(copy.Get(), buffer.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(context_->Map(copy.Get(), 0, D3D11_MAP_READ, 0, &mapped))) continue;
+            const UINT* words = static_cast<const UINT*>(mapped.pData);
+            UINT nan = 0, inf = 0, first = UINT_MAX;
+            for (UINT i = 0; i < desc.ByteWidth / 4; ++i) {
+                if ((words[i] & 0x7f800000u) != 0x7f800000u) continue;
+                if (words[i] & 0x007fffffu) ++nan; else ++inf;
+                if (first == UINT_MAX) first = i;
+            }
+            context_->Unmap(copy.Get(), 0);
+            char text[160], *out = text;
+            auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
+            auto number = [&out](UINT64 value) {
+                char digits[24]; int length = 0;
+                do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+                while (length) *out++ = digits[--length];
+            };
+            put("dxgi constants frame="); number(count); put(stage ? " stage=ps" : " stage=vs");
+            put(" slot="); number(slot); put(" bytes="); number(desc.ByteWidth);
+            put(" nan="); number(nan); put(" inf="); number(inf);
+            if (first != UINT_MAX) { put(" first-float="); number(first); }
+            put("\r\n");
+            AppendProbeTrace(text, static_cast<DWORD>(out - text));
+        }
+    }
+}
+
 // Scan a few published frames to tell an all-black game image apart from a transport fault.
 void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc) {
     static const UINT64 samples[] = {60, 600, 1800, 3600, 7200};
@@ -457,6 +509,7 @@ void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2
             put("\r\n");
             AppendProbeTrace(text, static_cast<DWORD>(out - text));
         }
+        ProbeConstantBuffers(count);
     }
     if (before) {
         if (!stats_) {
