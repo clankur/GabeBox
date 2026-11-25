@@ -59,8 +59,9 @@ def parse_rules(document):
 
 
 class PeImage:
-    def __init__(self, image, *, allow_signed_source=False):
+    def __init__(self, image, *, allow_signed_source=False, read_only=False):
         self.image = image
+        self.read_only = read_only
         pe = self.word(0x3c)
         if image[:2] != b"MZ" or image[pe:pe + 4] != b"PE\0\0" or self.short(pe + 4) != 0x8664:
             raise ValueError("Use a Windows x64 PE executable or DLL.")
@@ -83,11 +84,15 @@ class PeImage:
                 raise ValueError("Use a complete PE file with its original sections.")
             self.sections.append((virtual_size, address, raw_size, raw))
         self.new_section_offset = self.section_table + count * 40
+        self.certificate_offset = None
+        if read_only:
+            if self.new_section_offset > min(self.headers_size, len(image)):
+                raise ValueError("Invalid PE section table extent.")
+            return
         if self.new_section_offset + 40 > min(self.headers_size, len(image)):
             raise ValueError("The PE headers have no room for another section.")
         if self.word(self.directory(11)) or self.word(self.directory(11) + 4):
             raise ValueError("Use a PE without a bound import table.")
-        self.certificate_offset = None
         offset, size = struct.unpack_from("<II", image, self.directory(4))
         if offset or size:
             if not allow_signed_source:
@@ -317,6 +322,8 @@ class PeImage:
                 offset += length
 
     def redirect(self, rules, *, omit_dwarf_mapping=False, trim_dwarf=False):
+        if self.read_only:
+            raise ValueError("Cannot redirect imports on a read-only PE image.")
         omit_dwarf_mapping = omit_dwarf_mapping or trim_dwarf
         if self.certificate_offset is not None and omit_dwarf_mapping:
             raise ValueError("Build the signed-source recipe without a DWARF layout change.")

@@ -8,9 +8,11 @@ PROBE_CONTROL_NAME = PROBE_NAME + '.Control'
 GRAPHICS_CONTROL_NAME = PROBE_NAME + '.GraphicsControl'
 PROBE_STEAM_CORE_NAME = PROBE_NAME + '.SteamCore'
 BIG_PICTURE_NAME = 'XboxPortabilityProbe.BigPicture'
+CONTROLLER_POINTER_PROBE_NAME = 'XboxPortabilityProbe.ControllerPointer'
 PROBE_REPORT = 'probe-report.txt'
 BIG_PICTURE_REPORT = 'big-picture-report.txt'
 WEBVIEW_REPORT = 'big-picture-webview-report.txt'
+CONTROLLER_POINTER_REPORT = 'controller-pointer.txt'
 
 CHILD_EXIT = (('exit_code_matches', 'yes'),)
 PIPE_EXCHANGE = CHILD_EXIT + (('ipc', 'success'),)
@@ -64,6 +66,12 @@ CASES = {
         PROBE_NAME, 'Packaged process test',
         'Verify the helper exit code and a named-pipe request and reply.',
         PIPE_EXCHANGE, report_kind='packaged-child-process', require_run_id=True,
+    ),
+    'controller-pointer': ProbeCase(
+        CONTROLLER_POINTER_PROBE_NAME, 'Xbox controller pointer',
+        'Verify the standalone app enumerated game controllers from a foreground view.',
+        (('status', 'controller-sampling'), ('visible', '1')), filename=CONTROLLER_POINTER_REPORT,
+        report_kind='controller-pointer', require_run_id=True, terminal_status='controller-sampling',
     ),
     'graphics-control': ProbeCase(
         GRAPHICS_CONTROL_NAME, 'Graphics runtime control',
