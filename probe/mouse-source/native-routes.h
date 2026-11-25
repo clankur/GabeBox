@@ -18,14 +18,33 @@
 // live in the desktop partition of the Windows headers, so this UWP build
 // declares what it calls. The layouts and values match winuser.h and
 // corewindow.h; the exports themselves are resolved at run time.
+// winuser.h keeps these constants outside the partition guard and the types
+// inside it, so only the missing halves are declared here.
 #ifndef RIDEV_INPUTSINK
 #define RIDEV_INPUTSINK 0x00000100
+#endif
+#ifndef RIM_TYPEMOUSE
 #define RIM_TYPEMOUSE 0
+#endif
+#ifndef RIM_TYPEKEYBOARD
 #define RIM_TYPEKEYBOARD 1
+#endif
+#ifndef RID_INPUT
 #define RID_INPUT 0x10000003
+#endif
+#ifndef RI_MOUSE_WHEEL
 #define RI_MOUSE_WHEEL 0x0400
+#endif
+#ifndef RI_MOUSE_HWHEEL
 #define RI_MOUSE_HWHEEL 0x0800
+#endif
+#ifndef GMMP_USE_DISPLAY_POINTS
 #define GMMP_USE_DISPLAY_POINTS 1
+#endif
+#ifndef WM_INPUT
+#define WM_INPUT 0x00FF
+#endif
+#if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 DECLARE_HANDLE(HRAWINPUT);
 typedef struct tagRAWINPUTDEVICE {
     USHORT usUsagePage; USHORT usUsage; DWORD dwFlags; HWND hwndTarget;
@@ -49,9 +68,6 @@ typedef struct tagRAWINPUT {
 #define NEXTRAWINPUTBLOCK(ptr) ((PRAWINPUT)((((ULONG_PTR)((PBYTE)(ptr) + (ptr)->header.dwSize)) \
     + sizeof(ULONG64) - 1) & ~(sizeof(ULONG64) - 1)))
 typedef struct tagMOUSEMOVEPOINT { int x; int y; DWORD time; ULONG_PTR dwExtraInfo; } MOUSEMOVEPOINT, *LPMOUSEMOVEPOINT;
-#endif
-#ifndef WM_INPUT
-#define WM_INPUT 0x00FF
 #endif
 
 // corewindow.h forward declares this interface outside the desktop partition.
