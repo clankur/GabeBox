@@ -743,6 +743,42 @@ static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
     return GetProcAddress(adapter, name);
 }
 
+
+// A profile that hosts XInput routes controllers through the hosted mailbox. Windows.Gaming.Input in the
+// game's child process sees no controller, so engines that prefer it (Unity's Input System) are told it is
+// unavailable and fall back to XInput. Other WinRT activations are forwarded unchanged.
+typedef HRESULT (WINAPI *ActivationFactory)(void *, REFIID, void **);
+typedef PCWSTR (WINAPI *StringBuffer)(void *, UINT32 *);
+static ActivationFactory nativeActivationFactory;
+
+static HRESULT WINAPI HostedRoGetActivationFactory(void *classId, REFIID iid, void **factory) {
+    static StringBuffer buffer;
+    if (!buffer) {
+        HMODULE combase = GetModuleHandleW(L"combase.dll");
+        if (combase) buffer = (StringBuffer)(void *)GetProcAddress(combase, "WindowsGetStringRawBuffer");
+    }
+    UINT32 length = 0;
+    const PCWSTR name = buffer && classId ? buffer(classId, &length) : NULL;
+    static const WCHAR prefix[] = L"Windows.Gaming.Input.";
+    if (name && length >= ARRAYSIZE(prefix) - 1 &&
+            CompareStringOrdinal(name, ARRAYSIZE(prefix) - 1, prefix, ARRAYSIZE(prefix) - 1, FALSE) == CSTR_EQUAL) {
+        if (factory) *factory = NULL;
+        const char trace[] = "input wgi=unavailable-for-hosted-xinput\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        return REGDB_E_CLASSNOTREG;
+    }
+    return nativeActivationFactory(classId, iid, factory);
+}
+
+static FARPROC HostedActivationExport(FARPROC native, const char *name) {
+    if (!native || !SameName(name, "RoGetActivationFactory")) return NULL;
+    WCHAR enabled[2];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", enabled, ARRAYSIZE(enabled)) != 1 || enabled[0] != L'1')
+        return NULL;
+    InterlockedCompareExchangePointer((PVOID volatile *)&nativeActivationFactory, (PVOID)native, NULL);
+    return (FARPROC)(void *)HostedRoGetActivationFactory;
+}
+
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     if (module && (ULONG_PTR)name <= 0xffffu) {
         const DWORD previous = GetLastError();
@@ -768,6 +804,9 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 AppendTrace(trace, sizeof(trace) - 1);
                 result = hosted;
             }
+        } else if (name[0] == 'R') {
+            const FARPROC hosted = HostedActivationExport(result, name);
+            if (hosted) result = hosted;
         } else if (name[0] == 'S') {
             const FARPROC scoped = ScopedShellExport((HMODULE)module, name);
             if (scoped) {
