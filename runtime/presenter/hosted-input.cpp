@@ -98,16 +98,25 @@ void mergeRemotePad(SdlHostGamepadState &value) {
     static const int buttons[] = {0, 1, 2, 3, 10, 9, -1, -1, 11, 12, 13, 14, 6, 4, 7, 8};
     for (unsigned i = 0; i < ARRAYSIZE(buttons); ++i)
         if (remotePad[i] && buttons[i] >= 0) value.buttons |= 1 << buttons[i];
+    // A physical pad raises the same key events, and its key-up can arrive after its stick or
+    // trigger has returned to rest. Key-derived axes therefore apply only to an axis the
+    // physical reading has left at rest for a settle period.
+    static DWORD physicalMoved[SDL_HOST_PAD_AXES];
+    const DWORD now = GetTickCount();
+    bool settled[SDL_HOST_PAD_AXES];
+    for (unsigned a = 0; a < SDL_HOST_PAD_AXES; ++a) {
+        const bool rest = a >= 4 ? value.axes[a] <= -32768 + 8192 : value.axes[a] > -8192 && value.axes[a] < 8192;
+        if (!rest) physicalMoved[a] = now;
+        settled[a] = rest && now - physicalMoved[a] >= 150;
+    }
     // Triggers rest at -32768. A trigger key reports a full pull.
     for (unsigned i = 0; i < 2; ++i)
-        if (remotePad[6 + i] && value.axes[4 + i] <= -32768 + 8192) value.axes[4 + i] = 32767;
+        if (remotePad[6 + i] && settled[4 + i]) value.axes[4 + i] = 32767;
     // Left stick up/down/right/left, then the right stick. Host axes point down and right.
     static const int axes[] = {1, 1, 0, 0, 3, 3, 2, 2};
     static const int signs[] = {-1, 1, 1, -1, -1, 1, 1, -1};
-    for (unsigned i = 0; i < ARRAYSIZE(axes); ++i) {
-        LONG &axis = value.axes[axes[i]];
-        if (remotePad[16 + i] && axis > -8192 && axis < 8192) axis = signs[i] < 0 ? -32768 : 32767;
-    }
+    for (unsigned i = 0; i < ARRAYSIZE(axes); ++i)
+        if (remotePad[16 + i] && settled[axes[i]]) value.axes[axes[i]] = signs[i] < 0 ? -32768 : 32767;
 }
 SdlHostGamepadState previousPad;
 bool sentPad;

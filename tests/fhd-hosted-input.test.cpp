@@ -255,6 +255,7 @@ int main() {
     argVt[6] = (void *)getState;
     physical = {};
     physical.ly = .5;
+    clockMs += 200;  // Leave the earlier physical movement outside the settle period.
     FhdPollHostedInput(&box, &fakeWindow);
     for (UINT key : {0xC3u, 0xCCu, 0xD3u, 0xD5u, 0xCAu}) {
         state = key;
@@ -272,6 +273,22 @@ int main() {
     clockMs += 16;
     FhdPollHostedInput(&box, &fakeWindow);
     assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[0] == 0 && box.gamepad.axes[5] == -32768);
+    // A physical stick that recenters before its key-up arrives does not jump to full deflection.
+    physical = {};
+    physical.lx = .75;
+    state = 0xD5;
+    event(KeyDown, (IUnknown *)&arg);
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] > 0 && box.gamepad.axes[0] < 32767);
+    physical.lx = 0;
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] == 0);
+    event(KeyUp, (IUnknown *)&arg);
+    clockMs += 200;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] == 0);
     // A release lost while the game was in the background does not leave the button held.
     state = 0xC5;
     event(KeyDown, (IUnknown *)&arg);

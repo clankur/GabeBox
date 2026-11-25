@@ -3239,12 +3239,6 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"SDL_JOYSTICK_GAMEINPUT", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
-                // Steam publishes the controllers it virtualizes for SDL titles to ignore. The
-                // hosted pad is not one of them, so an inherited list would hide it; an empty
-                // value removes the inherited variable.
-                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES", L""},
-                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", L""},
-                {L"SteamVirtualGamepadInfo", L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
@@ -3260,7 +3254,18 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_HOST_START_TIME", hostStartTime},
                 {L"XBOX_STEAM_HANDOFF_ACCOUNT", std::to_wstring(shadowOwner)}
             };
-            auto environment = SteamChildEnvironment(variables);
+            // Steam publishes the controllers it virtualizes for SDL titles to ignore. The hosted
+            // pad is not one of them, so a hosted-XInput title must not inherit those lists;
+            // SteamChildEnvironment removes a variable listed with an empty value.
+            const std::pair<std::wstring, std::wstring> hostedPadVariables[] = {
+                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES", L""},
+                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", L""},
+                {L"SteamVirtualGamepadInfo", L""},
+            };
+            std::vector<std::pair<std::wstring, std::wstring>> childVariables(std::begin(variables), std::end(variables));
+            if (shadowHostedXInput)
+                childVariables.insert(childVariables.end(), std::begin(hostedPadVariables), std::end(hostedPadVariables));
+            auto environment = SteamChildEnvironment(childVariables);
             if (environment.empty()) {
                 co_return winrt::hstring(report + L"steam_launch=shadow-environment-error\r\n");
             }

@@ -89,7 +89,9 @@ static BOOL LegacyXAudioClass(REFCLSID clsid) {
 
 /* DirectInput is not part of the Xbox system. Input stacks such as SDL's Windows
    joystick driver create IDirectInput8 before XInput and abandon XInput when that
-   fails, so a missing class hides the hosted controller. This object reports a
+   fails, so a missing class hides the hosted controller. Profiles that route the
+   controller through hosted XInput receive the object below; other titles keep the
+   system's failure. This object reports a
    system with no DirectInput devices: Initialize and EnumDevices succeed without
    callbacks, CreateDevice and FindDevice report an unregistered device and
    GetDeviceStatus reports it detached. Controllers stay on the XInput path. */
@@ -183,8 +185,11 @@ static HRESULT EmptyDirectInput8(REFIID iid, LPVOID *object) {
 
 HRESULT WINAPI XboxCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *object) {
     HRESULT result = CoCreateInstance(clsid, outer, context, iid, object);
+    WCHAR hostedPad[2];
     if (FAILED(result) && !outer && iid && object && clsid && (context & CLSCTX_INPROC_SERVER) &&
-            SameGuid(clsid, &directInput8Class)) {
+            SameGuid(clsid, &directInput8Class) &&
+            GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", hostedPad, ARRAYSIZE(hostedPad)) == 1 &&
+            hostedPad[0] == L'1') {
         const DWORD error = GetLastError();
         const HRESULT empty = EmptyDirectInput8(iid, object);
         SetLastError(error);
