@@ -2413,6 +2413,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 if (!shadowRecipe && shadowRuntime.empty()) shadowRuntime = L"godot";
                 const bool unity = shadowRuntime == L"unity";
                 const bool unityDxgi = unity && shadowRenderer == L"d3d11";
+                // Godot's Direct3D 12 driver presents through the hosted DXGI and composition adapter.
+                const bool godotDxgi = shadowDxgi && shadowRuntime == L"godot" && shadowRenderer == L"d3d12";
                 if (shadowBuild.empty() || shadowBuild.size() > 20 ||
                         shadowBuild.find_first_not_of(L"0123456789") != std::wstring::npos ||
                         !steam_win32_stage::IsImageName(shadowExecutable, L".exe") ||
@@ -2438,7 +2440,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             (!shadowDxgi && shadowRenderer != L"opengl3") ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32XInput910.dll"))) ||
                         (shadowDxgi && (!shadowRecipe ||
-                            (!unityDxgi && (!shadowRuntime.empty() || !shadowRenderer.empty())) ||
+                            (!unityDxgi && !godotDxgi && (!shadowRuntime.empty() || !shadowRenderer.empty())) ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
                         ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable) &&
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
@@ -2447,7 +2449,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         (shadowDynamicCompanions && (!shadowOriginalExecutable || !shadowFiles || !shadowTrace)) ||
                         (!accessibility.empty() && (!shadowAccessibilityDisabled || !shadowRecipe ||
-                            !hostedSurfaceless || shadowRuntime != L"godot" || shadowRenderer != L"opengl3")) ||
+                            !hostedSurfaceless || shadowRuntime != L"godot" || (shadowRenderer != L"opengl3" && !godotDxgi))) ||
                         (!shadowImage.empty() && !steam_win32_stage::IsImageName(shadowImage, L".dll") &&
                             !steam_win32_stage::IsImageName(shadowImage, L".exe")) ||
                         shadowSource.size() > 260 ||

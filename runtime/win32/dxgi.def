@@ -6,3 +6,4 @@ EXPORTS
     XboxGetOutputMonitorRect
     D3DReflect=XboxD3DReflect
     D3DGetInputSignatureBlob=XboxD3DGetInputSignatureBlob
+    DCompositionCreateDevice=XboxDCompositionCreateDevice

@@ -505,6 +505,9 @@ static void RecordWideLoad(LPCWSTR path, HMODULE result, DWORD error) {
     Record(name, result, 1, result != NULL, error);
 }
 
+static BOOL HostedDxgiEnabled(void);
+static HMODULE HostedDxgiAdapter(void);
+
 HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const DWORD previous = GetLastError();
     HMODULE result = LoadHostedXInput(name);
@@ -519,7 +522,19 @@ HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
     result = LoadLibraryW(companion ? staged : name);
-    const DWORD error = GetLastError();
+    DWORD error = GetLastError();
+    /* A console without the system compositor still serves hosted windows, which
+       only need the hosted DXGI adapter's DCompositionCreateDevice. */
+    if (!result && error == ERROR_MOD_NOT_FOUND && name &&
+            CompareStringOrdinal(name, -1, L"dcomp.dll", -1, TRUE) == CSTR_EQUAL && HostedDxgiEnabled()) {
+        /* The caller owns one reference, as with any successful LoadLibraryW. */
+        result = HostedDxgiAdapter() ? LoadPackagedLibrary(L"XboxWin32Dxgi.dll", 0) : NULL;
+        if (result) {
+            error = previous;
+            const char trace[] = "asset dcomp-library=hosted\r\n";
+            AppendTrace(trace, sizeof(trace) - 1);
+        }
+    }
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
@@ -663,12 +678,12 @@ static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, cons
     return result;
 }
 
-static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
+static BOOL HostedDxgiEnabled(void) {
     WCHAR enabled[2];
-    if (!(SameName(name, "CreateDXGIFactory2") || SameName(name, "CreateDXGIFactory1") ||
-            SameName(name, "CreateDXGIFactory")) || module != GetModuleHandleW(L"dxgi.dll") ||
-            GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", enabled, ARRAYSIZE(enabled)) != 1 ||
-            enabled[0] != L'1') return NULL;
+    return GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_DXGI", enabled, ARRAYSIZE(enabled)) == 1 && enabled[0] == L'1';
+}
+
+static HMODULE HostedDxgiAdapter(void) {
     static PVOID volatile loaded;
     HMODULE adapter = (HMODULE)InterlockedCompareExchangePointer(&loaded, NULL, NULL);
     if (!adapter) {
@@ -680,7 +695,18 @@ static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
             adapter = existing;
         }
     }
-    return GetProcAddress(adapter, name);
+    return adapter;
+}
+
+/* Hosted windows are invisible to the system compositor, so their swap chains and
+   DirectComposition devices come from the hosted DXGI adapter. */
+static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
+    const BOOL factory = (SameName(name, "CreateDXGIFactory2") || SameName(name, "CreateDXGIFactory1") ||
+        SameName(name, "CreateDXGIFactory")) && module == GetModuleHandleW(L"dxgi.dll");
+    const BOOL composition = SameName(name, "DCompositionCreateDevice") && module == GetModuleHandleW(L"dcomp.dll");
+    if (!(factory || composition) || !HostedDxgiEnabled()) return NULL;
+    const HMODULE adapter = HostedDxgiAdapter();
+    return adapter ? GetProcAddress(adapter, name) : NULL;
 }
 
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
@@ -701,11 +727,13 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 module == GetModuleHandleW(L"d3d12.dll")) {
             const PVOID first = InterlockedCompareExchangePointer(&d3d12CreateDevice, (PVOID)result, NULL);
             if (!first || first == (PVOID)result) result = (FARPROC)(PVOID)TraceD3D12CreateDevice;
-        } else if (name[0] == 'C') {
+        } else if (name[0] == 'C' || name[0] == 'D') {
             const FARPROC hosted = HostedDxgiFactory(module, name);
             if (hosted) {
-                const char trace[] = "asset dxgi-factory=hosted\r\n";
-                AppendTrace(trace, sizeof(trace) - 1);
+                const char factoryTrace[] = "asset dxgi-factory=hosted\r\n";
+                const char compositionTrace[] = "asset dcomp-device=hosted\r\n";
+                if (name[0] == 'C') AppendTrace(factoryTrace, sizeof(factoryTrace) - 1);
+                else AppendTrace(compositionTrace, sizeof(compositionTrace) - 1);
                 result = hosted;
             }
         } else if (name[0] == 'S') {

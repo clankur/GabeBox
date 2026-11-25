@@ -1,0 +1,1 @@
+data_sts2_windows_x86_64/steam_api64.dll

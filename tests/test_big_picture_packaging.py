@@ -357,7 +357,7 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "XboxWin32Window.dll").read_bytes(), b"runtime fixture")
         adapted = "10929685\nGame.exe\nopengl3\ngodot\n\n\n\naccessibility=disabled\n"
         (profile / marker).write_text(adapted)
-        with self.assertRaisesRegex(ValueError, "matching hosted OpenGL profile"):
+        with self.assertRaisesRegex(ValueError, "matching hosted Godot profile"):
             stage_trials(self.layout, [f"1145360={profile}"], template)
         (self.layout / "steam-sdl-surfaceless-1145360.txt").write_text("10929685")
         stage_trials(self.layout, [f"1145360={profile}"], template)
@@ -524,6 +524,48 @@ class BigPicturePackageTests(unittest.TestCase):
                                  "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"), b"old")
         with self.assertRaisesRegex(ValueError, "hosted XInput support"):
             stage_trials(self.layout, [f"{app}={profile}"], without_xinput)
+
+    def test_win32_godot_direct3d12_profile_requires_hosted_composition(self):
+        self.layout.mkdir()
+        app, build = "2868840", "26655341"
+        profile = self.work / "godot-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nd3d12\ngodot\n\n\n\naccessibility=disabled\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-files-{app}.txt").write_text("data_sts2_windows_x86_64/steam_api64.dll\n")
+        (profile / f"steam-win32-steam-sdk-{app}.txt").write_text("data_sts2_windows_x86_64/steam_api64.dll\n")
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+
+        def runtime(dxgi, loader):
+            template = self.work / f"godot-runtime-{len(list(self.work.glob('godot-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", b"native fixture")
+                archive.writestr("XboxWin32Dxgi.dll", dxgi)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Window.dll",
+                             "XboxWin32Desktop.dll", "XboxWin32SteamDiscovery.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        complete = runtime(b"DCompositionCreateDevice", "dcomp.dll".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "accessibility option needs a matching hosted Godot profile"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        (profile / f"steam-win32-dxgi-{app}.txt").touch()
+        with self.assertRaisesRegex(ValueError, "loader trace for its dynamic graphics imports"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nd3d12\ngodot\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "hosted DirectComposition"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(b"old", b"old"))
+        stage_trials(self.layout, [f"{app}={profile}"], complete)
+        self.assertEqual((self.layout / f"steam-win32-dxgi-{app}.txt").read_bytes(), b"")
+        self.assertEqual((self.layout / f"steam-win32-steam-sdk-{app}.txt").read_bytes(),
+                         b"data_sts2_windows_x86_64/steam_api64.dll")
+        for name in ("XboxWin32Dxgi.dll", "XboxWin32Window.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll"):
+            self.assertTrue((self.layout / name).is_file(), name)
 
     def test_win32_source_profile_requires_verifier_and_stages_only_fingerprints(self):
         self.layout.mkdir()

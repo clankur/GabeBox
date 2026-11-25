@@ -118,6 +118,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     desktop_dxgi = False
     desktop_documents = False
     unity_direct3d = False
+    godot_direct3d = False
     local_low = False
     hosted_xinput = False
     player_prefs = False
@@ -149,11 +150,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 or (len(fields) >= 6 and len(fields[5]) > 260)
                 or (len(fields) >= 7 and fields[6] not in ("", "loader-trace"))):
             raise ValueError(f"Invalid Win32 trial profile for AppID {app}.")
+        # Godot's Direct3D 12 driver presents through the hosted DXGI and composition adapter.
+        godot_dxgi = fields[2:4] == ["d3d12", "godot"] and (root / f"steam-win32-dxgi-{app}.txt").is_file()
+        godot_hosted = fields[2:4] == ["opengl3", "godot"] or godot_dxgi
         if len(fields) == 8:
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
-            if (fields[7] != "accessibility=disabled" or fields[2:4] != ["opengl3", "godot"]
+            if (fields[7] != "accessibility=disabled" or not godot_hosted
                     or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
-                raise ValueError(f"The accessibility option needs a matching hosted OpenGL profile for AppID {app}.")
+                raise ValueError(f"The accessibility option needs a matching hosted Godot profile for AppID {app}.")
         source_profile = files.get(source_name)
         if source_profile is not None and fields[0] not in json.loads(source_profile):
             raise ValueError(f"The Win32 source profile does not include the trial build for AppID {app}.")
@@ -204,10 +208,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         has_dxgi = (root / dxgi_marker).is_file()
         unity_dxgi = fields[2:4] == ["d3d11", "unity"]
         if has_dxgi:
-            if (root / dxgi_marker).stat().st_size or (any(fields[2:4]) and not unity_dxgi):
-                raise ValueError(f"The DXGI marker requires the game's default native renderer or Unity Direct3D 11 for AppID {app}.")
+            if (root / dxgi_marker).stat().st_size or (any(fields[2:4]) and not unity_dxgi and not godot_dxgi):
+                raise ValueError(f"The DXGI marker requires the game's default native renderer, Unity Direct3D 11 "
+                                 f"or Godot Direct3D 12 for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
+            if godot_dxgi and fields[6:7] != ["loader-trace"]:
+                raise ValueError(f"Godot Direct3D 12 needs the loader trace for its dynamic graphics imports for AppID {app}.")
+            godot_direct3d |= godot_dxgi
         elif unity_dxgi:
             raise ValueError(f"Unity Direct3D 11 requires the DXGI marker for AppID {app}.")
         graphics_adapter = has_dxgi or fields[2:3] == ["opengl3"]
@@ -291,8 +299,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             legacy_steam_sdk = True
         sdk_relative = None
         if sdk_profile.is_file():
-            if sdk_profile.stat().st_size > 512 or fields[2:4] != ["opengl3", "godot"] or not companions.is_file():
-                raise ValueError(f"The Steam SDK option needs a staged OpenGL profile for AppID {app}.")
+            if sdk_profile.stat().st_size > 512 or not godot_hosted or not companions.is_file():
+                raise ValueError(f"The Steam SDK option needs a staged hosted Godot profile for AppID {app}.")
             sdk_relative = sdk_profile.read_text(encoding="ascii").rstrip("\r\n")
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
             if (not re.fullmatch(r"(?:[A-Za-z0-9._ -]+/)*steam_api64\.dll", sdk_relative)
@@ -393,6 +401,9 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             raise ValueError("Use a Steam Core artifact with profile Documents support.")
     if unity_direct3d and " -force-d3d11".encode("utf-16le") not in native:
         raise ValueError("Use a Steam Core artifact with the Unity Direct3D 11 launch path.")
+    if godot_direct3d and (b"DCompositionCreateDevice" not in files["XboxWin32Dxgi.dll"]
+                           or "dcomp.dll".encode("utf-16le") not in files["XboxWin32LoaderTrace.dll"]):
+        raise ValueError("Use a Steam Core artifact with hosted DirectComposition for Godot Direct3D 12.")
     if local_low:
         variable = "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Desktop.dll"]:
