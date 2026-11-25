@@ -14,30 +14,31 @@ Tested on Xbox Series X, OS `26100.9673`, with SteamCore `1.0.232.680` and the b
 - The run saved locally (`current_run.save`, 39,829 bytes). Steam Cloud writes failed (see open items).
 - Screenshot SHA-256: character select `9bee081a…`, map `aad8385b…`, combat `4476f604…`, settled combat `412097e8…`.
 
-A settled 30-second combat window starting `2026-11-25T08:56:02Z` passed `python3 -m tools.measure --require-gpu-60 --internal-resolution 1920x1080 --output-resolution 1920x1080` (`gpu_60fps: true`, trace SHA-256 `df87b242…`). The scene showed the combat idling between turns with ambient animation:
+An active 30-second combat window from `2026-11-25T08:51:55Z` to `08:52:25Z` passed `python3 -m tools.measure --require-gpu-60 --internal-resolution 1920x1080 --output-resolution 1920x1080` (`gpu_60fps: true`). During that window cards were played, the turn ended and HP changed. No screenshot was taken inside it. The trace's SHA-256 is `df87b242…`. An independent verifier reproduced these numbers from the raw trace:
 
-| Frames | Average | Lowest rolling second | p99 | Worst | > 33 ms | Transport |
+| Window | Frames | Average | Lowest rolling second | Worst | > 33 ms | Transport |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1,799 | **59.967 FPS** | **59** | 16.888 ms | 17.246 ms | 0 | 1,799 shared GPU textures, 0 CPU uploads, hardware adapter verified |
+| Active combat, `08:51:55Z` | 1,799 | **59.967 FPS** | **59** | 17.15 ms | 0 | 1,799 shared GPU textures, 0 CPU uploads, hardware adapter verified |
+| Idle combat, `08:56:02Z` | 1,799 | 59.967 FPS | 59 | 17.25 ms | 0 | same |
 
-The active-play windows recorded before that sample were:
+Windows that overlap first-use content miss the lowest-second rule:
 
-| Window start (UTC) | Average | Lowest rolling second | Largest gap | Cause |
-| --- | --- | --- | --- | --- |
-| `08:51:25` | 57.53 FPS | 29 | 517 ms | first card play and first enemy attack |
-| `08:52:58` | 59.63 FPS | 50 | 134 ms | new enemy move |
-| `08:54:23` | 59.53 FPS | 51 | 150 ms | first `strength_power` icon load |
+| Window start (UTC) | Average | Lowest rolling second | Game-side stalls |
+| --- | --- | --- | --- |
+| `08:51:25` | 57.53 FPS | 29 | 50 + 117 ms at the first card play |
+| `08:52:58` | 59.63 FPS | 50 | 134 + 50 ms at a new enemy move |
+| `08:54:23` | 59.53 FPS | 51 | 150 ms at the first `strength_power` icon load |
 
-The log recorded each new asset as `Asset not cached`. Every gap advanced the producer by one frame, so the game itself paused while loading. Steady-state p99 was 16.9 ms in all windows. The game caps itself at 60 FPS (`fps_limit: 60`).
+The log reported each new asset as `Asset not cached`. Every one of these gaps advanced the producer by a single frame, so the game was loading, not the presenter dropping frames. Thirteen further stalls of 500–567 ms all fall within 0.5 s of a Device Portal `/ext/screenshot` capture, so do not take screenshots inside a measured window. Internal resolution is the game's 1920 × 1080 fullscreen window as logged. Godot does not log a render scale. The game caps itself at 60 FPS (`fps_limit: 60`).
 
 ### Remaining open items on this build
 
-- **Card art and character portraits render white.** Both appear in the screenshots as plain white panels. The card frames, text, UI and combat scene render correctly. The compressed atlas or the texture format path through Mesa's OpenGL driver is the first suspect.
-- **Steam Cloud writes fail.** `k_EResultIOFailure` comes back from `ISteamRemoteStorage`. The game keeps the local file. Cloud upload needs the Steam client's remote storage path on Xbox.
-- **Return to library through the overlay.** A View + Menu chord followed by Down + A closed the Big Picture webview and left the game running. Device Portal screenshots of the overlay return HTTP 500, so the overlay state was not observed. The Play → overlay → exit cycle is open for all titles, as the README records.
-- **Save and reload.** Local writes succeeded. Reloading the run after a restart has not been observed.
-- **Audio.** FMOD initialized and no audio errors were logged. Audible output has not been checked.
-- **Godot shader cache.** On this route the cache persists poorly, so the first use of each effect stalls for up to 0.5 s on every launch.
+- **Save and reload (blocker).** Every launch logs `Deleting profile1/saves/progress.save because it does not exist on remote`, and every Steam Cloud write fails with `k_EResultIOFailure`. The game treats Steam Cloud as authoritative, so local progress is deleted at the next launch. Cloud writes through the SDK handoff must work before save and reload can pass.
+- **Card art, character portraits and the main menu render white.** Card frames, text, the map, the combat scene and the character sprite render correctly. Leads are the compressed texture path or a card shader on Mesa's OpenGL driver, and the 13 `shader_gles3.cpp:800` shader-cache errors at startup.
+- **Return to library through the overlay.** A View + Menu chord followed by Down + A closed the Big Picture webview and left the game running. Overlay screenshots return HTTP 500. The Play → overlay → exit cycle is open for every title.
+- **Physical controller.** Input was verified with Device Portal remote input only. A physical pad uses the same hosted pad, but STS2 has not been played with one on `1.0.232.680`.
+- **Audio.** FMOD initialized and logged no errors. Audible output has not been checked.
+- **Review fixes since `1.0.232.680`** (commit `30c8249`). The axis settle period, and limiting the ignore-list and DirectInput changes to hosted-XInput titles, are built and unit-tested but have not run on the console. Recheck ULTRAKILL, Spider-Man and Hades after the shared input and environment changes.
 
 ## First failing operations, in order
 
