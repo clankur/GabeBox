@@ -33,6 +33,7 @@ typedef struct SdlGl {
     void *(*currentWindow)(void);
     void *(*procedure)(const char *);
     int (*swapInterval)(int);
+    int (*getSwapInterval)(void);
     void (*swapWindow)(void *);
     void (*pumpEvents)(void);
     int (*peepEvents)(SdlWindowEvent *, int, int, unsigned int, unsigned int);
@@ -76,6 +77,9 @@ static BOOL PackagePath(LPCWSTR variable, LPCWSTR library) {
 static void InitializeSteamworks(void) {
     if (steamChecked) return;
     steamChecked = TRUE;
+    WCHAR legacy[2];
+    if (GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_LEGACY", legacy, ARRAYSIZE(legacy)) == 1 &&
+            legacy[0] == L'1') return;
     if (GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_SDK", NULL, 0) <= 1) return;
     typedef DWORD (WINAPI *Initialize)(BOOL);
     HMODULE module = LoadPackagedLibrary(L"XboxWin32SteamDiscovery.dll", 0);
@@ -93,7 +97,10 @@ static void InitializeSteamworks(void) {
 static BOOL Initialize(void) {
     if (initialized) return TRUE;
     InitializeSteamworks();
-    HMODULE module = LoadLibraryExW(L"SDL2.dll", NULL, 0);
+    WCHAR hosted[2];
+    const BOOL packaged = GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_WGL", hosted, ARRAYSIZE(hosted)) == 1 &&
+        hosted[0] == L'1';
+    HMODULE module = packaged ? LoadPackagedLibrary(L"SDL2.dll", 0) : LoadLibraryExW(L"SDL2.dll", NULL, 0);
     if (!module) return FALSE;
 #define SDL_BIND(member, exportName) \
     sdl.member = (void *)GetProcAddress(module, "SDL_" exportName); \
@@ -115,6 +122,7 @@ static BOOL Initialize(void) {
     SDL_BIND(currentWindow, "GL_GetCurrentWindow");
     SDL_BIND(procedure, "GL_GetProcAddress");
     SDL_BIND(swapInterval, "GL_SetSwapInterval");
+    SDL_BIND(getSwapInterval, "GL_GetSwapInterval");
     SDL_BIND(swapWindow, "GL_SwapWindow");
     SDL_BIND(pumpEvents, "PumpEvents");
     SDL_BIND(peepEvents, "PeepEvents");
@@ -200,6 +208,38 @@ BOOL WINAPI XboxSetPixelFormat(HDC dc, int selection, const PIXELFORMATDESCRIPTO
     return TRUE;
 }
 
+int WINAPI XboxGetPixelFormat(HDC dc) {
+    const XboxWindow *window = XboxFindWindow((HWND)dc);
+    if (!window) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    return window->pixelFormat;
+}
+
+int WINAPI XboxDescribePixelFormat(HDC dc, int index, UINT bytes, PIXELFORMATDESCRIPTOR *out) {
+    if (!XboxFindWindow((HWND)dc)) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (!out) return 1;
+    if (index != 1 || bytes < sizeof(out->nSize)) {
+        SetLastError(ERROR_INVALID_PIXEL_FORMAT);
+        return 0;
+    }
+    const UINT count = bytes < sizeof(*out) ? bytes : sizeof(*out);
+    const PIXELFORMATDESCRIPTOR format = {
+        .nSize = (WORD)count, .nVersion = 1,
+        .dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+        .iPixelType = PFD_TYPE_RGBA, .cColorBits = 24,
+        .cRedBits = 8, .cGreenBits = 8, .cGreenShift = 8,
+        .cBlueBits = 8, .cBlueShift = 16, .cAlphaBits = 8, .cAlphaShift = 24,
+        .cDepthBits = 24, .cStencilBits = 8, .iLayerType = PFD_MAIN_PLANE,
+    };
+    for (UINT i = 0; i < count; ++i) ((BYTE *)out)[i] = ((const BYTE *)&format)[i];
+    return 1;
+}
+
 static HGLRC CreateContext(HDC dc, int major, int minor, int profile, int flags) {
     XboxWindow *window = XboxFindWindow((HWND)dc);
     if (!window) return NULL;
@@ -221,8 +261,9 @@ static HGLRC CreateContext(HDC dc, int major, int minor, int profile, int flags)
     void *oldWindow = sdl.currentWindow();
     void *oldContext = sdl.currentContext();
     sdl.resetAttributes();
-    /* SDL_GL_DEPTH_SIZE/STENCIL_SIZE/DOUBLEBUFFER and context version/profile. */
-    if (sdl.setAttribute(6, 24) || sdl.setAttribute(7, 8) || sdl.setAttribute(5, 1) ||
+    /* SDL_GL_RED_SIZE through SDL_GL_ALPHA_SIZE match the hosted RGBA format. */
+    if (sdl.setAttribute(0, 8) || sdl.setAttribute(1, 8) || sdl.setAttribute(2, 8) || sdl.setAttribute(3, 8) ||
+            sdl.setAttribute(6, 24) || sdl.setAttribute(7, 8) || sdl.setAttribute(5, 1) ||
             sdl.setAttribute(17, major) || sdl.setAttribute(18, minor) ||
             sdl.setAttribute(20, flags) || sdl.setAttribute(21, profile)) {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -363,6 +404,10 @@ static BOOL WINAPI SwapInterval(int interval) {
     return XboxWindowThread() && CurrentContext() && sdl.swapInterval(interval) == 0;
 }
 
+static int WINAPI GetSwapInterval(void) {
+    return XboxWindowThread() && CurrentContext() ? sdl.getSwapInterval() : 0;
+}
+
 static const char wglExtensions[] = "WGL_ARB_extensions_string WGL_EXT_extensions_string "
     "WGL_ARB_create_context WGL_ARB_create_context_profile WGL_EXT_swap_control";
 
@@ -386,6 +431,7 @@ PROC WINAPI XboxWglGetProcAddress(LPCSTR name) {
     if (Equals(name, "wglGetExtensionsStringARB")) return (PROC)(void *)ExtensionStringARB;
     if (Equals(name, "wglGetExtensionsStringEXT")) return (PROC)(void *)ExtensionStringEXT;
     if (Equals(name, "wglSwapIntervalEXT")) return (PROC)(void *)SwapInterval;
+    if (Equals(name, "wglGetSwapIntervalEXT")) return (PROC)(void *)GetSwapInterval;
     if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l') return NULL;
     return (PROC)sdl.procedure(name);
 }

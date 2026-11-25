@@ -1,6 +1,7 @@
 // Input for the native CoreWindow on its dispatcher thread. The wire formats
 // match SteamSdlSurface and the WWA player. No captures or polling survive End.
 #include "hosted-input.h"
+#include "hosted-rumble.h"
 #include <roapi.h>
 #include <winstring.h>
 #include <stdint.h>
@@ -18,9 +19,11 @@ enum WindowMethod {
     KeyDown = 34,
     KeyUp = 36,
     CaptureLost = 38,
+    PointerExited = 42,
     PointerMoved = 44,
     PointerPressed = 46,
     PointerReleased = 48,
+    PointerWheelChanged = 52,
     VisibilityChanged = 56
 };
 template <class... Args> HRESULT method(IUnknown *obj, unsigned slot, Args... args) {
@@ -57,6 +60,7 @@ struct Reading {
 };
 static_assert(sizeof(Reading) == 64 && sizeof(KeyStatus) == 12, "WinRT input ABI");
 SdlHostMailbox *mail;
+HostedRumble rumble;
 IUnknown *window, *pads;
 enum OverlayState { Playing, Requested, Reported };
 OverlayState overlay;
@@ -68,12 +72,13 @@ DWORD lastTime;
 UINT highSurrogate;
 LONG mouse, legacyKeys;
 constexpr UINT pointerEdgeCount = 32;
-constexpr LONG pointerPressed = 1 << 24;
+struct PointerUpdate { LONG position, wheel; };
 LONG wantedPointer, wantedKeys, pendingPointerSerial;
-LONG pointerEdges[pointerEdgeCount];
+PointerUpdate pointerEdges[pointerEdgeCount];
 UINT pointerEdgeRead, pointerEdgeSize;
 double cursorX, cursorY;
-bool physicalClick, padClick, freshPointer;
+LONG physicalButtons;
+bool padClick, freshPointer, physicalPointer, routedPointer;
 LONG heldVirtual[256];
 SdlHostGamepadState previousPad;
 bool sentPad;
@@ -93,12 +98,12 @@ void setPad(SdlHostGamepadState const &pad) {
     previousPad = pad;
     sentPad = true;
 }
-LONG pointer(LONG pos, LONG keys) {
-    if (!alive() || (pos == mouse && keys == legacyKeys))
+LONG pointer(LONG pos, LONG keys, LONG wheel = 0) {
+    if (!alive() || (!wheel && pos == mouse && keys == legacyKeys))
         return 0;
     InterlockedIncrement(&mail->input_serial);
     InterlockedExchange(&mail->input_pointer, pos);
-    InterlockedExchange(&mail->input_keys, keys);
+    InterlockedExchange(&mail->input_keys, keys | wheel);
     const LONG serial = InterlockedIncrement(&mail->input_serial);
     mouse = pos;
     legacyKeys = keys;
@@ -108,7 +113,8 @@ void publishPanelPointer() {
     if (!alive() || (pendingPointerSerial && SdlHostLoad(&mail->input_ack) != pendingPointerSerial)) return;
     pendingPointerSerial = 0;
     if (pointerEdgeSize) {
-        pendingPointerSerial = pointer(pointerEdges[pointerEdgeRead], wantedKeys);
+        const auto update = pointerEdges[pointerEdgeRead];
+        pendingPointerSerial = pointer(update.position, wantedKeys, update.wheel);
         pointerEdgeRead = (pointerEdgeRead + 1) % pointerEdgeCount;
         --pointerEdgeSize;
     } else {
@@ -116,6 +122,7 @@ void publishPanelPointer() {
     }
 }
 void neutral() {
+    rumble.StopBeforeSuspend();
     const auto idle = SdlHostIdleGamepad(alive() ? SdlHostLoad(&mail->gamepad.buttons) : 0);
     if (nativePad)
         setPad(idle);
@@ -137,7 +144,8 @@ void neutral() {
         key = 0;
     highSurrogate = 0;
     padClick = false;
-    physicalClick = false;
+    physicalButtons = 0;
+    physicalPointer = false;
     blockChord = true;
     chordPending = false;
 }
@@ -271,10 +279,11 @@ UINT scanFor(UINT vk, KeyStatus s) {
     }
 }
 double clamp(double value, double lo, double hi) { return value < lo ? lo : value > hi ? hi : value; }
-void sendPointer() {
+void sendPointer(LONG wheel = 0) {
     LONG pos = (LONG)(clamp(cursorX, 0, 1) * 4095 + .5) | ((LONG)(clamp(cursorY, 0, 1) * 4095 + .5) << 12);
-    if (physicalClick || padClick || (!keyboard() && heldVirtual[VK_RETURN]))
-        pos |= 1 << 24;
+    pos |= physicalButtons;
+    if (padClick || (!keyboard() && heldVirtual[VK_RETURN])) pos |= SDL_HOST_POINTER_LEFT;
+    if (nativePad && physicalPointer) pos |= SDL_HOST_POINTER_VISIBLE;
     LONG keys = 0;
     if (!keyboard()) {
         if (heldVirtual[VK_ESCAPE])
@@ -285,30 +294,40 @@ void sendPointer() {
     if (!nativePad && (previousPad.buttons & 2))
         keys |= 32;
     if (!menuOnRelease) {
-        pointer(pos, keys);
+        pointer(pos, keys, wheel);
         return;
     }
-    if ((pos ^ wantedPointer) & pointerPressed) {
+    if (wheel || ((pos ^ wantedPointer) & SDL_HOST_POINTER_BUTTONS)) {
         if (pointerEdgeSize == pointerEdgeCount) --pointerEdgeSize;
-        pointerEdges[(pointerEdgeRead + pointerEdgeSize) % pointerEdgeCount] = pos;
+        pointerEdges[(pointerEdgeRead + pointerEdgeSize) % pointerEdgeCount] = {pos, wheel};
         ++pointerEdgeSize;
     }
     wantedPointer = pos;
     wantedKeys = keys;
     publishPanelPointer();
 }
-void mouseEvent(IUnknown *args) {
+void mouseEvent(IUnknown *args, bool scrolling) {
     IUnknown *point = nullptr, *props = nullptr;
     Point pos = {};
     Rect bounds = {};
-    BYTE left = 0;
     if (FAILED(method(args, 6, &point)) || !point)
         return;
     HRESULT hr = method(point, 7, &pos);
     if (SUCCEEDED(hr))
         hr = method(point, 13, &props);
-    if (SUCCEEDED(hr) && props)
-        hr = method(props, 16, &left);
+    LONG buttons = 0, delta = 0;
+    BYTE horizontal = 0;
+    if (SUCCEEDED(hr) && props) {
+        constexpr struct { unsigned property; LONG button; } properties[] = {
+            {16, SDL_HOST_POINTER_LEFT}, {17, SDL_HOST_POINTER_RIGHT}, {18, SDL_HOST_POINTER_MIDDLE},
+            {25, SDL_HOST_POINTER_X1}, {26, SDL_HOST_POINTER_X2}};
+        for (const auto &property : properties) {
+            BYTE pressed = 0;
+            if (SUCCEEDED(method(props, property.property, &pressed)) && pressed) buttons |= property.button;
+        }
+        if (scrolling && FAILED(method(props, 19, &delta))) delta = 0;
+        if (delta && FAILED(method(props, 20, &horizontal))) horizontal = 0;
+    }
     if (props)
         props->Release();
     point->Release();
@@ -318,10 +337,8 @@ void mouseEvent(IUnknown *args) {
     if (scale <= 0)
         return;
     // PointerPoint.Position is relative to this view. Exclude letterbox bars.
-    cursorX = clamp((pos.x - (bounds.w - gameW * scale) * .5) / (gameW * scale), 0, 1);
-    cursorY = clamp((pos.y - (bounds.h - gameH * scale) * .5) / (gameH * scale), 0, 1);
-    physicalClick = left != 0;
-    sendPointer();
+    FhdHostedPointerUpdate((pos.x - (bounds.w - gameW * scale) * .5) / (gameW * scale),
+        (pos.y - (bounds.h - gameH * scale) * .5) / (gameH * scale), buttons, delta, horizontal);
 }
 void requestOverlay() {
     if (!overlay) {
@@ -358,13 +375,12 @@ void event(unsigned type, IUnknown *args) {
     }
     if (!foreground())
         return;
-    if (type == CaptureLost) {
-        physicalClick = false;
-        sendPointer();
+    if (type == CaptureLost || type == PointerExited) {
+        if (!routedPointer) FhdHostedPointerRelease(type == PointerExited);
         return;
     }
-    if (type == PointerMoved || type == PointerPressed || type == PointerReleased) {
-        mouseEvent(args);
+    if (type == PointerMoved || type == PointerPressed || type == PointerReleased || type == PointerWheelChanged) {
+        if (!routedPointer) mouseEvent(args, type == PointerWheelChanged);
         return;
     }
     UINT key = 0;
@@ -446,6 +462,8 @@ Handler handlers[] = {{&events, &handlerWindowActivatedEventArgs, Activated},
                       {&events, &handlerPointerEventArgs, PointerMoved},
                       {&events, &handlerPointerEventArgs, PointerPressed},
                       {&events, &handlerPointerEventArgs, PointerReleased},
+                      {&events, &handlerPointerEventArgs, PointerWheelChanged},
+                      {&events, &handlerPointerEventArgs, PointerExited},
                       {&events, &handlerPointerEventArgs, CaptureLost}};
 LONG axis(double value) {
     value = clamp(value, -1, 1); // JS Math.round uses floor(x + .5), including ties on negatives.
@@ -453,9 +471,9 @@ LONG axis(double value) {
     LONG result = (LONG)scaled;
     return scaled < result ? result - 1 : result;
 }
-bool readPad(Reading *out) {
+IUnknown *readPad(Reading *out) {
     if (!pads)
-        return false;
+        return nullptr;
     IUnknown *list = nullptr, *pad = nullptr;
     HRESULT hr = method(pads, 10, &list);
     UINT size = 0;
@@ -466,10 +484,13 @@ bool readPad(Reading *out) {
         list->Release();
     }
     if (!pad)
-        return false;
+        return nullptr;
     hr = method(pad, 8, out);
-    pad->Release();
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        pad->Release();
+        return nullptr;
+    }
+    return pad;
 }
 } // namespace
 extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
@@ -513,13 +534,35 @@ extern "C" void FhdPauseHostedInput() {
     if (mail && overlay != Reported) {
         neutral();
         overlay = Reported;
+    } else {
+        rumble.Stop();
     }
+}
+extern "C" void FhdStopHostedRumble() { rumble.Stop(); }
+extern "C" void FhdUseRoutedPointer() { routedPointer = true; }
+extern "C" void FhdHostedPointerUpdate(double x, double y, LONG buttons, LONG wheelDelta, BOOL horizontalWheel) {
+    if (!foreground()) return;
+    cursorX = clamp(x, 0, 1);
+    cursorY = clamp(y, 0, 1);
+    physicalButtons = buttons & SDL_HOST_POINTER_BUTTONS;
+    physicalPointer = true;
+    const auto delta = static_cast<SHORT>(clamp(wheelDelta, -32768, 32767));
+    LONG wheel = static_cast<LONG>(static_cast<UINT>(static_cast<USHORT>(delta)) << 16);
+    if (delta && horizontalWheel) wheel |= SDL_HOST_WHEEL_HORIZONTAL;
+    sendPointer(wheel);
+}
+extern "C" void FhdHostedPointerRelease(BOOL exited) {
+    if (!foreground()) return;
+    physicalButtons = 0;
+    if (exited) physicalPointer = false;
+    sendPointer();
 }
 extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
     menuOnRelease = enabled != FALSE;
 }
 extern "C" BOOL FhdHostedMenuHeld() { return chordPending; }
 extern "C" void FhdEndHostedInput() {
+    rumble.Attach(nullptr);
     if (window) {
         for (auto &h : handlers)
             if (h.registered) {
@@ -537,9 +580,10 @@ extern "C" void FhdEndHostedInput() {
     mail = nullptr;
     overlay = Playing;
     menuOnRelease = false;
+    routedPointer = false;
     sentPad = false;
 }
-extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
+extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, SdlRumbleMailbox *vibration, void *coreWindow) {
     FhdEndHostedInput();
     if (!box || !coreWindow || SdlHostLoad(&box->magic) != SDL_HOST_MAGIC)
         return E_INVALIDARG;
@@ -548,6 +592,7 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     if (FAILED(hr))
         return hr;
     mail = box;
+    rumble.Attach(vibration);
     focused = TRUE;
     BYTE shown = 1;
     method(window, Visible, &shown);
@@ -579,9 +624,14 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     return S_OK;
 }
 extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
-    if (!mail || box != mail || !coreWindow || !alive())
+    if (!mail || box != mail || !coreWindow)
         return 0;
+    if (!alive()) {
+        rumble.Stop();
+        return 0;
+    }
     if (overlay) {
+        rumble.Stop();
         if (overlay == Requested) {
             overlay = Reported;
             return 1;
@@ -590,11 +640,17 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
     }
     DWORD now = GetTickCount(), elapsed = now - lastTime;
     lastTime = now;
-    if (!foreground())
+    if (!foreground()) {
+        rumble.Stop();
         return 0;
+    }
     Reading reading = {};
     auto value = SdlHostIdleGamepad(0);
-    const bool connected = readPad(&reading);
+    IUnknown *pad = readPad(&reading);
+    const bool connected = pad != nullptr;
+    if (nativePad) rumble.Update(pad);
+    else rumble.Stop();
+    if (pad) pad->Release();
     if (connected) {
         const unsigned bits[] = {4, 8, 16, 32, 2, 0, 1, 4096, 8192, 1024, 2048, 64, 128, 256, 512};
         value.buttons = SDL_HOST_PAD_CONNECTED;

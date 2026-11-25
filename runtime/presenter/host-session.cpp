@@ -1,6 +1,8 @@
 #include "gpu-receiver.h"
 #include "frame-trace.h"
 #include "../shared/sdl-host-protocol.h"
+#include "../shared/sdl-rumble-mailbox.h"
+#include "hosted-input.h"
 #include <dxgi1_2.h>
 #include <appmodel.h>
 #include <winstring.h>
@@ -13,17 +15,10 @@ extern "C" HRESULT FhdLocalPath(WCHAR *,DWORD);
 extern "C" int FhdWindowVisible(void *);
 extern "C" LONG FhdReadActivation(void *);
 extern "C" HRESULT FhdRequestReturn();
-#ifdef FHD_NATIVE_INPUT
-extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *,void *);
-extern "C" void FhdSetHostedInputProfile(BOOL,UINT,UINT);
-extern "C" BOOL FhdHostedInputForeground();
-extern "C" int FhdPollHostedInput(SdlHostMailbox *,void *);
-extern "C" void FhdResumeHostedInput();
-extern "C" void FhdEndHostedInput();
-#endif
 namespace {
 SRWLOCK stateLock=SRWLOCK_INIT;
 SdlHostMailbox *box;
+SdlRumbleMailbox *rumbleBox;
 HANDLE baseFile=INVALID_HANDLE_VALUE, child;
 alignas(HostedGpuReceiver) BYTE receiverStorage[sizeof(HostedGpuReceiver)];
 HostedGpuReceiver *receiver;
@@ -43,7 +38,8 @@ volatile LONG sharedMode=0, nativePad=1;
 volatile LONG pointerSample=-1, pointerSerial, pointerAck, pointerEvents, pointerForeground;
 void samplePointer() {
 #ifdef FHD_NATIVE_INPUT
-    pointerSample=nativePad || !box ? -1 : SdlHostLoad(&box->input_pointer);
+    const LONG point = box ? SdlHostLoad(&box->input_pointer) : -1;
+    pointerSample = point >= 0 && (!nativePad || (point & SDL_HOST_POINTER_VISIBLE)) ? point : -1;
     if (pointerSample >= 0) {
         pointerSerial=SdlHostLoad(&box->input_serial);
         pointerAck=SdlHostLoad(&box->input_ack);
@@ -71,6 +67,7 @@ void report(Text &t) {
 }
 void releaseBase() {
     if (receiver) {receiver->~HostedGpuReceiver();receiver=nullptr;}
+    if (rumbleBox) {UnmapViewOfFile(rumbleBox);rumbleBox=nullptr;}
     if (box) {UnmapViewOfFile(box);box=nullptr;}
     if (baseFile!=INVALID_HANDLE_VALUE){CloseHandle(baseFile);baseFile=INVALID_HANDLE_VALUE;}
     if (child){CloseHandle(child);child=nullptr;}
@@ -95,6 +92,7 @@ HRESULT attach(const WCHAR *path,bool create) {
     receiver=new(receiverStorage) HostedGpuReceiver;
     HRESULT hr=receiver->Open(path);
     if (FAILED(hr)) {releaseBase();return hr;}
+    if (!create) rumbleBox=OpenSdlRumbleMailbox(path);
     stop=overlay=submitted=sharedCount=cpuCount=width=height=visible=activation=gpuError=hardError=sharedMode=0;
     pointerSample=-1;
     gpuStage="waiting-for-producer";sampleUs=sampleFrames=0;
@@ -103,7 +101,8 @@ HRESULT attach(const WCHAR *path,bool create) {
 LONG mediaToken;
 HRESULT drawMailbox(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,
                     bool nativeGamepad, UINT64 &sequence, bool &gpu) {
-    const LONG pointer = nativeGamepad ? -1 : SdlHostLoad(&box->input_pointer);
+    const LONG point = SdlHostLoad(&box->input_pointer);
+    const LONG pointer = !nativeGamepad || (point & SDL_HOST_POINTER_VISIBLE) ? point : -1;
     HRESULT hr = receiver->Draw(device, ctx, target, 1920, 1080, sequence, pointer);
     gpuStage = receiver->Stage();
     gpu = hr == S_OK;
@@ -150,9 +149,10 @@ extern "C" void FhdReleaseMedia(LONG token) {
     }
     ReleaseSRWLockExclusive(&stateLock);
 }
-extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG token) {
+extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG token, SdlRumbleMailbox **rumble) {
     AcquireSRWLockShared(&stateLock);
     auto mailbox = token && mediaToken == token ? box : nullptr;
+    *rumble = mailbox ? rumbleBox : nullptr;
     ReleaseSRWLockShared(&stateLock);
     return mailbox;
 }
@@ -249,7 +249,7 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
     trace.open();
 #ifdef FHD_NATIVE_INPUT
     bool inputPaused=false;
-    if(SUCCEEDED(hr))hr=FhdBeginHostedInput(box,window);
+    if(SUCCEEDED(hr))hr=FhdBeginHostedInput(box,rumbleBox,window);
 #endif
     while(SUCCEEDED(hr)&&!InterlockedCompareExchange(&stop,0,0)&&!SdlHostLoad(&box->quit)) {
         hr=pump(dispatcher);if(FAILED(hr))break;
@@ -261,7 +261,13 @@ extern "C" HRESULT FhdHostedLoop(LONG token,void *window,void *dispatcher,HRESUL
             else FhdResumeHostedInput();
         }
 #endif
-        if (overlay) {if (wait) WaitForSingleObjectEx(wait,15,FALSE);continue;}
+        if (overlay) {
+#ifdef FHD_NATIVE_INPUT
+            FhdStopHostedRumble();
+#endif
+            if (wait) WaitForSingleObjectEx(wait,15,FALSE);
+            continue;
+        }
         UINT64 seq = 0;
         bool gpu = false;
         hr = drawMailbox(device,ctx,target,nativePad != 0,seq,gpu);

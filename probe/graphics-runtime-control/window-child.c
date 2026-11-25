@@ -123,23 +123,57 @@ static unsigned int TryGraphics(void) {
     HDC dc = GetDC(window);
     const PIXELFORMATDESCRIPTOR format = {sizeof(format), 1, PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER,
         PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 24, 8, 0, PFD_MAIN_PLANE, 0, 0, 0, 0};
+#ifdef PROBE_WGL_LOADER
+    if (!SetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_WGL", L"1")) return 0x6e1b;
+    PIXELFORMATDESCRIPTOR described;
+    if (!dc || GetPixelFormat(dc) || DescribePixelFormat(dc, 0, 0, NULL) != 1 ||
+            DescribePixelFormat(dc, 1, sizeof(described), &described) != 1 ||
+            described.nSize != sizeof(described) || described.cColorBits != 24 || described.cAlphaBits != 8 ||
+            (described.dwFlags & format.dwFlags) != format.dwFlags) return 0x6e1c;
+#endif
     int index = dc ? ChoosePixelFormat(dc, &format) : 0;
     if (!index || !SetPixelFormat(dc, index, &format)) return 0x6e050000u | (GetLastError() & 0xffffu);
+#ifdef PROBE_WGL_LOADER
+    if (GetPixelFormat(dc) != index) return 0x6e1d;
+    HMODULE gl = LoadLibraryW(L"OPENGL32.DLL");
+#else
     HMODULE gl = LoadLibraryW(L"opengl32.dll");
+#endif
     if (!gl) return 0x6e060000u | (GetLastError() & 0xffffu);
     Create create = (Create)(void *)GetProcAddress(gl, "wglCreateContext");
     MakeCurrent makeCurrent = (MakeCurrent)(void *)GetProcAddress(gl, "wglMakeCurrent");
     Delete destroy = (Delete)(void *)GetProcAddress(gl, "wglDeleteContext");
     Resolve resolve = (Resolve)(void *)GetProcAddress(gl, "wglGetProcAddress");
     if (!create || !makeCurrent || !destroy || !resolve) return 0x6e07;
+#ifdef PROBE_WGL_LOADER
+    HMODULE implementation = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)(void *)resolve, &implementation) ||
+            implementation != GetModuleHandleW(L"XboxWin32Window.dll")) return 0x6e1e;
+    if (GetProcAddress(gl, "wglShareLists") || GetLastError() != ERROR_PROC_NOT_FOUND) return 0x6e20;
+#endif
     HGLRC legacy = create(dc);
     if (!legacy || !makeCurrent(dc, legacy)) return 0x6e080000u | (GetLastError() & 0xffffu);
     CreateAttributes createAttributes = (CreateAttributes)(void *)resolve("wglCreateContextAttribsARB");
     if (!createAttributes) return 0x6e09;
+#ifdef PROBE_WGL_LOADER
+    const int attributes[] = {0x2091, 3, 0x2092, 3, 0x9126, 1, 0};
+#else
     const int attributes[] = {0x2091, 3, 0x2092, 3, 0x9126, 1, 0x2094, 2, 0};
+#endif
     HGLRC modern = createAttributes(dc, NULL, attributes);
     if (!modern || !makeCurrent(NULL, NULL) || !destroy(legacy) || !makeCurrent(dc, modern))
         return 0x6e0a0000u | (GetLastError() & 0xffffu);
+#ifdef PROBE_WGL_LOADER
+    typedef void (WINAPI *GetInteger)(GLenum, GLint *);
+    GetInteger query = (GetInteger)(void *)resolve("glGetIntegerv");
+    GLint major = 0, minor = 0, profile = 0;
+    if (!query) return 0x6e1f;
+    query(0x821b, &major); /* GL_MAJOR_VERSION */
+    query(0x821c, &minor); /* GL_MINOR_VERSION */
+    query(0x9126, &profile); /* GL_CONTEXT_PROFILE_MASK */
+    if ((major < 3 || (major == 3 && minor < 3)) || !(profile & 1)) return 0x6e1f;
+#endif
     if (!resolve("glBindFramebuffer") || !SetWindowPos(window, NULL, 0, 0, 80, 48, SWP_NOMOVE | SWP_NOZORDER) ||
             lifecycle != 7) return 0x6e0b;
 

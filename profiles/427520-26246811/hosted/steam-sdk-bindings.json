@@ -1,0 +1,6 @@
+{
+  "steam_api64.dll": {
+    "SteamAPI_RestartAppIfNecessary": "XboxWin32SteamDiscovery.dll",
+    "SteamInternal_SteamAPI_Init": "XboxWin32SteamDiscovery.dll"
+  }
+}

@@ -5,15 +5,15 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(require.resolve("../ui/signin/steam-sdl-native-view.js"), "utf8");
 
-test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
+test("the XAML game panel measures visible swaps and waits for foreground before sending text", async () => {
     const calls = [], samples = [], first = [], menus = [];
     let now = 0, swaps = 0, callbacks = 2, empty = 1, busy = 0, generated = 1, tick, visible = true, finishClose;
-    let nativeInput = false, menuRequests = 0, failReveal = false;
+    let nativeInput = false, menuRequests = 0, failReveal = false, foregroundAllowed = true;
     const drain = () => new Promise(resolve => setImmediate(resolve));
     const host = {
         async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
         async setPanelVisible(value) {
-            visible = value;
+            visible = value && foregroundAllowed;
             calls.push(["visible", value]);
             if (value && failReveal) throw new Error("Visibility did not settle");
         },
@@ -64,11 +64,27 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     assert.match(samples[0][2], /sample_source_empty_callbacks=12\r\n/);
     assert.match(samples[0][2], /sample_present_busy_callbacks=8\r\n/);
     assert.match(samples[0][2], /sample_gpu_sequence=1794\r\n/);
+    await game.cover();
+    foregroundAllowed = false;
+    let sentWhileHidden = false;
+    const textReady = game.resumeForText().then(value => { sentWhileHidden = value; return value; });
+    await drain();
+    tick();
+    assert.equal(sentWhileHidden, false);
+    visible = foregroundAllowed = true;
+    tick();
+    assert.equal(await textReady, true);
+    await game.cover();
+    foregroundAllowed = false;
+    const canceled = game.resumeForText();
+    await drain();
     const stopped = game.close(); assert.equal(game.close(), stopped);
+    assert.equal(await canceled, false);
     const next = open(3);
     await drain();
-    assert.deepEqual(calls, [["open", "local\\sdl-host-1-2.bin", false], ["visible", false],
-        ["visible", true], ["visible", false], ["visible", true], ["close"]]);
+    assert.deepEqual(calls, [["open", "local\\sdl-host-1-2.bin", false], ["visible", false], ["visible", true],
+        ["visible", false], ["visible", true], ["visible", false], ["visible", true], ["visible", false],
+        ["visible", true], ["close"]]);
     finishClose(); await stopped; await drain();
     assert.deepEqual(calls.at(-1), ["open", "local\\sdl-host-3-2.bin", false]);
     assert.equal(await game.resume(1), false);

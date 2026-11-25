@@ -158,6 +158,43 @@ class PeImage:
         self.locate(rva, end - offset + 1)
         return self.image[offset:end].decode("ascii")
 
+    def named_exports(self):
+        address, size = struct.unpack_from("<II", self.image, self.directory(0))
+        if not address and not size:
+            return set()
+        image_size = self.word(self.optional + 56)
+        if not address or size < 40 or address + size > image_size:
+            raise ValueError("Invalid PE export directory.")
+        directory = self.locate(address, size)
+        functions_count, names_count, functions, names, ordinals = struct.unpack_from("<5I", self.image, directory + 20)
+        if not names_count:
+            return set()
+        functions = self.locate(functions, functions_count * 4)
+        names = self.locate(names, names_count * 4)
+        ordinals = self.locate(ordinals, names_count * 2)
+        exports = set()
+        previous = ""
+        for index in range(names_count):
+            ordinal = self.short(ordinals + index * 2)
+            if ordinal >= functions_count:
+                raise ValueError("Invalid PE named export ordinal.")
+            target = self.word(functions + ordinal * 4)
+            if address <= target < address + size:
+                forwarder = self.string(target)
+                module, _, symbol = forwarder.rpartition(".")
+                if (len(forwarder) + 1 > address + size - target or not SYMBOL.fullmatch(module)
+                        or not SYMBOL.fullmatch(symbol) or (symbol.startswith("#") and not symbol[1:].isdigit())):
+                    raise ValueError("Invalid PE export forwarder.")
+            elif not 0 < target < image_size or not any(start <= target < start + max(virtual_size, raw_size)
+                                                        for virtual_size, start, raw_size, _ in self.sections):
+                raise ValueError("Invalid PE named export target.")
+            name = self.string(self.word(names + index * 4))
+            if name <= previous:
+                raise ValueError("Invalid PE export name ordering.")
+            exports.add(name)
+            previous = name
+        return exports
+
     def import_descriptors(self):
         table = self.word(self.directory(1))
         count = self.word(self.directory(1) + 4) // DESCRIPTOR.size
