@@ -146,11 +146,18 @@ class MessageEncodingTests(unittest.TestCase):
                 sent.append(path)
 
         log = io.StringIO()
-        remote.run(Client(), ['A', 'wait:2', 'key:ENTER', 'shot:out/a.png'], 0.5, log, sleep=slept.append)
+        times = iter(['2026-11-25T19:19:54.740Z', '2026-11-25T19:19:57.000Z', '2026-11-25T19:19:58.000Z',
+                      '2026-11-25T19:19:59.000Z'])
+        remote.run(Client(), ['A', 'wait:2', 'key:ENTER', 'shot:out/a.png'], 0.5, log, sleep=slept.append,
+                   now=lambda: next(times))
         self.assertEqual(sent, [b'\x01\xc3\x01', b'\x01\xc3\x00', b'\x02\x1c\x01', b'\x02\x1c\x00',
                                 Path('out/a.png')])
         self.assertIn(2, slept)
-        self.assertEqual(len(log.getvalue().splitlines()), 4)
+        # Each step is logged with the UTC time its first action started.
+        self.assertEqual(log.getvalue().splitlines(), ['2026-11-25T19:19:54.740Z A', '2026-11-25T19:19:57.000Z wait:2',
+                                                       '2026-11-25T19:19:58.000Z key:ENTER',
+                                                       '2026-11-25T19:19:59.000Z shot:out/a.png'])
+        self.assertRegex(remote.utc_now(), r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$')
 
 
 class HandshakeTests(unittest.TestCase):

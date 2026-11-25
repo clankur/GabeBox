@@ -54,6 +54,14 @@ For an unattended trial, prepare the Big Picture layout with `--play-installed-a
 
 The deadline covers observation of the selected run. The JSON `outcome` distinguishes a first hosted frame, a process exit, a launch failure, or a timeout. The CLI exits with a nonzero status for an observation timeout or an argument, connection, or portal error. Terminal game outcomes are carried in JSON. `frame-observed` records a presentation milestone, which can include a black startup frame. Use the game on the console to verify input, audio, save behavior and return to the Library.
 
+### Connection drops and certificate changes
+
+The observer keeps collecting through transient Device Portal failures: timeouts such as `[Errno 60] Operation timed out`, connection resets and refusals, and dropped TLS or HTTP connections. It retries a failed read after 0.5, 1, 2 and 4 seconds, within the observation deadline. If the portal still does not answer, that read is skipped for the current poll and the next poll tries again. While the portal stays unreachable, each read is tried once per poll. A skipped process listing leaves the previous `--image-name` state unchanged, so an outage does not end the run as `game-process-gone`. Status lines `portal-unreachable …; retrying` and `portal-recovered after Ns` go to standard error.
+
+When any read was retried, the result has a `portal` object with the number of `retries`, the number of `skipped_reads`, and each `gaps` entry's `start_utc`, `end_utc`, `seconds`, error type and errno, `failed_attempts` and `skipped_reads`. `unrecovered_gap` describes an outage still open when the observation ended. Compare gap times with frame traces and loader records: data written during a gap is collected on the next successful read, but a staging folder deleted during a gap cannot be read again. HTTP errors other than the existing 404 and 409 handling still stop the command.
+
+A certificate that differs from `XBOX_PORTAL_CERT_SHA256` is never retried or trusted. Every command stops with the console's new SHA-256 fingerprint. The console can create a new portal certificate after a reboot or a Dev Home reset. Confirm that the fingerprint belongs to your console, for example with `python3 -m tools.xbox_deploy fingerprint` on a trusted network, before updating the pin. An observer with `--output` first saves what it already copied, with outcome `portal-certificate-changed`. Interrupting the observer with Ctrl-C saves the same way with outcome `interrupted`.
+
 ### Require game startup checkpoints
 
 Use a short sequence of loader records from the diagnostic build under test. Keep the initial GPU submission as one checkpoint and use a later engine event for the transition you want to verify.
@@ -104,7 +112,7 @@ python3 -m tools.xbox_remote_input --gap 1.0 A wait:3 shot:after-a.png DOWN Y ho
 
 `chord:MENU+VIEW` presses both buttons together, holds them for 0.25 s, then releases them. It is the deliberate Big Picture chord. Separate `MENU` and `VIEW` taps never form one.
 
-Run `--help` for the step list. `--check` opens and closes the WebSocket without sending input. Confirm delivery with `inspect-input`: a held button shows `connected: true` and its bit set in the host pad, and the game's `ack` follows once it reads the pad. Device Portal mouse messages do not raise host pointer events, and screenshots of the Big Picture overlay return HTTP 500. [Remote Input API](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/uwp-remoteinput-api) · [Slay the Spire 2 example](../analysis/slay-the-spire-2-compatibility.md#controller-input-chain)
+Run `--help` for the step list. Each step is logged to standard output with the UTC time, to the millisecond, at which its first action started. Use those times to find a step in a frame trace or loader record. `--check` opens and closes the WebSocket without sending input. Confirm delivery with `inspect-input`: a held button shows `connected: true` and its bit set in the host pad, and the game's `ack` follows once it reads the pad. Device Portal mouse messages do not raise host pointer events, and screenshots of the Big Picture overlay return HTTP 500. [Remote Input API](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/uwp-remoteinput-api) · [Slay the Spire 2 example](../analysis/slay-the-spire-2-compatibility.md#controller-input-chain)
 
 ## Inspect the current game's render state
 
@@ -134,6 +142,18 @@ The JSON summary gives the latest filtered records and counts for graphics pipel
 
 The inspector reads up to 1 MiB of the live trace and marks `truncated` when more bytes are available. A record still being written is skipped. A terminal report must include its completion marker. Pass `--output` to save the summary and the complete allowlisted records within the read limit. The inspection only reads the selected package's diagnostics through Device Portal.
 
+### Measurement records
+
+The loader trace also carries measurement records with their own exact formats. The inspector and observer keep them in trace order and summarize them under `diagnostics` (`inspect-loader`) or `loader_diagnostics` (`observe`). `recent` lists only the other records.
+
+| Records | Summary |
+| --- | --- |
+| `audio meter=…` and `audio window=N peak-milli=P audible=A/S` | `audio`: meter state, window count and range, windows with at least half of the read samples audible, silent and unread windows, highest peak in thousandths of full scale, and the first and latest three windows. Each window covers 10 seconds of the default render endpoint's mix, sampled every 100 ms. The meter stops after 90 windows. It does not show which process produced the sound, so a person still needs to listen. |
+| `pso timing result=…` and `pso kind=G\|C\|S utc=… us=… result=…` (with `XBOX_WIN32_PSO_TRACE=1`) | `pipelines`: whether timing was installed, the number of pipeline creations that took at least 2 ms by kind, their total and longest durations, failures, and the five slowest records. The runtime stops after 2000 records. |
+| `dxgi dred-…` | `device_removed`: incomplete command lists, whether a GPU page fault was reported, and up to 16 records |
+
+The runtime deletes the staging folder, and its raw `loader-trace.txt`, when the game exits normally. The child exit report carries only the general load, export, fault, asset, DXGI and input records, so measurement records cannot be recovered from it afterwards. To keep them, run `observe` with `--output` while the game runs, or copy the raw trace with `get-file` before the game exits.
+
 ## Collect and measure
 
 `--output` creates a new local directory. Available files depend on which diagnostics the signed package enables.
@@ -144,10 +164,11 @@ The inspector reads up to 1 MiB of the live trace and marks `truncated` when mor
 | `primary-lifecycle.txt` | Filtered primary host lifecycle checkpoints when the trace changes during the observation |
 | `sdl-startup.txt` | Filtered SDL and Win32 startup checkpoints for the launch's trace ID |
 | `loader-trace.txt` | Filtered loader records from the launch report, the child exit report, or a uniquely matched new staging folder |
+| `loader-diagnostics.txt` | Every audio meter, pipeline timing and device-removed record copied from the live staging folder, in order |
 | `fhd-present-times.bin` | Native frame timestamps whose header belongs to the observed game launch window |
 | `bootstrap.bmp` | Optional startup image requested with `--bootstrap-frame` |
 
-The native launch and exit reports retain up to 24 KiB of complete allowlisted records from the last 28 KiB of the loader trace. The observer can also read up to 1 MiB from the matching live staging directory and retains up to 128 recent distinct records. After a named child exit, the observer allows up to three seconds within its existing deadline for the terminal trace to appear.
+The native launch and exit reports retain up to 24 KiB of complete allowlisted records from the last 28 KiB of the loader trace. With `--output`, for a launch that reports `steam_shadow_stage=verified-local-copy`, the observer copies the live trace on every poll while the game runs, up to 1 MiB, so the copy survives the staging folder's removal at exit. A new observation selects the one staging folder that was not present at its baseline. With `--run-id`, it selects the one folder created within five minutes of that launch. `live_loader` in the result names the folder, the number of successful reads, and the time and size of the last read. Records written after the last read, normally less than a few seconds before exit, are not copied. `loader-trace.txt` keeps up to 128 recent distinct general records. `loader-diagnostics.txt` keeps up to 4096 measurement records without merging repeats. After a named child exit, the observer allows up to three seconds within its existing deadline for the terminal trace to appear.
 
 For a 60 FPS comparison, use the same scene and settings on both builds. Record the UTC start time of a settled gameplay segment, continue playing through the sample, and feed the native trace to the analyzer. Supply the dimensions observed for the game renderer and the Xbox display output. Measure each independently for the same scene.
 
@@ -157,4 +178,32 @@ python3 -m tools.measure game-run/fhd-present-times.bin \
     --internal-resolution "$internal_resolution" --output-resolution "$output_resolution"
 ```
 
+Add `--list-gaps 100` to list every presenter gap longer than 100 ms in the window, with its UTC time and the change in GPU source sequence. Match the times against remote input steps, screenshots, process samples and `pso` records.
+
 See the [native presentation measurement guide](GAME-LAUNCH.md#native-fullscreen-presentation) for the hardware and cadence checks.
+
+## Sample processes, take screenshots and copy files
+
+These commands read from the console without controlling it. Each selects the installed Steam Core package, or the version passed with `--version`, and works for any title.
+
+```sh
+python3 -m tools.xbox_deploy sample-processes --seconds 900 --image-name "$game_exe_basename" \
+    --output game-run-processes.jsonl
+python3 -m tools.xbox_deploy screenshots --delay 45 --interval 45 --count 10 --output game-run-shots
+python3 -m tools.xbox_deploy list-files '\TempState' --recursive --since-utc "$launch_utc"
+python3 -m tools.xbox_deploy get-file '\TempState\SteamWin32Trial (163)' loader-trace.txt --output loader-raw.txt
+```
+
+`sample-processes` writes one JSON line per sample with the UTC time and, for each process of the package, each `--image-name` and `WerFault.exe`, its CPU percentage, private working set and total commit in MiB. `package_commit_mib` sums the package's processes. A process that starts or exits between samples adds an `event` line, which shows crash reporting or a game exit without watching the console. A sample Device Portal cannot answer after retries is written as `unavailable` and sampling continues. Standard output gets a summary with each process's first and last sample and its peak commit, peak working set and highest CPU percentage.
+
+`screenshots` saves PNG files on the schedule given and writes `screenshots.jsonl` with each capture's UTC start and end, duration, dimensions and SHA-256. HTTP errors are recorded and the schedule continues; captures of the Big Picture overlay can return HTTP 500. Each capture stalls presentation on the console for about half a second, so exclude capture times from frame-rate windows.
+
+`list-files` and `get-file` accept folders under `\LocalState`, `\TempState`, `\LocalCache`, `\RoamingState` and `\AC` of the package. `get-file` streams to a new local file, prints its size and SHA-256, and removes the local copy if the transfer fails.
+
+## Restart Steam Core
+
+```sh
+python3 -m tools.xbox_deploy relaunch --version "$version"
+```
+
+`relaunch` stops the installed Steam Core package, including any game it started, waits up to `--stop-timeout` seconds (default 30) until Device Portal lists none of the package's processes, then activates the package again. It does not activate a package whose processes did not stop. A package built with `--play-installed-app-id` then requests its configured Play again. This command controls the console: coordinate with anyone else using it, and start the observer first if you want the next launch recorded.
