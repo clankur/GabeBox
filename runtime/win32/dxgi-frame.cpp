@@ -304,7 +304,7 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
     return S_OK;
 }
 
-// Sample a few published frames to tell an all-black game image apart from a transport fault.
+// Scan a few published frames to tell an all-black game image apart from a transport fault.
 void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& desc) {
     static const UINT64 samples[] = {120, 600, 1800, 3600, 7200};
     const UINT64 count = ++published_;
@@ -332,15 +332,23 @@ void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE
         SetLastError(previous);
         return;
     }
-    UINT nonblack = 0, total = 0;
+    UINT64 nonblack = 0, total = 0;
     UINT64 sum[3]{};
-    for (UINT row = 0; row < 36; ++row) {
-        const auto* line = static_cast<const BYTE*>(mapped.pData) + mapped.RowPitch * ((desc.Height * row + desc.Height / 72) / 36);
-        for (UINT column = 0; column < 64; ++column) {
-            const BYTE* pixel = line + 4 * ((desc.Width * column + desc.Width / 128) / 64);
+    UINT left = desc.Width, top = desc.Height, right = 0, bottom = 0, peak = 0;
+    for (UINT row = 0; row < desc.Height; ++row) {
+        const auto* line = static_cast<const BYTE*>(mapped.pData) + static_cast<SIZE_T>(mapped.RowPitch) * row;
+        for (UINT column = 0; column < desc.Width; ++column) {
+            const BYTE* pixel = line + 4 * column;
             ++total;
             sum[0] += pixel[0]; sum[1] += pixel[1]; sum[2] += pixel[2];
-            if (pixel[0] > 8 || pixel[1] > 8 || pixel[2] > 8) ++nonblack;
+            const UINT brightest = pixel[0] > pixel[1] ? (pixel[0] > pixel[2] ? pixel[0] : pixel[2]) : (pixel[1] > pixel[2] ? pixel[1] : pixel[2]);
+            if (brightest > peak) peak = brightest;
+            if (brightest <= 8) continue;
+            ++nonblack;
+            if (column < left) left = column;
+            if (column > right) right = column;
+            if (row < top) top = row;
+            if (row > bottom) bottom = row;
         }
     }
     context_->Unmap(probe_.Get(), 0);
@@ -354,6 +362,10 @@ void DxgiFramePublisher::ProbeFrame(ID3D11Texture2D* source, const D3D11_TEXTURE
     put("dxgi frame-probe frame="); number(count);
     put(" nonblack="); number(nonblack); put("/"); number(total);
     put(" mean="); number(sum[0] / total); put(","); number(sum[1] / total); put(","); number(sum[2] / total);
+    put(" peak="); number(peak);
+    if (nonblack) {
+        put(" box="); number(left); put(","); number(top); put("-"); number(right); put(","); number(bottom);
+    }
     put(" format="); number(desc.Format);
     put("\r\n");
     AppendProbeTrace(text, static_cast<DWORD>(out - text));
