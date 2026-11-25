@@ -17,6 +17,52 @@ void AppendProbeTrace(const char* text, DWORD size) {
     WriteFile(file, text, size, &written, nullptr);
     CloseHandle(file);
 }
+
+// Save a quarter-size BMP beside the loader trace so a run can be checked by eye within seconds.
+void WriteProbeImage(const D3D11_MAPPED_SUBRESOURCE& mapped, const D3D11_TEXTURE2D_DESC& desc, UINT64 count, UINT buffer) {
+    WCHAR path[512];
+    DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
+    if (!length || length >= ARRAYSIZE(path) - 40) return;
+    while (length && path[length - 1] != L'\\') --length;
+    const WCHAR prefix[] = L"frame-probe-";
+    for (const WCHAR* p = prefix; *p;) path[length++] = *p++;
+    WCHAR digits[24]; int used = 0;
+    UINT64 value = count;
+    do { digits[used++] = static_cast<WCHAR>(L'0' + value % 10); value /= 10; } while (value);
+    while (used) path[length++] = digits[--used];
+    path[length++] = L'-';
+    path[length++] = static_cast<WCHAR>(L'0' + buffer % 10);
+    for (const WCHAR* p = L".bmp"; *p;) path[length++] = *p++;
+    path[length] = 0;
+    const UINT width = desc.Width / 4, height = desc.Height / 4, stride = (width * 3 + 3) & ~3u;
+    const DWORD image = stride * height;
+    BYTE header[54]{};
+    auto put32 = [&header](unsigned at, DWORD v) { for (int i = 0; i < 4; ++i) header[at + i] = static_cast<BYTE>(v >> (8 * i)); };
+    header[0] = 'B'; header[1] = 'M';
+    put32(2, 54 + image); put32(10, 54); put32(14, 40); put32(18, width); put32(22, height);
+    header[26] = 1; header[28] = 24; put32(34, image);
+    BYTE* pixels = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, image));
+    if (!pixels) return;
+    const bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    for (UINT y = 0; y < height; ++y) {
+        const BYTE* line = static_cast<const BYTE*>(mapped.pData) + static_cast<SIZE_T>(mapped.RowPitch) * (y * 4);
+        BYTE* out = pixels + static_cast<SIZE_T>(stride) * (height - 1 - y);
+        for (UINT x = 0; x < width; ++x) {
+            const BYTE* pixel = line + 16 * x;
+            out[3 * x] = rgba ? pixel[2] : pixel[0];
+            out[3 * x + 1] = pixel[1];
+            out[3 * x + 2] = rgba ? pixel[0] : pixel[2];
+        }
+    }
+    const HANDLE file = CreateFile2FromAppW(path, GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(file, header, sizeof(header), &written, nullptr);
+        WriteFile(file, pixels, image, &written, nullptr);
+        CloseHandle(file);
+    }
+    HeapFree(GetProcessHeap(), 0, pixels);
+}
 }
 
 using Microsoft::WRL::ComPtr;
@@ -306,7 +352,7 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
 
 // Scan a few published frames to tell an all-black game image apart from a transport fault.
 void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc) {
-    static const UINT64 samples[] = {120, 600, 1800, 3600, 7200};
+    static const UINT64 samples[] = {60, 600, 1800, 3600, 7200};
     const UINT64 count = ++published_;
     bool sample = false;
     for (UINT64 at : samples) sample |= count == at;
@@ -361,6 +407,7 @@ void DxgiFramePublisher::ProbeBuffer(ID3D11Texture2D* source, const D3D11_TEXTUR
             if (row > bottom) bottom = row;
         }
     }
+    if (count <= 600) WriteProbeImage(mapped, desc, count, buffer);
     context_->Unmap(probe_.Get(), 0);
     char text[160], *out = text;
     auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
