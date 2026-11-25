@@ -446,3 +446,7 @@ Two more D3D11 results:
 
 - Every engine target format reports render-target and blend support.
 - A vtable counter on the immediate context saw no `Draw` or `DrawIndexed` calls. It probably missed Unity's calls, so it is inconclusive.
+
+**Controller route for Unity (`07b7acf`).** When a profile hosts XInput, the loader trace answers Unity's dynamic `RoGetActivationFactory` lookups for `Windows.Gaming.Input.*` with `REGDB_E_CLASSNOTREG`. On `1.0.237.1`, Unity logged "Windows.Gaming.Input failed to initialize …, fallback to XInput / Using XInput". The trace recorded `xinput-sample=connected`, and then `active` after Device Portal remote-input A presses (cherry-picked `d682122` and `63ddb85` from the STS2 branch).
+
+The frames stayed all zero with the same full-screen-only GPU work. Rendering is not gated on input, and the empty cameras remain the open problem.
