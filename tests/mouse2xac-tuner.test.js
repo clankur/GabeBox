@@ -336,3 +336,21 @@ test("the simulator estimates the pipeline delay", () => {
     const lag = sim.estimateLag(1000, 100);
     assert.ok(lag !== null && lag >= 3 && lag <= 6, "lag " + lag);
 });
+
+test("settings round-trip through the page link query", () => {
+    const settings = { ...defaults, outputPeriodUs: 10000, fullScaleCountsPerSecond: 25600, invertY: true, wheelEnabled: false };
+    const query = protocol.settingsToQuery(settings);
+    assert.equal(query, "outputPeriodUs=10000&fullScaleCountsPerSecond=25600&backlogPeriods=6&invertX=0&invertY=1&wheelEnabled=0");
+    assert.deepEqual(protocol.settingsFromQuery("?" + query), { settings, errors: [] });
+});
+
+test("a link query without settings is ignored, and bad values keep their defaults", () => {
+    assert.equal(protocol.settingsFromQuery(""), null);
+    assert.equal(protocol.settingsFromQuery("?utm_source=x"), null);
+    const read = protocol.settingsFromQuery("?outputPeriodUs=1000&backlogPeriods=12&invertX=2&fullScaleCountsPerSecond=");
+    assert.equal(read.settings.outputPeriodUs, defaults.outputPeriodUs);
+    assert.equal(read.settings.backlogPeriods, 12);
+    assert.equal(read.settings.invertX, defaults.invertX);
+    assert.equal(read.settings.fullScaleCountsPerSecond, defaults.fullScaleCountsPerSecond);
+    assert.equal(read.errors.length, 3);
+});
