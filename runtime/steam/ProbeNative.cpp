@@ -37,6 +37,7 @@
 #include "SteamSdlSurface.h"
 #include "SteamLibraryStorage.h"
 #include "SteamCloudRestore.h"
+#include "SteamUserDataRedirect.h"
 #include "../shared/steam-handoff-control.h"
 #include "steam-download-queue.h"
 #include "steam-launch-detail.h"
@@ -812,6 +813,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> SteamSignIn(
         co_await save(complete);
         co_return winrt::hstring{};
     }
+    report += steam_userdata::InstallRedirect(
+        module, std::wstring(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()));
 
     auto factory = reinterpret_cast<SteamFactory>(GetProcAddress(module, "CreateInterface"));
     auto create = reinterpret_cast<CreateUser>(GetProcAddress(module, "Steam_CreateGlobalUser"));
