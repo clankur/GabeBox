@@ -18,6 +18,7 @@ hosted_display=false
 known_folders=false
 player_prefs=false
 win32_opengl=false
+pipeline_cache=false
 sdl_artifact=
 sdl_version=
 case ${1:-} in
@@ -59,6 +60,10 @@ case ${1:-} in
         player_prefs=true
         shift
         ;;
+    --d3d12-pipeline-cache)
+        pipeline_cache=true
+        shift
+        ;;
     --dxgi-composition)
         dxgi_composition=true
         shift
@@ -85,7 +90,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --d3d12-pipeline-cache | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
@@ -260,6 +265,14 @@ EOF
     child_output="$build/standard-xinput.exe"
 elif $display_config; then
     child="$src/display-config-child.c"
+elif $pipeline_cache; then
+    # The same cache source as XboxWin32LoaderTrace.dll, linked into the child.
+    child="$src/pipeline-cache-child.c"
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" -std=c11 -O2 -ffreestanding \
+        -Wall -Wextra -Werror -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 \
+        -c "$repo/runtime/win32/d3d12-pipeline-cache.c" -o "$build/d3d12-pipeline-cache.obj"
+    "${LLVM_DLLTOOL:-llvm-dlltool}" -m i386:x86-64 -d "$repo/runtime/win32/ntdll-eh.def" -l "$build/ntdll-eh.lib"
+    graphics_libs=("$build/d3d12-pipeline-cache.obj" "$build/ntdll-eh.lib")
 elif $player_prefs; then
     child="$src/player-prefs-child.c"
     "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2 -ffreestanding -Wall -Wextra -Werror \
@@ -353,7 +366,7 @@ else
 fi
 if $win32_opengl || $hosted_xinput; then
     "${win32_compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
-elif $display_config || $known_folders || $player_prefs; then
+elif $display_config || $known_folders || $player_prefs || $pipeline_cache; then
     display_flags=()
     if $hosted_display; then display_flags=(-DPROBE_HOSTED_DISPLAY); fi
     "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" \
