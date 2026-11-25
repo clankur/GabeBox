@@ -105,6 +105,37 @@
         return errors;
     }
 
+    // Settings in a URL query, so the simulator and device pages can hand them
+    // to each other. Flags are written as 0 or 1.
+    function settingsToQuery(settings) {
+        return SETTINGS.map(function (spec) {
+            return spec.key + "=" + toRaw(spec, settings[spec.key]);
+        }).join("&");
+    }
+
+    // Reads settings from a query string such as location.search. Returns null
+    // when it names none of them; missing ones keep their defaults. Invalid ones
+    // are reported in errors and keep their defaults too.
+    function settingsFromQuery(search) {
+        var params = new URLSearchParams(search);
+        var settings = defaultSettings();
+        var errors = [];
+        var found = false;
+        SETTINGS.forEach(function (spec) {
+            if (!params.has(spec.key)) return;
+            found = true;
+            var text = params.get(spec.key);
+            var raw = text.trim() === "" ? NaN : Number(text);
+            // toRaw would turn any truthy flag into 1, so check flags here.
+            var problem = spec.flag && raw !== 0 && raw !== 1
+                ? spec.label + " must be 0 or 1"
+                : validateSetting(spec.key, fromRaw(spec, raw));
+            if (problem) errors.push(problem);
+            else settings[spec.key] = fromRaw(spec, raw);
+        });
+        return found ? { settings: settings, errors: errors } : null;
+    }
+
     function encodeCommand(command, value) {
         if (value === undefined) value = 0;
         if (!Number.isInteger(command) || command < 0 || command > 0xFF) throw new RangeError("command must be a byte");
@@ -201,6 +232,8 @@
         fromRaw: fromRaw,
         validateSetting: validateSetting,
         validateSettings: validateSettings,
+        settingsToQuery: settingsToQuery,
+        settingsFromQuery: settingsFromQuery,
         encodeCommand: encodeCommand,
         writeCommand: writeCommand,
         decodeResponse: decodeResponse,

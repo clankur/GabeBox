@@ -56,6 +56,16 @@ main, .page-header, footer { max-width: 1180px; margin: 0 auto; }
 
 .page-header h1 { font-size: 1.35rem; margin: 16px 0 4px; }
 .page-header p { margin: 0 0 12px; color: var(--muted); }
+.page-nav { display: flex; gap: 4px; margin: 0 0 10px; border-bottom: 1px solid var(--border); }
+.page-nav a {
+  padding: 6px 12px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  text-decoration: none;
+}
+.page-nav a:hover { color: var(--text); }
+.page-nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
 h2 { font-size: 1.1rem; margin: 0 0 10px; }
 h3 { font-size: 0.95rem; margin: 14px 0 6px; }
 a { color: var(--accent); }
