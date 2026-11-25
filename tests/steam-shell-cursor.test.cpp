@@ -1,4 +1,4 @@
-#include "../probe/big-picture-webview/shell-cursor.h"
+#include "../ui/big-picture-webview/shell-cursor.h"
 #include <cassert>
 
 struct Window {

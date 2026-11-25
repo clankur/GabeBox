@@ -1,4 +1,4 @@
-#include "../probe/SteamCloudManifest.h"
+#include "../runtime/steam/SteamCloudManifest.h"
 
 #include <cassert>
 
@@ -28,6 +28,14 @@ static std::string Save(std::uint32_t app, std::string_view path, std::uint32_t 
 
 int main() {
     constexpr std::uint32_t app = 646570;
+    constexpr std::uint64_t owner = 76561197960268001ULL;
+    assert(SnapshotTrialMatches(L"413150 76561197960268001", 413150, owner));
+    assert(SnapshotTrialMatches(L"413150 76561197960268001\r\n", 413150, owner));
+    assert(!SnapshotTrialMatches(L"413150 76561197960268001", app, owner));
+    assert(!SnapshotTrialMatches(L"413150 76561197960268001", 413150, owner + 1));
+    assert(!SnapshotTrialMatches(L"413150 76561197960268001\n\n", 413150, owner));
+    assert(!SnapshotTrialMatches(L"413150 76561197960268001\r", 413150, owner));
+
     const auto request = ListRequest(app);
     std::string_view data = request;
     Field field{};

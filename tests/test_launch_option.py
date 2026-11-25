@@ -8,7 +8,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 
-prepare = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'probe' / 'prepare-steam-core.py'))
+prepare = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'build_tools/prepare_steam_core.py'))
 
 
 def write_template(root, signin='', extra_entries=()):
@@ -47,6 +47,13 @@ class LaunchOptionTests(unittest.TestCase):
             prepare['prepare_layout'](template, standard, '1.0.2.0', None, None, False, True)
             for name in ('slay-working-directory.dll', 'slay-sdl-display.dll', 'steam-sdl-host-646570.txt'):
                 self.assertFalse((standard / name).exists())
+
+            (runtime / 'SlayConsoleDiagnostic$1.class').unlink()
+            invalid = root / 'invalid'
+            with self.assertRaisesRegex(ValueError, r'SlayConsoleDiagnostic\$1\.class'):
+                prepare['prepare_layout'](template, invalid, '1.0.2.0', None, None, False, True,
+                                          slay_sdl_host=runtime)
+            self.assertFalse(invalid.exists())
 
     def test_startup_snapshot_is_opt_in_and_title_scoped(self):
         with tempfile.TemporaryDirectory() as temporary:

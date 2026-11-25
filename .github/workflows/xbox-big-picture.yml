@@ -5,25 +5,33 @@ on:
   push:
     paths:
       - '.github/workflows/xbox-big-picture.yml'
-      - 'probe/big-picture/**'
-      - 'probe/Assets/**'
-      - 'probe/prepare-big-picture.py'
-      - 'analysis/stage-pinned-client.py'
-      - 'analysis/steam_client_win64.manifest'
-      - 'analysis/valve-release.json'
-      - 'xbox-deploy.py'
+      - 'ui/big-picture/**'
+      - 'ui/Assets/**'
+      - 'build_tools/**'
+      - 'tools/**'
+      - 'runtime/steam/pins/**'
+      - 'runtime/dos/**'
+      - 'profiles/**'
+      - 'ui/big-picture-bridge/**'
+      - 'ui/big-picture-webview/**'
+      - 'ui/signin/**'
+      - 'probe/big-picture-webview/**'
       - 'tests/big-picture-launch.test.js'
       - 'tests/test_big_picture_*.py'
   pull_request:
     paths:
       - '.github/workflows/xbox-big-picture.yml'
-      - 'probe/big-picture/**'
-      - 'probe/Assets/**'
-      - 'probe/prepare-big-picture.py'
-      - 'analysis/stage-pinned-client.py'
-      - 'analysis/steam_client_win64.manifest'
-      - 'analysis/valve-release.json'
-      - 'xbox-deploy.py'
+      - 'ui/big-picture/**'
+      - 'ui/Assets/**'
+      - 'build_tools/**'
+      - 'tools/**'
+      - 'runtime/steam/pins/**'
+      - 'runtime/dos/**'
+      - 'profiles/**'
+      - 'ui/big-picture-bridge/**'
+      - 'ui/big-picture-webview/**'
+      - 'ui/signin/**'
+      - 'probe/big-picture-webview/**'
       - 'tests/big-picture-launch.test.js'
       - 'tests/test_big_picture_*.py'
 
@@ -69,12 +77,12 @@ jobs:
           $layout = Join-Path $work 'layout'
           $out = Join-Path $work 'artifact'
           New-Item -ItemType Directory -Path $layout,$out | Out-Null
-          Copy-Item -Recurse probe/big-picture/Assets $layout
-          Copy-Item probe/big-picture/AppxManifest.xml,probe/big-picture/big-picture.html,probe/big-picture/big-picture.js $layout
+          Copy-Item -Recurse ui/big-picture/Assets $layout
+          Copy-Item ui/big-picture/AppxManifest.xml,ui/big-picture/big-picture.html,ui/big-picture/big-picture.js $layout
           & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata `
-            /out $work /winmd "$layout\BigPicture.Native.winmd" probe/big-picture/BigPicture.Native.idl
+            /out $work /winmd "$layout\BigPicture.Native.winmd" ui/big-picture/BigPicture.Native.idl
           & cl.exe /nologo /LD /O2 /MT /std:c++20 /DUNICODE /D_UNICODE /DWINAPI_FAMILY=WINAPI_FAMILY_APP `
-            "/Fo$work\launcher.obj" "/Fe$layout\BigPicture.Native.dll" probe/big-picture/launcher.cpp WindowsApp.lib uuid.lib `
+            "/Fo$work\launcher.obj" "/Fe$layout\BigPicture.Native.dll" ui/big-picture/launcher.cpp WindowsApp.lib uuid.lib `
             /link /APPCONTAINER "/IMPLIB:$work\launcher.lib" /EXPORT:DllGetActivationFactory /EXPORT:DllCanUnloadNow
           & "$tool\makepri.exe" createconfig /cf "$work\priconfig.xml" /dq lang-en-US /pv 10.0.0
           & "$tool\makepri.exe" new /cf "$work\priconfig.xml" /pr $layout /of "$layout\resources.pri"

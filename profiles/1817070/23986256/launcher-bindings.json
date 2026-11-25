@@ -1,0 +1,67 @@
+{
+  "uxtheme.dll": {
+    "EnableThemeDialogTexture": "XboxWin32Desktop.dll"
+  },
+  "kernel32.dll": {
+    "GetProcAddress": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryA": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryW": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryExW": "XboxWin32LoaderTrace.dll",
+    "GetModuleFileNameW": "XboxWin32LoaderTrace.dll",
+    "ExitProcess": "XboxWin32LoaderTrace.dll",
+    "TerminateProcess": "XboxWin32LoaderTrace.dll",
+    "RaiseException": "XboxWin32LoaderTrace.dll",
+    "GetStartupInfoW": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryExA": "XboxWin32LoaderTrace.dll",
+    "VirtualAlloc": "XboxWin32LoaderTrace.dll"
+  },
+  "shell32.dll": {
+    "SHGetFolderPathW": "XboxWin32Desktop.dll"
+  },
+  "ole32.dll": {
+    "CoCreateInstance": "XboxWin32LoaderTrace.dll"
+  },
+  "steam_api64.dll": {
+    "SteamAPI_Init": "XboxWin32SteamDiscovery.dll",
+    "SteamAPI_IsSteamRunning": "XboxWin32SteamDiscovery.dll",
+    "SteamAPI_RestartAppIfNecessary": "XboxWin32SteamDiscovery.dll"
+  },
+  "user32.dll": {
+    "GetActiveWindow": "XboxWin32Window.dll",
+    "ClientToScreen": "XboxWin32Window.dll",
+    "ScreenToClient": "XboxWin32Window.dll",
+    "GetCursorPos": "XboxWin32Window.dll",
+    "GetPhysicalCursorPos": "XboxWin32Window.dll",
+    "MonitorFromWindow": "XboxWin32Window.dll",
+    "GetMonitorInfoW": "XboxWin32Window.dll",
+    "EnumDisplayMonitors": "XboxWin32Window.dll",
+    "DispatchMessageW": "XboxWin32Window.dll",
+    "PeekMessageW": "XboxWin32Window.dll",
+    "DefWindowProcW": "XboxWin32Window.dll",
+    "DestroyWindow": "XboxWin32Window.dll",
+    "SetFocus": "XboxWin32Window.dll",
+    "GetFocus": "XboxWin32Window.dll",
+    "GetForegroundWindow": "XboxWin32Window.dll",
+    "SetForegroundWindow": "XboxWin32Window.dll",
+    "GetWindowLongPtrW": "XboxWin32Window.dll",
+    "SetWindowLongPtrW": "XboxWin32Window.dll",
+    "GetSystemMetrics": "XboxWin32Window.dll",
+    "GetWindowRect": "XboxWin32Window.dll",
+    "GetClientRect": "XboxWin32Window.dll",
+    "PostMessageW": "XboxWin32Window.dll",
+    "RegisterClassExW": "XboxWin32Window.dll",
+    "CreateWindowExW": "XboxWin32Window.dll",
+    "UnregisterClassW": "XboxWin32Window.dll",
+    "GetDC": "XboxWin32Window.dll",
+    "ReleaseDC": "XboxWin32Window.dll",
+    "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "EnumDisplayDevicesW": "XboxWin32Window.dll",
+    "SetWindowPos": "XboxWin32Window.dll",
+    "MonitorFromPoint": "XboxWin32Window.dll",
+    "ShowWindow": "XboxWin32Window.dll"
+  },
+  "gdi32.dll": {
+    "GetDeviceCaps": "XboxWin32Window.dll",
+    "DeleteDC": "XboxWin32Window.dll"
+  }
+}

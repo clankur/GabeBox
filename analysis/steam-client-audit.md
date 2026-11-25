@@ -6,7 +6,7 @@ This historical audit records the project’s initial findings. See the [project
 
 ## What REA measured
 
-We obtained Valve’s Windows x64 client manifest (version `1794536281`), downloaded three of the named archives, matched the byte counts and SHA-256 hashes in the manifest, and inspected five actual client components with REA 6.10.1. The Windows installer was audited separately because its architecture differs from the client that it installs. [Valve client manifest](https://client-update.akamai.steamstatic.com/steam_client_win64) · [Pinned archives and hashes](valve-release.json) · [Per-file results](client-imports.json)
+We obtained Valve’s Windows x64 client manifest (version `1794536281`), downloaded three of the named archives, matched the byte counts and SHA-256 hashes in the manifest, and inspected five actual client components with REA 6.10.1. The Windows installer was audited separately because its architecture differs from the client that it installs. [Valve client manifest](https://client-update.akamai.steamstatic.com/steam_client_win64) · [Pinned archives and hashes](../runtime/steam/pins/valve-release.json) · [Per-file results](../runtime/steam/pins/client-imports.json)
 
 | Component | Architecture | Selected observed dependencies | What a port would have to investigate |
 | --- | --- | --- | --- |
@@ -41,7 +41,7 @@ With Python 3.11 or later and the REA 6.10.1 CLI installed, run the following fr
 
 ```sh
 python3 analysis/audit-client.py > /tmp/steam-client-imports.json
-diff -u analysis/client-imports.json /tmp/steam-client-imports.json
+diff -u runtime/steam/pins/client-imports.json /tmp/steam-client-imports.json
 bash analysis/audit-steamsetup.sh /tmp/steam-installer-audit
 ```
 

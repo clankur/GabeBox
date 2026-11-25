@@ -1,0 +1,58 @@
+{
+  "user32.dll": {
+    "RegisterClassExW": "XboxWin32Window.dll",
+    "RegisterClassW": "XboxWin32Window.dll",
+    "UnregisterClassW": "XboxWin32Window.dll",
+    "CreateWindowExW": "XboxWin32Window.dll",
+    "DestroyWindow": "XboxWin32Window.dll",
+    "DefWindowProcW": "XboxWin32Window.dll",
+    "GetClientRect": "XboxWin32Window.dll",
+    "GetWindowRect": "XboxWin32Window.dll",
+    "ClientToScreen": "XboxWin32Window.dll",
+    "ScreenToClient": "XboxWin32Window.dll",
+    "GetDC": "XboxWin32Window.dll",
+    "ReleaseDC": "XboxWin32Window.dll",
+    "ShowWindow": "XboxWin32Window.dll",
+    "IsWindowVisible": "XboxWin32Window.dll",
+    "GetFocus": "XboxWin32Window.dll",
+    "GetActiveWindow": "XboxWin32Window.dll",
+    "GetForegroundWindow": "XboxWin32Window.dll",
+    "SetFocus": "XboxWin32Window.dll",
+    "SetForegroundWindow": "XboxWin32Window.dll",
+    "SetWindowPos": "XboxWin32Window.dll",
+    "GetWindowLongPtrW": "XboxWin32Window.dll",
+    "SetWindowLongPtrW": "XboxWin32Window.dll",
+    "PostMessageW": "XboxWin32Window.dll",
+    "PeekMessageA": "XboxWin32Window.dll",
+    "PeekMessageW": "XboxWin32Window.dll",
+    "DispatchMessageA": "XboxWin32Window.dll",
+    "DispatchMessageW": "XboxWin32Window.dll",
+    "MonitorFromWindow": "XboxWin32Window.dll",
+    "MonitorFromPoint": "XboxWin32Window.dll",
+    "EnumDisplayMonitors": "XboxWin32Window.dll",
+    "EnumDisplayDevicesW": "XboxWin32Window.dll",
+    "GetMonitorInfoW": "XboxWin32Window.dll",
+    "GetMonitorInfoA": "XboxWin32Window.dll",
+    "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "GetSystemMetrics": "XboxWin32Window.dll"
+  },
+  "gdi32.dll": {
+    "ChoosePixelFormat": "XboxWin32Window.dll",
+    "CreateDCW": "XboxWin32Window.dll",
+    "DeleteDC": "XboxWin32Window.dll",
+    "GetDeviceCaps": "XboxWin32Window.dll",
+    "SetPixelFormat": "XboxWin32Window.dll",
+    "SwapBuffers": "XboxWin32Window.dll"
+  },
+  "opengl32.dll": {
+    "wglCreateContext": "XboxWin32Window.dll",
+    "wglDeleteContext": "XboxWin32Window.dll",
+    "wglGetCurrentContext": "XboxWin32Window.dll",
+    "wglGetCurrentDC": "XboxWin32Window.dll",
+    "wglGetProcAddress": "XboxWin32Window.dll",
+    "wglMakeCurrent": "XboxWin32Window.dll"
+  },
+  "kernel32.dll": {
+    "GetProcAddress": "XboxWin32Window.dll"
+  }
+}

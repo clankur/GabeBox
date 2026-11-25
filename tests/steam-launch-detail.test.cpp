@@ -1,4 +1,4 @@
-#include "../probe/steam-launch-detail.h"
+#include "../runtime/steam/steam-launch-detail.h"
 #include <cassert>
 
 int main() {

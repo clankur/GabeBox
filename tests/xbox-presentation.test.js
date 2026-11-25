@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = name => fs.readFileSync(path.join(__dirname, '../probe', name), 'utf8');
+const source = name => fs.readFileSync(path.join(__dirname, '../ui', name), 'utf8');
 
 test('Xbox restricted presentation modes and unavailable host properties', () => {
     const check = vm.runInNewContext(source('signin/xbox-system-mode.js'), {window: {}});

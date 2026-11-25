@@ -7,7 +7,7 @@
  * method ordering are taken from Windows SDK 10.0.26100.0 headers.
  */
 
-#include "child-process.h"
+#include "../runtime/shared/child-process.h"
 
 typedef unsigned char BYTE;
 typedef unsigned short WORD;

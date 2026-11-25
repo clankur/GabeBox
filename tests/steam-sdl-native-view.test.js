@@ -3,24 +3,32 @@ const fs = require("node:fs");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(require.resolve("../probe/signin/steam-sdl-native-view.js"), "utf8");
+const source = fs.readFileSync(require.resolve("../ui/signin/steam-sdl-native-view.js"), "utf8");
 
 test("the XAML game panel counts visible swaps and serializes replacement across a pending close", async () => {
-    const calls = [], samples = [], first = [];
+    const calls = [], samples = [], first = [], menus = [];
     let now = 0, swaps = 0, callbacks = 2, empty = 1, busy = 0, generated = 1, tick, visible = true, finishClose;
+    let nativeInput = false, menuRequests = 0, failReveal = false;
     const drain = () => new Promise(resolve => setImmediate(resolve));
     const host = {
         async openPanel(path, pad) { calls.push(["open", path, pad]); visible = true; },
-        async setPanelVisible(value) { visible = value; calls.push(["visible", value]); },
+        async setPanelVisible(value) {
+            visible = value;
+            calls.push(["visible", value]);
+            if (value && failReveal) throw new Error("Visibility did not settle");
+        },
         closePanel() { calls.push(["close"]); return new Promise(resolve => { finishClose = resolve; }); },
+        status() { return "gpu_stage=open-texture-and-fences\r\ngpu_hresult=2147942405\r\nother=discarded\r\n"; },
         panelStatus() { return "width=1920\r\nheight=1080\r\nprimary_panel=1\r\nvisible=" +
             Number(visible) + "\r\npresented=" + swaps + "\r\nrender_callbacks=" + callbacks +
             "\r\nsource_empty_callbacks=" + empty + "\r\npresent_busy_callbacks=" + busy +
-            "\r\ngpu_sequence=" + generated + "\r\n"; },
+            "\r\ngpu_sequence=" + generated + "\r\nnative_input=" + Number(nativeInput) +
+            "\r\nnative_menu_requests=" + menuRequests + "\r\n"; },
         openMedia() { assert.fail("The XAML panel should own playback"); }
     };
     const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
-        presented: stats => first.push(stats), measured: (frames, us, stats) => samples.push([frames, us, stats])};
+        menu: view => menus.push(view),
+        presented: (stats, gpu) => first.push({stats, gpu}), measured: (frames, us, stats) => samples.push([frames, us, stats])};
     const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
         steamBigPictureHost: {switchView: async (to, from) => { assert.equal(to, from); }}};
     const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
@@ -32,12 +40,24 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     const game = open(1);
     await drain();
     tick(); assert.equal(first.length, 0);
-    swaps = 1; tick(); assert.match(first[0], /primary_panel=1/);
-    now += 10000; swaps += 600; tick();
+    assert.equal(game.ownsInput(), false);
+    swaps = 1; tick(); assert.match(first[0].stats, /primary_panel=1/);
+    assert.equal(first[0].gpu, "steam_sdl_gpu_stage=open-texture-and-fences\r\nsteam_sdl_gpu_hresult=2147942405\r\n");
+    nativeInput = true;
+    menuRequests = 1;
+    now += 10000; swaps += 600; tick(); tick();
+    assert.equal(game.ownsInput(), true);
+    assert.deepEqual(menus, [1]);
     game.cover(); await drain();
-    now += 50000; swaps += 1200; tick();
+    now += 50000; swaps += 1200; menuRequests = 2; tick();
     assert.deepEqual(samples, []);
-    await game.resume(1); tick();
+    failReveal = true;
+    assert.equal(await game.resume(1), false);
+    assert.equal(visible, false);
+    failReveal = false;
+    assert.equal(await game.resume(1), true);
+    tick();
+    assert.deepEqual(menus, [1]);
     now += 30000; swaps += 1780; callbacks += 1800; empty += 12; busy += 8; generated += 1794; tick();
     assert.deepEqual(samples.map(sample => sample.slice(0, 2)), [[1780, 30000000]]);
     assert.match(samples[0][2], /sample_render_callbacks=1800\r\n/);
@@ -47,7 +67,8 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     const stopped = game.close(); assert.equal(game.close(), stopped);
     const next = open(3);
     await drain();
-    assert.deepEqual(calls, [["open", "local\\sdl-host-1-2.bin", false], ["visible", false], ["visible", true], ["close"]]);
+    assert.deepEqual(calls, [["open", "local\\sdl-host-1-2.bin", false], ["visible", false],
+        ["visible", true], ["visible", false], ["visible", true], ["close"]]);
     finishClose(); await stopped; await drain();
     assert.deepEqual(calls.at(-1), ["open", "local\\sdl-host-3-2.bin", false]);
     assert.equal(await game.resume(1), false);
@@ -149,14 +170,17 @@ test("XAML keeps the video running under Valve and counts only foreground frames
 
 function fixture(accept = true, gate = null, withSteam = false) {
     const calls = [];
-    let tick, stats = "presented=0\n";
+    let tick, stats = "presented=0\n", failResume = false;
     const host = { open: path => calls.push(path), start: () => calls.push("start"),
         setNativeGamepad: enabled => calls.push(enabled), close: () => calls.push("close"),
         viewId: () => -31, status: () => stats };
     const window = { Fhd: { Native: { RenderHost: host } } };
     if (withSteam) window.steamBigPictureHost = {
         samplePresenter: () => {},
-        switchView: async () => { calls.push("steam-switch"); }
+        switchView: async (to, from) => {
+            calls.push(["steam-switch", to, from]);
+            if (failResume && to === -31) throw new Error("View switch failed");
+        }
     };
     const Windows = {
         UI: { ViewManagement: { ApplicationView: { getForCurrentView: () => ({ id: -73 }) }, ApplicationViewSwitcher: {
@@ -175,7 +199,7 @@ function fixture(accept = true, gate = null, withSteam = false) {
             presented: () => calls.push("presented"), menu: () => calls.push("menu"),
             measured: (n, us) => calls.push([n, us]) }, nativePad);
     }
-    return { open, calls, poll(value) { if (value) stats = value; tick(); } };
+    return { open, calls, failResume(value) { failResume = value; }, poll(value) { if (value) stats = value; tick(); } };
 }
 
 test("a fresh game launched from Steam gets a standalone Xbox view before the switch", async () => {
@@ -202,7 +226,23 @@ test("native presentation uses the package-local frame mailbox and returns to th
     run.poll();
     control.close();
     assert.deepEqual(run.calls, ["C:\\LocalState\\sdl-host-12-99.bin", false, "start", -31, "presented",
-        "menu", "start", -31, [1799, 30001000], "menu", "close"]);
+        "menu", -31, "start", [1799, 30001000], "menu", "close"]);
+});
+
+test("a secondary presenter survives a failed overlay Resume and accepts a retry", async () => {
+    const run = fixture(true, null, true);
+    const control = run.open("steam_sdl_mailbox=sdl-host-2-3.bin\n");
+    run.poll();
+    await new Promise(resolve => setImmediate(resolve));
+    run.poll("presented=1\noverlay_requested=1\n");
+    run.failResume(true);
+    assert.equal(await control.resume(10), false);
+    assert.deepEqual(run.calls.slice(-3), ["menu", ["steam-switch", -31, 10], ["steam-switch", 10, -31]]);
+    assert.ok(!run.calls.includes("fallback"));
+    run.failResume(false);
+    assert.equal(await control.resume(10), true);
+    assert.deepEqual(run.calls.slice(-2), [["steam-switch", -31, 10], "start"]);
+    await control.close();
 });
 
 test("a failed view switch releases the native resources and lets the existing player resume", async () => {

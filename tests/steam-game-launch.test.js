@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const launchFile = path.join(__dirname, "../probe/signin/steam-game-launch.js");
+const launchFile = path.join(__dirname, "../ui/signin/steam-game-launch.js");
 const browser = vm.createContext({});
 vm.runInContext(readFileSync(launchFile, "utf8"), browser, { filename: launchFile });
 const dispatch = browser.steamGameLaunch;
@@ -90,5 +90,22 @@ test("both legacy and install-before-launch trial markers retain their meaning",
         '{"appId":646570,"repeat":false,"install":false}');
     for (const invalid of ["0", "16777216", "7760\nexec", "7760\ninstall\nrepeat"]) {
         assert.equal(dispatch.parseTrial(invalid), null);
+    }
+});
+
+test("prerequisite restart replay requires a terminal checkpoint and completed manifest", () => {
+    const account = "76561197960268001";
+    const complete = "steam_launch_redistributables_manifest=complete\r\n";
+    const required = "steam_launch=prerequisite-restart-required\r\n";
+    const args = dispatch.prerequisiteRestartArgs(complete + required, account, 12, 123);
+    assert.equal(args, "steam-prerequisite-play 76561197960268001 12 123");
+    assert.equal(JSON.stringify(dispatch.parsePrerequisiteRestart(args)),
+        '{"account":"76561197960268001","appId":12,"runId":"123"}');
+    for (const report of [required, complete, complete + "steam_launch=dependency-install-incomplete\r\n"]) {
+        assert.equal(dispatch.prerequisiteRestartArgs(report, account, 12, 123), "");
+    }
+    for (const invalid of [args + " extra", args.replace(" 12 ", " 16777216 "), args.replace(account, "another"),
+        args.replace(account, "18446744073709551616")]) {
+        assert.equal(dispatch.parsePrerequisiteRestart(invalid), null);
     }
 });

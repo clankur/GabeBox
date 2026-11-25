@@ -4,22 +4,9 @@ on:
   push:
     paths:
       - '.github/workflows/xbox-sdl.yml'
-      - 'probe/add-sdl-startup-trace.py'
-      - 'probe/add-sdl-surfaceless.py'
-      - 'probe/sdl-startup-trace.h'
-      - 'probe/sdl-local-preferences.h'
-      - 'probe/sdl-software-frame.h'
-      - 'probe/sdl-host-display-size.h'
-      - 'probe/sdl-host-protocol.h'
-      - 'probe/sdl-host-runtime.h'
-      - 'probe/sdl-surfaceless-framebuffer.h'
-      - 'probe/sdl-swap-clock.h'
+      - 'runtime/sdl/**'
+      - 'runtime/shared/**'
       - 'tests/sdl-swap-clock.c'
-      - 'probe/sdl-gpu-producer.cpp'
-      - 'probe/sdl-gpu-protocol.h'
-      - 'probe/mesa-glinterop.h'
-      - 'probe/sdl-gl-trace.h'
-      - 'probe/sdl-offscreen-cursor.h'
   workflow_dispatch:
 
 permissions:
@@ -32,6 +19,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - version: '2.0.20'
+            sha256: 'c56aba1d7b5b0e7e999e4a7698c70b63a3394ff9704b5f6e1c57e0c16f04dd06'
+            artifact: xbox-sdl2-2.0.20-x64
           - version: '2.32.10'
             sha256: '5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165'
             artifact: xbox-sdl2-x64
@@ -67,10 +57,10 @@ jobs:
           }
           tar -xf $archive
           if ($version -in @('2.26.2', '2.30.9')) {
-            python "$env:GITHUB_WORKSPACE/probe/add-sdl-startup-trace.py" "SDL2-$version"
+            python "$env:GITHUB_WORKSPACE/runtime/sdl/add-sdl-startup-trace.py" "SDL2-$version"
           }
           if ($version -eq '2.30.9') {
-            python "$env:GITHUB_WORKSPACE/probe/add-sdl-surfaceless.py" "SDL2-$version"
+            python "$env:GITHUB_WORKSPACE/runtime/sdl/add-sdl-surfaceless.py" "SDL2-$version"
           }
           # CMake 4 needs a policy floor of at least 3.5 for older SDL releases.
           $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'

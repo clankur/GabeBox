@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(require.resolve("../probe/big-picture-bridge/xbox-user.js"), "utf8");
+const source = fs.readFileSync(require.resolve("../ui/big-picture-bridge/xbox-user.js"), "utf8");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const steamId = "76561197960268001";
 
@@ -42,6 +42,26 @@ test("verified session drives both Valve observers; only public identity leaves 
     assert.deepEqual(users[2], { strSteamID: result.steamId });
     userSub.unregister();
     assert.equal(active(), false);
+});
+
+test("Valve can start login before the verified Xbox session reaches its listeners", async () => {
+    let completeSession, reads = 0;
+    const { user } = setup(method => {
+        assert.equal(method, "session");
+        reads++;
+        return new Promise(resolve => { completeSession = resolve; });
+    });
+    assert.equal(user.StartLogin(), undefined);
+    assert.equal(user.StartLogin(), undefined);
+    const states = [];
+    const sub = user.RegisterForLoginStateChange((...args) => states.push(args));
+    await settle();
+    assert.equal(reads, 1);
+    assert.deepEqual(states, []);
+    completeSession({ steamId });
+    await settle();
+    assert.deepEqual(states, [["", 5, 1, 0, 100, ""]]);
+    sub.unregister();
 });
 
 test("failed or invalid native reads never produce a login or a logout event", async () => {

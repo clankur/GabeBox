@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { create } = require("../probe/signin/steam-sdl-timing.js");
+const { create } = require("../ui/signin/steam-sdl-timing.js");
 
 function sample(frameForTick, resetAt) {
     const timing = create();

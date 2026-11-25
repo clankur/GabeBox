@@ -1,4 +1,4 @@
-#include "../probe/sdl-swap-clock.h"
+#include "../runtime/shared/sdl-swap-clock.h"
 #include <assert.h>
 
 int main(void)
@@ -25,5 +25,18 @@ int main(void)
     assert(XboxSdlNextSwap(&clock, now, 0) == now);
     assert(XboxSdlNextSwap(&clock, now, 2) == now);
     assert(XboxSdlNextSwap(&clock, now + 2, 2) == now + hz / 30);
+
+    // DXGI's optional 60000/1001 Hz experiment scales the clock numerator
+    // while wait durations still use the actual performance counter rate.
+    XboxSdlSwapClock ntsc = {0, hz + hz / 1000, 0, 0};
+    now = origin;
+    assert(XboxSdlNextSwap(&ntsc, now, 1) == origin);
+    for (uint64_t draw = 1; draw <= 60000; ++draw) {
+        now += hz / 200;
+        const uint64_t deadline = XboxSdlNextSwap(&ntsc, now, 1);
+        const uint64_t exact = origin + draw * hz * 1001 / 60000;
+        assert(deadline <= exact && exact - deadline <= 3);
+        now = deadline;
+    }
     return 0;
 }

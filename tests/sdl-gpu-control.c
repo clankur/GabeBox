@@ -5,7 +5,7 @@
 #include "SDL.h"
 #include "SDL_opengl.h"
 #include <appmodel.h>
-#include "../probe/sdl-gpu-protocol.h"
+#include "../runtime/shared/sdl-gpu-protocol.h"
 
 enum { width = 1920, height = 1080, fps = 60, duration = 70 };
 typedef void (APIENTRY *Color)(GLfloat, GLfloat, GLfloat, GLfloat);

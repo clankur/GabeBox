@@ -1,4 +1,4 @@
-#include "../probe/sdl-host-display-size.h"
+#include "../runtime/sdl/sdl-host-display-size.h"
 #include <assert.h>
 
 /* Build with SDL2's sdl2-config --cflags --libs and run in a fresh process. */

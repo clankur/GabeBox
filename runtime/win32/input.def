@@ -1,0 +1,9 @@
+LIBRARY XboxWin32Input.dll
+EXPORTS
+    GetPointerPenInfo=XboxGetPointerPenInfo @1
+    LoadCursorFromFileW=XboxLoadCursorFromFileW @2
+    MapVirtualKeyExA=XboxMapVirtualKeyExA @3
+    XInputGetCapabilities=XboxXInputGetCapabilities @4
+    XInputGetState=XboxXInputGetState @5
+    GetRawInputBuffer=XboxGetRawInputBuffer @6
+    XInputSetState=XboxXInputSetState @7

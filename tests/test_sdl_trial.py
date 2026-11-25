@@ -1,5 +1,4 @@
 import hashlib
-import importlib.util
 from argparse import Namespace
 from pathlib import Path
 from struct import pack_into
@@ -8,9 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 
-spec = importlib.util.spec_from_file_location('xbox_deploy', Path(__file__).resolve().parents[1] / 'xbox-deploy.py')
-cli = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cli)
+from tools import xbox_deploy as cli
 
 
 class SdlTrialTests(unittest.TestCase):
