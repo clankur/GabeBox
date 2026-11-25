@@ -388,3 +388,38 @@ Console checks, in order:
 1. **Graphics control:** `probe/graphics-runtime-control/build.sh --hosted-display` (then `--display-config`) must exit `0x51A7`. A `3xx` from `--display-config` confirms that native sizing leaves the counts unwritten.
 2. **First launch:** `python3 -m tools.xbox_deploy deploy` the signed package. Start `observe --app-id 1229490 --image-name ULTRAKILL.exe --frame-seconds 40`, then open the package so it submits the configured Play. Compare `unity-startup.txt` with the 32,412,455,616-byte `TempOverflow` failure.
 3. **Coverage:** record first frame, controller input, audio, save and reload (PlayerPrefs hive and `LocalLow`), and return to the library. Measure 30 settled seconds with `python3 -m tools.measure --require-gpu-60`.
+
+### ULTRAKILL black screen on Series X, 2026-11-25
+
+These results come from Series X Steam Core builds `1.0.232.61` through `1.0.233.5`, on a base reassembled as `1.0.232.60` (`b048d049…`), running ULTRAKILL `22957324`. Startup now passes every earlier blocker:
+
+- The hosted CCD display topology answers Unity's display queries.
+- `LocalLow` and the PlayerPrefs hive are scoped per account and title.
+- Hosted XInput loads through Unity's `LoadLibraryA`.
+- The hosted swap chain presents about 60 frames per second to the presenter, at 1920 × 1080, as GPU-shared textures with no CPU uploads.
+
+The game loads its tutorial content and writes `Saves/Slot1/generalprogress.bepis`. Every image is black.
+
+- **Frame probe:** the DXGI frame probe (`dxgi-frame.cpp`) reads back the presented buffer. Every swap-chain buffer is exactly zero, with `peak=0`, at published frames 60 through 7200, on Unity D3D11 and on Unity D3D12 (`-force-d3d12`). Single-threaded rendering (`-force-gfx-direct`) gives the same result.
+- **Rejected causes:**
+  - Window size and move messages (`b974e2a`).
+  - Masking of occlusion status (no `DXGI_STATUS_OCCLUDED` was ever returned).
+  - Staging the native Steam, Discord, occlusion-culling and Burst plugins as hash-pinned companions.
+  - The OpenGL Core renderer, which fails context activation and then faults.
+- **GPU work per frame:** a D3D11 pipeline-statistics query over one frame at each sample shows the work Unity submits:
+
+  | Frame | Vertices | Primitives | Pixel shader | Compute |
+  | --- | --- | --- | --- | --- |
+  | 60 | 84 | 28 | 29,030,400 | 2,073,600 |
+  | 600 | 114 | 38 | 39,398,400 | 2,073,600 |
+  | 1,800 | 54 | 18 | 18,662,400 | 2,073,600 |
+  | 3,600 | 6 | 2 | 2,073,600 | 2,077,696 |
+
+  Every pixel-shader count is a whole multiple of 1920 × 1080. So the cameras run full-screen post-processing over an image that contains no meshes and no UI.
+- **Likely cause:** `Assembly-CSharp` routes visibility through `ULTRAKILL.Portal.PortalRenderV2`. That path uses Intel's masked occlusion culling (`MaskedOcclusionCullingNative.dll`), Burst `UpdateOcclusionBurst`, and a GPU occlusion readback (`OnOcclusionReadbackCompleted`, `occlusionBitset`). If either step reports everything occluded, the result matches these statistics.
+
+**Next checks:**
+
+1. Toggle the game's own `PortalOcclusion` console command with remote input. The Device Portal remote-input route is on `claude/sts2-xbox-compat-6e11d5`.
+2. Trace Unity's `AsyncGPUReadback` completion on Xbox D3D11.
+3. Confirm that `MaskedOcclusionCullingNative.dll` loads and reports its SIMD implementation.
