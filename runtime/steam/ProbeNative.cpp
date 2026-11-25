@@ -3232,6 +3232,13 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_LOCAL_LOW", shadowLow},
                 {L"XBOX_WIN32_PREFS_KEY", shadowPrefsKey}, {L"XBOX_WIN32_PREFS_HIVE", shadowPrefsHive},
                 {L"XBOX_WIN32_HOST_XINPUT", shadowHostedXInput ? L"1" : L""},
+                // The host owns the console controller and republishes it as hosted XInput user 0.
+                // SDL's other joystick backends can see the physical pad, claim the XInput
+                // device and then never deliver its input, so they are off for these titles.
+                {L"SDL_JOYSTICK_WGI", shadowHostedXInput ? L"0" : L""},
+                {L"SDL_JOYSTICK_GAMEINPUT", shadowHostedXInput ? L"0" : L""},
+                {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
+                {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
