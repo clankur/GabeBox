@@ -29,6 +29,7 @@ cannot carry, so they are sent as virtual-key codes.
 
 import argparse
 import base64
+from datetime import datetime, timezone
 import getpass
 import hashlib
 import hmac
@@ -43,7 +44,7 @@ import time
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.device_portal import DevicePortal  # noqa: E402
+from tools.device_portal import CertificateChanged, DevicePortal  # noqa: E402
 from tools.xbox_deploy import load_settings  # noqa: E402
 
 REMOTE_INPUT = '/ext/remoteinput'
@@ -228,7 +229,7 @@ class RemoteInput:
         try:
             actual = hashlib.sha256(self.sock.getpeercert(binary_form=True)).hexdigest()
             if not hmac.compare_digest(actual, portal.fingerprint):
-                raise ValueError(f'Xbox portal certificate changed. Observed SHA-256: {actual}')
+                raise CertificateChanged(actual, portal.fingerprint)
             nonce = base64.b64encode(os.urandom(16)).decode('ascii')
             host = f'{portal.host}:{portal.port}'
             self.sock.sendall(handshake_request(host, nonce, portal.authorization, portal.csrf_token))
@@ -264,15 +265,22 @@ class RemoteInput:
             self.sock.close()
 
 
-def run(client, steps, gap, log, sleep=time.sleep):
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def run(client, steps, gap, log, sleep=time.sleep, now=utc_now):
+    # Log the UTC time each step started so it can be matched against frame traces and loader records.
     for step in steps:
+        started = None
         for seconds, action in parse_step(step):
             sleep(seconds)
+            started = started or now()
             if isinstance(action, Path):
                 client.screenshot(action)
             elif action is not None:
                 client.send(action)
-        print(f'{time.strftime("%H:%M:%S")} {step}', file=log, flush=True)
+        print(f'{started or now()} {step}', file=log, flush=True)
         sleep(gap)
 
 

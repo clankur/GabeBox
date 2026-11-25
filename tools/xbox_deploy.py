@@ -27,7 +27,7 @@ from probe.catalog import (
 )
 from probe.runner import report_fields, run_case
 from tools.artifacts import SDL_LIMIT, SDL_TRIALS, load_sdl_artifact, pe_summary
-from tools.device_portal import PACKAGE_API, DevicePortal, PortalError
+from tools.device_portal import PACKAGE_API, CertificateChanged, DevicePortal, PortalError, utc_text
 
 
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
@@ -613,6 +613,32 @@ def stop_probe(portal, app, allow_inactive=False):
         raise
 
 
+def package_processes(portal, app):
+    _, raw = portal.request('GET', '/api/resourcemanager/processes', read_limit=4 * 1024 * 1024)
+    return sorted((item['ImageName'], item['ProcessId']) for item in json.loads(raw)['Processes']
+                  if item.get('PackageFullName') == app['PackageFullName'])
+
+
+def relaunch_package(portal, app, timeout, *, clock=time.monotonic, pause=time.sleep):
+    """Stop every process of an installed package, wait until none remain, then activate it again."""
+    before = package_processes(portal, app)
+    stop_probe(portal, app, allow_inactive=True)
+    started = clock()
+    while True:
+        remaining = package_processes(portal, app)
+        if not remaining:
+            break
+        if clock() - started >= timeout:
+            names = ', '.join(sorted({image for image, _ in remaining}))
+            raise ValueError(f'{app["PackageFullName"]} still has running processes after {timeout}s ({names}). '
+                             'It was not activated again.')
+        pause(0.5)
+    stopped_seconds = round(clock() - started, 3)
+    activate_probe(portal, app)
+    return {'package': app['PackageFullName'], 'stopped_processes': [image for image, _ in before],
+            'stop_seconds': stopped_seconds, 'activated_utc': utc_text(time.time())}
+
+
 def collect_probe(portal, key, version, manual, timeout, restart=False, json_output=False):
     case = CASES[key]
     app = find_installed_probe(portal, case.package, version)
@@ -904,6 +930,32 @@ def main():
     lifetime.add_argument('--portal-return', action='store_true',
                           help='reproduce return through Device Portal’s app launcher')
     lifetime.add_argument('--dwell', type=int, default=15, help='seconds to keep the control foreground')
+    relaunch = commands.add_parser('relaunch', help='stop the installed Steam Core package and its game, then activate it again')
+    relaunch.add_argument('--version', help='require a specific installed package version')
+    relaunch.add_argument('--stop-timeout', type=int, default=30, help='seconds to wait for every package process to exit')
+    sampler = commands.add_parser('sample-processes',
+                                  help='record memory and CPU of the Steam Core package and named processes without controlling the Xbox')
+    sampler.add_argument('--version', help='require a specific installed package version')
+    sampler.add_argument('--image-name', action='append', default=[], metavar='EXE',
+                         help='also sample this executable basename, for example a game outside the package')
+    sampler.add_argument('--seconds', type=int, required=True, help='sampling duration (1–7200)')
+    sampler.add_argument('--interval', type=float, default=1.0, help='seconds between samples (0.5–60, default 1)')
+    sampler.add_argument('--output', type=Path, required=True, help='new JSON Lines file for samples and process events')
+    shots = commands.add_parser('screenshots', help='save Device Portal screenshots on a schedule without controlling the Xbox')
+    shots.add_argument('--output', type=Path, required=True, help='new directory for PNG files and screenshots.jsonl')
+    shots.add_argument('--delay', type=float, default=0, help='seconds before the first screenshot (default 0)')
+    shots.add_argument('--interval', type=float, default=30, help='seconds between screenshots (default 30)')
+    shots.add_argument('--count', type=int, default=1, help='number of screenshots (1–240, default 1)')
+    list_command = commands.add_parser('list-files', help='list a Steam Core package folder such as \\TempState')
+    list_command.add_argument('folder', help='package folder beginning with \\LocalState, \\TempState, \\LocalCache, \\RoamingState or \\AC')
+    list_command.add_argument('--version', help='require a specific installed package version')
+    list_command.add_argument('--recursive', action='store_true', help='include subfolders up to six levels deep')
+    list_command.add_argument('--since-utc', help='keep entries created or modified at or after this UTC time')
+    get_command = commands.add_parser('get-file', help='copy one file from a Steam Core package folder')
+    get_command.add_argument('folder', help='package folder beginning with \\LocalState, \\TempState, \\LocalCache, \\RoamingState or \\AC')
+    get_command.add_argument('name', help='file name within the folder')
+    get_command.add_argument('--version', help='require a specific installed package version')
+    get_command.add_argument('--output', type=Path, required=True, help='new local file')
     for command in (deploy, probe, lifetime):
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait per checkpoint')
     for command in (deploy, probe):
@@ -978,6 +1030,29 @@ def main():
 
     if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
         sdl.error('--frame-timeout must be between 1 and 120 seconds')
+    if args.command == 'relaunch' and not 1 <= args.stop_timeout <= 300:
+        relaunch.error('--stop-timeout must be between 1 and 300 seconds')
+    if args.command == 'sample-processes':
+        if not 1 <= args.seconds <= 7200 or not 0.5 <= args.interval <= 60:
+            sampler.error('Use 1–7200 seconds of sampling and an interval of 0.5–60 seconds')
+        if any(not re.fullmatch(r'[a-z0-9_. -]{1,100}\.exe', name, re.I) for name in args.image_name):
+            sampler.error('--image-name takes an executable basename')
+    if args.command == 'screenshots' and not (1 <= args.count <= 240 and 0 <= args.delay <= 3600
+                                              and 1 <= args.interval <= 3600):
+        shots.error('Use 1–240 screenshots, a 0–3600 second delay and a 1–3600 second interval')
+    if args.command in ('sample-processes', 'screenshots', 'get-file'):
+        if args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir():
+            parser.error('--output must name a new path under an existing directory')
+    if args.command in ('list-files', 'get-file'):
+        from tools.xbox_capture import file_name, package_folder, utc_filetime
+
+        try:
+            package_folder(args.folder)
+            if args.command == 'get-file':
+                file_name(args.name)
+            args.since = utc_filetime(args.since_utc) if args.command == 'list-files' and args.since_utc else None
+        except ValueError as error:
+            (list_command if args.command == 'list-files' else get_command).error(str(error))
 
     settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
@@ -1014,14 +1089,39 @@ def main():
         if not args.portal_return and args.dwell >= 120:
             lifetime.error('protocol return requires --dwell below the control app’s 120-second request window')
 
-    if not hmac.compare_digest(portal.request(), fingerprint):
-        raise ValueError('Xbox portal certificate does not match XBOX_PORTAL_CERT_SHA256.')
+    observed = portal.request()
+    if not hmac.compare_digest(observed, fingerprint):
+        raise CertificateChanged(observed, fingerprint)
     if username:
         if not password:
             if not sys.stdin.isatty():
                 raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
             password = getpass.getpass('Xbox Device Portal password: ')
         portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
+    if args.command in ('relaunch', 'sample-processes', 'screenshots', 'list-files', 'get-file'):
+        from tools import xbox_capture
+
+        def progress(stage):
+            print(stage, file=sys.stderr, flush=True)
+
+        if args.command == 'screenshots':
+            result = xbox_capture.capture_screenshots(portal, args.output, args.delay, args.interval, args.count,
+                                                      progress=progress)
+        else:
+            app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+            if args.command == 'relaunch':
+                result = relaunch_package(portal, app, args.stop_timeout)
+            elif args.command == 'sample-processes':
+                images = list(dict.fromkeys([*args.image_name, *xbox_capture.CRASH_IMAGES]))
+                progress(f'sampling {app["PackageFullName"]} and {", ".join(images)}')
+                result = xbox_capture.sample_processes(portal, app['PackageFullName'], images, args.seconds,
+                                                       args.interval, args.output, progress=progress)
+            elif args.command == 'list-files':
+                result = xbox_capture.list_files(portal, app, args.folder, recursive=args.recursive, since=args.since)
+            else:
+                result = xbox_capture.get_file(portal, app, args.folder, args.name, args.output)
+        print(json.dumps(result, indent=2))
+        return
     if args.command == 'lifetime':
         run_lifetime(portal, args.version, args.dwell, args.timeout, args.portal_return)
         return

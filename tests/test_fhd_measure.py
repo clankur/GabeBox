@@ -43,6 +43,13 @@ class StallDiagnosisTests(unittest.TestCase):
             self.assertIsNone(gap['gpu_source_sequence_delta'])
             self.assertIsNone(gap['producer_stage_overlap_ms'])
 
+    def test_lists_every_gap_over_the_threshold_with_its_utc_time(self):
+        report = measure['presenter_gaps'](self.frames, 0, None, 1, 50)
+        self.assertEqual(report['count'], 1)
+        self.assertEqual(report['gaps'], [{'utc': '1970-01-01T00:00:00.017+00:00', 'start_offset_s': .017,
+                                           'gap_ms': 100, 'gpu_source_sequence_delta': 2}])
+        self.assertEqual(measure['presenter_gaps'](self.frames, 0, None, 1, 16)['count'], 3)
+
     def test_nonmonotonic_producer_counters_are_rejected(self):
         log = self.stall.replace('lock=1052', 'lock=1045')
         with self.assertRaisesRegex(ValueError, 'Inconsistent producer stall timestamps'):

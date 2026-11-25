@@ -1,4 +1,5 @@
 from contextlib import redirect_stderr, redirect_stdout
+import errno
 import hashlib
 import io
 import json
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from tools import xbox_deploy as cli, xbox_diagnostics as diagnostics
+from tools.device_portal import CertificateChanged
 
 
 APP = {'PackageFullName': 'XboxPortabilityProbe.ChildProcess.SteamCore_1.2.3.4_x64__example'}
@@ -967,3 +969,173 @@ class ObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed during input sampling'):
                 cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
             self.assertFalse(args.output.exists())
+
+
+MEASURED = (b'audio meter=ready\r\n'
+            b'audio window=1 peak-milli=29 audible=15/100\r\n'
+            b'pso timing result=0x00000000\r\n'
+            b'pso kind=G utc=19:14:13.851 us=48210 result=0x00000000\r\n'
+            b'audio window=2 peak-milli=0 audible=0/100\r\n'
+            b'pso kind=C utc=19:14:13.910 us=2210 result=0x80070057\r\n'
+            b'dxgi dred-query result=0x00000000\r\n'
+            b'dxgi dred-node queue=Mesa list=Frame completed=0x0003/0x0008 ops=01 02 03 [04] 05 \r\n'
+            b'dxgi dred-fault va=0x0000000012340000 existing=Texture:0x0D freed=-:0x0C\r\n'
+            b'audio window=3 peak-milli=36 audible=100/100\r\n')
+
+
+class LoaderDiagnosticTests(unittest.TestCase):
+    def test_measurement_records_are_kept_in_order_and_summarized(self):
+        lines = diagnostics.complete_loader_lines(b'load game.dll ok source=package\r\n' + MEASURED
+                                                  + b'audio window=4 peak-milli=1 audible=1/100 C:\\private\r\n'
+                                                  + b'pso kind=X utc=19:14:13.851 us=1 result=0x00000000\r\n'
+                                                  + b'dxgi dred-fault va=0x0000000012340000 existing=C:\\private:0x0D\r\n')
+        self.assertEqual(len(lines), 11)
+        measured = diagnostics.diagnostic_lines(lines)
+        self.assertEqual(measured, MEASURED.decode().splitlines())
+        self.assertEqual(diagnostics.unique_loader_lines(lines),
+                         ['load game.dll ok source=package', 'dxgi dred-query result=0x00000000'])
+        summary = diagnostics.diagnostic_summary(measured)
+        windows = ['audio window=1 peak-milli=29 audible=15/100', 'audio window=2 peak-milli=0 audible=0/100',
+                   'audio window=3 peak-milli=36 audible=100/100']
+        self.assertEqual(summary['audio'], {
+            'meter': 'ready', 'windows': 3, 'window_seconds': 10, 'first_window': 1, 'last_window': 3,
+            'audible_windows': 1, 'silent_windows': 1, 'unread_windows': 0, 'peak_milli_max': 36,
+            'first': windows, 'latest': windows,
+        })
+        self.assertEqual(summary['pipelines']['timing'], 'ready')
+        self.assertEqual(summary['pipelines']['kinds'], {'graphics': 1, 'compute': 1})
+        self.assertEqual(summary['pipelines']['total_ms'], 50.42)
+        self.assertEqual(summary['pipelines']['max_ms'], 48.21)
+        self.assertEqual(summary['pipelines']['failures'], 1)
+        self.assertEqual(summary['device_removed']['incomplete_command_lists'], 1)
+        self.assertTrue(summary['device_removed']['page_fault'])
+        self.assertEqual(len(summary['device_removed']['records']), 3)
+        unavailable = diagnostics.diagnostic_summary(['audio meter=unavailable stage=endpoint result=0x80070490'])
+        self.assertEqual(unavailable['audio']['meter'], 'unavailable: stage=endpoint result=0x80070490')
+        self.assertEqual(unavailable['audio']['windows'], 0)
+
+    def test_loader_inspection_keeps_measurement_lines_and_summarizes_them(self):
+        launch = EPOCH_MS + 1
+        fixture = Fixture([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE),
+            LIVE_TRACE: b'asset shell-request result=0x00000000\r\n' + MEASURED,
+        }], stages=[[stage(LIVE_STAGE, launch + 5)]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'loader'
+            result = fixture.inspect_loader(options(run_id=launch, output=output))
+            trace = result['loader_trace']
+            self.assertEqual(trace['records'], 11)
+            self.assertEqual(trace['recent'], ['asset shell-request result=0x00000000',
+                                               'dxgi dred-query result=0x00000000'])
+            self.assertEqual(trace['diagnostics']['audio']['windows'], 3)
+            self.assertEqual(trace['diagnostics']['pipelines']['events_over_2ms'], 2)
+            saved = (output / 'loader-trace.txt').read_bytes()
+            self.assertEqual(saved, (b'asset shell-request result=0x00000000\r\n' + MEASURED).replace(b'\r\n', b'\n'))
+
+
+class ResilientObserverTests(unittest.TestCase):
+    launch = EPOCH_MS + 1
+
+    def outage(self, start, end, error):
+        class Flaky(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                if start <= self.now < end:
+                    raise error
+                return super().read(portal, app, folder, name, limit)
+
+            def request(self, method, path, **kwargs):
+                if start <= self.now < end:
+                    raise error
+                if path == '/api/resourcemanager/processes':
+                    return 200, json.dumps({'Processes': [{'ImageName': 'Game.exe'}]}).encode()
+                return super().request(method, path, **kwargs)
+
+        running = {diagnostics.PROBE_REPORT: probe(self.launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+                   LIVE_TRACE: MEASURED}
+        return Flaky([{diagnostics.PROBE_REPORT: probe()}, running], stages=[[], [stage(LIVE_STAGE, self.launch)]])
+
+    def test_short_timeouts_are_retried_with_backoff_and_recorded_as_a_gap(self):
+        fixture = self.outage(3, 6, TimeoutError(errno.ETIMEDOUT, 'Operation timed out'))
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = diagnostics.observe(options(output=output, image_name='game.exe', frame_seconds=8, timeout=40),
+                                         fixture, APP, fixture.read, lambda raw: raw.decode(), PortalError,
+                                         clock=lambda: fixture.now, wall_clock=lambda: EPOCH_MS / 1000 + fixture.now,
+                                         pause=fixture.pause, progress=progress.append)
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertEqual(result['portal']['retries'], 3)
+            self.assertEqual(result['portal']['skipped_reads'], 0)
+            gap, = result['portal']['gaps']
+            self.assertEqual(gap['error'], f'TimeoutError errno={errno.ETIMEDOUT}')
+            self.assertEqual((gap['failed_attempts'], gap['seconds'], gap['skipped_reads']), (3, 3.5, 0))
+            self.assertIn(f'portal-unreachable TimeoutError errno={errno.ETIMEDOUT}; retrying', progress)
+            self.assertIn('portal-recovered after 3.5s', progress)
+            self.assertEqual(json.loads((output / 'observation.json').read_text())['portal'], result['portal'])
+
+    def test_long_outage_skips_reads_keeps_polling_and_does_not_report_the_game_gone(self):
+        fixture = self.outage(3, 15, ConnectionResetError(errno.ECONNRESET, 'Connection reset by peer'))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(output=output, image_name='game.exe', frame_seconds=20, timeout=40))
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertTrue(result['game_process_listed'])
+            gap, = result['portal']['gaps']
+            self.assertEqual(gap['error'], f'ConnectionResetError errno={errno.ECONNRESET}')
+            self.assertGreater(gap['skipped_reads'], 1)
+            self.assertEqual(result['portal']['skipped_reads'], gap['skipped_reads'])
+            # The live loader copy taken before the outage survives it.
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+
+    def test_certificate_change_is_fatal_but_saves_what_was_already_copied(self):
+        fixture = self.outage(3, 99, CertificateChanged('a' * 64, 'b' * 64))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            with self.assertRaises(CertificateChanged) as raised:
+                fixture.observe(options(output=output, frame_seconds=20, timeout=40))
+            self.assertIn('a' * 64, str(raised.exception))
+            self.assertIn('Nothing was trusted automatically', str(raised.exception))
+            self.assertEqual(fixture.now, 3)
+            saved = json.loads((output / 'observation.json').read_text())
+            self.assertEqual(saved['outcome'], 'portal-certificate-changed')
+            self.assertNotIn('portal', saved)
+            self.assertEqual(saved['loader_diagnostics']['audio']['windows'], 3)
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+            self.assertFalse((output / 'fhd-present-times.bin').exists())
+
+    def test_measurement_lines_survive_cleanup_of_the_staging_folder_at_exit(self):
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        running = probe(self.launch, extra=VERIFIED_STAGE + f'steam_shadow_exit_report={exit_file}\r\n')
+        exited = (b'steam_shadow_child_status=exited\r\nsteam_shadow_child_exit_u32=0\r\n'
+                  b'steam_shadow_loader=load game.dll ok source=package\r\nsteam_shadow_loader_trace=collected\r\n')
+        old = stage('SteamWin32Trial (37)', 1)
+        live = stage(LIVE_STAGE, self.launch)
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: probe()},
+            {diagnostics.PROBE_REPORT: running, LIVE_TRACE: b'load game.dll ok source=package\r\n' + MEASURED[:60]},
+            {diagnostics.PROBE_REPORT: running, LIVE_TRACE: b'load game.dll ok source=package\r\n' + MEASURED},
+            {diagnostics.PROBE_REPORT: running, exit_file: exited},
+        ], stages=[[old], [old, live], [old, live], [old]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(output=output, timeout=20))
+            self.assertEqual(result['outcome'], 'game-exited')
+            self.assertEqual(result['live_loader']['stage'], LIVE_STAGE)
+            self.assertEqual(result['live_loader']['reads'], 2)
+            self.assertEqual(result['loader_diagnostics']['audio']['windows'], 3)
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+            # The ordinary trace keeps its merged form; the exit report repeats the load record last.
+            self.assertEqual((output / 'loader-trace.txt').read_text(),
+                             'dxgi dred-query result=0x00000000\nload game.dll ok source=package\n')
+
+    def test_attached_observer_copies_the_live_trace_from_the_launch_staging_folder(self):
+        fixture = Fixture([{diagnostics.PROBE_REPORT: probe(self.launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+                            LIVE_TRACE: MEASURED}],
+                          stages=[[stage('SteamWin32Trial (37)', self.launch - 60_000), stage(LIVE_STAGE, self.launch + 900)]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(run_id=self.launch, output=output))
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertEqual(result['live_loader']['stage'], LIVE_STAGE)
+            self.assertTrue((output / 'loader-diagnostics.txt').exists())
+            self.assertNotIn(diagnostics.TEMP + '\\SteamWin32Trial (37)', [folder for folder, _, _ in fixture.reads])

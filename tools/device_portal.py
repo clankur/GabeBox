@@ -1,10 +1,14 @@
 """Pinned Xbox Device Portal HTTP transport and package upload."""
 
+from datetime import datetime, timezone
+import errno
 import hashlib
 import hmac
 import http.client
 from http.cookies import SimpleCookie
+import socket
 import ssl
+import time
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
@@ -17,6 +21,140 @@ class PortalError(ValueError):
         self.status = status
         self.response = response
         super().__init__(details)
+
+
+class CertificateChanged(ValueError):
+    """The console presented a TLS certificate other than the pinned one. Never retried or trusted."""
+
+    def __init__(self, observed, expected=''):
+        self.observed = observed
+        self.expected = expected
+        pinned = f' instead of the pinned {expected}' if expected else ''
+        super().__init__(
+            f'Xbox Device Portal presented a different TLS certificate (SHA-256 {observed}){pinned}. '
+            'The console creates a new portal certificate after some reboots and Dev Home resets. '
+            'Nothing was trusted automatically. Confirm that this fingerprint belongs to your console, '
+            'then set XBOX_PORTAL_CERT_SHA256 to it and rerun.')
+
+
+class PortalUnavailable(OSError):
+    """A Device Portal read kept failing with transient network errors after bounded retries."""
+
+
+TRANSIENT_ERRNOS = {getattr(errno, name) for name in (
+    'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'ECONNREFUSED', 'EHOSTUNREACH', 'EHOSTDOWN',
+    'ENETUNREACH', 'ENETDOWN', 'ENETRESET', 'EPIPE') if hasattr(errno, name)}
+
+
+def transient_error(error):
+    """Network failures that can clear on their own: timeouts, resets, refused or dropped connections."""
+    if isinstance(error, (CertificateChanged, PortalUnavailable)):
+        return False
+    if isinstance(error, (TimeoutError, socket.timeout, ConnectionError, http.client.RemoteDisconnected,
+                          http.client.IncompleteRead, http.client.BadStatusLine, ssl.SSLEOFError,
+                          ssl.SSLZeroReturnError)):
+        return True
+    return isinstance(error, OSError) and error.errno in TRANSIENT_ERRNOS
+
+
+def describe_error(error):
+    code = getattr(error, 'errno', None)
+    return f'{type(error).__name__} errno={code}' if isinstance(code, int) else type(error).__name__
+
+
+def utc_text(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+class PortalRetry:
+    """Retry idempotent Device Portal reads with bounded backoff and record when the portal was unreachable.
+
+    A gap opens at the first transient failure and closes at the next successful read. An
+    operation is retried after each delay in turn. When the delays are exhausted, or the next
+    attempt would start after the deadline, PortalUnavailable is raised so the caller can skip
+    that read and keep going. Certificate changes and HTTP errors are never retried.
+    """
+
+    MAX_GAPS = 64
+
+    def __init__(self, *, delays=(0.5, 1, 2, 4), clock=time.monotonic, wall_clock=time.time, pause=time.sleep,
+                 deadline=None, progress=None):
+        self.delays = tuple(delays)
+        self.clock = clock
+        self.wall_clock = wall_clock
+        self.pause = pause
+        self.deadline = deadline
+        self.progress = progress
+        self.retries = 0
+        self.unavailable = 0
+        self.gaps = []
+        self.dropped_gaps = 0
+        self.open_gap = None
+
+    def call(self, operation):
+        # While a gap is already open after exhausted retries, try each read once so a poll
+        # loop does not spend the full backoff on every file during an outage.
+        delays = () if self.open_gap is not None and self.open_gap['skipped_reads'] else self.delays
+        attempt = 0
+        while True:
+            try:
+                value = operation()
+            except Exception as error:
+                if not transient_error(error):
+                    raise
+                self._fail(error)
+                delay = delays[attempt] if attempt < len(delays) else None
+                if delay is None or (self.deadline is not None and self.clock() + delay > self.deadline):
+                    self.unavailable += 1
+                    self.open_gap['skipped_reads'] += 1
+                    raise PortalUnavailable(f'Xbox Device Portal is unreachable ({describe_error(error)}).') from error
+                attempt += 1
+                self.retries += 1
+                self.pause(delay)
+                continue
+            self._recover()
+            return value
+
+    def request(self, portal, method, path, **kwargs):
+        """Retry a GET through this policy. Other methods are not idempotent and pass straight through."""
+        if method != 'GET':
+            return portal.request(method, path, **kwargs)
+        return self.call(lambda: portal.request(method, path, **kwargs))
+
+    def _fail(self, error):
+        if self.open_gap is None:
+            self.open_gap = {'start_utc': utc_text(self.wall_clock()), 'started': self.clock(),
+                             'error': describe_error(error), 'failed_attempts': 0, 'skipped_reads': 0}
+            if self.progress:
+                self.progress(f'portal-unreachable {self.open_gap["error"]}; retrying')
+        self.open_gap['failed_attempts'] += 1
+
+    def _recover(self):
+        if self.open_gap is None:
+            return
+        gap = self.open_gap
+        self.open_gap = None
+        gap['end_utc'] = utc_text(self.wall_clock())
+        gap['seconds'] = round(self.clock() - gap.pop('started'), 3)
+        if self.progress:
+            self.progress(f'portal-recovered after {gap["seconds"]}s')
+        if len(self.gaps) < self.MAX_GAPS:
+            self.gaps.append(gap)
+        else:
+            self.dropped_gaps += 1
+
+    def summary(self):
+        """None when every read succeeded first time; otherwise the retries and gaps for a result."""
+        if not self.retries and not self.unavailable and not self.gaps and self.open_gap is None:
+            return None
+        result = {'retries': self.retries, 'skipped_reads': self.unavailable, 'gaps': list(self.gaps)}
+        if self.dropped_gaps:
+            result['gaps_not_listed'] = self.dropped_gaps
+        if self.open_gap is not None:
+            gap = dict(self.open_gap)
+            gap['seconds_so_far'] = round(self.clock() - gap.pop('started'), 3)
+            result['unrecovered_gap'] = gap
+        return result
 
 
 class DevicePortal:
@@ -45,7 +183,7 @@ class DevicePortal:
             if method is None:
                 return actual
             if not hmac.compare_digest(actual, self.fingerprint):
-                raise ValueError(f'Xbox portal certificate changed. Observed SHA-256: {actual}')
+                raise CertificateChanged(actual, self.fingerprint)
 
             request_headers = dict(headers or {})
             if self.authorization:

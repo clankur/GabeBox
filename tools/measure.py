@@ -144,6 +144,22 @@ def diagnose_stalls(trace, start, utc, duration, producer_log=None):
     return {'longest_gaps': result, 'producer_stall_records': len(producer) if producer_log is not None else None}
 
 
+def presenter_gaps(trace, start, utc, duration, threshold_ms, limit=512):
+    """Every interval between distinct presented frames longer than threshold_ms, with its UTC time."""
+    _, frequency, anchor, _, _, _, frames, _, _ = presentation_window(trace, start, utc, duration)
+    epoch = (HEADER.unpack_from(trace)[3] - FILETIME_EPOCH) / 10_000_000
+    gaps = []
+    for left, right in zip(frames, frames[1:]):
+        gap_ms = (right[0] - left[0]) * 1000 / frequency
+        if gap_ms <= threshold_ms:
+            continue
+        offset = (left[0] - anchor) / frequency
+        gaps.append({'utc': datetime.fromtimestamp(epoch + offset, timezone.utc).isoformat(timespec='milliseconds'),
+                     'start_offset_s': round(offset, 6), 'gap_ms': round(gap_ms, 3),
+                     'gpu_source_sequence_delta': right[1] - left[1] if left[3] == right[3] == 2 and right[1] > left[1] else None})
+    return {'threshold_ms': threshold_ms, 'count': len(gaps), 'gaps': gaps[:limit], 'listed': min(len(gaps), limit)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('trace', type=Path)
@@ -156,7 +172,11 @@ def main():
     parser.add_argument('--require-gpu-60', action='store_true', help='require sustained 60 fps on the verified hardware adapter')
     parser.add_argument('--diagnose-stalls', action='store_true', help='include source sequence changes at the longest presenter gaps')
     parser.add_argument('--producer-log', type=Path, help='correlate DXGI timings from the same Xbox run’s loader trace or saved report')
+    parser.add_argument('--list-gaps', type=float, metavar='MS',
+                        help='list every presenter gap longer than MS milliseconds with its UTC time')
     args = parser.parse_args()
+    if args.list_gaps is not None and not (math.isfinite(args.list_gaps) and args.list_gaps > 0):
+        parser.error('--list-gaps takes a positive number of milliseconds')
     try:
         trace = args.trace.read_bytes()
         result = summarize(trace, args.start_offset_s, args.start_utc, args.duration,
@@ -168,6 +188,9 @@ def main():
                 encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
                 log = raw.decode(encoding, errors='replace')
             result['stall_diagnostics'] = diagnose_stalls(trace, args.start_offset_s, args.start_utc, args.duration, log)
+        if args.list_gaps is not None:
+            result['presenter_gaps'] = presenter_gaps(trace, args.start_offset_s, args.start_utc, args.duration,
+                                                      args.list_gaps)
     except (OSError, ValueError, struct.error) as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2))

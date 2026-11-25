@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from probe.catalog import PROBE_REPORT, WEBVIEW_REPORT
 from probe.runner import report_fields as fields
 
+from .device_portal import CertificateChanged, PortalRetry, PortalUnavailable, utc_text
 from .measure import FILETIME_EPOCH, HEADER, PRESENT
 
 
@@ -37,7 +38,22 @@ CHECKPOINT = re.compile(r'[a-z][a-z0-9_.-]{0,62}(?::(?:0x[0-9a-f]{1,8}|[a-z][a-z
 TIMINGS = re.compile(r'[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}(?:,[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}){0,63}')
 BROWSER_RUN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
 WINDOW_TRACE = re.compile(r'(?:win32|sdl)_[a-z0-9_]{1,72}=[a-z0-9_.=-]{1,72}', re.I | re.ASCII)
-LOADER_TRACE = re.compile(r'(?:load|export|fault|asset|dxgi|input) [a-zA-Z0-9 ._?@$#=-]{1,174}')
+# Measurement records from runtime/win32: the endpoint peak meter, first-use pipeline timing
+# (XBOX_WIN32_PSO_TRACE=1) and D3D12 device-removed data. They use characters the general
+# record filter rejects, so each has an exact form.
+AUDIO_METER = re.compile(r'audio meter=(ready|unavailable stage=[a-z]{1,16} result=0x[0-9A-F]{8})')
+AUDIO_WINDOW = re.compile(r'audio window=([0-9]{1,5}) peak-milli=([0-9]{1,6}) audible=([0-9]{1,3})/([0-9]{1,3})')
+PSO_TIMING = re.compile(r'pso timing result=0x([0-9A-F]{8})')
+PSO_EVENT = re.compile(r'pso kind=([GCS]) utc=[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} us=([0-9]{1,10}) result=0x([0-9A-F]{8})')
+# Debug object names keep the general record character set, so a name with a path is dropped.
+DRED_NAME = r'[a-zA-Z0-9._?@$#=-]{1,96}'
+DRED_RECORD = re.compile(rf'dxgi dred-node queue={DRED_NAME} list={DRED_NAME} completed=0x[0-9A-F]{{4}}/0x[0-9A-F]{{4}} '
+                         r'ops=[0-9A-F\[\] ]{0,64}|'
+                         rf'dxgi dred-fault va=0x[0-9A-F]{{16}}(?: (?:existing|freed)={DRED_NAME}:0x[0-9A-F]{{2}}){{0,8}}')
+DIAGNOSTIC_TRACE = (AUDIO_METER, AUDIO_WINDOW, PSO_TIMING, PSO_EVENT, DRED_RECORD)
+DIAGNOSTIC_LIMIT = 4096
+LOADER_TRACE = re.compile('|'.join([r'(?:load|export|fault|asset|dxgi|input) [a-zA-Z0-9 ._?@$#=-]{1,174}',
+                                    *(pattern.pattern for pattern in DIAGNOSTIC_TRACE)]))
 LIVE_LOADER_EVENTS = {
     'graphics-pso-before': re.compile(r'asset graphics-pso-before(?: |$)'),
     'boot-wait': re.compile(r'asset boot-wait(?:[ =-]|$)'),
@@ -127,13 +143,71 @@ def filtered_lines(report, pattern, count=128):
     return [line for line in (report or '').splitlines() if pattern.fullmatch(line)][:count]
 
 
+def diagnostic_record(line):
+    return line.startswith(('audio ', 'pso ', 'dxgi dred-')) and any(
+        pattern.fullmatch(line) for pattern in DIAGNOSTIC_TRACE)
+
+
+def diagnostic_lines(lines):
+    """Measurement and device-removed records in trace order. Each is distinct evidence, so none are merged."""
+    return [line for line in lines if diagnostic_record(line)
+            or (line.startswith('dxgi dred-') and LOADER_TRACE.fullmatch(line))][:DIAGNOSTIC_LIMIT]
+
+
 def unique_loader_lines(lines):
     latest = {}
     for line in lines:
-        if LOADER_TRACE.fullmatch(line):
+        if LOADER_TRACE.fullmatch(line) and not diagnostic_record(line):
             latest.pop(line, None)
             latest[line] = None
     return list(latest)[-128:]
+
+
+def diagnostic_summary(lines):
+    """Summarize audio meter windows, pipeline timing and device-removed records."""
+    summary = {}
+    meter = next((match[1] for match in map(AUDIO_METER.fullmatch, lines) if match), None)
+    windows = [tuple(map(int, match.groups())) for match in map(AUDIO_WINDOW.fullmatch, lines) if match]
+    if meter or windows:
+        read = [window for window in windows if window[3]]
+        summary['audio'] = {
+            'meter': 'ready' if meter == 'ready' else meter.replace('unavailable ', 'unavailable: ') if meter else 'not-reported',
+            # Each window is 100 endpoint peak samples taken 100 ms apart. A sample above 0.001 counts as audible.
+            'windows': len(windows), 'window_seconds': 10,
+            'first_window': windows[0][0] if windows else None, 'last_window': windows[-1][0] if windows else None,
+            'audible_windows': sum(audible * 2 >= samples for _, _, audible, samples in read),
+            'silent_windows': sum(audible == 0 for _, _, audible, _ in read),
+            'unread_windows': len(windows) - len(read),
+            'peak_milli_max': max((peak for _, peak, _, _ in windows), default=None),
+            'first': [line for line in lines if AUDIO_WINDOW.fullmatch(line)][:3],
+            'latest': [line for line in lines if AUDIO_WINDOW.fullmatch(line)][-3:],
+        }
+    timing = next((match[1] for match in map(PSO_TIMING.fullmatch, lines) if match), None)
+    events = [(line, *match.groups()) for line, match in ((line, PSO_EVENT.fullmatch(line)) for line in lines) if match]
+    if timing or events:
+        names = {'G': 'graphics', 'C': 'compute', 'S': 'stream'}
+        kinds = {}
+        for _, kind, _, _ in events:
+            kinds[names[kind]] = kinds.get(names[kind], 0) + 1
+        slowest = sorted(events, key=lambda event: int(event[2]), reverse=True)[:5]
+        summary['pipelines'] = {
+            'timing': 'unreported' if timing is None else 'ready' if not int(timing, 16) & 0x80000000 else f'0x{timing}',
+            'events_over_2ms': len(events), 'kinds': kinds,
+            'total_ms': round(sum(int(event[2]) for event in events) / 1000, 3),
+            'max_ms': round(int(slowest[0][2]) / 1000, 3) if slowest else None,
+            'failures': sum(int(event[3], 16) & 0x80000000 != 0 for event in events),
+            'slowest': [event[0] for event in slowest],
+            # The runtime stops recording after 2000 events.
+            'event_limit_reached': len(events) >= 2000,
+        }
+    dred = [line for line in lines if line.startswith('dxgi dred-')]
+    if dred:
+        summary['device_removed'] = {
+            'incomplete_command_lists': sum(line.startswith('dxgi dred-node ') for line in dred),
+            'page_fault': any(line.startswith('dxgi dred-fault ') for line in dred),
+            'records': dred[:16],
+        }
+    return summary
 
 
 def embedded_loader_lines(report, *, ordered=False):
@@ -329,7 +403,11 @@ def live_loader_snapshot(raw):
 def loader_summary(lines, bytes_read, truncated=False):
     summary = {'state': 'observed' if lines else 'no-complete-records' if bytes_read else 'unavailable',
                'bytes_read': bytes_read, 'truncated': truncated,
-               'records': len(lines), 'recent': lines[-12:], 'events': {}}
+               'records': len(lines), 'recent': [line for line in lines if not diagnostic_record(line)][-12:],
+               'events': {}}
+    measured = diagnostic_summary(diagnostic_lines(lines))
+    if measured:
+        summary['diagnostics'] = measured
     for label, pattern in LIVE_LOADER_EVENTS.items():
         matching = [line for line in lines if pattern.match(line)]
         summary['events'][label] = {'count': len(matching), 'latest': matching[-4:]}
@@ -493,9 +571,15 @@ def collect_artifacts(report, blob, last_probe, launch_id, app_id, include_frame
 
 def observe(args, portal, app, read_file, decode_report, portal_error, *,
             clock=time.monotonic, wall_clock=time.time, pause=time.sleep, progress=None):
+    deadline = clock() + args.timeout
+    # Transient network failures skip one read and are recorded; the poll loop keeps going.
+    retry = PortalRetry(clock=clock, wall_clock=wall_clock, pause=pause, deadline=deadline, progress=progress)
+
     def blob(filename, limit, folder=LOCAL, *, allow_prefix=False):
         try:
-            raw = read_file(portal, app, folder, filename, limit + 1) or b''
+            raw = retry.call(lambda: read_file(portal, app, folder, filename, limit + 1)) or b''
+        except PortalUnavailable:
+            return None
         except portal_error as error:
             if error.status == 409:
                 return None
@@ -515,13 +599,13 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
 
     def stages():
         try:
-            return temporary_stages(portal, app)
+            return retry.call(lambda: temporary_stages(portal, app))
+        except PortalUnavailable:
+            return None
         except portal_error as error:
             if error.status not in (404, 409):
                 raise
             return None
-
-    deadline = clock() + args.timeout
 
     def terminal_loader_lines(filename, text, *, ordered=False):
         # The child exit watcher publishes process status before appending its trace.
@@ -549,7 +633,11 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
     initial_browser = fields(initial_browser or '')
     prior_run = numeric(initial_probe, 'run_id' if args.startup else 'steam_launch_run_id')
     baseline_primary = report(PRIMARY_REPORT) if args.output else ''
-    baseline_stages = stages() if args.output and args.app_id and not args.run_id else None
+    # The staging folder is deleted when the game exits normally, so a saved observation keeps
+    # copying its loader trace while the game runs. That copy is the only durable record of
+    # the measurement lines that the exit report does not carry.
+    live_trace = bool(args.output and args.app_id)
+    baseline_stages = stages() if live_trace and not args.run_id else None
 
     def stage_candidates(run=None):
         candidates = stages() or set()
@@ -588,145 +676,165 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
     def fresh(run):
         return run is not None and (run > prior_run if prior_run is not None else run >= earliest_id)
 
-    while clock() < deadline:
-        probe_text = report(PROBE_REPORT)
-        probe = fields(probe_text or '')
-        browser_text = report(WEBVIEW_REPORT)
-        if browser_text:
-            last_browser = fields(browser_text)
-        browser = last_browser
-        if args.startup:
-            native_run = numeric(probe, 'run_id')
-            web_run = browser.get('run_id', '')
-            if (fresh(native_run)
-                    and BROWSER_RUN.fullmatch(web_run) and web_run != initial_browser.get('run_id')):
-                snapshot = startup_snapshot(probe, browser)
-                last_probe = probe
-                last_snapshot = snapshot
-                if browser.get('status') in ('gamepad-ready', 'setup-ready'):
-                    outcome = browser['status']
-                    break
-        else:
-            seen_run = numeric(probe, 'steam_launch_run_id')
-            if (not game_run and fresh(seen_run)
-                    and matching_probe(probe, seen_run, args.app_id)):
-                game_run = seen_run
-            if game_run and matching_probe(probe, game_run, args.app_id):
-                last_probe = probe
-                exit_name = named_exit_report(probe, args.app_id)
-                exit_text = report(exit_name) if exit_name else ''
-                exit_report = fields(exit_text or '')
-                new_browser = {key: value for key, value in browser.items() if initial_browser.get(key) != value}
-                snapshot = game_snapshot(probe, new_browser, exit_report, args.app_id)
-                if args.image_name:
-                    active = args.image_name.casefold() in process_image_names(portal)
-                    snapshot['game_process_listed'] = active
-                    process_seen |= active
-                    process_missing = None if active or not process_seen else (
-                        process_missing if process_missing is not None else clock())
-                live_records = []
-                if (required or baseline_stages is not None) and probe.get('steam_shadow_stage') == 'verified-local-copy':
-                    new_stages = stage_candidates(game_run if required else None)
-                    if trial_stage is None and len(new_stages) == 1:
-                        trial_stage = next(iter(new_stages))
-                    if trial_stage in new_stages and (not required or len(new_stages) == 1):
-                        folder = TEMP + '\\' + trial_stage[0]
-                        raw = blob('loader-trace.txt', LIVE_LOADER_LIMIT, folder, allow_prefix=True)
-                        unchanged = True
-                        if required:
-                            current_stages = stage_candidates(game_run)
-                            after = fields(report(PROBE_REPORT) or '')
-                            unchanged = (current_stages == new_stages and matching_probe(after, game_run, args.app_id)
-                                         and after.get('run_id') == probe.get('run_id')
-                                         and after.get('steam_shadow_stage') == probe.get('steam_shadow_stage'))
-                        if unchanged:
-                            live_records = complete_loader_lines(raw or b'')
-                        loader_lines = unique_loader_lines(live_records) or loader_lines
-                if args.output:
-                    primary_loader_lines = embedded_loader_lines(probe_text) or primary_loader_lines
-                if (args.output or required) and exit_report.get('steam_shadow_child_status') == 'exited':
-                    exit_loader_lines = terminal_loader_lines(exit_name, exit_text, ordered=bool(required))
-                if required:
-                    # A Portal poll can return after its observation deadline.
-                    poll_deadline = min(deadline, checkpoint_deadline or deadline)
-                    if clock() > poll_deadline:
-                        if poll_deadline == checkpoint_deadline:
-                            outcome = 'checkpoint-stalled'
+    fatal = None
+    measured_lines = []
+    live_copy = {}
+    try:
+        while clock() < deadline:
+            probe_text = report(PROBE_REPORT)
+            probe = fields(probe_text or '')
+            browser_text = report(WEBVIEW_REPORT)
+            if browser_text:
+                last_browser = fields(browser_text)
+            browser = last_browser
+            if args.startup:
+                native_run = numeric(probe, 'run_id')
+                web_run = browser.get('run_id', '')
+                if (fresh(native_run)
+                        and BROWSER_RUN.fullmatch(web_run) and web_run != initial_browser.get('run_id')):
+                    snapshot = startup_snapshot(probe, browser)
+                    last_probe = probe
+                    last_snapshot = snapshot
+                    if browser.get('status') in ('gamepad-ready', 'setup-ready'):
+                        outcome = browser['status']
                         break
-                last_snapshot = snapshot
-                finished = finish_reason(probe, exit_report)
-                if process_missing is not None and clock() - process_missing >= 3:
-                    finished = finished or 'game-process-gone'
-                if probe.get('steam_sdl_host_frame') == 'presented' and first_frame is None:
-                    first_frame = clock()
-                if required:
-                    previous_count = len(checkpoint_records)
-                    if live_records:
-                        checkpoint_trace_truncated = len(raw) == LIVE_LOADER_LIMIT
-                    sources = (('live-loader', live_records), ('exit-report', exit_loader_lines),
-                               ('launch-report', embedded_loader_lines(probe_text, ordered=True)))
-                    # The exit report can contain records written after the last live read.
-                    for pattern in watched:
-                        previous = watched_records.get(pattern, {}).get('source', 'launch-report')
-                        for source, records in (sources[1], sources[0], sources[2]):
-                            if watch_priority[source] > watch_priority[previous]:
-                                break
-                            latest = next((record for record in reversed(records)
-                                           if checkpoint_matches(record, pattern)), None)
-                            if latest:
-                                watched_records[pattern] = {'record': latest, 'source': source}
-                                break
-                    for source, records in sources:
-                        if not records:
-                            continue
-                        if checkpoint_source == 'unavailable':
-                            checkpoint_source = source
-                        reached, failure = checkpoint_progress(records, required, failures)
-                        if len(reached) > len(checkpoint_records):
-                            checkpoint_records = reached
-                            checkpoint_source = source
-                            if progress:
-                                progress(f'checkpoint-reached {len(reached)}/{len(required)}')
-                        if failure:
-                            failed_checkpoint = failure
-                            failed_checkpoint_source = source
-                            outcome = 'checkpoint-failed'
+            else:
+                seen_run = numeric(probe, 'steam_launch_run_id')
+                if (not game_run and fresh(seen_run)
+                        and matching_probe(probe, seen_run, args.app_id)):
+                    game_run = seen_run
+                if game_run and matching_probe(probe, game_run, args.app_id):
+                    last_probe = probe
+                    exit_name = named_exit_report(probe, args.app_id)
+                    exit_text = report(exit_name) if exit_name else ''
+                    exit_report = fields(exit_text or '')
+                    new_browser = {key: value for key, value in browser.items() if initial_browser.get(key) != value}
+                    snapshot = game_snapshot(probe, new_browser, exit_report, args.app_id)
+                    if args.image_name:
+                        try:
+                            names = retry.call(lambda: process_image_names(portal))
+                        except PortalUnavailable:
+                            names = None  # Unknown, not missing: keep the previous process state.
+                        if names is not None:
+                            active = args.image_name.casefold() in names
+                            process_seen |= active
+                            process_missing = None if active or not process_seen else (
+                                process_missing if process_missing is not None else clock())
+                        snapshot['game_process_listed'] = (active if names is not None else
+                                                           bool(last_snapshot and last_snapshot.get('game_process_listed')))
+                    live_records = []
+                    if (required or live_trace) and probe.get('steam_shadow_stage') == 'verified-local-copy':
+                        # Without a baseline listing, select the staging folder created for this launch.
+                        new_stages = stage_candidates(game_run if required or baseline_stages is None else None)
+                        if trial_stage is None and len(new_stages) == 1:
+                            trial_stage = next(iter(new_stages))
+                        if trial_stage in new_stages and (not required or len(new_stages) == 1):
+                            folder = TEMP + '\\' + trial_stage[0]
+                            raw = blob('loader-trace.txt', LIVE_LOADER_LIMIT, folder, allow_prefix=True)
+                            unchanged = True
+                            if required:
+                                current_stages = stage_candidates(game_run)
+                                after = fields(report(PROBE_REPORT) or '')
+                                unchanged = (current_stages == new_stages and matching_probe(after, game_run, args.app_id)
+                                             and after.get('run_id') == probe.get('run_id')
+                                             and after.get('steam_shadow_stage') == probe.get('steam_shadow_stage'))
+                            if unchanged:
+                                live_records = complete_loader_lines(raw or b'')
+                                if raw:
+                                    live_copy = {'stage': trial_stage[0], 'reads': live_copy.get('reads', 0) + 1,
+                                                 'last_read_utc': utc_text(wall_clock()), 'last_read_bytes': len(raw)}
+                            loader_lines = unique_loader_lines(live_records) or loader_lines
+                            # The trace only grows, so the latest complete read holds every earlier record.
+                            measured_lines = diagnostic_lines(live_records) or measured_lines
+                    if args.output:
+                        primary_loader_lines = embedded_loader_lines(probe_text) or primary_loader_lines
+                    if (args.output or required) and exit_report.get('steam_shadow_child_status') == 'exited':
+                        exit_loader_lines = terminal_loader_lines(exit_name, exit_text, ordered=bool(required))
+                    if required:
+                        # A Portal poll can return after its observation deadline.
+                        poll_deadline = min(deadline, checkpoint_deadline or deadline)
+                        if clock() > poll_deadline:
+                            if poll_deadline == checkpoint_deadline:
+                                outcome = 'checkpoint-stalled'
                             break
-                    if failed_checkpoint is not None:
-                        break
-                    if finished and finished != 'window-ready':
+                    last_snapshot = snapshot
+                    finished = finish_reason(probe, exit_report)
+                    if process_missing is not None and clock() - process_missing >= 3:
+                        finished = finished or 'game-process-gone'
+                    if probe.get('steam_sdl_host_frame') == 'presented' and first_frame is None:
+                        first_frame = clock()
+                    if required:
+                        previous_count = len(checkpoint_records)
+                        if live_records:
+                            checkpoint_trace_truncated = len(raw) == LIVE_LOADER_LIMIT
+                        sources = (('live-loader', live_records), ('exit-report', exit_loader_lines),
+                                   ('launch-report', embedded_loader_lines(probe_text, ordered=True)))
+                        # The exit report can contain records written after the last live read.
+                        for pattern in watched:
+                            previous = watched_records.get(pattern, {}).get('source', 'launch-report')
+                            for source, records in (sources[1], sources[0], sources[2]):
+                                if watch_priority[source] > watch_priority[previous]:
+                                    break
+                                latest = next((record for record in reversed(records)
+                                               if checkpoint_matches(record, pattern)), None)
+                                if latest:
+                                    watched_records[pattern] = {'record': latest, 'source': source}
+                                    break
+                        for source, records in sources:
+                            if not records:
+                                continue
+                            if checkpoint_source == 'unavailable':
+                                checkpoint_source = source
+                            reached, failure = checkpoint_progress(records, required, failures)
+                            if len(reached) > len(checkpoint_records):
+                                checkpoint_records = reached
+                                checkpoint_source = source
+                                if progress:
+                                    progress(f'checkpoint-reached {len(reached)}/{len(required)}')
+                            if failure:
+                                failed_checkpoint = failure
+                                failed_checkpoint_source = source
+                                outcome = 'checkpoint-failed'
+                                break
+                        if failed_checkpoint is not None:
+                            break
+                        if finished and finished != 'window-ready':
+                            outcome = finished
+                            break
+                        if len(checkpoint_records) == len(required):
+                            outcome = 'checkpoints-observed'
+                            break
+                        game_started = (probe.get('steam_shadow_child') == 'created' or first_frame is not None
+                                        or process_seen or finished == 'window-ready')
+                        completed = len(checkpoint_records)
+                        if completed > previous_count or (checkpoint_deadline is None and game_started):
+                            budget = checkpoint_timeouts[completed]
+                            checkpoint_deadline = clock() + budget
+                            if progress:
+                                progress(f'waiting-for-checkpoint {completed + 1}/{len(required)} ({budget}s) {required[completed]}')
+                    elif finished:
                         outcome = finished
                         break
-                    if len(checkpoint_records) == len(required):
-                        outcome = 'checkpoints-observed'
+                    elif first_frame is not None and clock() - first_frame >= args.frame_seconds:
+                        outcome = 'frame-observed'
                         break
-                    game_started = (probe.get('steam_shadow_child') == 'created' or first_frame is not None
-                                    or process_seen or finished == 'window-ready')
-                    completed = len(checkpoint_records)
-                    if completed > previous_count or (checkpoint_deadline is None and game_started):
-                        budget = checkpoint_timeouts[completed]
-                        checkpoint_deadline = clock() + budget
-                        if progress:
-                            progress(f'waiting-for-checkpoint {completed + 1}/{len(required)} ({budget}s) {required[completed]}')
-                elif finished:
-                    outcome = finished
+                elif game_run and seen_run is not None and seen_run > game_run:
+                    outcome = 'launch-superseded'
                     break
-                elif first_frame is not None and clock() - first_frame >= args.frame_seconds:
-                    outcome = 'frame-observed'
-                    break
-            elif game_run and seen_run is not None and seen_run > game_run:
-                outcome = 'launch-superseded'
+            if checkpoint_deadline is not None and clock() >= checkpoint_deadline:
+                outcome = 'checkpoint-stalled'
                 break
-        if checkpoint_deadline is not None and clock() >= checkpoint_deadline:
-            outcome = 'checkpoint-stalled'
-            break
-        if last_snapshot is not None and progress:
-            state = last_snapshot['webview'].get('status') or last_snapshot['probe'].get('steam_launch_phase')
-            if state and state != last_state:
-                progress(state)
-                last_state = state
-        cutoff = min(deadline, checkpoint_deadline) if checkpoint_deadline is not None else deadline
-        pause(min(1, max(0, cutoff - clock())))
+            if last_snapshot is not None and progress:
+                state = last_snapshot['webview'].get('status') or last_snapshot['probe'].get('steam_launch_phase')
+                if state and state != last_state:
+                    progress(state)
+                    last_state = state
+            cutoff = min(deadline, checkpoint_deadline) if checkpoint_deadline is not None else deadline
+            pause(min(1, max(0, cutoff - clock())))
+    except (CertificateChanged, KeyboardInterrupt) as error:
+        # Save what was already copied, then stop. A changed certificate is never retried.
+        fatal = error
+        outcome = 'portal-certificate-changed' if isinstance(error, CertificateChanged) else 'interrupted'
 
     result = {'version': args.version, 'mode': 'startup' if args.startup else 'game', 'outcome': outcome}
     if last_snapshot is not None:
@@ -751,15 +859,30 @@ def observe(args, portal, app, read_file, decode_report, portal_error, *,
         if failed_checkpoint is not None:
             result['checkpoints']['failure'] = failed_checkpoint
             result['checkpoints']['failure_source'] = failed_checkpoint_source
+    if live_copy:
+        result['live_loader'] = live_copy
+    if measured_lines:
+        result['loader_diagnostics'] = diagnostic_summary(measured_lines)
     if args.output:
         if outcome == 'game-exited' and ('steam_launch_process_exit' in last_probe or 'steam_shadow_exit' in last_probe):
             # Before the exit watcher starts, the primary launch report carries the terminal trace.
             loader_lines += primary_loader_lines + exit_loader_lines
         else:
             loader_lines = primary_loader_lines + loader_lines + exit_loader_lines
-        artifacts = (collect_artifacts(report, blob, last_probe, game_run if last_probe and not args.startup else None,
-                                      args.app_id, args.bootstrap_frame, baseline_primary, loader_lines)
-                     if last_probe else {})
+        artifacts = {}
+        if last_probe and fatal is None:
+            artifacts = collect_artifacts(report, blob, last_probe, game_run if not args.startup else None,
+                                          args.app_id, args.bootstrap_frame, baseline_primary, loader_lines)
+        elif last_probe and loader_lines:
+            artifacts['loader-trace.txt'] = ('\n'.join(unique_loader_lines(loader_lines)) + '\n').encode()
+        if measured_lines:
+            artifacts['loader-diagnostics.txt'] = ('\n'.join(measured_lines) + '\n').encode('ascii')
         result['artifacts'] = {name: len(data) for name, data in artifacts.items()}
+    portal_summary = retry.summary()
+    if portal_summary:
+        result['portal'] = portal_summary
+    if args.output:
         save_observation(args.output, result, artifacts)
+    if fatal is not None:
+        raise fatal
     return result
