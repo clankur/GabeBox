@@ -129,6 +129,25 @@ The app maps Slay the Spire's cloud paths to the verified install's `preferences
 
 To verify a read-only backup for another owned title, use an explicitly approved test account. Before signing the QA layout, add `steam-cloud-snapshot-trial.txt` containing one line in the form `APPID STEAMID64`. For Stardew Valley use AppID `413150`. Sign in as the matching account and open the installed title's **Cloud backups** action in Big Picture. Use the same report command and confirm `steam_cloud_action=snapshot` and either `snapshot:<verified-file-count>` or `empty`. Compare each snapshot payload with its manifest and download again to confirm the previous snapshot is retained. Validate save creation and reload separately through Play on the recorded game build.
 
+## Sync Steam Cloud around a Win32 trial
+
+The desktop client syncs a title's Steam Cloud files inside `IClientAppManager::LaunchApp`. It downloads before the game starts and uploads after the game exits. A Win32 trial starts from a staged copy through `CreateProcessW`, so the host runs both steps itself through the pinned client's `IClientRemoteStorage`. The getter, vtable and the six slots it calls are pinned to `steamclient64.dll` SHA-256 `5237b350…`. On any other image the host skips the sync and records `interface-mismatch`. The sync covers files written through `ISteamRemoteStorage`, which live in the redirected `LocalState\SteamUserData\<account>\<app>`. It does not request AutoCloud, because AutoCloud would resolve its roots against the host process instead of the trial's profile. [Implementation](../runtime/steam/SteamCloudSync.h) · [Policy](../runtime/steam/steam-cloud-sync-policy.h)
+
+Before every Win32 trial, if Steam Cloud is enabled for the account and the app:
+
+1. Unless the client's last sync state is `synchronized`, the host first copies the app's userdata folder to `LocalState\SteamCloudSync\<account>\<app>\<run>`. If the copy fails, it does not sync.
+2. It requests a download, then waits up to 20 s for the completion callback or for the job to stop.
+3. It never auto-resolves a conflict. When both sides changed (`conflictingchanges` or `changesincloudandlocally`), the local files stay active and the cloud stays untouched. The exit upload is blocked.
+4. The upload after exit runs only when this launch reached `synchronized`, or reached `changeslocally` with a successful download. Otherwise it could replace another device's newer files.
+
+To settle a held conflict, choose a side for the next launch:
+
+```sh
+python3 -m tools.xbox_deploy --env-file "$xbox_env" cloud-resolve --version VERSION --app-id APPID --keep cloud
+```
+
+`--keep cloud` downloads the cloud copy. `--keep local` uploads this console's copy over the cloud copy. In both cases the local files are backed up first, and the choice file is consumed after one attempt. Read the result with `report --version VERSION --steam-cloud-sync`. The launch writes `steam_cloud_sync_decision` and `steam_cloud_sync_upload_policy`. After the child exits, the host appends `steam_cloud_sync_exit_run_id`, the upload request, its result and file count, and the final state.
+
 ## Test an owned game download
 
 Deploy a download-enabled build through the same CLI and approve Steam Guard. In the library, select a small owned game and choose **Download**. The client rechecks the account, app type and Steam license. It submits the request to Steam’s app manager using the library registered at `LocalState/SteamLibrary`.

@@ -761,6 +761,33 @@ def request_protocol_return(portal, control, run):
                    {'Content-Type': f'multipart/form-data; boundary={boundary}'})
 
 
+STEAM_CLOUD_SYNC_REPORT = 'steam-cloud-sync-report.txt'
+CLOUD_CHOICES = ('cloud', 'local')
+
+
+def cloud_resolve_upload(app_id, keep, boundary):
+    """Build the one-shot conflict choice the next launch of app_id consumes."""
+    if not 0 < app_id <= 0xFFFFFFFF or keep not in CLOUD_CHOICES or not re.fullmatch(r'[0-9a-f]{32}', boundary):
+        raise ValueError('Use a positive AppID and keep cloud or local.')
+    filename = f'steam-cloud-resolve-{app_id}.txt'
+    body = (f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{filename}"; filename="{filename}"\r\n'
+            f'Content-Type: text/plain\r\n\r\n{keep}\r\n'
+            f'--{boundary}--\r\n').encode()
+    return filename, body
+
+
+def write_cloud_resolve(portal, app, app_id, keep):
+    boundary = uuid4().hex
+    filename, body = cloud_resolve_upload(app_id, keep, boundary)
+    query = local_state_query(app, extract='false')
+    portal.request('POST', f'/api/filesystem/apps/file?{query}', body,
+                   {'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    if read_probe_report(portal, app, filename).strip() != keep:
+        raise ValueError(f'{filename} did not read back as {keep}.')
+    print(f'{filename}={keep}. The next launch of {app_id} applies it if Steam Cloud reports a conflict.')
+
+
 def run_lifetime(portal, version, dwell, timeout, portal_return):
     app = find_installed_probe(portal, PROBE_LIFETIME_NAME, version)
     control = find_installed_probe(portal, PROBE_CONTROL_NAME, version)
@@ -878,6 +905,9 @@ def main():
                                 const='steam-library-migration.json', help='read the Steam library migration result')
     report_variant.add_argument('--steam-cloud', dest='report_file', action='store_const',
                                 const='steam-cloud-report.txt', help='read the Steam Cloud restore checkpoint')
+    report_variant.add_argument('--steam-cloud-sync', dest='report_file', action='store_const',
+                                const=STEAM_CLOUD_SYNC_REPORT,
+                                help='read the Win32 trial launch download and exit upload of Steam Cloud files')
     report_variant.add_argument('--sdl-startup', dest='report_file', action='store_const',
                                 const='sdl-startup', help='read the SDL startup checkpoints for the current launch')
     report_variant.add_argument('--slay-console', dest='report_file', action='store_const',
@@ -925,6 +955,13 @@ def main():
     game.add_argument('--executable', help='relative .exe path within the game folder')
     game.add_argument('--source-profile', type=Path, help='trusted Win32 fingerprint file for exporting owned inputs')
     game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
+    resolve = commands.add_parser('cloud-resolve',
+                                  help='choose which side wins a held Steam Cloud conflict at the next Win32 trial launch')
+    resolve.add_argument('--version', required=True, help='installed Steam package version')
+    resolve.add_argument('--app-id', type=int, required=True, help='Steam AppID')
+    resolve.add_argument('--keep', required=True, choices=CLOUD_CHOICES,
+                         help='cloud downloads the cloud files, local uploads this console\'s files; '
+                              'local files are backed up under LocalState\\SteamCloudSync first')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -1236,6 +1273,10 @@ def main():
     if args.command == 'inspect-game':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
         inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs)
+        return
+    if args.command == 'cloud-resolve':
+        app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        write_cloud_resolve(portal, app, args.app_id, args.keep)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)
