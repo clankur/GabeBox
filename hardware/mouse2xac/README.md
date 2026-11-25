@@ -56,6 +56,40 @@ To build locally with `arduino-cli`, install the arduino-pico core and the Pico 
 library at the versions the workflow pins, then compile with the same FQBN. The CPU
 clock must be 120 or 240 MHz, and the USB stack must be Adafruit TinyUSB.
 
+## Tuner
+
+[`tuner/index.html`](tuner/index.html) is a static page with no build step. Open it
+directly in desktop Chrome or Edge, or serve the folder:
+
+```sh
+cd hardware/mouse2xac/tuner && python3 -m http.server 8000
+# then open http://localhost:8000/
+```
+
+The scripts are classic scripts rather than ES modules, because Chrome does not load ES
+modules from `file://` URLs.
+
+- **Simulator.** Click the view to capture this computer's mouse with Pointer Lock. The
+  page asks for `unadjustedMovement` so counts skip OS pointer acceleration, and says when
+  the browser refuses. It feeds the counts through a port of the firmware encoder
+  (`encoder.js`), then samples the stick at a console interval with jitter and decodes it
+  with the formula in the [decoding contract](#decoding-contract). It draws the mouse path
+  against the decoded path and reports motion in flight, motion dropped by the backlog cap
+  and the boot report limit, saturated periods, skipped stick values, a best-fit delay,
+  and how far each gesture lands off once the hand stops. CPI presets and a hand speed
+  for full deflection set the full scale. The input scale multiplies counts to stand in
+  for a higher-CPI mouse than the one at hand.
+- **Device.** With the Feather plugged into the computer, Connect asks WebHID for
+  Adafruit's vendor ID (`0x239A`) and the joystick collection. The panel reads, writes,
+  saves and restores the settings, shows the counters, and draws the board's live
+  joystick reports. It can copy settings between the simulator and the board.
+
+`encoder.js` uses single-precision arithmetic in the sketch's order of operations. Run its
+tests with `node --test tests/mouse2xac-tuner.test.js`. The parity cases' expected values
+came from the sketch's encoder functions compiled on a host. A test also checks the
+protocol numbers and setting ranges against the sketch. The tuner has run only in a
+headless browser. It has not run against a board.
+
 ## What changed from upstream
 
 Upstream mapped each mouse report directly onto the stick and recentered after 32 ms

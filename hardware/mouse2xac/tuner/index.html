@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mouse2xac tuner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="page-header">
+  <h1>mouse2xac tuner</h1>
+  <p>Simulate the mouse-to-stick encoding with this computer's mouse, then read and write the settings on a Feather over WebHID. See the <a href="../README.md#settings">settings and config protocol</a>.</p>
+</header>
+
+<main>
+  <section class="panel" aria-labelledby="sim-title">
+    <h2 id="sim-title">Simulator</h2>
+    <div class="sim-layout">
+      <div class="sim-view">
+        <div class="canvas-wrap">
+          <canvas id="sim-canvas" tabindex="0" aria-label="Simulator view. Click to capture the mouse; press Escape to release."></canvas>
+          <div id="capture-hint" class="canvas-hint">Click to capture the mouse. Esc releases it.</div>
+        </div>
+        <div class="legend" aria-hidden="true">
+          <span><i class="swatch ref"></i>Mouse path</span>
+          <span><i class="swatch decoded"></i>Package decode</span>
+          <span id="scale-label"></span>
+        </div>
+        <p id="input-status" class="note" role="status" aria-live="polite">Mouse not captured.</p>
+        <div class="row">
+          <label class="inline" for="zoom">Zoom</label>
+          <input id="zoom" type="range" min="-3" max="3" step="0.25" value="0">
+          <button type="button" id="sim-align">Re-align</button>
+          <button type="button" id="sim-reset">Reset stats</button>
+        </div>
+        <div id="sim-meters" class="meters"></div>
+        <dl id="sim-stats" class="stats"></dl>
+      </div>
+
+      <form id="sim-form" class="controls" novalidate>
+        <fieldset>
+          <legend>Gaming mouse</legend>
+          <div class="field">
+            <label for="cpi">Mouse CPI</label>
+            <input id="cpi" type="number" min="1" max="100000" step="1" value="1600" inputmode="numeric">
+          </div>
+          <div class="presets" role="group" aria-label="CPI presets">
+            <button type="button" data-cpi="800">800</button>
+            <button type="button" data-cpi="1600">1600</button>
+            <button type="button" data-cpi="3200">3200</button>
+            <button type="button" data-cpi="6400">6400</button>
+          </div>
+          <div class="field">
+            <label for="hand-speed">Hand speed for full deflection, in/s</label>
+            <input id="hand-speed" type="number" min="0.01" max="1000" step="0.1" value="5" inputmode="decimal">
+          </div>
+          <div class="field">
+            <label for="report-rate">Mouse report rate</label>
+            <select id="report-rate">
+              <option value="125">125 Hz</option>
+              <option value="250">250 Hz</option>
+              <option value="500">500 Hz</option>
+              <option value="1000" selected>1000 Hz</option>
+              <option value="2000">2000 Hz</option>
+              <option value="4000">4000 Hz</option>
+              <option value="8000">8000 Hz</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="input-scale">Input scale, ×</label>
+            <input id="input-scale" type="number" min="0.01" max="100" step="0.25" value="1" inputmode="decimal" aria-describedby="input-scale-help">
+            <small id="input-scale-help">Multiplies this computer's mouse counts, to stand in for a higher-CPI mouse.</small>
+          </div>
+          <label class="check"><input id="clamp-boot" type="checkbox" checked> Clamp to ±127 counts per boot report</label>
+        </fieldset>
+
+        <fieldset id="sim-settings">
+          <legend>Firmware settings</legend>
+        </fieldset>
+
+        <fieldset>
+          <legend>Console</legend>
+          <div class="field">
+            <label for="console-interval">Sample interval, ms</label>
+            <input id="console-interval" type="number" min="1" max="100" step="0.5" value="8" inputmode="decimal">
+          </div>
+          <div class="field">
+            <label for="console-jitter">Jitter, ± ms</label>
+            <input id="console-jitter" type="number" min="0" max="50" step="0.25" value="1" inputmode="decimal">
+          </div>
+        </fieldset>
+        <p id="sim-errors" class="error" role="alert"></p>
+      </form>
+    </div>
+
+    <h3>Encoding contract</h3>
+    <table id="contract" class="contract">
+      <caption class="visually-hidden">Values derived from the simulator settings</caption>
+      <tbody></tbody>
+    </table>
+    <ul id="contract-warnings" class="warnings"></ul>
+  </section>
+
+  <section class="panel" aria-labelledby="device-title">
+    <h2 id="device-title">Device</h2>
+    <p id="device-support" class="note"></p>
+    <div class="row">
+      <button type="button" id="device-connect">Connect…</button>
+      <button type="button" id="device-disconnect" disabled>Disconnect</button>
+      <span id="device-info" class="note"></span>
+    </div>
+    <p id="device-status" class="note" role="status" aria-live="polite">No device connected.</p>
+
+    <div class="device-layout">
+      <form id="device-form" class="controls" novalidate>
+        <fieldset id="device-settings" disabled>
+          <legend>Settings on the board</legend>
+        </fieldset>
+        <div class="button-grid">
+          <button type="button" id="device-read" disabled>Read</button>
+          <button type="button" id="device-write" disabled>Write</button>
+          <button type="button" id="device-save" disabled>Save to flash</button>
+          <button type="button" id="device-defaults" disabled>Restore defaults</button>
+          <button type="button" id="device-reload" disabled>Reload saved</button>
+          <button type="button" id="device-from-sim" disabled>Copy simulator settings to device</button>
+          <button type="button" id="device-to-sim" disabled>Copy device settings to simulator</button>
+        </div>
+        <p id="device-errors" class="error" role="alert"></p>
+      </form>
+
+      <div>
+        <h3>Live joystick reports</h3>
+        <div id="device-meters" class="meters"></div>
+        <h3>Counters</h3>
+        <dl id="device-counters" class="stats"></dl>
+        <button type="button" id="device-clear" disabled>Clear counters</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="note">
+  <p>Untested on hardware: only the encoder, protocol and simulator have automated tests. Pointer Lock and WebHID need Chrome or Edge on a desktop.</p>
+</footer>
+
+<script src="protocol.js"></script>
+<script src="encoder.js"></script>
+<script src="sim.js"></script>
+<script src="device.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -95,6 +95,19 @@
         this.nextSample = t + this.options.random() * this.options.consoleIntervalMs + 0.001;
     };
 
+    // Move the clocks to t without simulating the gap, as after the page was
+    // hidden. Pending motion carries on from t.
+    Simulator.prototype.rebase = function (t) {
+        if (!this.started || t <= this.now) return;
+        var shift = t - this.now;
+        this.now = t;
+        this.nextReport += shift;
+        this.nextPeriod += shift;
+        this.nextSample += shift;
+        this.lastSample += shift;
+        this.lastInput += shift;
+    };
+
     Simulator.prototype.sampleGap = function () {
         var jitter = this.options.consoleJitterMs;
         var gap = this.options.consoleIntervalMs + (jitter > 0 ? (this.options.random() * 2 - 1) * jitter : 0);
