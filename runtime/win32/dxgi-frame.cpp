@@ -395,8 +395,51 @@ HRESULT DxgiFramePublisher::Publish11(IDXGISwapChain1* chain) {
 void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2D_DESC& desc) {
     static const UINT64 samples[] = {60, 600, 1800, 3600, 7200};
     const UINT64 count = ++published_;
-    bool sample = false;
-    for (UINT64 at : samples) sample |= count == at;
+    bool sample = false, before = false;
+    for (UINT64 at : samples) {
+        sample |= count == at;
+        before |= count + 1 == at;
+    }
+    // Pipeline statistics for the single frame ending at each sample: whether the game issued GPU work at all.
+    if (sample && statsActive_) {
+        context_->End(stats_.Get());
+        statsActive_ = false;
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS data{};
+        HRESULT ready = S_FALSE;
+        for (int attempt = 0; attempt < 200 && ready == S_FALSE; ++attempt) {
+            ready = context_->GetData(stats_.Get(), &data, sizeof(data), 0);
+            if (ready == S_FALSE) Sleep(1);
+        }
+        if (ready == S_OK) {
+            char text[200], *out = text;
+            auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
+            auto number = [&out](UINT64 value) {
+                char digits[24]; int length = 0;
+                do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+                while (length) *out++ = digits[--length];
+            };
+            put("dxgi frame-stats frame="); number(count);
+            put(" vertices="); number(data.IAVertices);
+            put(" vs="); number(data.VSInvocations);
+            put(" primitives="); number(data.CPrimitives);
+            put(" ps="); number(data.PSInvocations);
+            put(" cs="); number(data.CSInvocations);
+            put("\r\n");
+            AppendProbeTrace(text, static_cast<DWORD>(out - text));
+        }
+    }
+    if (before) {
+        if (!stats_) {
+            ComPtr<ID3D11Device> device;
+            context_->GetDevice(&device);
+            const D3D11_QUERY_DESC query{D3D11_QUERY_PIPELINE_STATISTICS, 0};
+            if (device) device->CreateQuery(&query, &stats_);
+        }
+        if (stats_) {
+            context_->Begin(stats_.Get());
+            statsActive_ = true;
+        }
+    }
     if (!sample || (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
             desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)) return;
     // Scan every buffer: a renderer that writes a buffer other than 0 shows up as a lit buffer here.

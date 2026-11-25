@@ -63,4 +63,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> probeCommands_;
     Microsoft::WRL::ComPtr<ID3D12Fence> probeFence_;
     UINT64 probeFenceValue_ = 0;
+    Microsoft::WRL::ComPtr<ID3D11Query> stats_;
+    bool statsActive_ = false;
 };
