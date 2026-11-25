@@ -7,7 +7,7 @@ partition and licensing boundary, not a defect in this compatibility layer, so a
 Edge-like cursor has to be driven from a source this layer can read.
 
 Contents: the answer · why · the platform statement · console evidence · the route
-matrix · what this rules out · GDK · what remains · reproducing it.
+matrix · what this rules out · GDK · what remains · what was removed.
 
 ## The answer
 
@@ -175,20 +175,32 @@ three exist on this console:
 
 All three terminate in the same mailbox, so building one does not foreclose another.
 
-## Reproducing it
+## What was removed
 
-```sh
-gh run download "$run" -n xbox-mouse-routes-x64 -D routes
-python3 -m tools.xbox_deploy deploy routes/XboxMouseRoutes-capability-1.0.1.1.appx \
-    --certificate routes/XboxMouseRoutes.cer --timeout 180
-python3 -m tools.xbox_deploy probe --case native-mouse-routes --version 1.0.1.1 --restart --timeout 90
-python3 -m tools.xbox_deploy report --version 1.0.1.1 --native-mouse-routes
-python3 -m tools.xbox_deploy report --version 1.0.1.1 --native-mouse-capture
-```
+The probes in this record are deleted. They had no measurement left to make, and keeping
+four dead input paths in the shared probe layer would have invited a fifth. Commit
+`f4e1e01` is the last revision that contains them:
 
-Move, click, and scroll the physical mouse during the three-minute sample, and hold a
-keyboard key for the positive control. The probe and its field meanings are documented
-with the [mouse route matrix](../probe/README.md#physical-mouse-route-matrix).
+| Removed | Was |
+| --- | --- |
+| `probe/mouse-source/` | The hosted UWP mouse source control, the standalone XAML capture app with its GameInput v0–v4 and route-matrix builds, and the independent `SwapChainPanel` variant |
+| `build_tools/prepare_mouse_capture.py` | The standalone APPX layout, including the restricted-capability declaration |
+| `.github/workflows/xbox-mouse-routes.yml` | The two-layout route matrix build |
+| `tests/test_mouse_capture_packaging.py` | Coverage for that packaging |
+| `mouse-source`, `native-mouse-ready`, `native-independent-mouse-ready`, `native-mouse-routes` | Probe catalog cases, with their five `xbox_deploy report` flags and their dead evidence fields |
+| `NativePanelMouseProbe` | The physical mouse diagnostic inside the panel presenter |
+
+What stays is the path that works. The presenter still routes XAML pointer events into
+the hosted input mailbox, and the shared Windows adapter still carries five buttons,
+both wheel axes, client coordinates for motion, and screen coordinates for the wheel.
+Deleting the probes removed the measurement of physical mouse hardware, not cursor
+delivery.
+
+To retest on a future console build, restore `probe/mouse-source` and
+`build_tools/prepare_mouse_capture.py` from `f4e1e01`, run the route matrix workflow,
+and deploy the `capability` layout. The route matrix is the one probe worth restoring
+first: it covers every route in a single foreground run, and the field meanings are in
+that revision's `probe/README.md`.
 
 ## Open items
 

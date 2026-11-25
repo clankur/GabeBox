@@ -4,9 +4,9 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
   pull_request:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
 
 permissions:
   contents: read

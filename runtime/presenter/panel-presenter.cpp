@@ -19,7 +19,6 @@
 
 #include "frame-trace.h"
 #include "hosted-input.h"
-#include "../../probe/mouse-source/native-panel.h"
 
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
@@ -86,7 +85,6 @@ struct Presenter {
     com_ptr<IDXGISwapChain2> chain;
     com_ptr<ID3D11RenderTargetView> target;
     FhdFrameTrace trace;
-    std::shared_ptr<NativePanelMouseProbe> mouseProbe = std::make_shared<NativePanelMouseProbe>();
     HANDLE inputTrace = INVALID_HANDLE_VALUE;
     bool menuHeld = false;
     bool nativePad = false, attached = false, inserted = false;
@@ -111,7 +109,6 @@ struct Presenter {
         publish(status);
     }
     void updateInputVisibility() {
-        mouseProbe->report(status.visible && (status.gpu || status.cpu));
         const bool pause = !status.visible;
         if (!status.nativeInput || inputPaused == pause) return;
         inputPaused = pause;
@@ -200,7 +197,6 @@ struct Presenter {
         } catch (...) {
             status.error = to_hresult();
             status.visible = false;
-            mouseProbe->report(false);
             if (status.nativeInput) FhdPauseHostedInput();
         }
         publish(status);
@@ -249,14 +245,8 @@ struct Presenter {
             pointerTarget.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Color{}));
             const auto update = [](auto const& sender, auto const& event) { relayPointer(sender, event, false); };
             pointerTarget.PointerMoved(update);
-            pointerTarget.PointerPressed([probe = mouseProbe](auto const& sender, auto const& event) {
-                probe->press(event);
-                relayPointer(sender, event, false);
-            });
-            pointerTarget.PointerReleased([probe = mouseProbe](auto const& sender, auto const& event) {
-                probe->release(event);
-                relayPointer(sender, event, false);
-            });
+            pointerTarget.PointerPressed(update);
+            pointerTarget.PointerReleased(update);
             pointerTarget.PointerWheelChanged([](auto const& sender, auto const& event) { relayPointer(sender, event, true); });
             pointerTarget.PointerExited([](auto const&, auto const&) { FhdHostedPointerRelease(TRUE); });
             pointerTarget.PointerCaptureLost([](auto const&, auto const&) { FhdHostedPointerRelease(FALSE); });
@@ -273,7 +263,6 @@ struct Presenter {
         check_hresult(panel.as<ISwapChainPanelNative>()->SetSwapChain(chain.get()));
         attached = true;
         trace.open();
-        mouseProbe->open(window);
         WCHAR inputPath[1024];
         if (trace.enabled() && SUCCEEDED(FhdLocalPath(inputPath, ARRAYSIZE(inputPath))) &&
                 FhdFrameTrace::suffix(inputPath, ARRAYSIZE(inputPath), L"\\fhd-panel-input.txt")) {
@@ -300,7 +289,6 @@ struct Presenter {
         updateVisibility();
     }
     void close() noexcept {
-        mouseProbe->close();
         if (inputTrace != INVALID_HANDLE_VALUE) {
             CloseHandle(inputTrace);
             inputTrace = INVALID_HANDLE_VALUE;

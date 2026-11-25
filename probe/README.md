@@ -78,64 +78,26 @@ Build `--steam-sdk-versioned` to exercise the redirected `SteamInternal_SteamAPI
 
 Run a signed graphics control with `python3 -m tools.xbox_deploy probe --case graphics-control --version "$version" --json`. These variants expect child exit `0x51A7`.
 
-## Hosted UWP mouse source control
+## Physical mouse input
 
-```sh
-bash probe/build.sh --mouse-source "$version" "$build"
-bash build_tools/package.sh --layout "$build/package" "$signed"
-python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
-python3 -m tools.xbox_deploy probe --case mouse-source --version "$version" --timeout 45 --json
-```
+The physical mouse probes are removed. A sideloaded Dev Mode package cannot read an
+attached Xbox mouse on any documented route, so no probe is left to measure: Dev Mode
+runs in the console's `SystemOS` partition while the mouse-capable GameInput runtime
+ships inside a GDK title's `GameOs.xvd`, the remaining Win32 raw input entry points are
+either unexported or return `ERROR_CALL_NOT_IMPLEMENTED`, no HID collection enumerates
+a device, and the restricted input capabilities install without effect.
 
-Move, click, and scroll with the physical mouse for 25 seconds after the control opens and leave the controller idle. The hosted app counts `MouseDevice.MouseMoved` callbacks and browser pointer events separately. If no nonzero relative delta arrives in the first 10 seconds and the host exposes a CoreWindow, it also tries pointer capture. The report includes document visibility, reported mouse capabilities, relative callbacks and deltas, browser event counts, and the available activation and capture results. The CLI passes when it observes `relative_motion=observed`. Browser events and hosted game delivery are separate results. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
+Four probes covered this and are gone: the hosted UWP mouse source control, the
+standalone XAML mouse capture app with its GameInput v0 through v4 builds, the
+independent `SwapChainPanel` variant, and the route matrix. Their console runs, field
+meanings, and the full citation trail are in [physical mouse input on an Xbox Dev Mode
+package](../analysis/xbox-mouse-input.md). Recover the sources from commit `f4e1e01` if
+a future console build makes the question worth retesting.
 
-## Standalone Xbox mouse capture
-
-Build [native-app.cpp](mouse-source/native-app.cpp) as an x64 C++20 UWP executable with the Windows SDK C++/WinRT projection. Link it as a Windows subsystem AppContainer executable against `WindowsApp.lib`. The layout uses its own package identity and has no Steam dependencies or account requirements.
-
-```sh
-python3 -m build_tools.prepare_mouse_capture "$executable" "$version" "$layout"
-bash build_tools/package.sh --layout "$layout" "$signed"
-python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
-python3 -m tools.xbox_deploy probe --case native-mouse-ready --version "$version" --restart --json
-python3 -m tools.xbox_deploy report --version "$version" --native-mouse-capture
-```
-
-Readiness requires a fresh run with `visible=1` and `registered=0x3f`. For a physical test, leave the controller idle, move the mouse, hold the left button inside the teal target, drag outside, release, and scroll. Record the `mouse-capture.txt` counters before and after the gesture and match `start_tick`. A successful XAML capture increments `xaml_accepted` and `verified_pointer_in_capture_list`. The same pointer moving outside the target while held advances `same_pointer_moves_outside`. `mouse_present=1` reports the view's mouse capability. Use the relative and CoreWindow counters in the standalone app's `LocalState/fhd-mouse-source.txt` to check whether this run received input. [XAML pointer capture contract](https://learn.microsoft.com/en-us/uwp/api/windows.ui.xaml.uielement.capturepointer)
-
-Build with `prepare_mouse_capture --controller-control` for a separate run using Xbox controller pointer emulation. Hold A over the target and use the analog stick to cross its edge before releasing. Record this run with its controller input source. [Xbox controller pointer emulation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
-
-For per-device mouse diagnostics, build the standalone executable with `MOUSE_PROBE_GAMEINPUT_V0` defined. Add `native/include/v0` from the pinned Microsoft.GameInput `4.1.315` package to the compiler include path. The v0 header SHA-256 is `4bda852f78a43f715837c1d97af7cf78fa14aa35dba4e755d305985364bf1196`. The probe loads the console's system `gameinput.dll` and samples for up to three minutes while the view stays foreground. It records each connection transition and polls mouse movement, buttons, wheel, and reading timestamps. Read the device report with `python3 -m tools.xbox_deploy report --version "$version" --native-mouse-devices`. [Microsoft.GameInput package](https://www.nuget.org/packages/Microsoft.GameInput/4.1.315) · [GameInput devices](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-devices)
-
-To identify the active mouse stream, collect a baseline while the probe is foreground, unplug the mouse or its receiver, reconnect it, then move, click, and scroll after the connection settles. Check that all reports share a run ID. Each slot generation marks one connection and starts a fresh reading baseline. A higher `reads` count with the same `timestamp` and `distinct_readings` means repeated polls of the same reading. Compare steady samples within one generation to attribute input changes. [GameInput readings](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-readings)
-
-To check foreground input delivery, hold a physical keyboard key for two seconds and release it while testing mouse movement. Compare the CoreWindow key event counts in `--native-mouse-capture` with the GameInput keyboard timestamp and key count changes in `--native-mouse-devices`. The probe records counts and timestamps. It samples the raw report timestamp only when a mouse slot advertises raw report support. [GameInput focus](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-fundamentals) · [GameInput raw reports](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/interfaces/igameinputreading/methods/igameinputreading_getrawreport)
-
-Add `MOUSE_PROBE_GAMEINPUT_VERSIONS` and the same package's `native/include` directory to query the console runtime for v1 through v4 and count sampled timestamp changes. For the isolated packaged-runtime experiment, also define `MOUSE_PROBE_GAMEINPUT_REDIST` and stage the package's `native/bin/xbox/GameInputRedist.dll` beside the test executable with its license and notice files. The Xbox DLL SHA-256 is `470720a88107b1fdada5af232718385feae32e0453b09f68718f285276aea760`. This build uses the typed v4 API on the packaged DLL, with independent load, factory, and first-reading checkpoints. [Xbox runtime requirements](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-xbox)
-
-## Physical mouse route matrix
-
-Build [native-app.cpp](mouse-source/native-app.cpp) with `MOUSE_PROBE_ROUTES` defined to sample every physical mouse delivery route in one foreground run. The [build workflow](../.github/workflows/xbox-mouse-routes.yml) produces both layouts: `baseline` keeps the existing capability set, and `capability` declares the restricted raw input capabilities with the HID mouse collections through `prepare_mouse_capture --input-observation`. Both select Xbox mouse mode, so an inactive pointer pipeline cannot explain a silent result.
-
-```sh
-gh run download "$run" -n xbox-mouse-routes-x64 -D routes
-python3 -m tools.xbox_deploy deploy routes/XboxMouseRoutes-capability-1.0.1.1.appx \
-    --certificate routes/XboxMouseRoutes.cer --timeout 180
-python3 -m tools.xbox_deploy probe --case native-mouse-routes --version 1.0.1.1 --restart --timeout 90
-python3 -m tools.xbox_deploy report --version 1.0.1.1 --native-mouse-routes
-```
-
-The case passes once the matrix reaches `stage=routes-sampling`, which means every enumeration finished. Move, click, and scroll the physical mouse during the three-minute sample and read the report again. `user32` is a bitmask of the resolved exports in registration order: `RegisterRawInputDevices`, `GetRawInputBuffer`, `GetRawInputData`, `GetRawInputDeviceList`, `PeekMessageW`, `GetCursorPos`, `GetAsyncKeyState`, `GetMouseMovePointsEx`. `window=1` means the probe obtained the CoreWindow's `HWND`. A `rawinput_sink_error` or `cursor_error` of `120` is `ERROR_CALL_NOT_IMPLEMENTED` from a resolved Xbox stub, which is a different result from a route that is implemented and silent. `hid_*_found=0` means the collection enumerated no devices, so its `open_hr` stays `E_PENDING` and no read was attempted. Compare the pointer counters in `--native-mouse-capture` from the same `run_id`, and hold a keyboard key during the sample for the positive control. [Raw input registration](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerrawinputdevices) · [Restricted capabilities](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations#restricted-capabilities)
-
-## Native game panel mouse capture
-
-Add an empty `fhd-mouse-source.txt` to the root of a test APPX layout containing the matching native presenter DLL and WinRT metadata. Install the signed build and open a hosted game through Big Picture. Leave the controller idle, move the physical mouse over the game, press and hold the left button while moving, release, and scroll.
-
-```sh
-python3 -m tools.xbox_deploy report --version "$version" --mouse-source
-```
-
-Capture a report before and after input while `visible=1`. Match `start_tick` between the observations. `registered=0x3f` indicates that all six subscriptions succeeded. The probe counts relative motion and CoreWindow mouse events after the game presents its first frame and while its panel is foreground. `panel_mouse_down` counts routed mouse presses. `capture_attempts` advances only during contact on that panel. `capture_hr=0` records a successful `SetPointerCapture` call and `release_hr=0` records a successful explicit release. A zero attempt count leaves capture untested. Track the game's mailbox alongside these counters to locate where input stopped. [Microsoft capture requirements](https://learn.microsoft.com/en-us/uwp/api/windows.ui.core.corewindow.setpointercapture)
+Pointer input that does reach a hosted game still arrives through the routed XAML
+pointer and the hosted input mailbox in [the panel
+presenter](../runtime/presenter/panel-presenter.cpp), driven by Xbox mouse mode or a
+keyboard rather than by a physical mouse.
 
 ## Xbox packaged process test
 
