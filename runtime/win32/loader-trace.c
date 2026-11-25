@@ -4,6 +4,7 @@
 #include "loader-trace-output.h"
 #include "hosted-xinput-load.h"
 #include "shell-lookup.h"
+#include "d3d12-pipeline-cache.h"
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
@@ -520,114 +521,6 @@ static void StartAudioMeter(void) {
     else TraceAudioStage("thread", HRESULT_FROM_WIN32(GetLastError()));
 }
 
-/* First-use pipeline timing (diagnostic, XBOX_WIN32_PSO_TRACE=1).
-
-   Every ID3D12Device in a process shares one method table, so wrapping its
-   pipeline-creation methods also times the devices that a hosted OpenGL
-   runtime such as Mesa creates internally. A background thread waits for
-   d3d12.dll, takes the method table from the adapter's existing device, and
-   records each pipeline creation that takes 2 ms or longer, with its UTC
-   time, so first-use stalls can be split into driver pipeline compilation
-   and everything else. Slots: 10 CreateGraphicsPipelineState,
-   11 CreateComputePipelineState, 47 ID3D12Device2::CreatePipelineState. */
-typedef HRESULT (STDMETHODCALLTYPE *CreatePipeline)(void *, const void *, REFIID, void **);
-static CreatePipeline originalPipelines[3];
-static volatile LONG pipelineEvents;
-
-static char *Digits(char *out, unsigned long value, int width) {
-    for (int shift = width - 1; shift >= 0; --shift) {
-        unsigned long scale = 1;
-        for (int i = 0; i < shift; ++i) scale *= 10;
-        *out++ = (char)('0' + value / scale % 10);
-    }
-    return out;
-}
-
-static HRESULT TimePipeline(int slot, void *device, const void *desc, REFIID iid, void **out) {
-    LARGE_INTEGER frequency, start, end;
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&start);
-    const HRESULT result = originalPipelines[slot](device, desc, iid, out);
-    QueryPerformanceCounter(&end);
-    const DWORD error = GetLastError();
-    const unsigned long micros = (unsigned long)((end.QuadPart - start.QuadPart) * 1000000 / frequency.QuadPart);
-    if (micros >= 2000 && InterlockedIncrement(&pipelineEvents) <= 2000) {
-        SYSTEMTIME now;
-        GetSystemTime(&now);
-        char line[96];
-        char *text = Text(line, "pso kind=");
-        *text++ = "GCS"[slot];
-        text = Text(text, " utc=");
-        text = Digits(text, now.wHour, 2);
-        *text++ = ':';
-        text = Digits(text, now.wMinute, 2);
-        *text++ = ':';
-        text = Digits(text, now.wSecond, 2);
-        *text++ = '.';
-        text = Digits(text, now.wMilliseconds, 3);
-        text = Unsigned(Text(text, " us="), micros);
-        text = Hex(Text(text, " result=0x"), (DWORD)result, 8);
-        text = Text(text, "\r\n");
-        AppendTrace(line, (DWORD)(text - line));
-    }
-    SetLastError(error);
-    return result;
-}
-
-static HRESULT STDMETHODCALLTYPE TimedGraphicsPipeline(void *device, const void *desc, REFIID iid, void **out) {
-    return TimePipeline(0, device, desc, iid, out);
-}
-static HRESULT STDMETHODCALLTYPE TimedComputePipeline(void *device, const void *desc, REFIID iid, void **out) {
-    return TimePipeline(1, device, desc, iid, out);
-}
-static HRESULT STDMETHODCALLTYPE TimedStreamPipeline(void *device, const void *desc, REFIID iid, void **out) {
-    return TimePipeline(2, device, desc, iid, out);
-}
-
-static DWORD WINAPI WrapPipelineCreation(LPVOID unused) {
-    (void)unused;
-    HMODULE d3d12 = NULL;
-    for (int i = 0; i < 1200 && !d3d12; ++i) {
-        d3d12 = GetModuleHandleW(L"d3d12.dll");
-        if (!d3d12) Sleep(50);
-    }
-    const CreateD3D12Device create = d3d12 ? (CreateD3D12Device)(void *)GetProcAddress(d3d12, "D3D12CreateDevice") : NULL;
-    IUnknown *device = NULL;
-    HRESULT result = create ? create(NULL, D3D_FEATURE_LEVEL_11_0, &deviceIid, (void **)&device) :
-        HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
-    if (SUCCEEDED(result) && device) {
-        void **methods = *(void ***)device;
-        static const int slots[3] = {10, 11, 47};
-        void *const timed[3] = {(void *)TimedGraphicsPipeline, (void *)TimedComputePipeline, (void *)TimedStreamPipeline};
-        ULONG previous = 0;
-        if (VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), PAGE_READWRITE, &previous)) {
-            for (int i = 0; i < 3; ++i) {
-                if (methods[slots[i]] == timed[i]) continue;
-                originalPipelines[i] = (CreatePipeline)methods[slots[i]];
-                InterlockedExchangePointer(&methods[slots[i]], timed[i]);
-            }
-            VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), previous, &previous);
-        } else {
-            result = HRESULT_FROM_WIN32(GetLastError());
-        }
-        device->lpVtbl->Release(device);
-    }
-    char line[64];
-    char *text = Hex(Text(line, "pso timing result=0x"), (DWORD)result, 8);
-    text = Text(text, "\r\n");
-    AppendTrace(line, (DWORD)(text - line));
-    return 0;
-}
-
-static void StartPipelineTiming(void) {
-    static volatile LONG started;
-    WCHAR enabled[2];
-    if (GetEnvironmentVariableW(L"XBOX_WIN32_PSO_TRACE", enabled, ARRAYSIZE(enabled)) != 1 || enabled[0] != L'1' ||
-            InterlockedExchange(&started, 1)) return;
-    HANDLE thread = CreateThread(NULL, 0, WrapPipelineCreation, NULL, 0, NULL);
-    if (thread) CloseHandle(thread);
-}
-
 static void StartFaultTrace(void) {
     if (InterlockedExchange(&faultTraceStarted, 1) ||
             GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", NULL, 0) <= 1) return;
@@ -642,7 +535,7 @@ static void StartFaultTrace(void) {
     while (line[length]) ++length;
     AppendTrace(line, length);
     StartAudioMeter();
-    StartPipelineTiming();
+    XboxPipelineHooksStart();
 }
 
 static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
@@ -660,11 +553,14 @@ static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
 
 DECLSPEC_NORETURN void WINAPI XboxExitProcess(UINT code) {
     RecordProcessExit("exit-process", code, __builtin_return_address(0));
+    XboxD3D12PipelineCacheFlush();
     ExitProcess(code);
 }
 
 BOOL WINAPI XboxTerminateProcess(HANDLE process, UINT code) {
     RecordProcessExit("terminate-process", code, __builtin_return_address(0));
+    if (process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId())
+        XboxD3D12PipelineCacheFlush();
     return TerminateProcess(process, code);
 }
 

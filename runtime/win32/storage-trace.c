@@ -276,8 +276,20 @@ DWORD WINAPI XboxTraceStorageAttributesW(LPCWSTR path) {
     return result;
 }
 
+/* A title whose exit imports are bound here still lets the loader-trace
+   adapter persist its Direct3D 12 pipeline cache before the process ends. */
+static void FlushPipelineCache(void) {
+    typedef void (WINAPI *Flush)(void);
+    const DWORD previous = GetLastError();
+    const HMODULE trace = GetModuleHandleW(L"XboxWin32LoaderTrace.dll");
+    const Flush flush = trace ? (Flush)(void *)GetProcAddress(trace, "XboxD3D12PipelineCacheFlush") : NULL;
+    if (flush) flush();
+    SetLastError(previous);
+}
+
 DECLSPEC_NORETURN void WINAPI XboxTraceExitProcess(UINT code) {
     RecordResult("ExitProcess", NULL, NULL, FALSE, FALSE, code);
+    FlushPipelineCache();
     ExitProcess(code);
 }
 
@@ -287,6 +299,7 @@ BOOL WINAPI XboxTraceTerminateProcess(HANDLE process, UINT code) {
             InterlockedIncrement(&terminationCalls) <= 2) {
         RecordResult("TerminateProcess", NULL, NULL, FALSE, FALSE, code);
     }
+    if (process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId()) FlushPipelineCache();
     SetLastError(previous);
     return TerminateProcess(process, code);
 }
