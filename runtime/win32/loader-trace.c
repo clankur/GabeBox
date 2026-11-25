@@ -923,12 +923,6 @@ static const GUID deviceFactoryClass =
 static const GUID removedDataClass =
     {0x4A75BBC4, 0x9FF4, 0x4AD8, {0x9F, 0x18, 0xAB, 0xAE, 0x84, 0xDC, 0x5F, 0xF2}};
 
-static BOOL SameGuid(const GUID *left, const GUID *right) {
-    const unsigned char *a = (const unsigned char *)left, *b = (const unsigned char *)right;
-    for (unsigned i = 0; i < sizeof(GUID); ++i) if (a[i] != b[i]) return FALSE;
-    return TRUE;
-}
-
 static HRESULT WINAPI TraceD3D12GetInterface(REFCLSID clsid, REFIID iid, void **out) {
     const GetD3D12Interface get = (GetD3D12Interface)InterlockedCompareExchangePointer(&d3d12GetInterface, NULL, NULL);
     const HRESULT result = get(clsid, iid, out);
