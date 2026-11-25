@@ -145,7 +145,7 @@ static void TraceCapabilities(DWORD index, DWORD result) {
     const LONG call = InterlockedIncrement(&count);
     if (call > 16) return;
     const DWORD error = GetLastError();
-    char line[96] = "input xinput-capabilities slot=0 result=0x00000000";
+    char line[128] = "input xinput-capabilities slot=0 result=0x00000000";
     line[31] = (char)('0' + (index & 7));
     for (int digit = 0; digit < 8; ++digit) line[42 + digit] = "0123456789ABCDEF"[(result >> (28 - 4 * digit)) & 15];
     unsigned length = 50;
@@ -154,6 +154,9 @@ static void TraceCapabilities(DWORD index, DWORD result) {
         const DWORD size = GetEnvironmentVariableW(L"SDL_JOYSTICK_WGI", value, ARRAYSIZE(value));
         const char *suffix = size == 1 && value[0] == L'0' ? " sdl-backends=hosted-only" : " sdl-backends=default";
         while (*suffix) line[length++] = *suffix++;
+        if (GetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", NULL, 0) > 1) {
+            for (suffix = " sdl-ignore-list=set"; *suffix;) line[length++] = *suffix++;
+        }
     }
     line[length++] = '\r';
     line[length++] = '\n';

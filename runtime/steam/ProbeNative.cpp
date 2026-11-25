@@ -3239,6 +3239,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"SDL_JOYSTICK_GAMEINPUT", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
                 {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
+                // Steam publishes the controllers it virtualizes for SDL titles to ignore. The
+                // hosted pad is not one of them, so an inherited list would hide it; an empty
+                // value removes the inherited variable.
+                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES", L""},
+                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", L""},
+                {L"SteamVirtualGamepadInfo", L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
