@@ -111,8 +111,23 @@ inline std::wstring LaunchSummary(Plan const& plan) {
         Wide(DecisionName(plan.decision)) + L"\r\nsteam_cloud_sync_upload_policy=" + Wide(UploadPolicy(plan)) + L"\r\n";
 }
 
-// One upload at a time; a launch waits for the previous title's exit upload.
-inline std::atomic<bool> exitSyncActive{false};
+// Exit uploads in flight. A launch waits for them before its download. Only the
+// upload itself counts, not the wait for the child, so a child that never exits
+// cannot hold back a later launch's sync.
+inline std::atomic<unsigned> exitUploadsActive{0};
+
+struct ExitUploadActive {
+    ExitUploadActive() { ++exitUploadsActive; }
+    ~ExitUploadActive() { --exitUploadsActive; }
+    ExitUploadActive(ExitUploadActive const&) = delete;
+    ExitUploadActive& operator=(ExitUploadActive const&) = delete;
+};
+
+inline std::uint64_t FileTimeNow() {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    return (static_cast<std::uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+}
 
 inline std::string HexText(DWORD value) {
     constexpr char digits[] = "0123456789ABCDEF";
@@ -131,15 +146,83 @@ inline bool WriteReport(std::wstring const& path, std::string const& text, bool 
         written == text.size();
 }
 
-// Reads a one-shot conflict choice the player left for this app.
-inline Choice ReadChoice(std::wstring const& path) {
+// Files this host process has applied, by path and contents. If one could not be
+// removed afterwards, a later launch still treats it as used rather than
+// applying it a second time.
+inline std::mutex usedChoicesLock;
+inline std::vector<std::wstring> usedChoices;
+
+inline std::wstring ChoiceKey(std::wstring const& path, std::string const& text) {
+    return path + L"|" + Wide(text);
+}
+
+struct ChoiceRead {
+    ChoiceFile file;
+    std::string text;
+};
+
+// Reads and checks the one-shot conflict choice the player left for this app.
+inline ChoiceRead ReadChoice(std::wstring const& path, std::uint32_t account) {
+    ChoiceRead result;
     auto opened = CreateFile2(path.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, nullptr);
-    if (opened == INVALID_HANDLE_VALUE) return Choice::None;
+    if (opened == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) result.file.status = ChoiceStatus::Invalid;
+        return result;
+    }
     winrt::handle file{opened};
-    char buffer[64];
+    char buffer[128];
     DWORD read{};
-    if (!ReadFile(file.get(), buffer, sizeof(buffer), &read, nullptr)) return Choice::Invalid;
-    return read == sizeof(buffer) ? Choice::Invalid : ParseChoice(std::string_view(buffer, read));
+    if (!ReadFile(file.get(), buffer, sizeof(buffer), &read, nullptr) || read == sizeof(buffer)) {
+        result.file.status = ChoiceStatus::Invalid;
+        return result;
+    }
+    result.text.assign(buffer, read);
+    result.file = EvaluateChoice(result.text, account, UnixSeconds(FileTimeNow()));
+    if (result.file.status == ChoiceStatus::Pending) {
+        std::lock_guard guard(usedChoicesLock);
+        const auto key = ChoiceKey(path, result.text);
+        if (std::find(usedChoices.begin(), usedChoices.end(), key) != usedChoices.end())
+            result.file.status = ChoiceStatus::Used;
+    }
+    return result;
+}
+
+// Removes a choice file that must not apply, and records the outcome.
+inline void DiscardChoice(std::wstring const& path, const char* reason, Report& report) {
+    report.Add("choice_discarded", reason);
+    if (DeleteFileFromAppW(path.c_str())) {
+        report.Add("choice_discard_result", "removed");
+        return;
+    }
+    const DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND) {
+        report.Add("choice_discard_result", "already-gone");
+        return;
+    }
+    report.Add("choice_discard_result", "failed").Add("choice_discard_error", HexText(error));
+}
+
+// Marks an applied choice used. The file moves to .applied-<run>; if that fails
+// it is deleted; if both fail the failure is recorded, and the choice is still
+// treated as used for the life of this host process.
+inline void ConsumeChoice(std::wstring const& path, std::string const& text, std::uint64_t run, Report& report) {
+    {
+        std::lock_guard guard(usedChoicesLock);
+        usedChoices.push_back(ChoiceKey(path, text));
+    }
+    const auto applied = path + L".applied-" + std::to_wstring(run);
+    if (MoveFileFromAppW(path.c_str(), applied.c_str())) {
+        report.Add("choice_consumed", "moved");
+        return;
+    }
+    const DWORD moveError = GetLastError();
+    if (DeleteFileFromAppW(path.c_str())) {
+        report.Add("choice_consumed", "deleted").Add("choice_move_error", HexText(moveError));
+        return;
+    }
+    report.Add("choice_consumed", "remove-failed").Add("choice_move_error", HexText(moveError))
+        .Add("choice_delete_error", HexText(GetLastError()));
 }
 
 struct Backup {
@@ -238,6 +321,102 @@ inline Backup BackupApp(std::wstring const& localState, std::uint64_t account, s
     return backup;
 }
 
+// Deletes a backup tree that CopyTree wrote. Stops at the first error and never
+// follows a reparse point.
+inline bool RemoveTree(std::wstring const& path, unsigned depth, DWORD& error) {
+    if (depth > 17) {
+        error = ERROR_BUFFER_OVERFLOW;
+        return false;
+    }
+    WIN32_FIND_DATAW entry{};
+    HANDLE find = FindFirstFileExFromAppW((path + L"\\*").c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch,
+        nullptr, 0);
+    if (find == INVALID_HANDLE_VALUE) {
+        error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND) return false;
+    } else {
+        struct Closer {
+            HANDLE handle;
+            ~Closer() { FindClose(handle); }
+        } closer{find};
+        do {
+            const std::wstring_view name(entry.cFileName);
+            if (name == L"." || name == L"..") continue;
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                error = ERROR_CANT_ACCESS_FILE;
+                return false;
+            }
+            const auto child = path + L"\\" + std::wstring(name);
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!RemoveTree(child, depth + 1, error)) return false;
+                continue;
+            }
+            // CopyFile keeps a read-only attribute; clear it so the copy can go.
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+                SetFileAttributesFromAppW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+            if (!DeleteFileFromAppW(child.c_str())) {
+                error = GetLastError();
+                return false;
+            }
+        } while (FindNextFileW(find, &entry));
+        error = GetLastError();
+        if (error != ERROR_NO_MORE_FILES) return false;
+    }
+    if (!RemoveDirectoryFromAppW(path.c_str())) {
+        error = GetLastError();
+        return false;
+    }
+    error = 0;
+    return true;
+}
+
+// After this launch's backup completed, keeps the newest KeepBackups for the
+// account and app plus anything younger than KeepBackupTicks, and never the
+// current run's. Records every pruned run and every failure.
+inline void PruneBackups(std::wstring const& localState, std::uint64_t account, std::uint32_t app,
+                         std::uint64_t currentRun, Report& report) {
+    const auto folder = localState + L"\\SteamCloudSync\\" + std::to_wstring(static_cast<std::uint32_t>(account)) +
+        L"\\" + std::to_wstring(app);
+    WIN32_FIND_DATAW entry{};
+    HANDLE find = FindFirstFileExFromAppW((folder + L"\\*").c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch,
+        nullptr, 0);
+    if (find == INVALID_HANDLE_VALUE) {
+        report.Add("backup_prune", "enumerate-error").Add("backup_prune_error", HexText(GetLastError()));
+        return;
+    }
+    std::vector<std::uint64_t> runs;
+    {
+        struct Closer {
+            HANDLE handle;
+            ~Closer() { FindClose(handle); }
+        } closer{find};
+        do {
+            std::uint64_t run = 0;
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && ParseRun(entry.cFileName, run))
+                runs.push_back(run);
+        } while (FindNextFileW(find, &entry));
+        const DWORD error = GetLastError();
+        if (error != ERROR_NO_MORE_FILES) {
+            report.Add("backup_prune", "enumerate-error").Add("backup_prune_error", HexText(error));
+            return;
+        }
+    }
+    const auto prune = BackupsToPrune(runs, currentRun, FileTimeNow());
+    std::string pruned, failed;
+    for (auto run : prune) {
+        DWORD error = 0;
+        if (RemoveTree(folder + L"\\" + std::to_wstring(run), 0, error)) {
+            pruned += (pruned.empty() ? "" : ",") + std::to_string(run);
+        } else {
+            failed += (failed.empty() ? "" : ",") + std::to_string(run) + ":" + HexText(error);
+        }
+    }
+    report.Number("backups_found", static_cast<std::int64_t>(runs.size()))
+        .Add("backup_pruned", pruned.empty() ? "none" : pruned);
+    if (!failed.empty()) report.Add("backup_prune_failed", failed);
+}
+
 // Under steamSessionMutex: the session this plan started with, if it is still live.
 inline SteamSignInHandles* Current(Plan const& plan) {
     auto session = liveSteamSession;
@@ -311,12 +490,14 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
     };
 
     const auto waitStarted = GetTickCount64();
-    while (exitSyncActive.load() && GetTickCount64() - waitStarted < PreviousUploadWaitMs)
+    while (exitUploadsActive.load() && GetTickCount64() - waitStarted < PreviousUploadWaitMs)
         co_await winrt::resume_after(std::chrono::milliseconds(100));
-    if (exitSyncActive.load()) co_return skip("previous-upload-pending");
+    if (exitUploadsActive.load()) co_return skip("previous-upload-pending");
 
     std::int32_t stateBefore = 0;
     bool running = false;
+    bool accountEnabled = false;
+    bool appEnabled = false;
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = liveSteamSession;
@@ -324,16 +505,28 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
         plan->session = session;
         plan->account = session->accountId;
         plan->storage = Open(*session);
-        if (!plan->storage) co_return skip("interface-mismatch");
-        const bool accountEnabled = plan->storage.AccountEnabled();
-        const bool appEnabled = plan->storage.AppEnabled(plan->app);
-        stateBefore = plan->storage.LastKnownState(plan->app);
-        running = plan->storage.InProgress(plan->app);
-        report.Flag("account_enabled", accountEnabled).Flag("app_enabled", appEnabled)
-            .StateField("state_before", stateBefore).Flag("in_progress_before", running);
-        if (!accountEnabled) co_return skip("account-cloud-disabled");
-        if (!appEnabled) co_return skip("app-cloud-disabled");
+        if (plan->storage) {
+            accountEnabled = plan->storage.AccountEnabled();
+            appEnabled = plan->storage.AppEnabled(plan->app);
+            stateBefore = plan->storage.LastKnownState(plan->app);
+            running = plan->storage.InProgress(plan->app);
+            report.Flag("account_enabled", accountEnabled).Flag("app_enabled", appEnabled)
+                .StateField("state_before", stateBefore).Flag("in_progress_before", running);
+        }
     }
+
+    // The one-shot conflict choice. A file for another account, past its expiry,
+    // in the old unbound format or otherwise unusable is removed now, whether or
+    // not this launch syncs, so it can never apply to a later conflict.
+    const auto choicePath = localState + L"\\steam-cloud-resolve-" + std::to_wstring(plan->app) + L".txt";
+    const auto choice = ReadChoice(choicePath, static_cast<std::uint32_t>(plan->account));
+    report.Add("choice_file", ChoiceStatusName(choice.file.status));
+    if (choice.file.status == ChoiceStatus::Pending) report.Add("choice_pending", ChoiceName(choice.file.choice));
+    if (DiscardAtLaunch(choice.file.status)) DiscardChoice(choicePath, ChoiceStatusName(choice.file.status), report);
+
+    if (!plan->storage) co_return skip("interface-mismatch");
+    if (!accountEnabled) co_return skip("account-cloud-disabled");
+    if (!appEnabled) co_return skip("app-cloud-disabled");
     if (running) {
         auto wait = std::make_shared<JobWait>();
         co_await WaitForJob(plan, Download, ~0ull, DownloadTimeoutMs, true, wait);
@@ -352,26 +545,28 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
         if (!destination.empty() && backup.ok)
             report.Add("backup_path", winrt::to_string(std::wstring_view(destination).substr(localState.size() + 1)));
         backedUp = backup.ok;
+        if (backup.ok && std::strcmp(backup.status, "copied") == 0)
+            PruneBackups(localState, plan->account, plan->app, plan->runId, report);
         return backup.ok;
     };
     if (BackupRequired(stateBefore) && !backupLocal()) co_return skip("backup-failed");
 
     std::uint64_t mark = 0;
+    bool downloadAccepted = false;
     {
         std::lock_guard lock(steamSessionMutex);
         auto session = Current(*plan);
         if (!session) co_return skip("session-lost");
         session->PumpCallbacks();
         mark = session->cloudCompletions.Mark();
-        const bool accepted = plan->storage.Request(plan->app, Download);
-        report.Add("download", accepted ? "requested" : "refused");
-        if (!accepted) {
-            plan->decision = Decision::Unconfirmed;
-            plan->detail = "download-refused";
-        }
+        downloadAccepted = plan->storage.Request(plan->app, Download);
+        report.Add("download", downloadAccepted ? "requested" : "refused");
     }
     std::int32_t stateAfter = 0;
-    if (plan->detail != "download-refused") {
+    if (!downloadAccepted) {
+        plan->decision = Decision::Unconfirmed;
+        plan->detail = "download-refused";
+    } else {
         auto wait = std::make_shared<JobWait>();
         co_await WaitForJob(plan, Download, mark, DownloadTimeoutMs, false, wait);
         if (wait->sessionLost) co_return skip("session-lost");
@@ -382,26 +577,22 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
             stateAfter = plan->storage.LastKnownState(plan->app);
         }
         report.StateField("state_after_download", stateAfter);
-        plan->decision = Classify(stateAfter, wait->result);
+        plan->decision = Classify(stateBefore, stateAfter, downloadAccepted, wait->result);
         plan->detail = DecisionName(plan->decision);
+        if (plan->decision == Decision::Synchronized) report.Add("download_confirmed_by", SynchronizedBy(wait->result));
     }
 
-    // Conflict policy: the cloud copy wins, unless the player left a one-shot
-    // "local" choice for this launch. Nothing is resolved without a complete
-    // backup of the local files, and only a confirmed synchronized state counts.
+    // Conflict policy: the cloud copy wins, unless the player left a pending
+    // one-shot "local" choice for this account. Nothing is resolved without a
+    // complete backup of the local files, and only a confirmed synchronized
+    // state counts.
+    const auto side = choice.file.Effective();
     if (plan->decision == Decision::HeldConflict) {
-        const auto choicePath = localState + L"\\steam-cloud-resolve-" + std::to_wstring(plan->app) + L".txt";
-        const auto choice = ReadChoice(choicePath);
-        const bool acceptLocal = AcceptLocal(choice);
-        report.Add("choice", ChoiceName(choice)).Add("resolve_side", acceptLocal ? "local" : "cloud");
+        const bool acceptLocal = AcceptLocal(side);
+        report.Add("choice", ChoiceName(side)).Add("resolve_side", acceptLocal ? "local" : "cloud");
         if (!(backedUp || backupLocal())) {
             report.Add("resolve", "skipped-backup-failed");
         } else {
-            // One-shot: a later conflict follows the policy again.
-            if (choice != Choice::None) {
-                const auto applied = choicePath + L".applied-" + std::to_wstring(plan->runId);
-                report.Flag("choice_consumed", MoveFileFromAppW(choicePath.c_str(), applied.c_str()) != FALSE);
-            }
             const auto direction = acceptLocal ? Upload : Download;
             bool accepted = false;
             {
@@ -430,10 +621,21 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
                 stateAfter = plan->storage.LastKnownState(plan->app);
             }
             report.StateField("state_after_resolve", stateAfter);
-            plan->decision = AfterResolution(choice, accepted, stateAfter, wait->result);
+            plan->decision = AfterResolution(side, accepted, stateAfter, wait->result);
             plan->detail = DecisionName(plan->decision);
             if (plan->decision == Decision::HeldConflict) report.Add("resolve", "unconfirmed");
         }
+        // One-shot: the choice is used up only by a confirmed resolution. Until
+        // then it stays for the next launch, bounded by its expiry.
+        if (side != Choice::None) {
+            if (IsResolved(plan->decision)) ConsumeChoice(choicePath, choice.text, plan->runId, report);
+            else report.Add("choice_kept", "resolution-unconfirmed");
+        }
+    } else if (side != Choice::None &&
+               (plan->decision == Decision::Synchronized || plan->decision == Decision::LocalChanges)) {
+        // The sync settled without a conflict, so the choice has nothing left to
+        // decide; keeping it could override a different, later conflict.
+        DiscardChoice(choicePath, "no-conflict", report);
     }
     report.Add("decision", DecisionName(plan->decision)).Add("upload_policy", UploadPolicy(*plan))
         .Add("launch", "complete");
@@ -442,10 +644,6 @@ static winrt::Windows::Foundation::IAsyncAction PrepareLaunch(std::shared_ptr<Pl
 
 // Uploads after the trial's process exits, whoever reaps it.
 static winrt::fire_and_forget UploadAfterExit(winrt::handle process, std::shared_ptr<Plan> plan) {
-    exitSyncActive.store(true);
-    struct Clear {
-        ~Clear() { exitSyncActive.store(false); }
-    } clear;
     Report report;
     try {
         co_await winrt::resume_background();
@@ -463,6 +661,9 @@ static winrt::fire_and_forget UploadAfterExit(winrt::handle process, std::shared
         };
         if (!UploadAllowed(plan->decision)) co_return finish(UploadPolicy(*plan).c_str());
 
+        // Counted from here until this coroutine ends, so a launch waits only
+        // for an upload that is actually running.
+        ExitUploadActive active;
         std::uint64_t mark = 0;
         {
             std::lock_guard lock(steamSessionMutex);

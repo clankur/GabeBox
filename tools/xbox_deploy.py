@@ -770,31 +770,78 @@ def request_protocol_return(portal, control, run):
 
 STEAM_CLOUD_SYNC_REPORT = 'steam-cloud-sync-report.txt'
 CLOUD_CHOICES = ('cloud', 'local')
+CLOUD_CHOICE_HOURS = 24
+# The host ignores and removes a choice whose expiry is more than 7 days away.
+MAX_CLOUD_CHOICE_HOURS = 72
+STEAM_ACCOUNT_FOLDER = re.compile(r'[1-9][0-9]{0,9}')
 
 
-def cloud_resolve_upload(app_id, keep, boundary):
-    """Build the one-shot conflict choice the next launch of app_id consumes."""
-    if not 0 < app_id <= 0xFFFFFFFF or keep not in CLOUD_CHOICES or not re.fullmatch(r'[0-9a-f]{32}', boundary):
-        raise ValueError('Use a positive AppID and keep cloud or local.')
+def cloud_resolve_line(keep, account, expires):
+    """The choice line the host accepts: the side, the account's id32 and a UTC expiry."""
+    if keep not in CLOUD_CHOICES or not 0 < account <= 0xFFFFFFFF or not 0 < expires < 253402300800:
+        raise ValueError('Keep cloud or local for a Steam account id32 with a future expiry.')
+    return f'{keep} account={account} expires={time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires))}\n'
+
+
+def cloud_resolve_upload(app_id, keep, account, expires, boundary):
+    """Build the one-shot conflict choice the next launch of app_id may apply once."""
+    if not 0 < app_id <= 0xFFFFFFFF or not re.fullmatch(r'[0-9a-f]{32}', boundary):
+        raise ValueError('Use a positive AppID.')
+    line = cloud_resolve_line(keep, account, expires)
     filename = f'steam-cloud-resolve-{app_id}.txt'
     body = (f'--{boundary}\r\n'
             f'Content-Disposition: form-data; name="{filename}"; filename="{filename}"\r\n'
             # The file ends in a newline: the CRLF before the boundary belongs to the delimiter,
             # and read_probe_report treats a file without a final newline as still being written.
-            f'Content-Type: text/plain\r\n\r\n{keep}\n\r\n'
+            f'Content-Type: text/plain\r\n\r\n{line}\r\n'
             f'--{boundary}--\r\n').encode()
-    return filename, body
+    return filename, body, line
 
 
-def write_cloud_resolve(portal, app, app_id, keep):
+def steam_accounts(portal, app):
+    """Steam account id32 folders under LocalState\\SteamUserData."""
+    query = local_state_query(app, path=r'\LocalState\SteamUserData')
+    try:
+        _, raw = portal.request('GET', f'/api/filesystem/apps/files?{query}')
+    except PortalError as error:
+        if error.status not in (404, 409):
+            raise
+        return []
+    accounts = []
+    for item in json.loads(raw).get('Items', []):
+        name = item.get('Name')
+        if (isinstance(name, str) and STEAM_ACCOUNT_FOLDER.fullmatch(name) and int(name) <= 0xFFFFFFFF
+                and item.get('Type', 16) == 16):
+            accounts.append(int(name))
+    return sorted(accounts)
+
+
+def cloud_resolve_account(portal, app, account):
+    """The account to bind the choice to: the given id32 or the console's only Steam account."""
+    accounts = steam_accounts(portal, app)
+    if account is not None:
+        if account not in accounts:
+            raise ValueError(f'LocalState\\SteamUserData has no folder for account {account}.')
+        return account
+    if len(accounts) != 1:
+        found = ', '.join(map(str, accounts)) or 'none'
+        raise ValueError(f'Pass --account with the Steam account id32 (LocalState\\SteamUserData has: {found}).')
+    return accounts[0]
+
+
+def write_cloud_resolve(portal, app, app_id, keep, account=None, hours=CLOUD_CHOICE_HOURS):
+    if not 0 < hours <= MAX_CLOUD_CHOICE_HOURS:
+        raise ValueError(f'Use --hours from 1 to {MAX_CLOUD_CHOICE_HOURS}.')
+    account = cloud_resolve_account(portal, app, account)
     boundary = uuid4().hex
-    filename, body = cloud_resolve_upload(app_id, keep, boundary)
+    filename, body, line = cloud_resolve_upload(app_id, keep, account, int(time.time()) + hours * 3600, boundary)
     query = local_state_query(app, extract='false')
     portal.request('POST', f'/api/filesystem/apps/file?{query}', body,
                    {'Content-Type': f'multipart/form-data; boundary={boundary}'})
-    if read_probe_report(portal, app, filename).strip() != keep:
-        raise ValueError(f'{filename} did not read back as {keep}.')
-    print(f'{filename}={keep}. The next launch of {app_id} applies it once if Steam Cloud reports a conflict.')
+    if read_probe_report(portal, app, filename) != line:
+        raise ValueError(f'{filename} did not read back as written.')
+    print(f'{filename}: {line.strip()}. A launch of {app_id} by account {account} before the expiry applies it '
+          'once to a Steam Cloud conflict; a launch without a conflict, or any launch after the expiry, removes it.')
 
 
 def run_lifetime(portal, version, dwell, timeout, portal_return):
@@ -973,6 +1020,12 @@ def main():
     resolve.add_argument('--keep', required=True, choices=CLOUD_CHOICES,
                          help='cloud downloads the cloud files, local uploads this console\'s files; '
                               'local files are backed up under LocalState\\SteamCloudSync first')
+    resolve.add_argument('--account', type=int,
+                         help='Steam account id32, the folder name under LocalState\\SteamUserData '
+                              '(default: the only one there)')
+    resolve.add_argument('--hours', type=int, default=CLOUD_CHOICE_HOURS,
+                         help=f'hours until the choice expires (default {CLOUD_CHOICE_HOURS}, '
+                              f'maximum {MAX_CLOUD_CHOICE_HOURS})')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -1294,7 +1347,7 @@ def main():
         return
     if args.command == 'cloud-resolve':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        write_cloud_resolve(portal, app, args.app_id, args.keep)
+        write_cloud_resolve(portal, app, args.app_id, args.keep, args.account, args.hours)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)
