@@ -432,6 +432,27 @@ void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2
         if (!stats_) {
             ComPtr<ID3D11Device> device;
             context_->GetDevice(&device);
+            // Engines size their camera targets from these formats; report what the device can render to.
+            static const DXGI_FORMAT formats[] = {DXGI_FORMAT_B5G6R5_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT};
+            for (DXGI_FORMAT format : formats) {
+                UINT support = 0;
+                const HRESULT checked = device ? device->CheckFormatSupport(format, &support) : E_POINTER;
+                char text[120], *out = text;
+                auto put = [&out](const char* value) { while (*value) *out++ = *value++; };
+                auto number = [&out](UINT64 value) {
+                    char digits[24]; int length = 0;
+                    do { digits[length++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+                    while (length) *out++ = digits[--length];
+                };
+                put("dxgi format-support format="); number(format);
+                put(" result="); number(static_cast<UINT>(checked));
+                put(" render-target="); number((support & D3D11_FORMAT_SUPPORT_RENDER_TARGET) != 0);
+                put(" depth-stencil="); number((support & D3D11_FORMAT_SUPPORT_DEPTH_STENCIL) != 0);
+                put(" texture2d="); number((support & D3D11_FORMAT_SUPPORT_TEXTURE2D) != 0);
+                put("\r\n");
+                AppendProbeTrace(text, static_cast<DWORD>(out - text));
+            }
             const D3D11_QUERY_DESC query{D3D11_QUERY_PIPELINE_STATISTICS, 0};
             if (device) device->CreateQuery(&query, &stats_);
         }
