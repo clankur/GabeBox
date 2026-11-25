@@ -193,6 +193,58 @@ public:
     }
 };
 
+// Diagnostic for measured packages: record when a hosted D3D12 device is
+// removed relative to the frames presented and published, so a removal can be
+// attributed to the game's own GPU work or to the hosted frame copy.
+volatile LONG hostedPresents = 0, hostedPublishes = 0;
+
+struct RemovalWatch {
+    ID3D12Device* device;
+    UINT64 start;
+};
+
+DWORD WINAPI WatchDeviceRemoval(void* parameter) {
+    auto* watch = static_cast<RemovalWatch*>(parameter);
+    LARGE_INTEGER frequency{}, now{};
+    QueryPerformanceFrequency(&frequency);
+    for (int i = 0; i < 180 * 50; ++i) {
+        const HRESULT reason = watch->device->GetDeviceRemovedReason();
+        if (reason != S_OK) {
+            QueryPerformanceCounter(&now);
+            Trace("device-removed-ms", static_cast<HRESULT>((now.QuadPart - watch->start) * 1000 / frequency.QuadPart));
+            Trace("device-removed-reason", reason);
+            Trace("device-removed-presents", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPresents, 0, 0)));
+            Trace("device-removed-publishes", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPublishes, 0, 0)));
+            break;
+        }
+        Sleep(20);
+    }
+    watch->device->Release();
+    HeapFree(GetProcessHeap(), 0, watch);
+    return 0;
+}
+
+void StartRemovalWatch(ID3D12CommandQueue* queue) {
+    static volatile LONG started = 0;
+    if (!queue || InterlockedExchange(&started, 1)) return;
+    auto* watch = static_cast<RemovalWatch*>(HeapAlloc(GetProcessHeap(), 0, sizeof(RemovalWatch)));
+    if (!watch) return;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    watch->start = static_cast<UINT64>(now.QuadPart);
+    watch->device = nullptr;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&watch->device)))) {
+        HeapFree(GetProcessHeap(), 0, watch);
+        return;
+    }
+    const HANDLE thread = CreateThread(nullptr, 0, WatchDeviceRemoval, watch, 0, nullptr);
+    if (thread) CloseHandle(thread);
+    else {
+        watch->device->Release();
+        HeapFree(GetProcessHeap(), 0, watch);
+    }
+}
+
 class HostedSwapChain final : public IDXGISwapChain4 {
     IDXGISwapChain1* native_;
     ComPtr<IDXGISwapChain2> native2_;
@@ -207,7 +259,7 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     ProducerCadenceTrace cadence_;
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
-    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
+    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false, skipPublish_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
@@ -246,6 +298,9 @@ class HostedSwapChain final : public IDXGISwapChain4 {
 
     void Publish(UINT interval, UINT flags) {
         if (flags & DXGI_PRESENT_TEST) return;
+        if (cadence_.Enabled()) StartRemovalWatch(queue_.Get());
+        if (skipPublish_) return;
+        InterlockedIncrement(&hostedPublishes);
         const HRESULT code = publisher_.Publish(native_, queue_ ? native3_->GetCurrentBackBufferIndex() : 0);
         cadence_.Record(code, publisher_.IsActive(), interval, flags);
         if (code == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
@@ -314,6 +369,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         const HRESULT result = present(nativeInterval);
         if (timing.entered) timing.returned = cadence_.Timestamp();
         TracePresent(interval, nativeInterval, flags, result);
+        if (!(flags & DXGI_PRESENT_TEST) && InterlockedIncrement(&hostedPresents) <= 10 && cadence_.Enabled())
+            Trace("present-result", result);
         if (measure) cadence_.RecordPresent(timing, publisher_.IsActive());
         ReleaseSRWLockExclusive(&lock_);
         return result;
@@ -334,6 +391,9 @@ public:
         if (HasPackageMarker(L"\\fhd-measure.txt")) {
             paceBeforePublish_ = HasPackageMarker(L"\\fhd-paced-publish.txt");
             use5994_ = HasPackageMarker(L"\\fhd-refresh-5994.txt");
+            // Diagnostic only: present without copying frames to the host.
+            skipPublish_ = HasPackageMarker(L"\\fhd-skip-publish.txt");
+            if (skipPublish_) Trace("publish-skipped", S_OK);
             cadence_.Enable();
         }
         SetLastError(error);
