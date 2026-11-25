@@ -961,6 +961,10 @@ struct View : implements<View, IFrameworkView> {
         auto lifetime = get_strong();
         closed = true;
         updateShellCursor(false);
+        // Give keyboard focus back to the account host while the WebView that holds it still
+        // exists. A WebView closed while focused, as after an unresponsive renderer, leaves the
+        // CoreWindow without key events, and a hosted game loses remote and keyboard input.
+        if (primaryPanel) showPrimaryShell(false);
         if (cloudCache) cloudCache->cancel();
         if (store) { store->close(); store.reset(); }
         closePopup();
@@ -968,7 +972,6 @@ struct View : implements<View, IFrameworkView> {
         web = nullptr;
         controller = nullptr;
         if (primaryPanel) {
-            showPrimaryShell(false);
             Windows::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(primaryPanel, nullptr);
             Uninitialize();
         } else window.Dispatcher().StopProcessEvents();

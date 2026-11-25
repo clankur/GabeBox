@@ -66,6 +66,7 @@ LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
 DWORD lastTime;
 UINT highSurrogate;
+UINT keyEvents;
 LONG mouse, legacyKeys;
 constexpr UINT pointerEdgeCount = 32;
 constexpr LONG pointerPressed = 1 << 24;
@@ -415,6 +416,8 @@ void requestOverlay() {
 void event(unsigned type, IUnknown *args) {
     if (!alive() || !args)
         return;
+    if (type == KeyDown || type == KeyUp)
+        ++keyEvents;
     if (type == Activated) {
         UINT state = 1;
         if (SUCCEEDED(method(args, 6, &state))) {
@@ -568,6 +571,8 @@ bool readPad(Reading *out) {
 }
 } // namespace
 extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
+extern "C" BOOL FhdHostedInputPaused() { return mail && overlay != Playing; }
+extern "C" UINT FhdHostedKeyEvents() { return keyEvents; }
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
     if (!!nativePad != !!gamepad) {
         if (alive()) {
@@ -603,6 +608,13 @@ extern "C" void FhdResumeHostedInput() {
     neutral();
     overlay = Playing;
     lastTime = GetTickCount();
+    // A chord that opened the overlay leaves no held or pending state behind, and the first
+    // sample after resuming is published even when it matches the idle state, so the game
+    // acknowledges a fresh serial once input flows again.
+    padChordHeld = 0;
+    chordPending = false;
+    resetChord();
+    sentPad = false;
 }
 extern "C" void FhdPauseHostedInput() {
     if (mail && overlay != Reported) {
@@ -648,6 +660,7 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
         return hr;
     mail = box;
     chordCounts = {};
+    keyEvents = 0;
     padChordHeld = 0;
     focused = TRUE;
     BYTE shown = 1;

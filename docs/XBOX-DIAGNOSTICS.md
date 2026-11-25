@@ -14,21 +14,25 @@ The observer waits for both the native sign-in run and the WebView run to change
 
 ### Big Picture renderer failure during a game
 
-Big Picture closes its WebView when the renderer reports `process-error:...`, including an unresponsive render process (`process-error:owner:2:unresponsive:259:none`). If a game is running at that point, Big Picture keeps the game going:
+Big Picture closes its WebView when the renderer reports `process-error:...`, including an unresponsive render process (`process-error:owner:2:unresponsive:259:none`). It does the same when it covers a game for the Menu + View chord and Valve's controls do not draw within 10 seconds (`overlay-unresponsive`). The bridge confirms the controls with an `overlay-ready` message two animation frames after it requests them. On Slay the Spire 2 (`1.0.246.2`), the owner renderer instead used about one CPU core and grew by roughly 6 MB/s from the chord onward. The overlay stayed white and A did nothing. Chromium reported the renderer unresponsive about 75 seconds later. If a game is running when the WebView closes, Big Picture keeps the game going:
 
-- If the game was covered by the Steam view, Big Picture shows it again and gives it input focus.
-- The Menu + View chord returns straight to the game until it exits.
+- If the game was covered by the Steam view, Big Picture shows it again. The presenter gives keyboard focus back to the account host, and hosted input leaves its overlay pause.
+- The Menu + View chord leaves the game shown, without covering it, and resumes its input until the game exits.
 - When the game exits, Big Picture reopens through the same path a released renderer uses.
 - If the game cannot be shown again after one retry, Big Picture restarts at once and takes over the running game, so Valve's Resume and Exit Game still reach it.
+
+`game-restored` means that the panel presented new frames and that hosted input was live within 3 seconds. Live means unpaused, with the window focused, visible and accepting input. Otherwise Big Picture retries once. It then records `game-input-resume-failed` with a reason and leaves the game shown. The reasons are `input-paused`, `input-background`, `no-frames`, `panel-hidden`, `panel-closed` and `game-exited`. A normal Resume records the same check as `game-input-resume-failed:REASON` in the status history.
 
 `big-picture-webview-report.txt` records each transition as a numbered `webview_recovery_N=` line, and the restarted session keeps those lines. The transitions are:
 
 - `game-webview-lost`, with the AppID, whether the game was covered, and the native cause
-- `game-restore-started`, `game-restore-retry`, `game-restored` or `game-restore-failed`
+- `game-restore-started`, `game-restore-retry`, `game-restored`, `game-input-resume-failed` or `game-restore-failed`
 - `game-kept-foreground`
 - `game-overlay-unavailable`
 - `webview-restart-after-game` or `webview-restart-for-game`
 - `game-adopted`
+
+The report keeps the first renderer script failure as `renderer_error`. When more follow, it also writes `renderer_error_count` and `renderer_error_latest`, which records the latest failure with the status it arrived in. Valve's audio store sends `Audio.GetSupportedFeatures` once at startup and has no rejection handler. The bridge now answers that request as an unavailable service, so it no longer fills `renderer_error`.
 
 ## Inspect an active Steam install
 
@@ -101,6 +105,8 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 `--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
 
 The presenter accepts Menu + View only when one source holds both buttons: the live Windows.Gaming.Input reading, or the VK_GAMEPAD key events that Device Portal remote input and a physical pad raise. The two presses must land within 400 ms of each other, and the pair must stay held for 50 ms. Big Picture opens when both buttons are released. If one button stays down for more than 1 s after the other is released, the chord is dropped, and that button stays hidden from the game until it is released. `chord_from_keys` counts held chords that came from key events; the rest of `chord_held` came from the pad. `chord_ignored` counts times both buttons were down without a paired press, such as a View held for a game action or a key whose release was lost. `chord_expired` counts dropped chords. The panel status reports the same totals as `native_menu_chords_ignored` and `native_menu_chords_expired`.
+
+Each time the game is shown again, the presenter gives keyboard focus to the account host. Normal gameplay keeps focus there, and from there the CoreWindow raises the key events that carry remote controller input, the keyboard and the remote chord. `focus_restored` counts successful hand-offs, and `focus_declined` counts hand-offs the XAML control refused. `input_resumed` counts exits from the overlay pause. `keys_after_show` counts shows that were followed by a key event. After a recovery, a remote button press that leaves `keys_after_show` at zero means that key events still do not reach the window. The panel status reports `native_input_active`, `native_input_paused`, `native_key_events` and `native_focus_restores`. After Resume, the first controller sample is published under a new serial even if it has not changed, so `inspect-input` shows the game acknowledge it.
 
 ## Drive a hosted game with remote input
 

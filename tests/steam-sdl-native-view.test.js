@@ -75,6 +75,52 @@ test("the XAML game panel counts visible swaps and serializes replacement across
     const closed = next.close(); await drain(); finishClose(); await closed;
 });
 
+test("a game shown again counts as resumed only once frames advance and hosted input is live", async () => {
+    let now = 0, swaps = 10, visible = true, active = 0, paused = 1, legacy = false, advancing = true;
+    const drain = () => new Promise(resolve => setImmediate(resolve));
+    const host = {
+        async openPanel() {}, async setPanelVisible(value) { visible = value; }, async closePanel() {},
+        status() { return ""; },
+        panelStatus() {
+            return "primary_panel=1\r\nvisible=" + Number(visible) + "\r\npresented=" + swaps + "\r\nnative_input=1\r\n" +
+                (legacy ? "" : "native_input_active=" + active + "\r\nnative_input_paused=" + paused + "\r\n");
+        }
+    };
+    const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
+        steamBigPictureHost: {switchView: async () => {}}};
+    const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
+    const Windows = {UI: {ViewManagement: {ApplicationView: {getForCurrentView: () => ({id: 1})}}},
+        Storage: {ApplicationData: {current: {localFolder: {path: "local"}}}}};
+    // Each 100 ms confirmation poll advances the clock; the game keeps presenting.
+    vm.runInNewContext(source, {window, document, Windows, performance: {now: () => now},
+        setInterval: () => 1, clearInterval() {},
+        setTimeout: (callback, delay) => { now += delay; if (advancing) swaps++; setImmediate(callback); return 1; }});
+    const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
+        menu() {}, presented() {}};
+    const game = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-7-2.bin\n", events, true, {hidden: false});
+    // Results come from the script realm; copy them for strict comparison.
+    const confirm = async ms => ({...await game.confirmInput(ms)});
+    await drain();
+    // Paused input (as after the chord) never counts, however long frames advance.
+    assert.deepEqual(await confirm(500), {ok: false, reason: "input-paused"});
+    paused = 0;
+    assert.deepEqual(await confirm(500), {ok: false, reason: "input-background"});
+    active = 1;
+    assert.deepEqual(await confirm(500), {ok: true});
+    // Frames that stop also fail, even with live input.
+    advancing = false;
+    assert.deepEqual(await confirm(300), {ok: false, reason: "no-frames"});
+    advancing = true;
+    await game.cover();
+    assert.deepEqual(await confirm(300), {ok: false, reason: "panel-hidden"});
+    assert.equal(await game.resume(), true);
+    // A presenter without the newer fields is judged by frames and visibility alone.
+    legacy = true;
+    assert.deepEqual(await confirm(300), {ok: true});
+    await game.close();
+    assert.deepEqual(await confirm(300), {ok: false, reason: "panel-closed"});
+});
+
 async function checkPrimaryMedia(sameWindow) {
     let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
     const measurements = [], switches = [], released = [], captures = [], listeners = new Map();

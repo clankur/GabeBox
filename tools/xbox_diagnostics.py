@@ -86,12 +86,13 @@ FRAME_FIELDS = {
     'sample_render_callbacks', 'sample_source_empty_callbacks', 'sample_present_busy_callbacks',
     'slots_busy', 'pool_waits', 'source_empty_callbacks', 'presentation_busy_callbacks',
     'native_input', 'native_menu_requests', 'native_menu_chords', 'native_menu_chords_ignored',
-    'native_menu_chords_expired',
+    'native_menu_chords_expired', 'native_input_active', 'native_input_paused', 'native_key_events',
+    'native_focus_restores',
 }
 # Big Picture's numbered record of how it kept a running game when its renderer failed.
 WEBVIEW_RECOVERY = re.compile(r'webview_recovery_([1-9][0-9]?)')
 WEBVIEW_RECOVERY_ENTRY = re.compile(r'[a-z][a-z-]{0,47} appid=[1-9][0-9]{0,7}'
-                                    r'(?: covered=[01] cause=[A-Za-z0-9:._-]{1,96})?')
+                                    r'(?: covered=[01] cause=[A-Za-z0-9:._-]{1,96}| reason=[a-z][a-z-]{0,31})?')
 
 
 def numeric(report, key):

@@ -166,6 +166,12 @@ SDL_INPUT_PANEL_MARKERS = {
     'chord_ignored': (b'menu_chord=ignored reason=unpaired',),
     'chord_expired': (b'menu_chord=expired',),
     'menu_request': (b'menu_request=ready',),
+    # The game shown again: hosted input left its overlay pause, keyboard focus went back to
+    # the account host (or the XAML control declined it), and a key event arrived afterwards.
+    'input_resumed': (b'panel_input=resumed',),
+    'focus_restored': (b'panel_focus=restored',),
+    'focus_declined': (b'panel_focus=declined',),
+    'keys_after_show': (b'panel_keys=after-show',),
 }
 SDL_INPUT_PANEL_LINES = frozenset(line for lines in SDL_INPUT_PANEL_MARKERS.values() for line in lines)
 

@@ -132,8 +132,11 @@ class ObserverTests(unittest.TestCase):
         browser = {
             'status': 'game-restored',
             'game_frame_latest_sample': f'appid={APP_ID} visible=1 native_menu_chords=1 native_menu_chords_ignored=2 '
-                                        'native_menu_chords_expired=0 native_menu_requests=1',
+                                        'native_menu_chords_expired=0 native_menu_requests=1 native_input_active=1 '
+                                        'native_input_paused=0 native_key_events=14 native_focus_restores=1',
             'webview_recovery_2': f'game-restored appid={APP_ID}',
+            'webview_recovery_11': f'game-input-resume-failed appid={APP_ID} reason=input-background',
+            'webview_recovery_12': f'game-input-resume-failed appid={APP_ID} reason=Input_Background',
             'webview_recovery_10': f'game-overlay-unavailable appid={APP_ID}',
             'webview_recovery_1': f'game-webview-lost appid={APP_ID} covered=1 '
                                   'cause=process-error:owner:2:unresponsive:259:none',
@@ -143,10 +146,12 @@ class ObserverTests(unittest.TestCase):
         web = diagnostics.game_snapshot({}, browser, {}, APP_ID)['webview']
         self.assertEqual(web['webview_recovery'], [
             f'game-webview-lost appid={APP_ID} covered=1 cause=process-error:owner:2:unresponsive:259:none',
-            f'game-restored appid={APP_ID}', f'game-overlay-unavailable appid={APP_ID}'])
+            f'game-restored appid={APP_ID}', f'game-overlay-unavailable appid={APP_ID}',
+            f'game-input-resume-failed appid={APP_ID} reason=input-background'])
         self.assertEqual(web['game_frame_latest_sample'], {
             'visible': '1', 'native_menu_chords': '1', 'native_menu_chords_ignored': '2',
-            'native_menu_chords_expired': '0', 'native_menu_requests': '1'})
+            'native_menu_chords_expired': '0', 'native_menu_requests': '1', 'native_input_active': '1',
+            'native_input_paused': '0', 'native_key_events': '14', 'native_focus_restores': '1'})
         self.assertNotIn('webview_recovery', diagnostics.game_snapshot({}, {}, {}, APP_ID)['webview'])
 
     def test_startup_requires_fresh_native_and_browser_runs_and_filters_fields(self):
@@ -944,7 +949,8 @@ class ObserverTests(unittest.TestCase):
                     return 200, probe(run, extra=RENDER_FIELDS)
                 if name == 'fhd-panel-input.txt':
                     markers = (b'menu_chord=ignored reason=unpaired\r\nmenu_chord=held source=keys\r\n'
-                               b'menu_request=ready\r\nmenu_request=rea') if self.now else b''
+                               b'menu_request=ready\r\npanel_focus=restored\r\npanel_input=resumed\r\n'
+                               b'panel_keys=after-show\r\nmenu_request=rea') if self.now else b''
                     return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
                 assert name == MAILBOX
                 step = round(self.now * 2)
@@ -972,10 +978,13 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
                          ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
         self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
+        recovered = {'input_resumed': 1, 'focus_restored': 1, 'focus_declined': 0, 'keys_after_show': 1}
         self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'chord_from_keys': 1,
-                                                          'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1})
+                                                          'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
+                                                          **recovered})
         self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'chord_from_keys': 1,
-                                                         'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1})
+                                                         'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
+                                                         **recovered})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertNotIn(MAILBOX, json.dumps(result))
         fake = Portal()

@@ -156,7 +156,12 @@
             if (bigPictureMode) {
                 var steam = window.steamBigPictureHost;
                 if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
-                if (steam && gameViewId) {
+                if (steam && gameViewId && steam.overlayAvailable && !steam.overlayAvailable(appId)) {
+                    // Big Picture cannot show its controls now (its renderer failed or was
+                    // released for this game). Keep the game shown and give its input back.
+                    if (steam.recordGameFrame) steam.recordGameFrame(appId, "input", "menu_switch=declined\r\n");
+                    if (nativeView && runner.steamSdlRunning()) nativeView.resume();
+                } else if (steam && gameViewId) {
                     var player = nativeView;
                     menuOpening = true;
                     if (steam.recordGameFrame) steam.recordGameFrame(appId, "input", "menu_switch=requested\r\n");
@@ -175,6 +180,10 @@
                             if (closing || !ready || !runner.steamSdlRunning()) return false;
                             quit();
                             return true;
+                        }, function () {
+                            // Shown again: frames and the native panel's hosted input must flow.
+                            if (!runner.steamSdlRunning()) return {ok: false, reason: "game-exited"};
+                            return nativeView && nativeView.confirmInput ? nativeView.confirmInput(3000) : {ok: true};
                         });
                     }).then(function (shown) {
                         menuOpening = false;
