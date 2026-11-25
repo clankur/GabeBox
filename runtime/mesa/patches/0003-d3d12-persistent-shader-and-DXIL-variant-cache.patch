@@ -8,9 +8,10 @@ every launch, at its first draw.
 
 - get_disk_shader_cache returns a disk cache keyed by the Mesa revision and
   build time, the adapter IDs and UMD version, and the capabilities that
-  shape NIR and DXIL. On Windows it is created only when
-  MESA_SHADER_CACHE_DIR (or MESA_GLSL_CACHE_DIR) is set, so a process that
-  does not opt in behaves exactly as before. With the cache, st/mesa's
+  shape NIR and DXIL. It is Windows-only and created only when
+  MESA_SHADER_CACHE_DIR (or MESA_GLSL_CACHE_DIR) is set and DXIL_DEBUG is
+  not, so a process that does not opt in behaves exactly as before, and
+  other platforms keep upstream behaviour. With the cache, st/mesa's
   shader cache skips GLSL compile, link and GLSL -> NIR for programs it has
   seen, and program binaries get a format.
 - compile_nir() keys each variant on its serialized pre-compile NIR plus
@@ -48,7 +49,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
  
  #ifdef _WIN32
  #include "dxil_validator.h"
-@@ -71,6 +76,167 @@
+@@ -71,6 +76,168 @@
  {
     const struct glsl_type *base_type = glsl_without_array(var->type);
     return glsl_type_is_sampler(base_type) && !glsl_type_is_bare_sampler(base_type);
@@ -126,14 +127,15 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
 +static bool
 +d3d12_dxil_cache_usable(struct d3d12_context *ctx)
 +{
++#ifdef _WIN32
 +   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
 +
-+#ifdef _WIN32
 +   /* Debug output and unvalidated DXIL always go through the compiler. */
 +   return screen->disk_cache && ctx->dxil_validator &&
 +          !(d3d12_debug & (D3D12_DEBUG_EXPERIMENTAL | D3D12_DEBUG_DXIL |
 +                           D3D12_DEBUG_DISASS | D3D12_DEBUG_VERBOSE));
 +#else
++   (void)ctx;
 +   return false;
 +#endif
 +}
@@ -200,7 +202,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
 +   return nir;
 +}
 +
-+static void
++UNUSED static void
 +d3d12_dxil_cache_store(struct d3d12_screen *screen, const cache_key key,
 +                       const nir_shader *nir, const void *dxil, size_t dxil_size)
 +{
@@ -216,7 +218,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
  }
  
  static struct d3d12_shader *
-@@ -137,9 +303,38 @@
+@@ -137,9 +304,38 @@
  #endif
  
     struct blob tmp;
@@ -258,7 +260,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
     }
  
     // Non-ubo variables
-@@ -173,10 +368,13 @@
+@@ -173,10 +369,13 @@
  
  #ifdef _WIN32
     if (ctx->dxil_validator) {
@@ -276,7 +278,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
              debug_printf(
                 "== VALIDATION ERROR =============================================\n"
                 "%s\n"
-@@ -184,6 +382,9 @@
+@@ -184,6 +383,9 @@
                 err);
              ralloc_free(err);
           }
@@ -286,7 +288,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
        }
  
        if (d3d12_debug & D3D12_DEBUG_DISASS) {
-@@ -200,6 +401,17 @@
+@@ -200,6 +402,17 @@
  #endif
  
     blob_finish_get_buffer(&tmp, &shader->bytecode, &shader->bytecode_length);
@@ -304,7 +306,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
  
     if (d3d12_debug & D3D12_DEBUG_DXIL) {
        char buf[256];
-@@ -1070,6 +1282,9 @@
+@@ -1070,6 +1283,9 @@
        }
     }
  
@@ -314,7 +316,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
     /* Clone the NIR shader */
     new_nir_variant = nir_shader_clone(sel, sel->initial);
  
-@@ -1206,6 +1421,14 @@
+@@ -1206,6 +1422,14 @@
     /* prepend the new shader in the selector chain and pick it */
     new_variant->next_variant = sel->first;
     sel->current = sel->first = new_variant;
@@ -385,16 +387,16 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
 +static void
 +d3d12_init_disk_cache(struct d3d12_screen *screen)
 +{
-+#ifdef ENABLE_SHADER_CACHE
-+#ifdef _WIN32
++#if defined(ENABLE_SHADER_CACHE) && defined(_WIN32)
 +   /* Windows has no per-user default cache location.  Leave the cache, and
 +    * the program binary formats that depend on it, off unless the host
-+    * names a directory.
++    * names a directory.  DXIL_DEBUG dumps need real compiles, so they keep
++    * it off too.
 +    */
-+   if (!os_get_option("MESA_SHADER_CACHE_DIR") &&
-+       !os_get_option("MESA_GLSL_CACHE_DIR"))
++   if ((!os_get_option("MESA_SHADER_CACHE_DIR") &&
++        !os_get_option("MESA_GLSL_CACHE_DIR")) ||
++       os_get_option("DXIL_DEBUG"))
 +      return;
-+#endif
 +
 +   /* Identify the build by its revision and build time, and the device by
 +    * its IDs, driver version and the capabilities that shape NIR and DXIL.

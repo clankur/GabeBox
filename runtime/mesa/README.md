@@ -35,14 +35,14 @@ The series therefore reuses upstream's cache format, keys and GL front-end integ
 | Patch | Change | Size |
 | --- | --- | --- |
 | 0001 | `with_uwp` from the machine file's subsystem. Needed because the published UWP Meson fork has no `uwp` builtin option | +3 −1 |
-| 0002 | Windows backend for `util/disk_cache` (multi-file layout, same entry format). Uses only C runtime and AppContainer-safe Win32 calls. `-Dshader-cache=enabled` is allowed on Windows, while `auto` stays off | +426 −16 |
-| 0003 | d3d12 `get_disk_shader_cache`, a DXIL variant cache in `compile_nir`, and `D3D12_SHADER_CACHE_STATS` counters | +308 −10 |
+| 0002 | Windows backend for `util/disk_cache` (multi-file layout, same entry format). Uses only C runtime and AppContainer-safe Win32 calls. `-Dshader-cache=enabled` is allowed on Windows, while `auto` stays off | +427 −16 |
+| 0003 | d3d12 `get_disk_shader_cache`, a DXIL variant cache in `compile_nir`, and `D3D12_SHADER_CACHE_STATS` counters | +309 −10 |
 
 **Keys.** A variant's DXIL is a function of the NIR passed to `nir_to_dxil` and of the `nir_to_dxil_options`. The key is therefore the serialized pre-compile NIR plus every option field. The `d3d12_shader_key` is already reflected in that NIR through the passes it selects, and it holds pointers, so it is not hashed directly. The disk cache's driver id adds the Mesa version, git SHA and build time, the adapter IDs, the UMD version, and the capabilities that shape NIR and DXIL. Every new Mesa build therefore starts with a cold cache.
 
 **Value.** The value is the validated, signed DXIL plus the NIR as `nir_to_dxil` left it. `nir_to_dxil` rewrites the NIR the driver keeps for bindings, root signatures and later stages. A hit restores both, so the code after it runs exactly as it does after a compile. Only DXIL that passed validation is stored. DXIL dumps, disassembly, `D3D12_DEBUG=experimental` (unvalidated) and verbose debugging bypass the cache.
 
-**Opt-in.** On Windows the d3d12 screen creates the cache only when `MESA_SHADER_CACHE_DIR` (or `MESA_GLSL_CACHE_DIR`) is set. A packaged process has no per-user default cache location. Without the variable, the patched build behaves like the prebuilt one: no cache and no program-binary formats.
+**Opt-in.** The d3d12 cache is Windows-only. The screen creates it only when `MESA_SHADER_CACHE_DIR` (or `MESA_GLSL_CACHE_DIR`) is set and `DXIL_DEBUG` is not. A packaged process has no per-user default cache location. Without the variable, the patched build behaves like the prebuilt one: no cache and no program-binary formats. Linux/WSL builds of the driver keep upstream behaviour.
 
 **The GL front end needs no extra code.** Once the screen returns a cache, st/mesa's own program cache skips GLSL compile, link and GLSL → NIR for programs it has seen, and program binaries get a format (`GL_PROGRAM_BINARY_FORMAT_MESA`). It does not skip the d3d12 variant compile, because the variant key depends on draw-time state. That is what the DXIL cache in 0003 is for.
 
@@ -71,6 +71,10 @@ Verified off-console:
 - Patch 0002's Windows backend and the patched `disk_cache.c` pass a mingw-w64 `clang -fsyntax-only` check with `WINAPI_FAMILY_APP`. The remaining diagnostics come from the mingw environment (`timespec`, perfetto) and appear identically for the unpatched file. The POSIX path shows the same diagnostics before and after the patch.
 - `window-gl.c` compiles with `-ffreestanding -Wall -Wextra -Werror` against mingw-w64 headers.
 - The packager, staging and pin tests pass (`tests/test_mesa_runtime.py`).
+- A separate review agent read both patches against the pinned headers. It found no compile or hit-vs-miss errors. Its three actionable findings are fixed:
+  - only the final cache directory must be creatable;
+  - `DXIL_DEBUG` disables the cache;
+  - non-Windows builds are warning-free.
 
 Not verified (needs CI or the console):
 
@@ -105,4 +109,9 @@ Record the cache folder size after each run.
 - **Disk use** is bounded by `MESA_SHADER_CACHE_MAX_SIZE` (512 MiB) per account and title, on the app's install volume.
 - **Behaviour change** once program binaries exist. Godot starts writing real binaries, and Mesa rejects binaries from another build (driver hash check), so Godot recompiles them.
 - **Shared state.** The `pso` trace and the PSO costs are unaffected. A driver-side `ID3D12PipelineLibrary` cache is separate work.
+- **NIR after `nir_to_dxil` is serialized**, which upstream never does. A deref left pointing at a uniform struct that `nir_to_dxil` removed would assert in `nir_serialize`. GL lowers those structs earlier, so this is not expected. A `NIR_DEBUG=validate` debug build would confirm it.
+- **Build identity.** It comes from `MESA_GIT_SHA1`, `__DATE__` and `__TIME__` in `d3d12_screen.cpp`. A clean CI build always changes it. An incremental local build that touches only the compiler sources would not, and would reuse old entries, so do not ship incremental builds.
+- **Lost entries at exit.** Writes go through a background queue. A process that exits without destroying the screen can lose its last few entries, and the stats file can lag by up to 1 s. Expect "misses near 0" on a warm run.
+- **Path length.** Entry paths are the LocalState path plus about 150 characters. A failure past `MAX_PATH` shows up only as misses.
+- **Build tests.** `-Dbuild-tests=true` with the cache adds upstream's POSIX-only `cache_test.cpp`. The workflow does not build tests.
 - **Fork maintenance.** The patches touch `util/disk_cache*` and the d3d12 compiler. A mesa-uwp rebase needs them re-applied and re-pinned.

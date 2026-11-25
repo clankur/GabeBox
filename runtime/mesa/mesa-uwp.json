@@ -27,12 +27,12 @@
     },
     {
       "file": "patches/0002-util-disk_cache-add-a-Windows-multi-file-backend.patch",
-      "sha256": "3a184644d0894730f28451e96ccee054c4869beb4213610d7266f3099917830c",
+      "sha256": "1b3a225bc7d80a3bb24102f9b75312ca11d5bcc90e6295b9372c4d3bc13a5803",
       "variants": ["shader-cache"]
     },
     {
       "file": "patches/0003-d3d12-persistent-shader-and-DXIL-variant-cache.patch",
-      "sha256": "d171639a45c97078a5530f4082de5a6edb57cfa6e72de102f93f1fd55ab16972",
+      "sha256": "bbfafb2d4b5f38b93e837b38d16c1e98c1cb40682f0fb376d12f4b0178789946",
       "variants": ["shader-cache"]
     }
   ],

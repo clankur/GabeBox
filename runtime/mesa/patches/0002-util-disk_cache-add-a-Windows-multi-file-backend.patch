@@ -176,7 +176,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  
  static void
  delete_dir(const char* path)
-@@ -1285,6 +1315,479 @@
+@@ -1285,6 +1315,480 @@
  finish:
     ralloc_free(ctx);
  }
@@ -232,7 +232,9 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +}
 +
 +/* Create 'path' and any missing parents.  Both separators are accepted, and
-+ * a drive prefix such as "C:" is never created.
++ * a drive prefix such as "C:" is never created.  An AppContainer may not be
++ * allowed to inspect or create the folders above its own storage, so only the
++ * final directory has to exist or be creatable.
 + */
 +static int
 +win32_find_or_create_dir(const char *path, bool mkdir_with_parents_if_needed)
@@ -240,7 +242,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   if (path[0] == '\0')
 +      return -1;
 +
-+   if (!mkdir_with_parents_if_needed)
++   if (!mkdir_with_parents_if_needed || win32_find_or_mkdir(path, false) == 0)
 +      return win32_find_or_mkdir(path, false);
 +
 +   char *p = strdup(path);
@@ -248,21 +250,20 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +      return -1;
 +
 +   size_t length = strlen(p);
-+   int ret = 0;
-+   for (size_t i = 1; i <= length && ret == 0; i++) {
-+      if (i != length && p[i] != '/' && p[i] != '\\')
++   for (size_t i = 1; i < length; i++) {
++      if (p[i] != '/' && p[i] != '\\')
 +         continue;
 +
 +      char separator = p[i];
 +      p[i] = '\0';
 +      bool drive = i == 2 && p[1] == ':';
 +      if (!drive && p[i - 1] != '/' && p[i - 1] != '\\')
-+         ret = win32_find_or_mkdir(p, true);
++         (void)_mkdir(p);
 +      p[i] = separator;
 +   }
 +
 +   free(p);
-+   return ret;
++   return win32_find_or_mkdir(path, true);
 +}
 +
 +static char *
