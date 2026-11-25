@@ -76,6 +76,16 @@ Add `--keyboard` to read the queue's read, write, and reset counters when the ga
 
 Add `--rumble` to read the selected launch's optional vibration mailbox after a controller effect. The connection state can be `armed`, `disarmed`, or `updating`. On an instrumented build, `bridge_attached` and `presenter_attached` identify the endpoints. The flags show whether a connected XInput slot requested a nonzero effect, the bridge accepted it, and the presenter received a successful WinRT result. `stop_applied` records a successful zero command after a nonzero attempt. `device_error` records any failed WinRT vibration call. These flags accumulate for the launch, including while the controller is disconnected or the presenter is covered. They can capture an effect that starts and stops between two diagnostic reads. Older sidecars leave the flags clear. Confirm physical vibration and cancellation on the controller.
 
+## Drive a hosted game with remote input
+
+`python3 -m tools.xbox_remote_input` sends controller, keyboard and mouse input through Device Portal's `/ext/remoteinput` WebSocket. The presenter merges the controller presses into the hosted pad, so games reading hosted XInput receive them as controller input. Each step can be followed by a screenshot:
+
+```sh
+python3 -m tools.xbox_remote_input --gap 1.0 A wait:3 shot:after-a.png DOWN Y hold:A:0.5
+```
+
+Run `--help` for the step list. `--check` opens and closes the WebSocket without sending input. Confirm delivery with `inspect-input`: a held button shows `connected: true` and its bit set in the host pad, and the game's `ack` follows once it reads the pad. Device Portal mouse messages do not raise host pointer events, and screenshots of the Big Picture overlay return HTTP 500. [Remote Input API](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/uwp-remoteinput-api)
+
 ## Inspect the current game's render state
 
 Use the AppID and `run_id` from the game observation while that launch is current.
