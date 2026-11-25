@@ -2275,6 +2275,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowLocalLow = false;
     bool shadowHostedXInput = false;
     bool shadowJitTrace = false;
+    std::wstring shadowManagedWarmup;
     bool shadowDxgi = false;
     bool shadowD3d12DefaultAdapter = false;
     bool shadowStreamlineUnavailable = false;
@@ -2391,6 +2392,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowJitTrace = true;
+                }
+                // Managed first-use warm-up: the profile's plan names the game's IL-only
+                // assemblies, and the packaged XboxManagedWarmup assembly prepares their
+                // methods on a background thread (runtime/managed-warmup).
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-managed-warmup-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size() > 2048 ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxManagedWarmup.dll")) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowManagedWarmup = co_await FileIO::ReadTextAsync(file);
+                    for (auto &c : shadowManagedWarmup) {
+                        if (c == L'\r' || c == L'\n') c = L';';
+                    }
+                    if (shadowManagedWarmup.find_first_not_of(L';') == std::wstring::npos ||
+                            std::any_of(shadowManagedWarmup.begin(), shadowManagedWarmup.end(),
+                                [](wchar_t c) { return c < 0x20 || c > 0x7e; })) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
                 }
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
@@ -3238,6 +3259,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             const auto crashReport = shadowLocalCrashReports ? shadowRoaming + L"\\xbox-crash-receipts.bin" : std::wstring{};
             const auto discoveryHive = shadowSteamSdkPath.empty() ? std::wstring{} : trialRoot + L"\\steam-discovery.dat";
             const auto appId = std::to_wstring(app);
+            const auto managedWarmup = packageRoot + L"\\XboxManagedWarmup.dll";
             const std::pair<std::wstring, std::wstring> variables[] = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
                 {L"XBOX_WIN32_DOCUMENTS", shadowDocumentsPath},
@@ -3261,6 +3283,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},
+                {L"XBOX_WIN32_MANAGED_WARMUP", shadowManagedWarmup.empty() ? std::wstring{} : managedWarmup},
+                {L"XBOX_WIN32_MANAGED_WARMUP_PLAN", shadowManagedWarmup},
+                {L"XBOX_WIN32_MANAGED_WARMUP_LOG", shadowManagedWarmup.empty() ? std::wstring{} :
+                    std::wstring(ApplicationData::Current().LocalFolder().Path()) + L"\\managed-warmup-" + appId + L".log"},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_ORIGINAL_EXECUTABLE", shadowOriginalExecutablePath},
@@ -3286,6 +3312,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             std::vector<std::pair<std::wstring, std::wstring>> childVariables(std::begin(variables), std::end(variables));
             if (shadowHostedXInput)
                 childVariables.insert(childVariables.end(), std::begin(hostedPadVariables), std::end(hostedPadVariables));
+            // Titles started through apphost run the same assembly as a startup hook; native
+            // hosts such as Godot never run startup hooks and are started by the Win32 layer.
+            if (!shadowManagedWarmup.empty())
+                childVariables.emplace_back(L"DOTNET_STARTUP_HOOKS", managedWarmup);
             auto environment = SteamChildEnvironment(childVariables);
             if (environment.empty()) {
                 co_return winrt::hstring(report + L"steam_launch=shadow-environment-error\r\n");
@@ -3309,6 +3339,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (shadowLocalLow) report += L"steam_shadow_local_low=account-scoped\r\n";
             if (!shadowPrefsKey.empty()) report += L"steam_shadow_player_prefs=account-scoped\r\n";
             if (shadowHostedXInput) report += L"steam_shadow_xinput=hosted-lookup\r\n";
+            if (!shadowManagedWarmup.empty()) report += L"steam_shadow_managed_warmup=selected\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
             if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");

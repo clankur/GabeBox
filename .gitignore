@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 /big-picture-layout/
 /big-picture-signed/
+runtime/**/bin/
+runtime/**/obj/

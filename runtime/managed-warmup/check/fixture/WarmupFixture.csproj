@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <WarmupFramework Condition="'$(WarmupFramework)' == ''">net8.0</WarmupFramework>
+    <TargetFramework>$(WarmupFramework)</TargetFramework>
+    <AssemblyName>WarmupFixture</AssemblyName>
+    <Nullable>disable</Nullable>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+</Project>

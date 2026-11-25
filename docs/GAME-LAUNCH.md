@@ -58,6 +58,49 @@ The same game builds can be tested independently in the upstream combined launch
 
 When an audited image uses `SHGetFolderPathW` for Documents, bind that import to `XboxWin32Desktop.dll` and include an empty `steam-win32-documents-APPID.txt` in the matching trial profile. The native launcher creates a persistent Documents folder under the existing account and AppID profile in LocalState. The adapter returns that folder for the current user’s Documents query. It delegates unrelated queries to the system. Verify local save and reload separately from Steam Cloud. [Windows folder API](https://learn.microsoft.com/windows/win32/api/shlobj_core/nf-shlobj_core-shgetfolderpathw)
 
+### Warm a CoreCLR title's managed code before first use
+
+An IL-only game assembly is JIT-compiled the first time each method runs, on every launch. The first card play, attack or save then compiles new code on the game thread. Add `steam-win32-managed-warmup-APPID.txt` to the trial profile to select [`runtime/managed-warmup`](../runtime/managed-warmup). The component is packaged as `XboxManagedWarmup.dll`. It prepares the listed assemblies' methods on a below-normal-priority background thread with `RuntimeHelpers.PrepareMethod`. The publisher's files are not changed. [Slay the Spire 2 plan](../profiles/2868840/26655341/steam-win32-managed-warmup-2868840.txt)
+
+```text
+# Comment lines are dropped at staging.
+assembly=sts2 mvid=a5742661-f95f-4ba1-8b21-18dedf86422b
+priority=MegaCrit.Sts2.Core.GameActions
+remaining=yes
+depth=4
+```
+
+| Line | Meaning |
+| --- | --- |
+| `assembly=NAME [mvid=GUID]` | One to eight game assemblies, matched by simple name in any load context. With an MVID pin, a rebuilt assembly is skipped and logged. ReadyToRun and mixed-mode images are skipped. |
+| `priority=PREFIX` | Up to 32 namespace or type prefixes, warmed first in this order. |
+| `remaining=yes\|no` | Whether the rest of each assembly follows the priorities. The default is `yes`. |
+| `depth=0..8` | How far to follow calls from prepared code to the generic instantiations it needs, such as async state-machine boxes and collections over the game's value types, and to non-generic methods in other IL-only assemblies such as GodotSharp. The default is `4`. |
+
+**How it is started.** CoreCLR runs `DOTNET_STARTUP_HOOKS` only from `Assembly::ExecuteMainMethod`. Godot .NET never calls `hostfxr_run_app`. It initializes hostfxr for the game assembly and loads `GodotPlugins.Game.Main` through `load_assembly_and_get_function_pointer`, so a startup hook never runs. When the plan is selected, the launcher sets `XBOX_WIN32_MANAGED_WARMUP`. The adapter that serves the engine's `GetProcAddress` then wraps `hostfxr_get_runtime_delegate`: `XboxWin32Window.dll` on the OpenGL route and `XboxWin32LoaderTrace.dll` on Direct3D 12. After the engine's first successful load, the same delegate loads `XboxManagedWarmup.Entry.Start`. Titles started through apphost or `dotnet` run the same assembly as a startup hook. Only one entry starts per process. [CoreCLR startup hooks](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/vm/assembly.cpp) · [Godot .NET hosting](https://github.com/godotengine/godot/blob/4.5.1-stable/modules/mono/mono_gd/gd_mono.cpp)
+
+**Why it is safe.** `PrepareMethod` goes through the same prestub as a first call (`MethodDesc::DoPrestub`). Each method therefore gets the tier-0 code its first call would have produced, and tiered promotion is unchanged. In .NET 9, `CEEInfo::initClass` returns `CORINFO_INITCLASS_USE_HELPER` instead of running a class constructor during JIT, so preparation does not run game code. Methods are prepared directly only in IL-only images. Reference-type instantiations from ReadyToRun assemblies are skipped, because their shared code is precompiled and binding it would resolve ReadyToRun fixups. [initClass](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/vm/jitinterface.cpp) · [PrepareMethod](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/vm/reflectioninvocation.cpp)
+
+**Diagnostics.** The launch report records `steam_shadow_managed_warmup=selected`, and the loader trace records `managed-warmup bootstrap=hostfxr load=0x… entry=0x…`. A zero `load` and `entry` mean the warm-up thread started. The component appends to `LocalState\managed-warmup-APPID.log`:
+
+- the entry path (`via=hostfxr` or `via=startup-hook`);
+- for each assembly, its MVID and image kind;
+- a UTC-stamped line as each priority group finishes;
+- totals for roots, instantiations, cross-assembly callees and failures by exception type.
+
+**Desktop check.** `runtime/managed-warmup/check` runs the shipped assembly against an IL-only fixture loaded into an isolated `AssemblyLoadContext`. It counts `MethodJittingStarted` events for the fixture's hot path. Expect a positive control, zero events after the warm-up through both entries, no type initializer before first use, and a refused MVID pin. The `Build Xbox probe` workflow runs it. [Workflow step](../.github/workflows/xbox-probe.yml)
+
+**Alternatives considered.**
+
+| Option | Result |
+| --- | --- |
+| ReadyToRun (crossgen2) for the game assembly | Precompiles only the game's own version bubble. Instantiations of framework generics over the game's types still JIT, and on STS2's first turn those were about a third of main-thread JIT. It also needs the game's full reference set at build time, and it puts a rebuilt publisher assembly in the package. Running crossgen2 on the console from the player's own copy would avoid redistribution but is untested. |
+| Multicore JIT (`DOTNET_MultiCoreJitProfile` or `ProfileOptimization`) | CoreCLR 9 records at most `0x4000` methods per profile, including ReadyToRun method loads. Its player stops 60 s after start (`MULTICOREJITLIFE`), and the environment variable path uses the default binder. A Godot game assembly lives in an isolated load context, and its first combat comes minutes after start. [multicorejitimpl.h](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/vm/multicorejitimpl.h) |
+| `DOTNET_TieredCompilation=0` | Every first call becomes a fully optimized JIT, so first-use stalls get longer. |
+| `DOTNET_TieredPGO=0`, `TC_CallCountThreshold`, `TC_CallCountingDelayMs`, `TC_BackgroundWorkerTimeoutMs`, `OSR_*` | These change background promotion or loop transitions, not first-call JIT. `TieredPGO=0` removes the instrumented tier's background rejits at some cost to steady-state code. Measure it separately if CPU contention shows up. |
+
+The warm-up compiles methods a session may never call. Memory and CPU are recorded but bounded only by the plan, so use `remaining=no` to restrict a title to its priorities. While the warm-up is compiling, tiered compilation's call-counting delay stays active. Tier-1 promotion of the game's hot code therefore waits until the warm-up finishes.
+
 ## Hosted titles
 
 Register an adapter only when a bundled runtime can execute the verified installed format. An adapter declares its AppID, backend, native authorization method, success marker, and start function. The dispatcher opens a hosted runtime only after that method verifies the selected install. A refused or failed authorization returns to the library with its diagnostic.

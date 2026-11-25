@@ -7,6 +7,7 @@ import re
 from build_tools.redirect_pe_imports import validate_patch_recipe
 from build_tools.stage_session import read_package_member
 from build_tools.verify_win32_source import read_profile, valid_win32_component
+from tools.artifacts import pe_summary
 
 
 WIN32_ADAPTERS = frozenset({
@@ -71,6 +72,46 @@ def stage_surfaceless_profiles(layout, profiles):
                      + original[match.end("apps"):])
 
 
+MANAGED_WARMUP = "XboxManagedWarmup.dll"
+WARMUP_ASSEMBLY = re.compile(
+    r"assembly=([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})"
+    r"(?: mvid=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
+WARMUP_PRIORITY = re.compile(r"priority=[A-Za-z_][A-Za-z0-9_.+`]{0,159}")
+
+
+def read_managed_warmup_plan(path, app):
+    """Validate a managed warm-up plan with the rules runtime/managed-warmup/Warmup.cs applies."""
+    with path.open("rb") as source:
+        data = source.read(4097)
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        text = None
+    lines = [] if text is None else [line.strip("\r ") for line in text.split("\n")]
+    plan = [line for line in lines if line and not line.startswith("#")]
+    assemblies = set()
+    counts = {"priority": 0, "remaining": 0, "depth": 0}
+    valid = text is not None and len(data) <= 4096
+    for line in plan:
+        if match := WARMUP_ASSEMBLY.fullmatch(line):
+            name = match[1].casefold()
+            valid &= name not in assemblies
+            assemblies.add(name)
+        elif WARMUP_PRIORITY.fullmatch(line):
+            counts["priority"] += 1
+        elif line in ("remaining=yes", "remaining=no"):
+            counts["remaining"] += 1
+        elif re.fullmatch(r"depth=[0-8]", line):
+            counts["depth"] += 1
+        else:
+            valid = False
+    staged = "\n".join(plan).encode("ascii") if valid else b""
+    if (not valid or not 1 <= len(assemblies) <= 8 or counts["priority"] > 32 or counts["remaining"] > 1
+            or counts["depth"] > 1 or len(staged) > 2048):
+        raise ValueError(f"Invalid managed warm-up plan for AppID {app}.")
+    return staged
+
+
 def read_adapter_requirements(path, app, build):
     with path.open("rb") as source:
         data = source.read(4097)
@@ -125,6 +166,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     storage_trace = False
     hashed_companions = False
     system_companions = False
+    managed_warmup = False
+    hostfxr_warmup = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -258,6 +301,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                     raise ValueError(f"Expected an empty {option} marker for AppID {app}.")
                 files[marker] = b""
                 trace = True
+        warmup_marker = f"steam-win32-managed-warmup-{app}.txt"
+        if (root / warmup_marker).is_file():
+            # Unity titles run Mono, which has no CoreCLR prestub or startup hooks.
+            if fields[3:4] == ["unity"]:
+                raise ValueError(f"The managed warm-up needs a CoreCLR title for AppID {app}.")
+            files[warmup_marker] = read_managed_warmup_plan(root / warmup_marker, app)
+            managed_warmup = True
+            hostfxr_warmup |= fields[3:4] == ["godot"]
         shader_cache = f"steam-win32-godot-shader-cache-{app}.txt"
         if (root / shader_cache).is_file():
             with (root / shader_cache).open("rb") as source:
@@ -423,6 +474,21 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError("Use a Steam Core artifact with verified system companion support.")
+
+    if managed_warmup:
+        variable = "XBOX_WIN32_MANAGED_WARMUP_PLAN\0".encode("utf-16le")
+        if MANAGED_WARMUP not in available or variable not in native:
+            raise ValueError("Use a Steam Core artifact with the managed warm-up component.")
+        warmup = read_package_member(package, MANAGED_WARMUP)
+        if pe_summary(warmup).get("clr_requires_x86") != "no":
+            raise ValueError("Expected a managed warm-up assembly that loads in the x64 game.")
+        # Godot hosts the runtime itself; its resolved hostfxr export is wrapped by the
+        # adapter that serves the engine's GetProcAddress (window for OpenGL, loader trace
+        # for Direct3D 12).
+        hosts = [files[name] for name in ("XboxWin32Window.dll", "XboxWin32LoaderTrace.dll") if name in files]
+        if hostfxr_warmup and (not hosts or any(b"hostfxr_get_runtime_delegate" not in data for data in hosts)):
+            raise ValueError("Use a Steam Core artifact whose Win32 adapters start the managed warm-up.")
+        files[MANAGED_WARMUP] = warmup
 
     for name, data in files.items():
         (layout / name).write_bytes(data)
