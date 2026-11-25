@@ -294,6 +294,54 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "XboxWin32SteamDiscovery.dll").read_bytes(), feature)
         self.assertFalse((self.layout / "steam_api64.dll").exists())
 
+    def test_win32_d3d12_pipeline_cache_needs_loader_trace_and_a_matching_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "pipeline-cache-profile"
+        profile.mkdir()
+        app = "2868840"
+        build = "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\n\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
+        marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
+        (profile / marker).touch()
+
+        def runtime(native, loader):
+            template = self.work / f"pipeline-cache-{len(list(self.work.glob('pipeline-cache-*.appx')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", native)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        feature = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
+        current = runtime(feature, feature)
+        with self.assertRaisesRegex(ValueError, "empty marker and the loader trace"):
+            stage_trials(self.layout, [f"{app}={profile}"], current)
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / marker).write_text("on")
+        with self.assertRaisesRegex(ValueError, "empty marker and the loader trace"):
+            stage_trials(self.layout, [f"{app}={profile}"], current)
+        (profile / marker).write_bytes(b"")
+        for native, loader in ((b"old", feature), (feature, b"old")):
+            with self.assertRaisesRegex(ValueError, "persistent Direct3D 12 pipeline cache"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime(native, loader))
+        stage_trials(self.layout, [f"{app}={profile}"], current)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        self.assertEqual((self.layout / "XboxWin32LoaderTrace.dll").read_bytes(), feature)
+
+    def test_slay_the_spire_2_opengl_profile_selects_the_pipeline_cache(self):
+        root = ROOT / "profiles/2868840/26655341"
+        self.assertTrue((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").is_file())
+        self.assertEqual((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").stat().st_size, 0)
+        self.assertEqual((root / "steam-win32-shadow-2868840.txt").read_text().splitlines()[6], "loader-trace")
+        self.assertIn("XboxWin32LoaderTrace.dll",
+                      json.loads((root / "steam-win32-adapters-2868840.json").read_text())["required_adapters"])
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
