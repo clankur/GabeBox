@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/xbox-portal-pin.py\" --hook 2>/dev/null || true",
+            "timeout": 8,
+            "statusMessage": "Checking the Xbox Device Portal certificate pin"
+          }
+        ]
+      }
+    ]
+  }
+}
