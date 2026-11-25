@@ -84,8 +84,13 @@ static DWORD InitSteamSdk(DWORD *report, void *context) {
 
 typedef DWORD (*DiscoveryAction)(DWORD *report, void *context);
 
+/* keepMapped leaves the private hive mapped over HKCU once the action reports a
+   matched account. A retained modern SDK polls SteamAPI_IsSteamRunning through
+   HKCU\Software\Valve\Steam\ActiveProcess for the life of the game, and
+   titles that call the SDK through a managed runtime cannot be wrapped per call
+   the way the legacy imports are. */
 static DWORD WithSteamDiscovery(HMODULE client, LPCWSTR privateHive, DWORD *report,
-        DiscoveryAction action, void *context, DWORD *cleanupStatus) {
+        DiscoveryAction action, void *context, DWORD *cleanupStatus, BOOL keepMapped) {
     typedef LSTATUS (WINAPI *LoadHive)(LPCWSTR, PHKEY, REGSAM, DWORD, DWORD);
     typedef LSTATUS (WINAPI *CreateKey)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
                                        const SECURITY_ATTRIBUTES *, PHKEY, LPDWORD);
@@ -124,6 +129,12 @@ static DWORD WithSteamDiscovery(HMODULE client, LPCWSTR privateHive, DWORD *repo
                     *report |= STEAM_HANDOFF_SDK_DISCOVERY;
                     status = action(report, context);
                 }
+                if (keepMapped && status == ERROR_SUCCESS && (*report & STEAM_HANDOFF_SDK_MATCHED)) {
+                    /* The mapping refers to root, so it stays open until the process exits. */
+                    *report |= STEAM_HANDOFF_SDK_MAPPED;
+                    FreeLibrary(registry);
+                    return status;
+                }
                 const DWORD restored = overrideKey(HKEY_CURRENT_USER, NULL);
                 if (cleanupStatus) *cleanupStatus = restored;
             }
@@ -140,7 +151,7 @@ DWORD WINAPI XboxSteamInitialize(BOOL retain) {
         return STEAM_HANDOFF_SDK_REPORT | ERROR_INVALID_DATA;
     DWORD report = STEAM_HANDOFF_SDK_REPORT;
     HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-    DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL);
+    DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL, retain);
     if (client) FreeLibrary(client);
     return report | (result & 0xffffu);
 }
@@ -248,7 +259,7 @@ static bool InvokeLegacy(enum LegacyOperation operation, DWORD app, const char *
             call.lastError = call.entry ? before : GetLastError();
             if (call.entry) {
                 HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-                discovery = WithSteamDiscovery(client, hivePath, &report, CallLegacySdk, &call, &cleanup);
+                discovery = WithSteamDiscovery(client, hivePath, &report, CallLegacySdk, &call, &cleanup, FALSE);
                 // If discovery is unavailable, preserve the original SDK's decision.
                 if (!call.called) CallLegacySdk(&report, &call);
                 if (client) FreeLibrary(client);
