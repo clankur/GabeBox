@@ -18,6 +18,34 @@ void AppendProbeTrace(const char* text, DWORD size) {
     CloseHandle(file);
 }
 
+// Count draws issued on the immediate context so traces can compare issued calls with executed work.
+volatile LONG64 issuedDrawIndexed, issuedDraw;
+using DrawIndexedFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
+using DrawFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
+DrawIndexedFn nativeDrawIndexed;
+DrawFn nativeDraw;
+void STDMETHODCALLTYPE CountDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    InterlockedIncrement64(&issuedDrawIndexed);
+    nativeDrawIndexed(context, count, start, base);
+}
+void STDMETHODCALLTYPE CountDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
+    InterlockedIncrement64(&issuedDraw);
+    nativeDraw(context, count, start);
+}
+void HookDrawCounts(ID3D11DeviceContext* context) {
+    static volatile LONG hooked;
+    if (InterlockedCompareExchange(&hooked, 1, 0)) return;
+    void** table = *reinterpret_cast<void***>(context);
+    DWORD protection = 0;
+    // ID3D11DeviceContext vtable: DrawIndexed is slot 12 and Draw slot 13.
+    if (!VirtualProtect(&table[12], 2 * sizeof(void*), PAGE_READWRITE, &protection)) return;
+    nativeDrawIndexed = reinterpret_cast<DrawIndexedFn>(table[12]);
+    nativeDraw = reinterpret_cast<DrawFn>(table[13]);
+    table[12] = reinterpret_cast<void*>(&CountDrawIndexed);
+    table[13] = reinterpret_cast<void*>(&CountDraw);
+    VirtualProtect(&table[12], 2 * sizeof(void*), protection, &protection);
+}
+
 // Save a quarter-size BMP beside the loader trace so a run can be checked by eye within seconds.
 void WriteProbeImage(const void* data, UINT pitch, UINT frameWidth, UINT frameHeight, DXGI_FORMAT format, UINT64 count, UINT buffer) {
     WCHAR path[512];
@@ -424,6 +452,8 @@ void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2
             put(" primitives="); number(data.CPrimitives);
             put(" ps="); number(data.PSInvocations);
             put(" cs="); number(data.CSInvocations);
+            put(" issued-indexed="); number(static_cast<UINT64>(InterlockedCompareExchange64(&issuedDrawIndexed, 0, 0)));
+            put(" issued-draw="); number(static_cast<UINT64>(InterlockedCompareExchange64(&issuedDraw, 0, 0)));
             put("\r\n");
             AppendProbeTrace(text, static_cast<DWORD>(out - text));
         }
@@ -450,6 +480,7 @@ void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2
                 put(" render-target="); number((support & D3D11_FORMAT_SUPPORT_RENDER_TARGET) != 0);
                 put(" depth-stencil="); number((support & D3D11_FORMAT_SUPPORT_DEPTH_STENCIL) != 0);
                 put(" texture2d="); number((support & D3D11_FORMAT_SUPPORT_TEXTURE2D) != 0);
+                put(" blendable="); number((support & D3D11_FORMAT_SUPPORT_BLENDABLE) != 0);
                 put("\r\n");
                 AppendProbeTrace(text, static_cast<DWORD>(out - text));
             }
@@ -457,6 +488,9 @@ void DxgiFramePublisher::ProbeFrame(IDXGISwapChain1* chain, const D3D11_TEXTURE2
             if (device) device->CreateQuery(&query, &stats_);
         }
         if (stats_) {
+            HookDrawCounts(context_.Get());
+            InterlockedExchange64(&issuedDrawIndexed, 0);
+            InterlockedExchange64(&issuedDraw, 0);
             context_->Begin(stats_.Get());
             statsActive_ = true;
         }
