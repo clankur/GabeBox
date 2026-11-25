@@ -14,6 +14,53 @@
 #include <array>
 #include <vector>
 
+// Raw input, the mouse-point history, and the CoreWindow handle interface all
+// live in the desktop partition of the Windows headers, so this UWP build
+// declares what it calls. The layouts and values match winuser.h and
+// corewindow.h; the exports themselves are resolved at run time.
+#ifndef RIDEV_INPUTSINK
+#define RIDEV_INPUTSINK 0x00000100
+#define RIM_TYPEMOUSE 0
+#define RIM_TYPEKEYBOARD 1
+#define RID_INPUT 0x10000003
+#define RI_MOUSE_WHEEL 0x0400
+#define RI_MOUSE_HWHEEL 0x0800
+#define GMMP_USE_DISPLAY_POINTS 1
+DECLARE_HANDLE(HRAWINPUT);
+typedef struct tagRAWINPUTDEVICE {
+    USHORT usUsagePage; USHORT usUsage; DWORD dwFlags; HWND hwndTarget;
+} RAWINPUTDEVICE, *PRAWINPUTDEVICE;
+typedef RAWINPUTDEVICE const* PCRAWINPUTDEVICE;
+typedef struct tagRAWINPUTDEVICELIST { HANDLE hDevice; DWORD dwType; } RAWINPUTDEVICELIST, *PRAWINPUTDEVICELIST;
+typedef struct tagRAWINPUTHEADER { DWORD dwType; DWORD dwSize; HANDLE hDevice; WPARAM wParam; } RAWINPUTHEADER;
+typedef struct tagRAWMOUSE {
+    USHORT usFlags;
+    union { ULONG ulButtons; struct { USHORT usButtonFlags; USHORT usButtonData; }; };
+    ULONG ulRawButtons; LONG lLastX; LONG lLastY; ULONG ulExtraInformation;
+} RAWMOUSE;
+typedef struct tagRAWKEYBOARD {
+    USHORT MakeCode; USHORT Flags; USHORT Reserved; USHORT VKey; UINT Message; ULONG ExtraInformation;
+} RAWKEYBOARD;
+typedef struct tagRAWHID { DWORD dwSizeHid; DWORD dwCount; BYTE bRawData[1]; } RAWHID;
+typedef struct tagRAWINPUT {
+    RAWINPUTHEADER header;
+    union { RAWMOUSE mouse; RAWKEYBOARD keyboard; RAWHID hid; } data;
+} RAWINPUT, *PRAWINPUT;
+#define NEXTRAWINPUTBLOCK(ptr) ((PRAWINPUT)((((ULONG_PTR)((PBYTE)(ptr) + (ptr)->header.dwSize)) \
+    + sizeof(ULONG64) - 1) & ~(sizeof(ULONG64) - 1)))
+typedef struct tagMOUSEMOVEPOINT { int x; int y; DWORD time; ULONG_PTR dwExtraInfo; } MOUSEMOVEPOINT, *LPMOUSEMOVEPOINT;
+#endif
+#ifndef WM_INPUT
+#define WM_INPUT 0x00FF
+#endif
+
+// corewindow.h forward declares this interface outside the desktop partition.
+MIDL_INTERFACE("45D64A29-A63E-4CB6-B498-5781D298CB4F")
+IFhdCoreWindowInterop : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE get_WindowHandle(HWND* window) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_MessageHandled(boolean value) = 0;
+};
+
 // Counters the XAML view owns. Only interlocked writes cross the thread.
 struct RawInputRoute {
     volatile LONG registered = 0, sinkError = 0, foregroundError = 0, window = 0;
@@ -169,7 +216,7 @@ struct NativeMouseRoutes {
     void closeCollections() noexcept {
         for (auto& item : collections) {
             if (!item.device) continue;
-            try { item.device.RemoveInputReportReceived(item.token); } catch (...) {}
+            try { item.device.InputReportReceived(item.token); } catch (...) {}
             try { item.device.Close(); } catch (...) {}
             item.device = nullptr;
         }
@@ -310,7 +357,7 @@ struct RawInputWindow {
         }
 
         try {
-            auto const interop = core.as<ICoreWindowInterop>();
+            auto const interop = core.as<IFhdCoreWindowInterop>();
             if (SUCCEEDED(interop->get_WindowHandle(&window)) && window)
                 InterlockedExchange(&state.window, 1);
         } catch (...) {}
