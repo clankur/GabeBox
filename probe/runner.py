@@ -9,7 +9,7 @@ EVIDENCE_FIELDS = {
     'child_exit_code', 'expected_exit_code', 'exit_code_matches',
     'ipc', 'ipc_stage', 'ipc_error', 'ipc_child_exit', 'exit_code',
     'steam_core', 'create_interface', 'steam_error',
-    'hresult', 'callbacks', 'pointer_down',
+    'hresult', 'pointer_down',
     'visible', 'hr', 'stage', 'presented',
 }
 
