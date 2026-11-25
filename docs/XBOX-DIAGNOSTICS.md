@@ -74,6 +74,16 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 
 `--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
 
+## Drive a hosted game with remote input
+
+`python3 -m tools.xbox_remote_input` sends controller, keyboard and mouse input through Device Portal's `/ext/remoteinput` WebSocket. The presenter merges the controller presses into the hosted pad, so games reading hosted XInput receive them as controller input. Each step can be followed by a screenshot:
+
+```sh
+python3 -m tools.xbox_remote_input --gap 1.0 A wait:3 shot:after-a.png DOWN Y hold:A:0.5
+```
+
+Run `--help` for the step list. `--check` opens and closes the WebSocket without sending input. Confirm delivery with `inspect-input`: a held button shows `connected: true` and its bit set in the host pad, and the game's `ack` follows once it reads the pad. Device Portal mouse messages do not raise host pointer events, and screenshots of the Big Picture overlay return HTTP 500. [Remote Input API](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/uwp-remoteinput-api) · [Slay the Spire 2 example](../analysis/slay-the-spire-2-compatibility.md#controller-input-chain)
+
 ## Inspect the current game's render state
 
 Use the AppID and `run_id` from the game observation while that launch is current.
