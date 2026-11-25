@@ -352,3 +352,39 @@ Build Xbox probe run `45525796116` compiled every adapter, ProbeNative and the S
 - a signed package carrying the profile, which needs the pinned base APPX, `makemsix` and `osslsigncode`;
 - the `--display-config`, `--hosted-display`, `--known-folders`, `--player-prefs` and `--win32-opengl` controls;
 - an observed Big Picture Play of build `22957324`.
+
+#### Package and run the ULTRAKILL profile
+
+Run these commands from the repository root. Point `$owned` at a hash-matched ULTRAKILL `22957324` install. You can export the three pinned images from the Xbox with `python3 -m tools.xbox_deploy inspect-game --version "" --app-id 1229490 --source-profile profiles/1229490/source.json --export-inputs "$owned"`.
+
+```sh
+profile=profiles/1229490/22957324
+trial=$(mktemp -d)
+(cd "$owned" && shasum -a 256 -c "$OLDPWD/$profile/SOURCE-SHA256SUMS") || exit 1
+cp "$profile"/steam-win32-*.txt "$profile/steam-win32-adapters-1229490.json" "$trial/"
+cp profiles/1229490/source.json "$trial/steam-win32-source-1229490.json"
+python3 -m build_tools.redirect_pe_imports --recipe "$owned/ULTRAKILL.exe" \
+  "$profile/launcher-bindings.json" "$trial/steam-win32-shadow-1229490.xwp"
+python3 -m build_tools.redirect_pe_imports --recipe \
+  --signed-source-sha256 3beae3d0ca0b56d0f6264694d6e197685e0b107ca18b7a48266315629d7c5652 \
+  "$owned/UnityPlayer.dll" "$profile/engine-bindings.json" "$trial/steam-win32-shadow-1229490-engine.xwp"
+python3 -m build_tools.redirect_pe_imports --recipe \
+  --signed-source-sha256 43b9e1109889582050282d7f956a6e6b27ffca78f361d6b781cb63e3da66af13 \
+  "$owned/MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll" "$profile/mono-bindings.json" \
+  "$trial/steam-win32-shadow-1229490-mono.xwp"
+python3 -m build_tools.prepare_big_picture_library "$FHD_BASE" "$WEBVIEW" ./ultrakill-layout \
+  --version "$PACKAGE_VERSION" --session-artifact "$SESSION" --session-checksum "$SESSION_PIN" \
+  --primary-xaml "$PRIMARY" --primary-checksum "$PRIMARY_PIN" \
+  --presenter-artifact "$PRESENTER" --presenter-checksum "$PRESENTER_PIN" \
+  --surfaceless-profile 1229490=22957324 --win32-trial-profile "1229490=$trial" \
+  --play-installed-app-id 1229490
+bash build_tools/package.sh --layout ./ultrakill-layout ./ultrakill-signed
+```
+
+Take `$SESSION` from the `xbox-steam-core-template` artifact of Build Xbox probe run `45525796116` or a later run on this branch.
+
+Console checks, in order:
+
+1. **Graphics control:** `probe/graphics-runtime-control/build.sh --hosted-display` (then `--display-config`) must exit `0x51A7`. A `3xx` from `--display-config` confirms that native sizing leaves the counts unwritten.
+2. **First launch:** `python3 -m tools.xbox_deploy deploy` the signed package. Start `observe --app-id 1229490 --image-name ULTRAKILL.exe --frame-seconds 40`, then open the package so it submits the configured Play. Compare `unity-startup.txt` with the 32,412,455,616-byte `TempOverflow` failure.
+3. **Coverage:** record first frame, controller input, audio, save and reload (PlayerPrefs hive and `LocalLow`), and return to the library. Measure 30 settled seconds with `python3 -m tools.measure --require-gpu-60`.
