@@ -6,6 +6,8 @@ from pathlib import Path, PureWindowsPath
 import re
 import runpy
 import shutil
+import struct
+import sys
 from tempfile import TemporaryDirectory
 from urllib.parse import unquote
 from xml.etree import ElementTree
@@ -89,15 +91,29 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         return
     if not profiles or runtime is None:
         raise ValueError("Supply the Win32 trial profiles and their Win32 runtime template together.")
-    validate_recipe = runpy.run_path(str(PROBE / "redirect-pe-imports.py"))["validate_patch_recipe"]
+    pe_tools = runpy.run_path(str(PROBE / "redirect-pe-imports.py"))
     files = {}
+    recipe_bindings = {}
+
+    def add_recipe(path):
+        recipe = path.read_bytes()
+        try:
+            recipe_bindings[path.name] = list(pe_tools["patch_recipe_imports"](recipe))
+        except (ValueError, struct.error) as error:
+            raise ValueError(f"{path.name}: {error}") from error
+        files[path.name] = recipe
+
     trace = False
     desktop_gl = False
     unity_host = False
     crash_reports = False
     steam_sdk = False
     desktop_dxgi = False
+    unity_direct3d = False
     storage_trace = False
+    local_low_renderers = set()
+    xinput_renderers = set()
+    player_prefs = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -111,9 +127,10 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         fields = profile.decode("ascii").splitlines()
         if (not 2 <= len(fields) <= 8 or not re.fullmatch(r"[1-9][0-9]{0,19}", fields[0])
                 or not re.fullmatch(r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.exe", fields[1])
-                or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d12"))
+                or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d11", "d3d12"))
                 or (len(fields) >= 4 and fields[3] not in ("", "godot", "unity"))
                 or (len(fields) >= 3 and fields[2] and fields[3:4] not in (["godot"], ["unity"]))
+                or (fields[2:3] == ["d3d11"] and fields[3:4] != ["unity"])
                 or (len(fields) >= 5 and fields[4] and not re.fullmatch(
                     r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.(?:exe|dll)", fields[4]))
                 or (len(fields) >= 6 and len(fields[5]) > 260)
@@ -126,9 +143,8 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                 raise ValueError(f"The accessibility option needs a matching hosted OpenGL profile for AppID {app}.")
         trace |= fields[6:7] == ["loader-trace"]
         desktop_gl |= fields[2:3] == ["opengl3"]
-        recipe = (root / recipe_name).read_bytes()
-        validate_recipe(recipe)
-        files.update({profile_name: profile, recipe_name: recipe})
+        files[profile_name] = profile
+        add_recipe(root / recipe_name)
         storage_marker = f"steam-win32-storage-trace-{app}.txt"
         if (root / storage_marker).is_file():
             if (root / storage_marker).stat().st_size or fields[6:7] != ["loader-trace"]:
@@ -150,11 +166,41 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             files[crash_marker] = b""
             crash_reports = True
         dxgi_marker = f"steam-win32-dxgi-{app}.txt"
-        if (root / dxgi_marker).is_file():
-            if (root / dxgi_marker).stat().st_size or any(fields[2:4]):
-                raise ValueError(f"The DXGI marker requires the game's default native renderer for AppID {app}.")
+        has_dxgi = (root / dxgi_marker).is_file()
+        unity_dxgi = fields[2:4] == ["d3d11", "unity"]
+        if has_dxgi:
+            if (root / dxgi_marker).stat().st_size or (any(fields[2:4]) and not unity_dxgi):
+                raise ValueError(f"The DXGI marker requires the game's default native renderer or Unity Direct3D 11 for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
+        elif unity_dxgi:
+            raise ValueError(f"Unity Direct3D 11 requires the DXGI marker for AppID {app}.")
+        local_low_marker = f"steam-win32-local-low-{app}.txt"
+        if (root / local_low_marker).is_file():
+            if (root / local_low_marker).stat().st_size or (not has_dxgi and fields[2:3] != ["opengl3"]):
+                raise ValueError(f"The LocalLow marker requires an empty file and a Win32 graphics adapter for AppID {app}.")
+            files[local_low_marker] = b""
+            local_low_renderers.add("XboxWin32Dxgi.dll" if has_dxgi else "XboxWin32Window.dll")
+        xinput_marker = f"steam-win32-host-xinput-{app}.txt"
+        if (root / xinput_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / xinput_marker).stat().st_size or (not has_dxgi and fields[2:3] != ["opengl3"])
+                    or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"The XInput marker requires an empty file and a matching hosted profile for AppID {app}.")
+            files[xinput_marker] = b""
+            xinput_renderers.add("XboxWin32Dxgi.dll" if has_dxgi else "XboxWin32Window.dll")
+        prefs_marker = f"steam-win32-player-prefs-{app}.txt"
+        if (root / prefs_marker).is_file():
+            with (root / prefs_marker).open("rb") as source:
+                settings = source.read(2049)
+            prefix = settings.decode("utf-8-sig").rstrip("\r\n")
+            parts = prefix.split("\\")
+            if (len(settings) > 2048 or len(parts) != 3 or parts[0] != "Software" or
+                    len(prefix.encode("utf-16le")) >= 1024 or any(ord(c) < 32 or ord(c) == 127 for c in prefix) or
+                    any(not 0 < len(part.encode("utf-16le")) <= 510 for part in parts[1:])):
+                raise ValueError(f"Expected one Software\\company\\product preference key for AppID {app}.")
+            files[prefs_marker] = prefix.encode("utf-8")
+            player_prefs = True
         for option in ("working-directory", "original-executable", "dynamic-companions"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
@@ -181,11 +227,12 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
         unity = fields[3:4] == ["unity"]
         if unity:
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
-            if (fields[2] != "opengl3" or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
+            if (fields[2] not in ("opengl3", "d3d11") or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
                     or not companions.is_file() or not hosted.is_file()
                     or hosted.read_text(encoding="ascii") != fields[0]):
-                raise ValueError(f"The Unity option needs a matching hosted OpenGL launcher and loader trace for AppID {app}.")
+                raise ValueError(f"The Unity option needs a matching hosted launcher and loader trace for AppID {app}.")
             unity_host = True
+            unity_direct3d |= unity_dxgi
         sdk_marker = f"steam-win32-steam-sdk-{app}.txt"
         sdk_profile = root / sdk_marker
         sdk_relative = None
@@ -217,16 +264,33 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
                     raise ValueError(f"Invalid companion recipe for AppID {app}.")
                 name = f"steam-win32-shadow-{app}-{key}.xwp"
                 if name not in files:
-                    extra = (root / name).read_bytes()
-                    validate_recipe(extra)
-                    files[name] = extra
+                    add_recipe(root / name)
             files[companion_name] = data
+        if prefs_marker in files:
+            prefs_exports = {symbol for name, imports in recipe_bindings.items()
+                             if name == recipe_name or name.startswith(f"steam-win32-shadow-{app}-")
+                             for module, symbol in imports if module.lower() == "xboxwin32playerprefs.dll"}
+            if not {"RegCreateKeyW", "RegOpenKeyExW"} <= prefs_exports:
+                raise ValueError(f"The PlayerPrefs profile needs both registry bindings for AppID {app}.")
 
     with ZipFile(runtime) as package:
         identity = ElementTree.fromstring(package.read("AppxManifest.xml")).find("{*}Identity")
         if (identity is None or identity.get("Name") != "XboxPortabilityProbe.ChildProcess.SteamCore"
                 or identity.get("ProcessorArchitecture") != "x64"):
             raise ValueError("Use an x64 Steam Core runtime template built for this checkout.")
+
+        exports = {}
+
+        def require_exports(name, required, source):
+            if name not in exports:
+                try:
+                    exports[name] = pe_tools["PeLayout"](files[name]).exported_symbols()
+                except (ValueError, struct.error) as error:
+                    raise ValueError(f"Invalid export table in {name}: {error}") from error
+            for symbol in required:
+                if symbol not in exports[name]:
+                    raise ValueError(f"{source}: missing export {name}!{symbol}.")
+
         for name in ("ProbeNative.dll", "XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
             files[name] = package.read(name)
         if "XboxWin32Timer.dll" in package.namelist():
@@ -235,6 +299,23 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             files["XboxWin32Window.dll"] = package.read("XboxWin32Window.dll")
         if desktop_dxgi:
             files["XboxWin32Dxgi.dll"] = package.read("XboxWin32Dxgi.dll")
+        if unity_direct3d and " -force-d3d11".encode("utf-16le") not in files["ProbeNative.dll"]:
+            raise ValueError("Use a Win32 runtime template with the Unity Direct3D 11 launch path.")
+        if local_low_renderers:
+            local_low = "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le")
+            if any(local_low not in files[name] for name in local_low_renderers | {"ProbeNative.dll", "XboxWin32Desktop.dll"}):
+                raise ValueError("Use a Win32 runtime template with scoped LocalLow support.")
+            require_exports("XboxWin32Desktop.dll", ("SHGetKnownFolderPath",), "Scoped LocalLow")
+        if xinput_renderers:
+            setting = "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le")
+            if any(setting not in files[name] for name in xinput_renderers | {"ProbeNative.dll"}):
+                raise ValueError("Use a Win32 runtime template with hosted XInput lookup support.")
+            require_exports("XboxWin32Input.dll", ("XInputGetState", "XInputGetCapabilities", "XInputSetState"),
+                            "Hosted XInput")
+        if player_prefs:
+            hints = ("XBOX_WIN32_PREFS_KEY\0", "XBOX_WIN32_PREFS_HIVE\0")
+            if any(name.encode("utf-16le") not in files["ProbeNative.dll"] for name in hints):
+                raise ValueError("Use a Win32 runtime template with scoped PlayerPrefs support.")
         if unity_host:
             files["XboxWin32Unity.dll"] = package.read("XboxWin32Unity.dll")
             if "XboxWin32DisplayConfig.dll" in package.namelist():
@@ -245,6 +326,30 @@ def stage_win32_trial_profiles(layout, profiles, runtime):
             files["XboxWin32SteamDiscovery.dll"] = package.read("XboxWin32SteamDiscovery.dll")
         if trace:
             files["XboxWin32LoaderTrace.dll"] = package.read("XboxWin32LoaderTrace.dll")
+        available = {}
+        for name in package.namelist():
+            if "/" in name or not name.lower().startswith("xboxwin32") or not name.lower().endswith(".dll"):
+                continue
+            if name.lower() in available:
+                raise ValueError(f"Duplicate Win32 runtime adapter {name}.")
+            available[name.lower()] = name
+        for recipe_name, bindings in sorted(recipe_bindings.items()):
+            legacy = 0
+            for module, symbol in bindings:
+                if not module.lower().startswith("xboxwin32"):
+                    continue
+                name = available.get(module.lower())
+                if name is None:
+                    raise ValueError(f"{recipe_name}: missing Win32 runtime adapter {module}.")
+                if name not in files:
+                    files[name] = package.read(name)
+                if symbol is None:
+                    legacy += 1
+                    continue
+                require_exports(name, (symbol,), recipe_name)
+            if legacy:
+                print(f"{recipe_name}: {legacy} legacy adapter import names still refer to the installed image.",
+                      file=sys.stderr)
         if storage_trace:
             files["XboxWin32StorageTrace.dll"] = package.read("XboxWin32StorageTrace.dll")
     for name, data in files.items():
@@ -273,11 +378,19 @@ def stage_storage_capability(layout):
             b'<uap:Capability Name="removableStorage" /></Capabilities>', 1))
 
 
+def stage_configured_play(layout, app_id):
+    if app_id is None:
+        return
+    if type(app_id) is not int or not 1 <= app_id <= 0xffffff:
+        raise ValueError("--play-installed-app-id requires a Steam AppID from 1 to 16777215.")
+    (layout / "steam-launch-via-big-picture.txt").write_text(str(app_id) + "\n", encoding="ascii")
+
+
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
                    presenter_artifact=None, presenter_checksum=None, primary_xaml=None, primary_checksum=None,
                    dwarf_sdl=None, shared_sdl=None, library_inventory=False, surfaceless_profiles=(),
                    win32_trial_profiles=(), win32_runtime_template=None, migrate_legacy_library=False,
-                   early_library_reveal=False):
+                   early_library_reveal=False, play_installed_app_id=None):
     if (primary_xaml is None) != (primary_checksum is None):
         raise ValueError("Supply both --primary-xaml and --primary-checksum.")
     if early_library_reveal and primary_xaml is None:
@@ -337,6 +450,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
             (staged / "steam-library-inventory.txt").touch()
         stage_surfaceless_profiles(staged, surfaceless_profiles)
         stage_win32_trial_profiles(staged, win32_trial_profiles, win32_runtime_template)
+        stage_configured_play(staged, play_installed_app_id)
         stage_storage_capability(staged)
         if b"SteamLibraryCommand\x00" not in (staged / "XboxProbe.Native.winmd").read_bytes():
             raise ValueError("Use a Steam Core native component built with the Xbox storage interface.")
@@ -372,6 +486,8 @@ if __name__ == "__main__":
                         help="stage a local import compatibility trial from an audited recipe directory")
     parser.add_argument("--win32-runtime-template", type=Path,
                         help="Steam Core APPX template containing the Win32 trial runtime built for this checkout")
+    parser.add_argument("--play-installed-app-id", type=int, metavar="APPID",
+                        help="run one authenticated Big Picture Play trial for a locally installed game")
     parser.add_argument("--migrate-legacy-library", action="store_true",
                         help="request a verified one-time move of existing app-local Steam games to Xbox internal storage")
     args = parser.parse_args()
@@ -379,4 +495,4 @@ if __name__ == "__main__":
                    args.session_artifact, args.session_checksum, args.presenter_artifact, args.presenter_checksum,
                    args.primary_xaml, args.primary_checksum, args.dwarf_sdl, args.shared_sdl, args.library_inventory,
                    args.surfaceless_profile, args.win32_trial_profile, args.win32_runtime_template,
-                   args.migrate_legacy_library, args.early_library_reveal)
+                   args.migrate_legacy_library, args.early_library_reveal, args.play_installed_app_id)

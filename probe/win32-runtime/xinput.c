@@ -10,11 +10,13 @@
 
 typedef DWORD (WINAPI *GetState)(DWORD, XINPUT_STATE *);
 typedef DWORD (WINAPI *GetCapabilities)(DWORD, DWORD, XINPUT_CAPABILITIES *);
+typedef DWORD (WINAPI *SetState)(DWORD, XINPUT_VIBRATION *);
 static INIT_ONCE configured = INIT_ONCE_STATIC_INIT;
 static SRWLOCK stateLock = SRWLOCK_INIT;
 static SdlHostMailbox *mailbox;
 static GetState nativeGetState;
 static GetCapabilities nativeGetCapabilities;
+static SetState nativeSetState;
 static XINPUT_STATE latest;
 static BOOL connected;
 static volatile LONG slotObserved;
@@ -33,6 +35,7 @@ static BOOL CALLBACK OpenController(PINIT_ONCE once, PVOID parameter, PVOID *con
         if (system) {
             nativeGetState = (GetState)(void *)GetProcAddress(system, "XInputGetState");
             nativeGetCapabilities = (GetCapabilities)(void *)GetProcAddress(system, "XInputGetCapabilities");
+            nativeSetState = (SetState)(void *)GetProcAddress(system, "XInputSetState");
         }
         return TRUE;
     }
@@ -97,6 +100,11 @@ static void ConfigureController(void) {
     SetLastError(previous);
 }
 
+static BOOL HostedControllerConnected(DWORD index) {
+    return !index && mailbox && !SdlHostLoad(&mailbox->quit) &&
+        (SdlHostLoad(&mailbox->gamepad.buttons) & SDL_HOST_PAD_CONNECTED);
+}
+
 DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
     if (!state || index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
     ConfigureController();
@@ -134,8 +142,7 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
         return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeGetCapabilities) return nativeGetCapabilities(index, flags, capabilities);
-    if (index || !mailbox || SdlHostLoad(&mailbox->quit) ||
-            !(SdlHostLoad(&mailbox->gamepad.buttons) & SDL_HOST_PAD_CONNECTED)) return ERROR_DEVICE_NOT_CONNECTED;
+    if (!HostedControllerConnected(index)) return ERROR_DEVICE_NOT_CONNECTED;
 
     *capabilities = (XINPUT_CAPABILITIES){
         XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD, 0,
@@ -147,4 +154,11 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
         {0, 0}
     };
     return ERROR_SUCCESS;
+}
+
+DWORD WINAPI XboxXInputSetState(DWORD index, XINPUT_VIBRATION *vibration) {
+    if (!vibration || index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+    ConfigureController();
+    if (nativeSetState) return nativeSetState(index, vibration);
+    return HostedControllerConnected(index) ? ERROR_NOT_SUPPORTED : ERROR_DEVICE_NOT_CONNECTED;
 }

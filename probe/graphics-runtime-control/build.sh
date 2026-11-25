@@ -10,6 +10,12 @@ desktop_endpoints=false
 dxgi_composition=false
 dxgi_window=false
 dxgi_exchange=false
+dxgi_dynamic=false
+hosted_xinput=false
+display_config=false
+hosted_display=false
+known_folders=false
+player_prefs=false
 win32_opengl=false
 sdl_artifact=
 sdl_version=
@@ -31,6 +37,19 @@ case ${1:-} in
         desktop_endpoints=true
         shift
         ;;
+    --display-config|--hosted-display)
+        display_config=true
+        if [[ $1 == --hosted-display ]]; then hosted_display=true; fi
+        shift
+        ;;
+    --known-folders)
+        known_folders=true
+        shift
+        ;;
+    --player-prefs)
+        player_prefs=true
+        shift
+        ;;
     --dxgi-composition)
         dxgi_composition=true
         shift
@@ -40,10 +59,12 @@ case ${1:-} in
         dxgi_window=true
         shift
         ;;
-    --dxgi-exchange)
+    --dxgi-exchange|--dxgi-dynamic|--hosted-xinput)
         dxgi_composition=true
         dxgi_window=true
         dxgi_exchange=true
+        if [[ $1 != --dxgi-exchange ]]; then dxgi_dynamic=true; fi
+        if [[ $1 == --hosted-xinput ]]; then hosted_xinput=true; fi
         shift
         ;;
     --sdl-runtime|--sdl-video|--loader-order|--win32-opengl)
@@ -56,7 +77,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --desktop-window | --desktop-endpoints | --dxgi-composition | --dxgi-window | --dxgi-exchange | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --desktop-window | --desktop-endpoints | --display-config | --hosted-display | --known-folders | --player-prefs | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-dynamic | --hosted-xinput | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(cd "$(dirname "$0")" && pwd)
@@ -162,7 +183,7 @@ linker=("${LLD_LINK:-lld-link}" /nologo /machine:x64 "/subsystem:$subsystem" /ap
 graphics_libs=()
 child="$src/child.c"
 child_output="$layout/child.exe"
-if $dxgi_window || $win32_opengl; then
+if $dxgi_window || $win32_opengl || $hosted_display; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
     for source in window window-gl window-monitor; do
@@ -170,6 +191,11 @@ if $dxgi_window || $win32_opengl; then
     done
     "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/window.def" "/out:$layout/XboxWin32Window.dll" \
         "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
+fi
+if $hosted_display; then
+    "${win32_compiler[@]}" -c "$probe/win32-runtime/hosted-display.c" -o "$build/hosted-display.obj"
+    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/hosted-display.def" "/out:$layout/XboxWin32HostedDisplay.dll" \
+        "$build/hosted-display.obj" "$windows_app"
 fi
 if $dxgi_window; then
     for source in dxgi dxgi-frame; do
@@ -191,9 +217,31 @@ EXPORTS
 EOF
     "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/dxgi-user32.def" "/out:$build/dxgi-user32.lib"
     graphics_libs+=("$build/dxgi-user32.lib")
+    if $dxgi_dynamic; then
+        cat > "$build/dxgi-kernel32.def" <<'EOF'
+LIBRARY kernel32.dll
+EXPORTS
+    GetProcAddress
+EOF
+        "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/dxgi-kernel32.def" "/out:$build/dxgi-kernel32.lib"
+        graphics_libs+=("$build/dxgi-kernel32.lib")
+        python3 - "$build/dxgi-window-bindings.json" "$hosted_xinput" <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+bindings = json.loads(path.read_text())
+del bindings["dxgi.dll"]
+if sys.argv[2] == "true":
+    del bindings["user32.dll"]
+bindings["kernel32.dll"] = {"GetProcAddress": "XboxWin32Dxgi.dll"}
+path.write_text(json.dumps(bindings))
+PYTHON
+    fi
     child_output="$build/standard-dxgi.exe"
 fi
-if $win32_imports || $desktop_window; then
+if $win32_imports || $desktop_window || $hosted_xinput; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
     for source in input input-raw xinput; do
@@ -206,6 +254,14 @@ if $load_only; then
     compiler+=(-DPROBE_LOAD_MESA)
 elif $dxgi_composition; then
     child="$src/dxgi-child.cpp"
+elif $display_config; then
+    child="$src/display-config-child.c"
+elif $player_prefs; then
+    child="$src/player-prefs-child.c"
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2 -ffreestanding -Wall -Wextra -Werror \
+        -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "$probe/win32-runtime/player-prefs.c" -o "$build/player-prefs.obj"
+    "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/player-prefs.def" "/out:$layout/XboxWin32PlayerPrefs.dll" \
+        "$build/player-prefs.obj" "$windows_app"
 elif $win32_opengl; then
     window_bindings="$probe/win32-runtime/window-bindings.json"
     python3 - "$build" "$window_bindings" <<'PY'
@@ -215,7 +271,7 @@ import sys
 
 build, bindings = map(Path, sys.argv[1:])
 libraries = json.loads(bindings.read_text())
-libraries["opengl32.dll"] = ["glClearColor", "glClear", "glReadPixels", "glGetError"]
+libraries["opengl32.dll"] = [*libraries["opengl32.dll"], "glClearColor", "glClear", "glReadPixels", "glGetError"]
 for library, functions in libraries.items():
     (build / Path(library).with_suffix(".def")).write_text(
         f"LIBRARY {library}\nEXPORTS\n    " + "\n    ".join(functions) + "\n")
@@ -226,8 +282,8 @@ PY
     done
     child="$src/window-child.c"
     child_output="$build/standard-window.exe"
-elif $desktop_window; then
-    child="$probe/win32-runtime/desktop-control.c"
+elif $desktop_window || $known_folders; then
+    if $known_folders; then child="$src/known-folders-child.c"; else child="$probe/win32-runtime/desktop-control.c"; fi
     if $desktop_endpoints; then compiler+=(-DPROBE_DESKTOP_ENDPOINTS); fi
     "${compiler[@]}" -c "$probe/win32-runtime/desktop.c" -o "$build/win32-desktop.obj"
     "${linker[@]}" /dll /noentry "/def:$probe/win32-runtime/desktop.def" "/out:$layout/XboxWin32Desktop.dll" \
@@ -279,6 +335,13 @@ else
 fi
 if $win32_opengl; then
     "${win32_compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
+elif $display_config || $known_folders || $player_prefs; then
+    display_flags=()
+    if $hosted_display; then display_flags=(-DPROBE_HOSTED_DISPLAY); fi
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" \
+        -std=c11 -O2 -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror \
+        "${display_flags[@]+${display_flags[@]}}" \
+        -c "$child" -o "$build/graphics-child.obj"
 elif $dxgi_composition; then
     if $dxgi_exchange; then
         dxgi_flags=(-DPROBE_DXGI_WINDOW -DPROBE_DXGI_EXCHANGE)
@@ -287,6 +350,8 @@ elif $dxgi_composition; then
     else
         dxgi_flags=()
     fi
+    if $dxgi_dynamic; then dxgi_flags+=(-DPROBE_DXGI_DYNAMIC); fi
+    if $hosted_xinput; then dxgi_flags+=(-DPROBE_HOSTED_XINPUT); fi
     "${WIN32_CXX:?Set WIN32_CXX to a Windows x64 Clang++ driver with Windows SDK headers}" \
         -std=c++20 -O2 -DNDEBUG -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 "${dxgi_flags[@]+${dxgi_flags[@]}}" \
         -ffreestanding -fno-rtti -fno-exceptions \

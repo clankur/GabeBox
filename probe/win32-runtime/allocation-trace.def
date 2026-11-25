@@ -1,0 +1,4 @@
+LIBRARY XboxWin32AllocationTrace.dll
+EXPORTS
+    VirtualAlloc=XboxTraceVirtualAlloc
+    HeapAlloc=XboxTraceHeapAlloc

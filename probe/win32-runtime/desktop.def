@@ -2,3 +2,5 @@ LIBRARY XboxWin32Desktop.dll
 EXPORTS
     XboxILCreateFromPathA @189 NONAME
     PlaySoundA=XboxPlaySoundA
+    SHGetKnownFolderPath=XboxSHGetKnownFolderPath
+    SHGetFolderPathW=XboxSHGetFolderPathW

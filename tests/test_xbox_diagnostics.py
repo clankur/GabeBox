@@ -105,9 +105,10 @@ class ObserverTests(unittest.TestCase):
     def test_game_matches_appid_retries_transient_report_and_collects_new_run_artifacts(self):
         launch = EPOCH_MS + 2
         exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        unity_file = f'steam-unity-{APP_ID}-2274.log'
         temp_folder = diagnostics.TEMP + '\\SteamWin32Trial (2)'
         stable = ('steam_shadow_stage=verified-local-copy\r\nsteam_launch_sdl_run=2274\r\n'
-                  f'steam_shadow_exit_report={exit_file}\r\n')
+                  f'steam_shadow_exit_report={exit_file}\r\nsteam_shadow_unity_log={unity_file}\r\n')
         fixture = Fixture([
             {diagnostics.PROBE_REPORT: probe(EPOCH_MS), 'fhd-present-times.bin': frame(EPOCH_MS)},
             {diagnostics.PROBE_REPORT: probe(EPOCH_MS + 1, APP_ID + 1)},
@@ -120,6 +121,10 @@ class ObserverTests(unittest.TestCase):
                         b'steam_shadow_loader=dxgi native-present-interval result=0x00000000\r\n',
              'sdl-startup-2274.txt': b'sdl_gpu_interop=published\r\npath=C:\\private-secret\r\n',
              'sdl-startup-2274.bmp': b'BMcapture',
+             unity_file: b'Forcing GfxDevice: Direct3D 11\r\n'
+                         b'    Version:  Direct3D 11.0 [level 11.0]\r\n'
+                         b'path=C:\\private-secret\r\n'
+                         b'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\r\n',
              'fhd-present-times.bin': frame(launch)},
         ], stages=[
             [{'Name': 'SteamWin32Trial', 'DateCreated': 1}],
@@ -136,6 +141,9 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual((output / 'sdl-startup.txt').read_text(), 'sdl_gpu_interop=published\n')
             self.assertEqual((output / 'loader-trace.txt').read_text(), 'load example.dll ok source=package\n'
                              'dxgi native-present-interval result=0x00000000\n')
+            self.assertEqual((output / 'unity-startup.txt').read_text(), 'Forcing GfxDevice: Direct3D 11\n'
+                             'Version:  Direct3D 11.0 [level 11.0]\n'
+                             'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\n')
             self.assertEqual((output / 'fhd-present-times.bin').read_bytes(), frame(launch))
             self.assertEqual((output / 'bootstrap.bmp').read_bytes(), b'BMcapture')
             self.assertEqual(json.loads((output / 'observation.json').read_text()), result)
@@ -147,7 +155,8 @@ class ObserverTests(unittest.TestCase):
             with self.subTest(bad_trace=bad_trace):
                 fixture = Fixture([
                     {diagnostics.PROBE_REPORT: probe(launch, extra='steam_launch_phase=child-created\r\n'
-                                                      'steam_shadow_exit_report=..\\unrelated.txt\r\n'),
+                                                      'steam_shadow_exit_report=..\\unrelated.txt\r\n'
+                                                      'steam_shadow_unity_log=..\\unrelated.log\r\n'),
                      'fhd-present-times.bin': bad_trace},
                     {diagnostics.PROBE_REPORT: PortalError(409), 'fhd-present-times.bin': bad_trace},
                 ])

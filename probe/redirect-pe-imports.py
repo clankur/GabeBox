@@ -54,9 +54,11 @@ def parse_rules(document):
     return rules
 
 
-class PeImage:
-    def __init__(self, image, *, allow_signed_source=False):
+class PeLayout:
+    def __init__(self, image, file_size=None):
         self.image = image
+        if file_size is None:
+            file_size = len(image)
         pe = self.word(0x3c)
         if image[:2] != b"MZ" or image[pe:pe + 4] != b"PE\0\0" or self.short(pe + 4) != 0x8664:
             raise ValueError("Use a Windows x64 PE executable or DLL.")
@@ -66,20 +68,78 @@ class PeImage:
         optional_size = self.short(pe + 20)
         self.section_table = self.optional + optional_size
         if (self.short(self.optional) != 0x20b or optional_size < 240 or self.word(self.optional + 108) < 16
-                or not 1 <= count < 96):
+                or not 1 <= count <= 96):
             raise ValueError("Unsupported PE header layout.")
         self.headers_size = self.word(self.optional + 60)
         self.file_alignment = self.word(self.optional + 36)
         self.section_alignment = self.word(self.optional + 32)
+        self.new_section_offset = self.section_table + count * 40
+        if not self.new_section_offset <= self.headers_size <= len(image):
+            raise ValueError("Invalid PE section headers.")
         self.sections = []
         for index in range(count):
             offset = self.section_table + index * 40
             virtual_size, address, raw_size, raw = struct.unpack_from("<IIII", image, offset + 8)
-            if raw_size and (raw < self.headers_size or raw + raw_size > len(image)):
+            if raw_size and (raw < self.headers_size or raw + raw_size > file_size):
                 raise ValueError("Use a complete PE file with its original sections.")
             self.sections.append((virtual_size, address, raw_size, raw))
-        self.new_section_offset = self.section_table + count * 40
-        if self.new_section_offset + 40 > min(self.headers_size, len(image)):
+
+    def short(self, offset):
+        return struct.unpack_from("<H", self.image, offset)[0]
+
+    def word(self, offset):
+        return struct.unpack_from("<I", self.image, offset)[0]
+
+    def directory(self, index):
+        return self.optional + 112 + 8 * index
+
+    def locate(self, rva, size, sections=None):
+        for _, address, raw_size, raw in self.sections if sections is None else sections:
+            if address <= rva and rva - address + size <= raw_size:
+                return raw + rva - address
+        raise ValueError(f"PE RVA 0x{rva:x} is outside the file-backed sections.")
+
+    def string(self, rva):
+        offset = self.locate(rva, 1)
+        end = self.image.find(b"\0", offset, offset + 4096)
+        if end < 0:
+            raise ValueError("Unterminated PE string.")
+        self.locate(rva, end - offset + 1)
+        return self.image[offset:end].decode("ascii")
+
+    def exported_symbols(self):
+        rva, size = struct.unpack_from("<II", self.image, self.directory(0))
+        if not rva and not size:
+            return set()
+        if not rva or size < 40:
+            raise ValueError("Invalid PE export directory.")
+        offset = self.locate(rva, 40)
+        base, function_count, name_count, functions, names, ordinals = struct.unpack_from("<6I", self.image, offset + 16)
+        if function_count > 65536 or name_count > 65536:
+            raise ValueError("Invalid PE export table size.")
+        addresses = (struct.unpack_from(f"<{function_count}I", self.image, self.locate(functions, 4 * function_count))
+                     if function_count else ())
+        for address in addresses:
+            if (address >= self.headers_size and
+                    not any(rva <= address < rva + max(virtual, raw_size)
+                            for virtual, rva, raw_size, _ in self.sections)):
+                raise ValueError("A PE export points outside the mapped image.")
+        symbols = {f"#{base + index}" for index, address in enumerate(addresses) if address}
+        if name_count:
+            name_offsets = self.locate(names, 4 * name_count)
+            ordinal_offsets = self.locate(ordinals, 2 * name_count)
+            for i in range(name_count):
+                index = self.short(ordinal_offsets + i * 2)
+                if index >= function_count or not addresses[index]:
+                    raise ValueError("A PE export name refers to a missing entry.")
+                symbols.add(self.string(self.word(name_offsets + i * 4)))
+        return symbols
+
+
+class PeImage(PeLayout):
+    def __init__(self, image, *, allow_signed_source=False):
+        super().__init__(image)
+        if len(self.sections) == 96 or self.new_section_offset + 40 > self.headers_size:
             raise ValueError("The PE headers have no room for another section.")
         if self.word(self.directory(11)) or self.word(self.directory(11) + 4):
             raise ValueError("Use a PE without a bound import table.")
@@ -125,29 +185,6 @@ class PeImage:
                 raise ValueError("Invalid Authenticode certificate record.")
             cursor += align(length, 8)
         return offset
-
-    def short(self, offset):
-        return struct.unpack_from("<H", self.image, offset)[0]
-
-    def word(self, offset):
-        return struct.unpack_from("<I", self.image, offset)[0]
-
-    def directory(self, index):
-        return self.optional + 112 + 8 * index
-
-    def locate(self, rva, size, sections=None):
-        for _, address, raw_size, raw in self.sections if sections is None else sections:
-            if address <= rva and rva - address + size <= raw_size:
-                return raw + rva - address
-        raise ValueError(f"Import RVA 0x{rva:x} is outside the file-backed sections.")
-
-    def string(self, rva):
-        offset = self.locate(rva, 1)
-        end = self.image.find(b"\0", offset, offset + 4096)
-        if end < 0:
-            raise ValueError("Unterminated PE import name.")
-        self.locate(rva, end - offset + 1)
-        return self.image[offset:end].decode("ascii")
 
     def import_descriptors(self):
         table = self.word(self.directory(1))
@@ -347,7 +384,7 @@ class PeImage:
                     if key in rules and target.lower() != window_adapter.lower():
                         raise ValueError(f"Use the hosted window adapter for {module}!{symbol}.")
                     target = window_adapter
-                entries.append((target, index, thunk))
+                entries.append((target, index, thunk, symbol))
             if not entries or all(entry[0] == module for entry in entries):
                 descriptors.append((lookup, 0, chain, name, iat))
                 continue
@@ -355,7 +392,12 @@ class PeImage:
                 run = list(items)
                 # Keep each IAT cell at its original address. The loader reads
                 # the relocated lookup table to determine the run's length.
-                table = struct.pack(f"<{len(run) + 1}Q", *(item[2] for item in run), 0)
+                # Keep redirected symbol names in the recipe so packaging can
+                # check the new DLL without reading the installed game.
+                thunks = [save(b"\0\0" + symbol.encode("ascii") + b"\0", 2)
+                          if target != module and not thunk & ORDINAL else thunk
+                          for _, _, thunk, symbol in run]
+                table = struct.pack(f"<{len(run) + 1}Q", *thunks, 0)
                 target_name = name if target == module else save(target.encode("ascii") + b"\0")
                 descriptors.append((save(table, 8), 0, 0, target_name, iat + run[0][1] * 8))
         if found != rules.keys():
@@ -422,6 +464,73 @@ def validate_patch_recipe(recipe):
             or retained_prefix + tail_size > 0xFFFFFFFFFFFFFFFF
             or metadata.size + header_size + tail_size != len(recipe)):
         raise ValueError("Invalid compatibility recipe header.")
+    tail = metadata.size + header_size
+    return recipe[metadata.size:tail], retained_prefix, recipe[tail:]
+
+
+def patch_recipe_imports(recipe):
+    """Read redirected imports. Legacy recipes leave named thunks in the source image."""
+    header, retained, tail = validate_patch_recipe(recipe)
+    try:
+        layout = PeLayout(header, retained + len(tail))
+    except struct.error as error:
+        raise ValueError("Invalid PE headers in the compatibility recipe.") from error
+    virtual, address, raw_size, raw = layout.sections[-1]
+    if (len(header) != layout.headers_size
+            or header[layout.new_section_offset - 40:layout.new_section_offset - 32] != b".xboxabi"
+            or raw < retained or raw + raw_size != retained + len(tail) or not 0 < virtual <= raw_size):
+        raise ValueError("Missing appended import section in the compatibility recipe.")
+    data = tail[raw - retained:raw - retained + virtual]
+    original_sections = layout.sections[:-1]
+
+    def offset(rva, size):
+        index = rva - address
+        if not 0 <= index <= len(data) - size:
+            raise ValueError("A redirected import points outside the appended import section.")
+        return index
+
+    def name_at(rva):
+        index = offset(rva, 1)
+        end = data.find(b"\0", index, index + 4096)
+        if end <= index:
+            raise ValueError("Missing import name in the compatibility recipe.")
+        return data[index:end].decode("ascii")
+
+    table, size = struct.unpack_from("<II", header, layout.directory(1))
+    if not size or size % DESCRIPTOR.size:
+        raise ValueError("Invalid import table size in the compatibility recipe.")
+    start = offset(table, size)
+    for entry in range(start, start + size, DESCRIPTOR.size):
+        lookup, timestamp, chain, name, iat = DESCRIPTOR.unpack_from(data, entry)
+        if not (lookup or timestamp or chain or name or iat):
+            return
+        if not name or not iat or timestamp:
+            raise ValueError("Invalid import descriptor in the compatibility recipe.")
+        layout.locate(iat, 8, original_sections)
+        if not address <= name < address + virtual:
+            layout.locate(name, 1, original_sections)
+            continue  # Unchanged module name lives in the original image.
+        module = name_at(name)
+        if not DLL_NAME.fullmatch(module):
+            raise ValueError(f"Invalid redirected DLL name {module!r}.")
+        index = offset(lookup, 8)
+        while index <= len(data) - 8:
+            thunk = struct.unpack_from("<Q", data, index)[0]
+            if not thunk:
+                break
+            if thunk & ORDINAL:
+                if thunk & ~(ORDINAL | 0xffff):
+                    raise ValueError("Invalid ordinal import in the compatibility recipe.")
+                yield module, f"#{thunk & 0xffff}"
+            elif address <= thunk < address + virtual:
+                yield module, name_at(thunk + 2)
+            else:
+                layout.locate(thunk, 3, original_sections)
+                yield module, None
+            index += 8
+        else:
+            raise ValueError("Unterminated redirected lookup table in the compatibility recipe.")
+    raise ValueError("Unterminated import table in the compatibility recipe.")
 
 
 def main():

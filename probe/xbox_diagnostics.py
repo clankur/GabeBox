@@ -24,6 +24,11 @@ TIMINGS = re.compile(r'[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}(?:,[a-z][a-z0-9_.-]{0,
 BROWSER_RUN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
 WINDOW_TRACE = re.compile(r'(?:win32|sdl)_[a-z0-9_]{1,72}=[a-z0-9_.=-]{1,72}', re.I)
 LOADER_TRACE = re.compile(r'(?:load|export|fault|asset|dxgi|input) [a-zA-Z0-9 ._?@$#=-]{1,174}')
+UNITY_TRACE = re.compile(r'(?:Forcing GfxDevice: (?:Direct3D 11|Direct3D 12|OpenGL Core|Vulkan)|'
+                         r'Direct3D:|Version: +Direct3D [0-9.]{1,8} \[level [0-9.]{1,8}\]|'
+                         r'Begin MonoManager ReloadAssembly|Could not allocate memory: System out of memory!|'
+                         r'Trying to allocate: [0-9]{1,20}B with [0-9]{1,10} alignment\. '
+                         r'MemoryLabel: [a-zA-Z][a-zA-Z0-9_]{0,47})')
 LIFECYCLE = re.compile(r'pid=[0-9]{1,10} stage=[a-z-]{1,48} hresult=0x[0-9a-f]{8}'
                        r'(?: (?:tick_ms|old_bytes|new_bytes|usage_bytes|view_id|activation_mode|activation_state|'
                        r'visible|user_initiated|app_initiated)=-?[0-9]{1,20}){0,12}', re.I)
@@ -185,6 +190,13 @@ def collect_artifacts(report, blob, last_probe, launch_id, app_id, include_frame
         artifacts.pop('fhd-present-times.bin', None)
     if loader_lines:
         artifacts['loader-trace.txt'] = ('\n'.join(list(dict.fromkeys(loader_lines))[:128]) + '\n').encode()
+    unity_log = last_probe.get('steam_shadow_unity_log', '')
+    if re.fullmatch(rf'steam-unity-{app_id}-[0-9]{{1,20}}\.log', unity_log):
+        text = report(unity_log, TRACE_LIMIT)
+        lines = (line.strip() for line in (text or '').splitlines())
+        checkpoints = [line for line in lines if UNITY_TRACE.fullmatch(line)][:128]
+        if checkpoints:
+            artifacts['unity-startup.txt'] = ('\n'.join(checkpoints) + '\n').encode()
     return artifacts
 
 

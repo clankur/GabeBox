@@ -54,6 +54,33 @@ def dwarf_fixture():
     return image
 
 
+def recipe_fixture(target="oleaut32.dll", *, trimmed=False, ordinal=None):
+    source = dwarf_fixture() if trimmed else fixture()
+    symbol = "GetErrorInfo"
+    if ordinal is not None:
+        symbol = f"#{ordinal}"
+        base = 0x200 if trimmed else 0
+        for slot in (0x248, 0x268):
+            struct.pack_into("<Q", source, slot + base, tool["ORDINAL"] | ordinal)
+    rules = tool["parse_rules"]({"ole32.dll": {symbol: target}})
+    return tool["patch_recipe"](source, *tool["PeImage"](source).redirect(rules, trim_dwarf=trimmed))
+
+
+def export_fixture(symbol="GetErrorInfo", ordinal=1, *, aliases=()):
+    image = fixture()
+    names = sorted(((symbol,) if symbol else ()) + aliases)
+    struct.pack_into("<II", image, 0x98 + 112, 0x1100, 0x90)
+    struct.pack_into("<6I", image, 0x310, ordinal, 1, len(names), 0x1140, 0x1150, 0x1160)
+    struct.pack_into("<I", image, 0x340, 0x1000)
+    offset = 0x370
+    for i, name in enumerate(names):
+        struct.pack_into("<I", image, 0x350 + i * 4, offset + 0xe00)
+        text = name.encode("ascii") + b"\0"
+        image[offset:offset + len(text)] = text
+        offset += len(text)
+    return image
+
+
 class PeImportRedirectTests(unittest.TestCase):
     def test_split_lookup_tables_keep_every_original_iat_slot(self):
         image = bytes(fixture())
@@ -156,6 +183,42 @@ class PeImportRedirectTests(unittest.TestCase):
         self.assertEqual(metadata.size + header_size + trailer_size, len(recipe))
         self.assertEqual(recipe[metadata.size:metadata.size + header_size] + image[header_size:]
                          + recipe[metadata.size + header_size:], header + image[len(header):] + padding + section)
+
+    def test_appended_imports_can_be_verified_without_the_original_image(self):
+        imports = tool["patch_recipe_imports"]
+        self.assertEqual(list(imports(recipe_fixture())), [("oleaut32.dll", "GetErrorInfo")])
+        self.assertEqual(list(imports(recipe_fixture(trimmed=True))), [("oleaut32.dll", "GetErrorInfo")])
+        self.assertEqual(list(imports(recipe_fixture(ordinal=189))), [("oleaut32.dll", "#189")])
+
+        # A V1 lookup entry from before the change points to the original hint/name table.
+        legacy = bytearray(recipe_fixture())
+        header, prefix, tail = tool["validate_patch_recipe"](legacy)
+        pe = tool["PeLayout"](header, prefix + len(tail))
+        virtual_size, rva, _, raw = pe.sections[-1]
+        section = len(legacy) - len(tail) + raw - prefix
+        entry = section + pe.word(pe.directory(1)) - rva + tool["DESCRIPTOR"].size
+        lookup = struct.unpack_from("<I", legacy, entry)[0]
+        struct.pack_into("<Q", legacy, section + lookup - rva, 0x10a0)
+        self.assertEqual(list(imports(legacy)), [("oleaut32.dll", None)])
+
+        struct.pack_into("<Q", legacy, section + lookup - rva, rva + virtual_size)
+        with self.assertRaisesRegex(ValueError, "outside the file-backed sections"):
+            list(imports(legacy))
+        struct.pack_into("<I", legacy, entry, rva - 8)
+        with self.assertRaisesRegex(ValueError, "outside the appended import section"):
+            list(imports(legacy))
+
+    def test_export_inspection_reads_names_and_noname_ordinals(self):
+        inspector = tool["PeLayout"]
+        self.assertEqual(inspector(export_fixture()).exported_symbols(), {"GetErrorInfo", "#1"})
+        self.assertEqual(inspector(export_fixture(None, ordinal=189)).exported_symbols(), {"#189"})
+        malformed = export_fixture(ordinal=189)
+        struct.pack_into("<I", malformed, 0x340, 0)
+        with self.assertRaisesRegex(ValueError, "refers to a missing entry"):
+            inspector(malformed).exported_symbols()
+        struct.pack_into("<I", malformed, 0x340, 0xfffffffc)
+        with self.assertRaisesRegex(ValueError, "outside the mapped image"):
+            inspector(malformed).exported_symbols()
 
     def test_dwarf_omission_compacts_only_the_opt_in_mapped_section_table(self):
         image = bytes(dwarf_fixture())

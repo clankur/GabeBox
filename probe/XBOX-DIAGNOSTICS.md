@@ -19,6 +19,8 @@ python3 xbox-deploy.py observe --version "$version" --app-id "$steam_app_id" \
 
 Use `--image-name "$game_exe_basename"` to also follow the game's Device Portal process listing. For an already-started session, pass the exact `--run-id` shown as `steam_launch_run_id` by `xbox-deploy.py report --version "$version"`. For a fresh observation with no baseline run ID, the observer uses the local clock to screen out stale reports. Keep the computer and console clocks in sync for that case.
 
+For an unattended trial, prepare the Big Picture layout with `--play-installed-app-id APPID` and sign it. This requests one Play through Big Picture per installed package version after sign-in, subject to Steam's ownership and completed-install checks. Install the package without launching it, start the observer, and activate the app after `waiting-for-launch`. The observer saves filtered `unity-startup.txt` checkpoints when the matching launch reports a Unity player log. Those checkpoints include graphics selection, managed assembly reload, and large allocation errors.
+
 The deadline covers observation of the selected run. The JSON `outcome` distinguishes a first hosted frame, a process exit, a launch failure, or a timeout. The CLI exits with a nonzero status for an observation timeout or an argument, connection, or portal error. Terminal game outcomes are carried in JSON. `frame-observed` records a presentation milestone, which can include a black startup frame. Use the game on the console to verify input, audio, save behavior and return to the Library.
 
 ## Collect and measure

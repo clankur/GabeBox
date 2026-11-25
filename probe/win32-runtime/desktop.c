@@ -6,11 +6,24 @@
 #define ERROR_NOT_SUPPORTED 50u
 #define ERROR_INVALID_PARAMETER 87u
 #define ERROR_OUTOFMEMORY 14u
+#define ERROR_INSUFFICIENT_BUFFER 122u
+#define ERROR_DIRECTORY 267u
+#define INVALID_FILE_ATTRIBUTES 0xffffffffu
+#define FILE_ATTRIBUTE_DIRECTORY 0x10u
+#define FILE_ATTRIBUTE_REPARSE_POINT 0x400u
+#define ERROR_ACCESS_DENIED 5u
+#define KF_FLAG_DONT_VERIFY 0x4000u
+#define MAX_ENVIRONMENT_VALUE 32768u
 
 typedef unsigned short WCHAR;
 typedef unsigned long DWORD;
 typedef void *Module;
 typedef void (WINAPI *Procedure)(void);
+typedef struct {
+    DWORD data1;
+    unsigned short data2, data3;
+    unsigned char data4[8];
+} FolderId;
 
 IMPORT Module WINAPI LoadLibraryExW(const WCHAR *name, void *file, DWORD flags);
 IMPORT Module WINAPI GetModuleHandleW(const WCHAR *name);
@@ -22,11 +35,75 @@ IMPORT int WINAPI MultiByteToWideChar(unsigned int page, DWORD flags, const char
     WCHAR *output, int capacity);
 IMPORT void WINAPI SetLastError(DWORD error);
 IMPORT DWORD WINAPI GetLastError(void);
+IMPORT DWORD WINAPI GetEnvironmentVariableW(const WCHAR *name, WCHAR *value, DWORD capacity);
+IMPORT DWORD WINAPI GetFileAttributesW(const WCHAR *path);
+IMPORT void *WINAPI CoTaskMemAlloc(unsigned long long size);
+IMPORT void WINAPI CoTaskMemFree(void *memory);
 
 static Procedure SystemExport(const WCHAR *dll, const char *name) {
     Module module = GetModuleHandleW(dll);
     if (!module) module = LoadLibraryExW(dll, 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return module ? GetProcAddress(module, name) : 0;
+}
+
+static long FolderError(DWORD error) {
+    return (long)(0x80070000u | (error & 0xffffu));
+}
+
+static int IsLocalLow(const FolderId *id) {
+    static const FolderId localLow = {0xa520a1a4u, 0x1780, 0x4ff6, {0xbd, 0x18, 0x16, 0x73, 0x43, 0xc5, 0xaf, 0x16}};
+    if (!id || id->data1 != localLow.data1 || id->data2 != localLow.data2 || id->data3 != localLow.data3) return 0;
+    for (unsigned i = 0; i < sizeof(localLow.data4); ++i) {
+        if (id->data4[i] != localLow.data4[i]) return 0;
+    }
+    return 1;
+}
+
+static long CopyLocalLow(DWORD flags, DWORD capacity, WCHAR **output) {
+    if (capacity > MAX_ENVIRONMENT_VALUE) return FolderError(ERROR_INSUFFICIENT_BUFFER);
+    WCHAR *path = CoTaskMemAlloc((unsigned long long)capacity * sizeof(WCHAR));
+    if (!path) return FolderError(ERROR_OUTOFMEMORY);
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOCAL_LOW", path, capacity);
+    long result = 0;
+    if (!length) result = FolderError(GetLastError());
+    else if (length >= capacity) result = FolderError(ERROR_INSUFFICIENT_BUFFER);
+    else if (!(flags & KF_FLAG_DONT_VERIFY)) {
+        const DWORD attributes = GetFileAttributesW(path);
+        if (attributes == INVALID_FILE_ATTRIBUTES) result = FolderError(GetLastError());
+        else if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) result = FolderError(ERROR_ACCESS_DENIED);
+        else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) result = FolderError(ERROR_DIRECTORY);
+    }
+    if (result) CoTaskMemFree(path);
+    else *output = path;
+    return result;
+}
+
+long WINAPI XboxSHGetKnownFolderPath(const FolderId *id, DWORD flags, void *token, WCHAR **output) {
+    typedef long (WINAPI *KnownFolder)(const FolderId *, DWORD, void *, WCHAR **);
+    if (!output) return FolderError(ERROR_INVALID_PARAMETER);
+    *output = 0;
+    const DWORD previousError = GetLastError();
+    if (!token && !(flags & ~KF_FLAG_DONT_VERIFY) && IsLocalLow(id)) {
+        const DWORD capacity = GetEnvironmentVariableW(L"XBOX_WIN32_LOCAL_LOW", 0, 0);
+        if (capacity > 1) {
+            const long result = CopyLocalLow(flags, capacity, output);
+            SetLastError(previousError);
+            return result;
+        }
+    }
+    const KnownFolder native = (KnownFolder)SystemExport(L"shell32.dll", "SHGetKnownFolderPath");
+    SetLastError(previousError);
+    return native ? native(id, flags, token, output) : (long)0x80004001u;
+}
+
+long WINAPI XboxSHGetFolderPathW(void *window, int folder, void *token, DWORD mode, WCHAR *output) {
+    typedef long (WINAPI *FolderPath)(void *, int, void *, DWORD, WCHAR *);
+    if (!output) return FolderError(ERROR_INVALID_PARAMETER);
+    output[0] = 0;
+    const DWORD previousError = GetLastError();
+    const FolderPath native = (FolderPath)SystemExport(L"shell32.dll", "SHGetFolderPathW");
+    SetLastError(previousError);
+    return native ? native(window, folder, token, mode, output) : (long)0x80004001u;
 }
 
 static WCHAR *WideCopy(const char *text) {

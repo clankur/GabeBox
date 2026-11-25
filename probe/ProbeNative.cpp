@@ -2001,9 +2001,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::wstring shadowSource;
     std::wstring shadowArguments;
     std::wstring shadowGodotShaderCache;
+    std::wstring shadowPrefsKey;
     bool shadowTrace = false;
     bool shadowAccessibilityDisabled = false;
     bool shadowLocalCrashReports = false;
+    bool shadowLocalLow = false;
+    bool shadowHostedXInput = false;
     bool shadowDxgi = false;
     bool shadowWorkingDirectory = false;
     bool shadowOriginalExecutable = false;
@@ -2054,12 +2057,39 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 shadowFiles = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-files-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                auto playerPrefs = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-player-prefs-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                if (playerPrefs) {
+                    if ((co_await playerPrefs.GetBasicPropertiesAsync()).Size() > 2048)
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    shadowPrefsKey = co_await FileIO::ReadTextAsync(playerPrefs);
+                    while (shadowPrefsKey.ends_with(L'\r') || shadowPrefsKey.ends_with(L'\n')) shadowPrefsKey.pop_back();
+                    constexpr std::wstring_view prefix = L"Software\\";
+                    const auto split = shadowPrefsKey.find(L'\\', prefix.size());
+                    if (!shadowPrefsKey.starts_with(prefix) || split == std::wstring::npos ||
+                            split == prefix.size() || split - prefix.size() > 255 || split + 1 == shadowPrefsKey.size() ||
+                            shadowPrefsKey.size() - split - 1 > 255 || shadowPrefsKey.size() >= 512 ||
+                            shadowPrefsKey.find(L'\\', split + 1) != std::wstring::npos ||
+                            std::any_of(shadowPrefsKey.begin(), shadowPrefsKey.end(),
+                                [](wchar_t c) { return c < L' ' || c == 0x7f; }))
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                }
                 shadowSteamSdk = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-steam-sdk-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
                 shadowLocalCrashReports = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-crash-report-" + std::to_wstring(app) + L".txt")));
+                auto localLow = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-local-low-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                shadowLocalLow = static_cast<bool>(localLow);
+                if (localLow && (co_await localLow.GetBasicPropertiesAsync()).Size())
+                    co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 shadowDxgi = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-dxgi-" + std::to_wstring(app) + L".txt")));
+                auto hostedXInput = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
+                    L"steam-win32-host-xinput-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
+                shadowHostedXInput = static_cast<bool>(hostedXInput);
+                if (hostedXInput && (co_await hostedXInput.GetBasicPropertiesAsync()).Size())
+                    co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
                 shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -2083,13 +2113,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 if (!shadowRecipe && shadowRuntime.empty()) shadowRuntime = L"godot";
                 const bool unity = shadowRuntime == L"unity";
+                const bool unityDxgi = unity && shadowRenderer == L"d3d11";
                 if (shadowBuild.empty() || shadowBuild.size() > 20 ||
                         shadowBuild.find_first_not_of(L"0123456789") != std::wstring::npos ||
                         !steam_win32_stage::IsImageName(shadowExecutable, L".exe") ||
                         (!shadowRuntime.empty() && shadowRuntime != L"godot" && !unity) ||
                         (shadowRuntime.empty() && !shadowRenderer.empty()) ||
                         (unity && (!hostedSurfaceless || !shadowRecipe || !shadowFiles || !shadowTrace ||
-                            !shadowImage.empty() || shadowRenderer != L"opengl3" ||
+                            !shadowImage.empty() || (shadowRenderer != L"opengl3" && !unityDxgi) ||
+                            unityDxgi != shadowDxgi ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Unity.dll"))) ||
                         ((shadowFiles || !shadowImage.empty() || !shadowSource.empty()) && !shadowRecipe) ||
                         (!trace.empty() && (!shadowTrace || !shadowRecipe)) ||
@@ -2097,7 +2129,15 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32SteamDiscovery.dll"))) ||
                         (shadowLocalCrashReports && (!shadowRecipe ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32CrashReport.dll"))) ||
-                        (shadowDxgi && (!shadowRecipe || !shadowRuntime.empty() || !shadowRenderer.empty() ||
+                        (shadowLocalLow && (!shadowRecipe || (!shadowDxgi && shadowRenderer != L"opengl3") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Desktop.dll"))) ||
+                        (!shadowPrefsKey.empty() && (!shadowRecipe ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32PlayerPrefs.dll"))) ||
+                        (shadowHostedXInput && (!hostedSurfaceless || !shadowRecipe ||
+                            (!shadowDxgi && shadowRenderer != L"opengl3") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Input.dll"))) ||
+                        (shadowDxgi && (!shadowRecipe ||
+                            (!unityDxgi && (!shadowRuntime.empty() || !shadowRenderer.empty())) ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
                         ((shadowWorkingDirectory || shadowOriginalExecutable) && (!shadowRecipe ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
@@ -2107,7 +2147,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (!shadowImage.empty() && !steam_win32_stage::IsImageName(shadowImage, L".dll") &&
                             !steam_win32_stage::IsImageName(shadowImage, L".exe")) ||
                         shadowSource.size() > 260 ||
-                        (!shadowRenderer.empty() && shadowRenderer != L"d3d12" && shadowRenderer != L"opengl3") ||
+                        (!shadowRenderer.empty() && shadowRenderer != L"d3d12" && shadowRenderer != L"opengl3" && !unityDxgi) ||
                         location->app.buildId != shadowBuild) {
                     co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 }
@@ -2454,6 +2494,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     steam_win32_stage::StageFolder shadowStage;
     std::wstring shadowRoaming;
     std::wstring shadowCache;
+    std::wstring shadowLow;
+    std::wstring shadowPrefsHive;
     std::wstring shadowSteamSdkPath;
     std::wstring shadowOriginalExecutablePath;
     std::uint64_t shadowOwner = 0;
@@ -2476,6 +2518,18 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         auto cache = co_await profile.CreateFolderAsync(L"Local", CreationCollisionOption::OpenIfExists);
         shadowRoaming = roaming.Path().c_str();
         shadowCache = cache.Path().c_str();
+        if (shadowLocalLow) {
+            auto low = co_await profile.CreateFolderAsync(L"LocalLow", CreationCollisionOption::OpenIfExists);
+            shadowLow = low.Path().c_str();
+            steam_win32_stage::CheckNativeType(shadowLow, true);
+        }
+        if (!shadowPrefsKey.empty()) {
+            auto prefs = co_await profile.CreateFolderAsync(L"PlayerPrefs", CreationCollisionOption::OpenIfExists);
+            const std::wstring directory = prefs.Path().c_str();
+            steam_win32_stage::CheckNativeType(directory, true);
+            shadowPrefsHive = directory + L"\\registry.dat";
+            if (co_await prefs.TryGetItemAsync(L"registry.dat")) steam_win32_stage::CheckNativeType(shadowPrefsHive, false);
+        }
     }
     if (shadowRecipe) {
         co_await checkpoint(L"staging-compatibility");
@@ -2765,6 +2819,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             }
             if (!shadowArguments.empty()) command += L" " + shadowArguments;
             if (shadowRuntime == L"unity" && shadowTrace) {
+                if (shadowRenderer == L"d3d11") command += L" -force-d3d11";
                 const auto stamp = (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
                     launchTime.dwLowDateTime;
                 const auto log = L"steam-unity-" + std::to_wstring(app) + L"-" + std::to_wstring(stamp) + L".log";
@@ -2777,6 +2832,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             const auto appId = std::to_wstring(app);
             const std::pair<std::wstring, std::wstring> variables[] = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
+                {L"XBOX_WIN32_LOCAL_LOW", shadowLow},
+                {L"XBOX_WIN32_PREFS_KEY", shadowPrefsKey}, {L"XBOX_WIN32_PREFS_HIVE", shadowPrefsHive},
+                {L"XBOX_WIN32_HOST_XINPUT", shadowHostedXInput ? L"1" : L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
                 {L"XBOX_WIN32_INSTALL_ROOT", shadowTrace ? gameDirectory : std::wstring{}},
                 {L"XBOX_WIN32_WORKING_DIRECTORY", shadowWorkingDirectory ? gameDirectory : std::wstring{}},
@@ -2806,6 +2864,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 L"\r\nsteam_shadow_child=created\r\n";
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
             if (shadowLocalCrashReports) report += L"steam_shadow_crash_reporting=local\r\n";
+            if (shadowLocalLow) report += L"steam_shadow_local_low=account-scoped\r\n";
+            if (!shadowPrefsKey.empty()) report += L"steam_shadow_player_prefs=account-scoped\r\n";
+            if (shadowHostedXInput) report += L"steam_shadow_xinput=hosted-lookup\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
             if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");

@@ -2,7 +2,6 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
-import struct
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -15,6 +14,7 @@ prepare = builder["prepare_layout"]
 stage = builder["stage_client"]
 library_builder = runpy.run_path(str(ROOT / "probe" / "prepare-big-picture-library.py"))
 release_layout = library_builder["release_layout"]
+PE_FIXTURES = runpy.run_path(str(ROOT / "tests" / "test_pe_import_redirect.py"))
 MANIFEST = b"""<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
 <Identity Name="XboxPortabilityProbe.BigPicture" ProcessorArchitecture="x64" Publisher="CN=Xbox Portability Probe"/>
 <Applications><Application Id="App" StartPage="big-picture.html"/></Applications>
@@ -101,6 +101,18 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot replace"):
             stage_profiles(self.layout, ["413150=123"])
 
+    def test_configured_play_uses_the_one_shot_big_picture_marker(self):
+        self.layout.mkdir()
+        stage_play = library_builder["stage_configured_play"]
+        stage_play(self.layout, None)
+        for app_id in (0, 0x1000000, "1229490"):
+            with self.subTest(app_id=app_id), self.assertRaisesRegex(ValueError, "Steam AppID"):
+                stage_play(self.layout, app_id)
+        self.assertEqual(list(self.layout.iterdir()), [])
+        stage_play(self.layout, 1229490)
+        self.assertEqual({path.name: path.read_bytes() for path in self.layout.iterdir()},
+                         {"steam-launch-via-big-picture.txt": b"1229490\n"})
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
@@ -110,11 +122,9 @@ class BigPicturePackageTests(unittest.TestCase):
         recipe = "steam-win32-shadow-1145360.xwp"
         companions = "steam-win32-files-1145360.txt"
         (profile / marker).write_text("10929685\nHades.exe\n\n\nEngineWin64s.dll\nx64\nloader-trace\n")
-        (profile / recipe).write_bytes(
-            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
+        (profile / recipe).write_bytes(PE_FIXTURES["recipe_fixture"](trimmed=True))
         extra = "steam-win32-shadow-1145360-launcher.xwp"
-        (profile / extra).write_bytes(
-            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / extra).write_bytes(PE_FIXTURES["recipe_fixture"]())
         (profile / companions).write_text("Hades.exe\tlauncher\n")
         (profile / "Hades.exe").write_bytes(b"fixture game payload that must not be packaged")
         template = self.work / "runtime.appx"
@@ -237,6 +247,134 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / dynamic_companions).read_bytes(), b"")
         self.assertEqual((self.layout / nested_recipe).read_bytes(), (profile / nested_recipe).read_bytes())
         self.assertFalse((self.layout / nested_runtime).exists())
+
+        (profile / marker).write_text("10929685\nGame.exe\nd3d11\nunity\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 requires the DXGI marker"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        (profile / dxgi_marker).touch()
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 launch path"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+
+        current_template = self.work / "unity-d3d11-runtime.appx"
+        with ZipFile(template) as original, ZipFile(current_template, "w") as updated:
+            for name in original.namelist():
+                data = original.read(name)
+                if name == "ProbeNative.dll":
+                    data += " -force-d3d11".encode("utf-16le")
+                updated.writestr(name, data)
+        (self.layout / "steam-sdl-surfaceless-1145360.txt").write_text("1")
+        with self.assertRaisesRegex(ValueError, "matching hosted launcher"):
+            stage_trials(self.layout, [f"1145360={profile}"], current_template)
+        (self.layout / "steam-sdl-surfaceless-1145360.txt").write_text("10929685")
+        stage_trials(self.layout, [f"1145360={profile}"], current_template)
+        self.assertEqual((self.layout / dxgi_marker).read_bytes(), b"")
+        self.assertEqual((self.layout / "XboxWin32Unity.dll").read_bytes(), b"runtime fixture")
+        self.assertEqual((self.layout / "XboxWin32Dxgi.dll").read_bytes(), b"runtime fixture")
+
+        local_low_marker = "steam-win32-local-low-1145360.txt"
+        (profile / local_low_marker).write_bytes(b"unexpected path")
+        with self.assertRaisesRegex(ValueError, "LocalLow marker requires an empty file"):
+            stage_trials(self.layout, [f"1145360={profile}"], current_template)
+        (profile / local_low_marker).write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "scoped LocalLow support"):
+            stage_trials(self.layout, [f"1145360={profile}"], current_template)
+        local_low_template = self.work / "local-low-runtime.appx"
+        with ZipFile(current_template) as original, ZipFile(local_low_template, "w") as updated:
+            for name in original.namelist():
+                data = original.read(name)
+                if name == "XboxWin32Desktop.dll":
+                    data = PE_FIXTURES["export_fixture"]("SHGetKnownFolderPath")
+                if name in ("ProbeNative.dll", "XboxWin32Desktop.dll", "XboxWin32Dxgi.dll", "XboxWin32Window.dll"):
+                    data += "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le")
+                updated.writestr(name, data)
+        stage_trials(self.layout, [f"1145360={profile}"], local_low_template)
+        self.assertEqual((self.layout / local_low_marker).read_bytes(), b"")
+
+        for adapter, ordinal in (("XboxWin32AllocationTrace.dll", None), ("XboxWin32HostedDisplay.dll", 189)):
+            with self.subTest(adapter=adapter):
+                self.assertFalse((self.layout / adapter).exists())
+                (profile / engine_recipe).write_bytes(PE_FIXTURES["recipe_fixture"](adapter, ordinal=ordinal))
+                with self.assertRaisesRegex(ValueError, "missing Win32 runtime adapter"):
+                    stage_trials(self.layout, [f"1145360={profile}"], local_low_template)
+                stale_template = self.work / (adapter + ".appx")
+                stale = PE_FIXTURES["export_fixture"]("Other")
+                with ZipFile(local_low_template) as old, ZipFile(stale_template, "w") as updated:
+                    for name in old.namelist():
+                        updated.writestr(name, old.read(name))
+                    updated.writestr(adapter, stale)
+                with self.assertRaisesRegex(ValueError, "missing export"):
+                    stage_trials(self.layout, [f"1145360={profile}"], stale_template)
+                binary = PE_FIXTURES["export_fixture"](None, ordinal) if ordinal else PE_FIXTURES["export_fixture"]()
+                with ZipFile(local_low_template, "a") as updated:
+                    updated.writestr(adapter, binary)
+                stage_trials(self.layout, [f"1145360={profile}"], local_low_template)
+                self.assertEqual((self.layout / adapter).read_bytes(), binary)
+
+        xinput_marker = "steam-win32-host-xinput-1145360.txt"
+        (profile / xinput_marker).write_bytes(b"unexpected configuration")
+        with self.assertRaisesRegex(ValueError, "XInput marker requires an empty file"):
+            stage_trials(self.layout, [f"1145360={profile}"], local_low_template)
+        (profile / xinput_marker).write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "hosted XInput lookup support"):
+            stage_trials(self.layout, [f"1145360={profile}"], local_low_template)
+        xinput_template = self.work / "xinput-runtime.appx"
+        for complete in (False, True):
+            with ZipFile(local_low_template) as original, ZipFile(xinput_template, "w") as updated:
+                for name in original.namelist():
+                    data = original.read(name)
+                    if name in ("ProbeNative.dll", "XboxWin32Dxgi.dll"):
+                        data += "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le")
+                    if name == "XboxWin32Input.dll":
+                        data = PE_FIXTURES["export_fixture"]("XInputGetState", aliases=(
+                            "XInputGetCapabilities", "XInputSetState" if complete else "Other"))
+                        data += b"XInputSetState\0"
+                    updated.writestr(name, data)
+            if not complete:
+                with self.assertRaisesRegex(ValueError, "missing export XboxWin32Input.dll!XInputSetState"):
+                    stage_trials(self.layout, [f"1145360={profile}"], xinput_template)
+        stage_trials(self.layout, [f"1145360={profile}"], xinput_template)
+        self.assertEqual((self.layout / xinput_marker).read_bytes(), b"")
+
+    def test_player_prefs_profile_requires_scoped_key_both_bindings_and_matching_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "prefs-profile"
+        profile.mkdir()
+        (profile / "steam-win32-shadow-1145360.txt").write_text("10929685\nGame.exe\n")
+        recipe = profile / "steam-win32-shadow-1145360.xwp"
+        recipe.write_bytes(PE_FIXTURES["recipe_fixture"]())
+        marker = profile / "steam-win32-player-prefs-1145360.txt"
+        marker.write_text("Software\\Company\\Title\\Other\n")
+        template = self.work / "prefs-runtime.appx"
+        stage_trials = library_builder["stage_win32_trial_profiles"]
+        with self.assertRaisesRegex(ValueError, "preference key"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+        marker.write_text("Software\\Company\\Title\n")
+        with self.assertRaisesRegex(ValueError, "both registry bindings"):
+            stage_trials(self.layout, [f"1145360={profile}"], template)
+
+        adapter = "XboxWin32PlayerPrefs.dll"
+        pe = PE_FIXTURES["tool"]
+        image = PE_FIXTURES["fixture"]()
+        image[0x292:0x2a0] = b"RegCreateKeyW\0"
+        image[0x2a2:0x2b0] = b"RegOpenKeyExW\0"
+        rules = pe["parse_rules"]({"ole32.dll": {"RegCreateKeyW": adapter, "RegOpenKeyExW": adapter}})
+        recipe.write_bytes(pe["patch_recipe"](image, *pe["PeImage"](image).redirect(rules)))
+
+        for configured in (False, True):
+            with ZipFile(template, "w") as package:
+                package.writestr("AppxManifest.xml", MANIFEST.replace(b"XboxPortabilityProbe.BigPicture",
+                                  b"XboxPortabilityProbe.ChildProcess.SteamCore"))
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    package.writestr(name, b"fixture")
+                hints = "XBOX_WIN32_PREFS_KEY\0XBOX_WIN32_PREFS_HIVE\0".encode("utf-16le")
+                package.writestr("ProbeNative.dll", hints if configured else b"older runtime")
+                package.writestr(adapter, PE_FIXTURES["export_fixture"]("RegCreateKeyW", aliases=("RegOpenKeyExW",)))
+            if not configured:
+                with self.assertRaisesRegex(ValueError, "scoped PlayerPrefs support"):
+                    stage_trials(self.layout, [f"1145360={profile}"], template)
+        stage_trials(self.layout, [f"1145360={profile}"], template)
+        self.assertTrue((self.layout / adapter).is_file())
+        self.assertEqual((self.layout / marker.name).read_text(), "Software\\Company\\Title")
 
     def test_changed_cached_archive_and_manifest_leave_no_partial_layout(self):
         self.archive.write_bytes(b"x" * self.archive.stat().st_size)

@@ -1,0 +1,6 @@
+{
+  "winmm.dll": {
+    "timeSetEvent": "XboxWin32Timer.dll",
+    "timeKillEvent": "XboxWin32Timer.dll"
+  }
+}
