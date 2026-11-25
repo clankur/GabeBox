@@ -17,13 +17,33 @@ Forked from [touchgadget/mouse2xac](https://github.com/touchgadget/mouse2xac) at
 
 ## Hardware
 
-- Adafruit Feather RP2040 with USB Type-A Host
-- Xbox Adaptive Controller, powered from a 5 V / 2 A supply
-- A USB mouse that supports the boot protocol (nearly all do)
+| Item | Approximate price |
+| --- | --- |
+| Adafruit Feather RP2040 with USB Type-A Host | $12–15 |
+| Xbox Adaptive Controller (XAC) | $100 |
+| A USB mouse that supports the boot protocol (nearly all do) | — |
+| Optional: 5 V / 2 A barrel-jack supply for the XAC | — |
 
 Plug the mouse into the Feather's USB-A port and the Feather's USB-C port into one of the
 XAC's USB ports. Upstream recommends connecting the mouse before connecting the Feather
 to the XAC.
+
+### Power
+
+The Feather and mouse are powered from the XAC's USB port, and the XAC is powered by
+its internal battery or its USB-C cable. The XAC's 5 V / 2 A barrel jack is meant for
+USB accessories that need extra power. A Feather and an ordinary mouse should draw only
+about 100 mA, so try first without the barrel supply:
+
+1. **One cable.** Connect the XAC to the console with a USB-C cable. The console
+   charges the XAC while it runs.
+2. **No cables.** Run the XAC wirelessly on its battery. Expect shorter battery life,
+   because the battery also powers the Feather and mouse.
+
+Upstream mouse2xac recommends the barrel supply, without giving a reason. Whether the
+XAC's USB ports power the Feather without it, and whether the XAC works wired to a
+Series X, still have to be checked on hardware. Fall back to the barrel supply if the
+Feather browns out or the mouse fails to enumerate.
 
 ## Build and flash
 
