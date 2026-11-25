@@ -19,7 +19,7 @@ class CloudResolveUploadTests(unittest.TestCase):
         text = body.decode()
         self.assertTrue(text.startswith(f'--{BOUNDARY}\r\n'))
         self.assertIn('filename="steam-cloud-resolve-2868840.txt"', text)
-        self.assertIn('\r\n\r\ncloud\r\n', text)
+        self.assertIn('\r\n\r\ncloud\n\r\n', text)
         self.assertTrue(text.endswith(f'--{BOUNDARY}--\r\n'))
 
     def test_rejects_anything_but_a_known_choice(self):
@@ -36,7 +36,7 @@ class CloudResolveUploadTests(unittest.TestCase):
         method, path, body, headers = portal.request.call_args.args
         self.assertEqual(method, 'POST')
         self.assertIn('extract=false', path)
-        self.assertIn(b'\r\n\r\nlocal\r\n', body)
+        self.assertIn(b'\r\n\r\nlocal\n\r\n', body)
         self.assertTrue(headers['Content-Type'].startswith('multipart/form-data; boundary='))
         with patch.object(cli, 'read_probe_report', return_value='cloud'):
             with self.assertRaises(ValueError):

@@ -772,7 +772,9 @@ def cloud_resolve_upload(app_id, keep, boundary):
     filename = f'steam-cloud-resolve-{app_id}.txt'
     body = (f'--{boundary}\r\n'
             f'Content-Disposition: form-data; name="{filename}"; filename="{filename}"\r\n'
-            f'Content-Type: text/plain\r\n\r\n{keep}\r\n'
+            # The file ends in a newline: the CRLF before the boundary belongs to the delimiter,
+            # and read_probe_report treats a file without a final newline as still being written.
+            f'Content-Type: text/plain\r\n\r\n{keep}\n\r\n'
             f'--{boundary}--\r\n').encode()
     return filename, body
 
