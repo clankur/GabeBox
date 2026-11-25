@@ -1,0 +1,15 @@
+{
+  "build_id": "22957324",
+  "required_adapters": [
+    "XboxWin32Desktop.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32HostedDisplay.dll",
+    "XboxWin32Input.dll",
+    "XboxWin32LoaderTrace.dll",
+    "XboxWin32PlayerPrefs.dll",
+    "XboxWin32Timer.dll",
+    "XboxWin32Unity.dll",
+    "XboxWin32Window.dll",
+    "XboxWin32XInput910.dll"
+  ]
+}

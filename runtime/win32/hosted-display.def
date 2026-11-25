@@ -1,0 +1,5 @@
+LIBRARY XboxWin32HostedDisplay.dll
+EXPORTS
+    GetDisplayConfigBufferSizes=XboxHostedDisplaySizes
+    QueryDisplayConfig=XboxHostedQueryDisplay
+    DisplayConfigGetDeviceInfo=XboxHostedDisplayDeviceInfo

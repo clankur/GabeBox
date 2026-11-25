@@ -16,6 +16,18 @@ typedef struct WindowClass {
     WCHAR name[256];
 } WindowClass;
 
+typedef struct WindowSend {
+    struct WindowSend *previous, *next;
+    HWND window;
+    UINT message;
+    WPARAM wparam;
+    LPARAM lparam;
+    CONDITION_VARIABLE completed;
+    BOOL queued, done;
+    LRESULT result;
+    DWORD error;
+} WindowSend;
+
 static volatile LONG windowThread;
 static WindowClass classes[CLASS_COUNT];
 static XboxWindow windows[WINDOW_COUNT];
@@ -23,6 +35,14 @@ static SRWLOCK windowGeometryLock = SRWLOCK_INIT;
 static ULONG_PTR nextHandle = WINDOW_HANDLE_BASE + 1;
 static MSG messages[MESSAGE_COUNT];
 static UINT messageCount;
+static BOOL quitPending;
+static int quitCode;
+static INIT_ONCE wakeInitialized = INIT_ONCE_STATIC_INIT;
+static HANDLE windowWake;
+static HANDLE sendWake;
+static SRWLOCK sendLock = SRWLOCK_INIT;
+static WindowSend *firstSend, *lastSend;
+static UINT sendCount;
 static void* volatile hostClose;
 static volatile LONG hostExitChecked;
 static void* volatile foregroundWindow;
@@ -274,6 +294,25 @@ static FARPROC NativeWindowProcedure(LPCSTR name) {
     return procedure;
 }
 
+static BOOL CALLBACK InitWindowWake(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once;
+    (void)parameter;
+    (void)context;
+    windowWake = CreateEventExW(NULL, NULL, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+    if (!windowWake) return FALSE;
+    sendWake = CreateEventExW(NULL, NULL, CREATE_EVENT_MANUAL_RESET, EVENT_MODIFY_STATE | SYNCHRONIZE);
+    if (sendWake) return TRUE;
+    const DWORD error = GetLastError();
+    CloseHandle(windowWake);
+    windowWake = NULL;
+    SetLastError(error);
+    return FALSE;
+}
+
+static HANDLE WindowWake(void) {
+    return InitOnceExecuteOnce(&wakeInitialized, InitWindowWake, NULL, NULL) ? windowWake : NULL;
+}
+
 HWND WINAPI XboxGetForegroundWindow(void) {
     const HWND foreground = VirtualForegroundWindow();
     if (foreground) return foreground;
@@ -287,6 +326,17 @@ HWND WINAPI XboxGetActiveWindow(void) {
     typedef HWND (WINAPI *Native)(void);
     Native native = (Native)(void *)NativeWindowProcedure("GetActiveWindow");
     return native ? native() : NULL;
+}
+
+HWND WINAPI XboxGetParent(HWND handle) {
+    if (IsVirtualWindowHandle(handle)) {
+        // CreateWindowExW only accepts parentless hosted windows.
+        (void)XboxFindWindow(handle);
+        return NULL;
+    }
+    typedef HWND (WINAPI *Native)(HWND);
+    Native native = (Native)(void *)NativeWindowProcedure("GetParent");
+    return native ? native(handle) : NULL;
 }
 
 BOOL WINAPI XboxSetForegroundWindow(HWND handle) {
@@ -454,7 +504,7 @@ HWND WINAPI XboxCreateWindowExW(DWORD exStyle, LPCWSTR name, LPCWSTR title, DWOR
     const RECT bounds = {x, y, x + width, y + height};
     AcquireSRWLockExclusive(&windowGeometryLock);
     *window = (XboxWindow){handle, entry->procedure, classInstance, bounds, style, exStyle, 0,
-        (ATOM)(entry - classes + 1), 0, 0, FALSE};
+        (ATOM)(entry - classes + 1), 0, 0, FALSE, NULL, NULL, FALSE};
     ReleaseSRWLockExclusive(&windowGeometryLock);
     CREATESTRUCTW create = {data, classInstance, menu, parent, height, width, y, x, (LONG)style, title, name, exStyle};
     XboxWindowTrace("win32_window_create=nccreate\n");
@@ -501,10 +551,18 @@ BOOL WINAPI XboxDestroyWindow(HWND handle) {
 }
 
 LRESULT WINAPI XboxDefWindowProcW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
-    (void)wparam;
-    (void)lparam;
     if (message == WM_NCCREATE || message == WM_NCACTIVATE) return TRUE;
     if (message == WM_CLOSE) XboxDestroyWindow(handle);
+    if ((message == WM_SETICON || message == WM_GETICON) &&
+            (wparam == ICON_BIG || wparam == ICON_SMALL || (message == WM_GETICON && wparam == ICON_SMALL2))) {
+        XboxWindow *window = XboxFindWindow(handle);
+        if (window) {
+            HICON *icon = wparam == ICON_BIG ? &window->largeIcon : &window->smallIcon;
+            const HICON previous = *icon;
+            if (message == WM_SETICON) *icon = (HICON)lparam;
+            return (LRESULT)previous;
+        }
+    }
     return 0;
 }
 
@@ -593,6 +651,16 @@ BOOL WINAPI XboxShowWindow(HWND handle, int command) {
         else window->style &= ~WS_VISIBLE;
         window->procedure(handle, WM_SHOWWINDOW, showing, 0);
         if (!showing && window->handle == handle && !(window->style & WS_VISIBLE)) ClearWindowActivation(handle);
+        // Windows sends WM_SIZE and WM_MOVE the first time a window is shown; engines such as Unity
+        // take their render size from them.
+        if (showing && window->handle == handle && !window->destroying && !window->sizeMoveSent) {
+            window->sizeMoveSent = TRUE;
+            const RECT bounds = window->bounds;
+            window->procedure(handle, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(bounds.right - bounds.left, bounds.bottom - bounds.top));
+            if (window->handle == handle) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(bounds.left, bounds.top));
+            if (window->handle != handle) return previous;
+        }
     }
     if (activationChange == change && window->handle == handle && !window->destroying &&
             (window->style & WS_VISIBLE) && (command == SW_SHOW || command == SW_SHOWNORMAL ||
@@ -623,12 +691,14 @@ BOOL WINAPI XboxSetWindowPos(HWND handle, HWND insertAfter, int x, int y, int wi
     AcquireSRWLockExclusive(&windowGeometryLock);
     window->bounds = (RECT){x, y, x + width, y + height};
     ReleaseSRWLockExclusive(&windowGeometryLock);
-    if (width != previous.right - previous.left || height != previous.bottom - previous.top) {
-        XboxResizeCurrentContext(window);
+    // As DefWindowProc does for WM_WINDOWPOSCHANGED, report size and position unless the caller excluded them.
+    if (width != previous.right - previous.left || height != previous.bottom - previous.top) XboxResizeCurrentContext(window);
+    if (!(flags & SWP_NOSIZE)) {
+        window->sizeMoveSent = TRUE;
         window->procedure(handle, WM_SIZE, SIZE_RESTORED, MAKELPARAM(width, height));
     }
     if (window->handle != handle) return FALSE;
-    if (x != previous.left || y != previous.top) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(x, y));
+    if (!(flags & SWP_NOMOVE)) window->procedure(handle, WM_MOVE, 0, MAKELPARAM(x, y));
     if (window->handle != handle) return FALSE;
     if (flags & SWP_SHOWWINDOW) XboxShowWindow(handle, (flags & SWP_NOACTIVATE) ? SW_SHOWNA : SW_SHOW);
     if (flags & SWP_HIDEWINDOW) XboxShowWindow(handle, SW_HIDE);
@@ -664,6 +734,26 @@ LONG_PTR WINAPI XboxSetWindowLongPtrW(HWND handle, int index, LONG_PTR value) {
     default: SetLastError(ERROR_INVALID_INDEX); return 0;
     }
     return previous;
+}
+
+LONG WINAPI XboxGetWindowLongA(HWND handle, int index) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LONG (WINAPI *Native)(HWND, int);
+        Native native = (Native)(void *)NativeWindowProcedure("GetWindowLongA");
+        return native ? native(handle, index) : 0;
+    }
+    if (index != GWL_STYLE && index != GWL_EXSTYLE) { SetLastError(ERROR_INVALID_INDEX); return 0; }
+    return (LONG)XboxGetWindowLongPtrW(handle, index);
+}
+
+LONG WINAPI XboxSetWindowLongA(HWND handle, int index, LONG value) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LONG (WINAPI *Native)(HWND, int, LONG);
+        Native native = (Native)(void *)NativeWindowProcedure("SetWindowLongA");
+        return native ? native(handle, index, value) : 0;
+    }
+    if (index != GWL_STYLE && index != GWL_EXSTYLE) { SetLastError(ERROR_INVALID_INDEX); return 0; }
+    return (LONG)XboxSetWindowLongPtrW(handle, index, value);
 }
 
 BOOL WINAPI XboxPostMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -738,6 +828,161 @@ static void PollHostedPointer(void) {
     InterlockedExchange(&mailbox->input_ack, serial);
 }
 
+/* Keyboard, text and pointer input that a hosted SDL window read from the host
+   mailbox, delivered as the messages a desktop window would receive. */
+typedef struct HostedKey {
+    BYTE usage, vk;
+    USHORT scan; /* Set-1 scancode; 0xE0xx marks an extended key. */
+} HostedKey;
+
+static const HostedKey hostedKeys[] = {
+    {40, VK_RETURN, 0x1C}, {41, VK_ESCAPE, 0x01}, {42, VK_BACK, 0x0E}, {43, VK_TAB, 0x0F},
+    {44, VK_SPACE, 0x39}, {45, VK_OEM_MINUS, 0x0C}, {46, VK_OEM_PLUS, 0x0D}, {47, VK_OEM_4, 0x1A},
+    {48, VK_OEM_6, 0x1B}, {49, VK_OEM_5, 0x2B}, {50, VK_OEM_5, 0x2B}, {51, VK_OEM_1, 0x27},
+    {52, VK_OEM_7, 0x28}, {53, VK_OEM_3, 0x29}, {54, VK_OEM_COMMA, 0x33}, {55, VK_OEM_PERIOD, 0x34},
+    {56, VK_OEM_2, 0x35}, {57, VK_CAPITAL, 0x3A}, {68, VK_F11, 0x57}, {69, VK_F12, 0x58},
+    {70, VK_SNAPSHOT, 0xE037}, {71, VK_SCROLL, 0x46}, {72, VK_PAUSE, 0x45}, {73, VK_INSERT, 0xE052},
+    {74, VK_HOME, 0xE047}, {75, VK_PRIOR, 0xE049}, {76, VK_DELETE, 0xE053}, {77, VK_END, 0xE04F},
+    {78, VK_NEXT, 0xE051}, {79, VK_RIGHT, 0xE04D}, {80, VK_LEFT, 0xE04B}, {81, VK_DOWN, 0xE050},
+    {82, VK_UP, 0xE048}, {83, VK_NUMLOCK, 0xE045}, {84, VK_DIVIDE, 0xE035}, {85, VK_MULTIPLY, 0x37},
+    {86, VK_SUBTRACT, 0x4A}, {87, VK_ADD, 0x4E}, {88, VK_RETURN, 0xE01C}, {89, VK_NUMPAD1, 0x4F},
+    {90, VK_NUMPAD2, 0x50}, {91, VK_NUMPAD3, 0x51}, {92, VK_NUMPAD4, 0x4B}, {93, VK_NUMPAD5, 0x4C},
+    {94, VK_NUMPAD6, 0x4D}, {95, VK_NUMPAD7, 0x47}, {96, VK_NUMPAD8, 0x48}, {97, VK_NUMPAD9, 0x49},
+    {98, VK_NUMPAD0, 0x52}, {99, VK_DECIMAL, 0x53}, {100, VK_OEM_102, 0x56}, {101, VK_APPS, 0xE05D},
+    {224, VK_CONTROL, 0x1D}, {225, VK_SHIFT, 0x2A}, {226, VK_MENU, 0x38}, {227, VK_LWIN, 0xE05B},
+    {228, VK_CONTROL, 0xE01D}, {229, VK_SHIFT, 0x36}, {230, VK_MENU, 0xE038}, {231, VK_RWIN, 0xE05C},
+};
+static BYTE hostedModifiers; /* usages 224-231 held, bit (usage - 224) */
+static WPARAM hostedButtons;
+
+/* Maps a USB HID keyboard usage (SDL scancode) to a virtual key and set-1 scancode. */
+static BOOL HostedKeyCode(UINT usage, UINT *vk, UINT *scan) {
+    static const BYTE letters[26] = {0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                                     0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C};
+    if (usage >= 4 && usage <= 29) {
+        *vk = 'A' + usage - 4;
+        *scan = letters[usage - 4];
+    } else if (usage >= 30 && usage <= 39) {
+        *vk = usage == 39 ? '0' : '1' + usage - 30;
+        *scan = 0x02 + usage - 30;
+    } else if (usage >= 58 && usage <= 67) {
+        *vk = VK_F1 + usage - 58;
+        *scan = 0x3B + usage - 58;
+    } else if (usage >= 104 && usage <= 115) {
+        *vk = VK_F13 + usage - 104;
+        *scan = 0;
+    } else {
+        for (UINT i = 0; i < ARRAYSIZE(hostedKeys); ++i) {
+            if (hostedKeys[i].usage != usage) continue;
+            *vk = hostedKeys[i].vk;
+            *scan = hostedKeys[i].scan;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL QueueHostedInput(HWND handle, UINT message, WPARAM wparam, LPARAM lparam, POINT screen) {
+    if (!XboxFindWindow(handle)) return FALSE;
+    if (messageCount == MESSAGE_COUNT) {
+        SetLastError(ERROR_NOT_ENOUGH_QUOTA);
+        return FALSE;
+    }
+    messages[messageCount++] = (MSG){handle, message, wparam, lparam, GetTickCount(), screen};
+    return TRUE;
+}
+
+static POINT HostedCursor(void) {
+    AcquireSRWLockShared(&windowGeometryLock);
+    const POINT screen = hostPointerScreen;
+    ReleaseSRWLockShared(&windowGeometryLock);
+    return screen;
+}
+
+/* Keyboard messages go to the focused window, as on the desktop. */
+static HWND HostedKeyboardWindow(HWND window) {
+    return focusWindow && XboxFindWindow(focusWindow) ? focusWindow : window;
+}
+
+void XboxPostHostedKey(HWND window, UINT usage, BOOL down, BOOL repeat) {
+    UINT vk, scan;
+    if (!HostedKeyCode(usage, &vk, &scan)) return;
+    const DWORD error = GetLastError();
+    if (usage >= 224 && usage <= 231) {
+        if (down) hostedModifiers |= (BYTE)(1u << (usage - 224));
+        else hostedModifiers &= (BYTE)~(1u << (usage - 224));
+    }
+    const BOOL alt = (hostedModifiers & 0x44) != 0, control = (hostedModifiers & 0x11) != 0;
+    /* Alt, F10 and keys pressed with Alt alone are system keys. */
+    const BOOL system = (vk == VK_MENU || vk == VK_F10 || alt) && !control;
+    const UINT message = system ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP);
+    LPARAM lparam = 1 | (LPARAM)(scan & 0xFF) << 16;
+    if (scan & 0xE000) lparam |= (LPARAM)1 << 24;
+    if (alt) lparam |= (LPARAM)1 << 29;
+    if (!down || repeat) lparam |= (LPARAM)1 << 30;
+    if (!down) lparam |= (LPARAM)1 << 31;
+    QueueHostedInput(HostedKeyboardWindow(window), message, vk, (LPARAM)(DWORD)lparam, HostedCursor());
+    SetLastError(error);
+}
+
+void XboxPostHostedText(HWND window, const char *utf8) {
+    const DWORD error = GetLastError();
+    const HWND target = HostedKeyboardWindow(window);
+    const POINT screen = HostedCursor();
+    const BYTE *text = (const BYTE *)utf8;
+    while (text && *text) {
+        UINT cp = *text++, extra = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+        if (extra) cp &= 0x3F >> extra;
+        else if (cp >= 0x80) continue;
+        for (; extra && (*text & 0xC0) == 0x80; --extra) cp = cp << 6 | (*text++ & 0x3F);
+        if (extra || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) continue;
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            QueueHostedInput(target, WM_CHAR, 0xD800 | cp >> 10, 1, screen);
+            cp = 0xDC00 | (cp & 0x3FF);
+        }
+        QueueHostedInput(target, WM_CHAR, cp, 1, screen);
+    }
+    SetLastError(error);
+}
+
+/* x and y are client pixels. WM_MOUSEWHEEL takes its wheel delta in units of WHEEL_DELTA. */
+void XboxPostHostedPointer(HWND window, UINT message, LONG x, LONG y, int wheel) {
+    const DWORD error = GetLastError();
+    if (!hostPointerConfigured) OpenHostedPointer();
+    RECT bounds;
+    /* With hosted DXGI the window adapter reads the pointer from the mailbox itself. */
+    if (hostPointerMailbox || !HostedWindowBounds(window, &bounds)) {
+        SetLastError(error);
+        return;
+    }
+    const POINT screen = {bounds.left + x, bounds.top + y};
+    switch (message) {
+    case WM_LBUTTONDOWN: hostedButtons |= MK_LBUTTON; break;
+    case WM_LBUTTONUP: hostedButtons &= ~(WPARAM)MK_LBUTTON; break;
+    case WM_RBUTTONDOWN: hostedButtons |= MK_RBUTTON; break;
+    case WM_RBUTTONUP: hostedButtons &= ~(WPARAM)MK_RBUTTON; break;
+    case WM_MBUTTONDOWN: hostedButtons |= MK_MBUTTON; break;
+    case WM_MBUTTONUP: hostedButtons &= ~(WPARAM)MK_MBUTTON; break;
+    default: break;
+    }
+    WPARAM keys = hostedButtons;
+    if (hostedModifiers & 0x22) keys |= MK_SHIFT;
+    if (hostedModifiers & 0x11) keys |= MK_CONTROL;
+    AcquireSRWLockExclusive(&windowGeometryLock);
+    hostPointerScreen = screen;
+    hostPointerWindow = window;
+    ReleaseSRWLockExclusive(&windowGeometryLock);
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+        QueueHostedInput(window, message, keys | (WPARAM)(WORD)(SHORT)(wheel * WHEEL_DELTA) << 16,
+            MAKELPARAM(screen.x, screen.y), screen);
+    } else {
+        QueueHostedInput(window, message, keys, MAKELPARAM(x, y), screen);
+    }
+    SetLastError(error);
+}
+
 static BOOL ReadCursorPosition(LPPOINT position, const char *nativeName) {
     if (!position) {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -754,9 +999,19 @@ static BOOL ReadCursorPosition(LPPOINT position, const char *nativeName) {
     const ReadCursor native = user ? (ReadCursor)(void *)GetProcAddress(user, nativeName) : NULL;
     if (native) {
         SetLastError(error);
-        return native(position);
+        if (native(position)) return TRUE;
+        if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) return FALSE;
     }
-    SetLastError(ERROR_PROC_NOT_FOUND);
+    // Xbox User32 has no desktop cursor. Before hosted pointer input arrives, a hosted foreground
+    // window reports the centre of its client area, as a desktop cursor would always have a position.
+    const HWND foreground = VirtualForegroundWindow();
+    RECT bounds;
+    if (foreground && HostedWindowBounds(foreground, &bounds)) {
+        *position = (POINT){bounds.left + (bounds.right - bounds.left) / 2, bounds.top + (bounds.bottom - bounds.top) / 2};
+        SetLastError(error);
+        return TRUE;
+    }
+    SetLastError(native ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_PROC_NOT_FOUND);
     return FALSE;
 }
 
@@ -768,8 +1023,153 @@ BOOL WINAPI XboxGetPhysicalCursorPos(LPPOINT position) {
     return ReadCursorPosition(position, "GetPhysicalCursorPos");
 }
 
-BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+/* The sender owns this request until the window thread completes it. */
+static void RemoveSend(WindowSend *send) {
+    if (send->previous) send->previous->next = send->next;
+    else firstSend = send->next;
+    if (send->next) send->next->previous = send->previous;
+    else lastSend = send->previous;
+    --sendCount;
+    send->queued = FALSE;
+    if (!firstSend) ResetEvent(sendWake);
+}
+
+static void DispatchSentMessages(void) {
+    const DWORD previousError = GetLastError();
+    for (;;) {
+        AcquireSRWLockExclusive(&sendLock);
+        WindowSend *send = firstSend;
+        if (send) RemoveSend(send);
+        ReleaseSRWLockExclusive(&sendLock);
+        if (!send) break;
+
+        XboxWindow *window = XboxFindWindow(send->window);
+        LRESULT result = 0;
+        DWORD error = ERROR_SUCCESS;
+        if (window) result = window->procedure(send->window, send->message, send->wparam, send->lparam);
+        else error = GetLastError();
+
+        AcquireSRWLockExclusive(&sendLock);
+        send->result = result;
+        send->error = error;
+        send->done = TRUE;
+        WakeConditionVariable(&send->completed);
+        ReleaseSRWLockExclusive(&sendLock);
+    }
+    SetLastError(previousError);
+}
+
+LRESULT WINAPI XboxSendMessageW(HWND handle, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (!IsVirtualWindowHandle(handle)) {
+        typedef LRESULT (WINAPI *Native)(HWND, UINT, WPARAM, LPARAM);
+        Native native = (Native)(void *)NativeWindowProcedure("SendMessageW");
+        return native ? native(handle, message, wparam, lparam) : 0;
+    }
+    const LONG owner = InterlockedCompareExchange(&windowThread, 0, 0);
+    if (!owner) { SetLastError(ERROR_INVALID_WINDOW_HANDLE); return 0; }
+    if (owner == (LONG)GetCurrentThreadId()) {
+        XboxWindow *window = XboxFindWindow(handle);
+        return window ? window->procedure(handle, message, wparam, lparam) : 0;
+    }
+
+    const DWORD previousError = GetLastError();
+    if (!WindowWake()) return 0;
+    HANDLE ownerHandle = OpenThread(SYNCHRONIZE, FALSE, (DWORD)owner);
+    if (!ownerHandle) return 0;
+    WindowSend send = {.window = handle, .message = message, .wparam = wparam, .lparam = lparam,
+        .completed = CONDITION_VARIABLE_INIT, .queued = TRUE};
+    AcquireSRWLockExclusive(&sendLock);
+    if (sendCount == MESSAGE_COUNT || !SetEvent(sendWake)) {
+        const DWORD error = sendCount == MESSAGE_COUNT ? ERROR_NOT_ENOUGH_QUOTA : GetLastError();
+        ReleaseSRWLockExclusive(&sendLock);
+        CloseHandle(ownerHandle);
+        SetLastError(error);
+        return 0;
+    }
+    send.previous = lastSend;
+    if (lastSend) lastSend->next = &send;
+    else firstSend = &send;
+    lastSend = &send;
+    ++sendCount;
+    while (!send.done) {
+        if (SleepConditionVariableSRW(&send.completed, &sendLock, 250, 0) || send.done) continue;
+        const DWORD waitError = GetLastError();
+        const DWORD ownerState = WaitForSingleObject(ownerHandle, 0);
+        if (ownerState == WAIT_OBJECT_0) {
+            if (send.queued) RemoveSend(&send);
+            send.error = ERROR_INVALID_WINDOW_HANDLE;
+            break;
+        }
+        if (ownerState == WAIT_TIMEOUT && waitError == ERROR_TIMEOUT) continue;
+        if (send.queued) {
+            send.error = ownerState == WAIT_FAILED ? GetLastError() : waitError;
+            RemoveSend(&send);
+            break;
+        }
+        // The window procedure already owns the message arguments. Keep them alive.
+        ReleaseSRWLockExclusive(&sendLock);
+        Sleep(1);
+        AcquireSRWLockExclusive(&sendLock);
+    }
+    ReleaseSRWLockExclusive(&sendLock);
+    CloseHandle(ownerHandle);
+    SetLastError(send.error ? send.error : previousError);
+    return send.result;
+}
+
+DWORD WINAPI XboxMsgWaitForMultipleObjects(DWORD count, const HANDLE *handles, BOOL waitAll, DWORD timeout, DWORD mask) {
+    const DWORD previousError = GetLastError();
+    typedef DWORD (WINAPI *Native)(DWORD, const HANDLE *, BOOL, DWORD, DWORD);
+    Native native = (Native)(void *)NativeWindowProcedure("MsgWaitForMultipleObjects");
+    if ((LONG)GetCurrentThreadId() != windowThread || !(mask & QS_SENDMESSAGE) ||
+            (waitAll && count) || count >= MAXIMUM_WAIT_OBJECTS - 1 || (count && !handles))
+        return native ? native(count, handles, waitAll, timeout, mask) : WAIT_FAILED;
+    if (!native && mask != QS_SENDMESSAGE) { SetLastError(ERROR_NOT_SUPPORTED); return WAIT_FAILED; }
+
+    if (!WindowWake()) return WAIT_FAILED;
+    HANDLE combined[MAXIMUM_WAIT_OBJECTS - 1];
+    for (DWORD i = 0; i < count; ++i) combined[i] = handles[i];
+    combined[count] = sendWake;
+    if (native) {
+        const DWORD result = native(count + 1, combined, FALSE, timeout, mask);
+        if (result != WAIT_FAILED) return result == WAIT_OBJECT_0 + count + 1 ? WAIT_OBJECT_0 + count : result;
+        const DWORD error = GetLastError();
+        if (error != ERROR_NOT_SUPPORTED && error != ERROR_CALL_NOT_IMPLEMENTED) return result;
+    }
+    // A send-only wait can use kernel handles when USER32 has no message wait.
+    if (mask != QS_SENDMESSAGE) return WAIT_FAILED;
+    SetLastError(previousError);
+    return WaitForMultipleObjectsEx(count + 1, combined, FALSE, timeout, FALSE);
+}
+
+void WINAPI XboxPostQuitMessage(int exitCode) {
+    if ((LONG)GetCurrentThreadId() == windowThread) {
+        // A quit request coalesces and is delivered after the posted messages.
+        quitCode = exitCode;
+        quitPending = TRUE;
+        return;
+    }
+    typedef void (WINAPI *Native)(int);
+    Native native = (Native)(void *)NativeWindowProcedure("PostQuitMessage");
+    if (native) native(exitCode);
+}
+
+static BOOL PeekHostedMessage(MSG *message, HWND filter, UINT first, UINT last, UINT remove, LPCSTR name) {
     if (!XboxWindowThread() || !message) return FALSE;
+    DispatchSentMessages();
+    const UINT categories = HIWORD(remove);
+    if (categories && !(categories & (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE))) {
+        if (!(categories & QS_SENDMESSAGE)) return FALSE;
+        typedef BOOL (WINAPI *Native)(MSG *, HWND, UINT, UINT, UINT);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        if (!native || !native(message, IsVirtualWindowHandle(filter) ? NULL : filter, first, last, remove)) return FALSE;
+        // A nested send-only pump must leave a quit request for the main loop.
+        if (message->message == WM_QUIT) {
+            if (remove & PM_REMOVE) XboxPostQuitMessage((int)message->wParam);
+            return FALSE;
+        }
+        return TRUE;
+    }
     XboxPollWglHostEvents();
     const DWORD error = GetLastError();
     PollHostedPointer();
@@ -788,14 +1188,75 @@ BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, U
         }
         return TRUE;
     }
+    if (!messageCount && quitPending) {
+        *message = (MSG){NULL, WM_QUIT, (WPARAM)(INT_PTR)quitCode, 0, GetTickCount(), {0, 0}};
+        if (remove & PM_REMOVE) quitPending = FALSE;
+        return TRUE;
+    }
     return FALSE;
 }
 
+BOOL WINAPI XboxPeekMessageA(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+    return PeekHostedMessage(message, filter, first, last, remove, "PeekMessageA");
+}
+
+BOOL WINAPI XboxPeekMessageW(MSG *message, HWND filter, UINT first, UINT last, UINT remove) {
+    return PeekHostedMessage(message, filter, first, last, remove, "PeekMessageW");
+}
+
+static BOOL GetHostedMessage(MSG *message, HWND filter, UINT first, UINT last, LPCSTR name) {
+    if ((LONG)GetCurrentThreadId() != windowThread ||
+            (filter && filter != (HWND)(INT_PTR)-1 && !IsVirtualWindowHandle(filter))) {
+        typedef BOOL (WINAPI *Native)(MSG *, HWND, UINT, UINT);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        return native ? native(message, filter, first, last) : -1;
+    }
+    if (!message || first > last) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    if (IsVirtualWindowHandle(filter) && !XboxFindWindow(filter)) return -1;
+    if (!WindowWake()) return -1;
+    HANDLE wake[] = {windowWake, sendWake};
+    while (!XboxPeekMessageW(message, filter, first, last, PM_REMOVE)) {
+        // SDL's offscreen backend supplies close events from its mailbox when pumped.
+        const DWORD delay = XboxWglHostEventsActive() ? 8 : INFINITE;
+        if (WaitForMultipleObjectsEx(ARRAYSIZE(wake), wake, FALSE, delay, FALSE) == WAIT_FAILED) return -1;
+    }
+    return message->message != WM_QUIT;
+}
+
+BOOL WINAPI XboxGetMessageA(MSG *message, HWND filter, UINT first, UINT last) {
+    return GetHostedMessage(message, filter, first, last, "GetMessageA");
+}
+
+BOOL WINAPI XboxGetMessageW(MSG *message, HWND filter, UINT first, UINT last) {
+    return GetHostedMessage(message, filter, first, last, "GetMessageW");
+}
+
 void WINAPI XboxRequestWindowClose(HWND window) {
+    const DWORD error = GetLastError();
     InterlockedExchangePointer(&hostClose, window);
+    HANDLE wake = WindowWake();
+    if (wake) SetEvent(wake);
+    SetLastError(error);
+}
+
+static LRESULT DispatchHostedMessage(const MSG *message, LPCSTR name) {
+    if (!message || message->message == WM_QUIT) return 0;
+    if (!IsVirtualWindowHandle(message->hwnd)) {
+        typedef LRESULT (WINAPI *Native)(const MSG *);
+        Native native = (Native)(void *)NativeWindowProcedure(name);
+        return native ? native(message) : 0;
+    }
+    XboxWindow *window = XboxFindWindow(message->hwnd);
+    return window ? window->procedure(message->hwnd, message->message, message->wParam, message->lParam) : 0;
+}
+
+LRESULT WINAPI XboxDispatchMessageA(const MSG *message) {
+    return DispatchHostedMessage(message, "DispatchMessageA");
 }
 
 LRESULT WINAPI XboxDispatchMessageW(const MSG *message) {
-    XboxWindow *window = message ? XboxFindWindow(message->hwnd) : NULL;
-    return window ? window->procedure(message->hwnd, message->message, message->wParam, message->lParam) : 0;
+    return DispatchHostedMessage(message, "DispatchMessageW");
 }

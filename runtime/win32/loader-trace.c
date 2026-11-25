@@ -3,11 +3,12 @@
 #define COBJMACROS
 #include "loader-trace-output.h"
 #include "hosted-xinput-load.h"
+#include "shell-lookup.h"
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
 
-static volatile LONG64 loaderEvents[128];
+static volatile LONG64 loaderEvents[1024];
 static volatile LONG faultTraceStarted;
 static volatile LONG workingDirectoryStarted;
 static volatile LONG originalImageObserved;
@@ -462,17 +463,81 @@ static HMODULE LoadVerifiedSystemCompanion(LPCWSTR name, DWORD *error) {
     return NULL;
 }
 
+
+// SetDllDirectoryW has no effect inside the app container, so bare plugin names that an engine expects
+// to find in its plugin directory fail with ERROR_MOD_NOT_FOUND. Remember the directory and retry there.
+static SRWLOCK dllDirectoryLock = SRWLOCK_INIT;
+static WCHAR dllDirectory[512];
+
+BOOL WINAPI XboxSetDllDirectoryW(LPCWSTR path) {
+    const DWORD previous = GetLastError();
+    AcquireSRWLockExclusive(&dllDirectoryLock);
+    DWORD length = 0;
+    while (path && path[length] && length + 1 < ARRAYSIZE(dllDirectory)) {
+        dllDirectory[length] = path[length] == L'/' ? L'\\' : path[length];
+        ++length;
+    }
+    if (path && path[length]) length = 0;  // Too long to retry safely.
+    while (length && dllDirectory[length - 1] == L'\\') --length;
+    dllDirectory[length] = 0;
+    ReleaseSRWLockExclusive(&dllDirectoryLock);
+    const BOOL native = SetDllDirectoryW(path);
+    const char trace[] = "asset dll-directory=recorded\r\n";
+    AppendTrace(trace, sizeof(trace) - 1);
+    SetLastError(native ? GetLastError() : previous);
+    return TRUE;
+}
+
+static HMODULE LoadFromDllDirectory(LPCWSTR name, DWORD *error) {
+    if (!name || !*name) return NULL;
+    for (LPCWSTR p = name; *p; ++p) {
+        if (*p == L'\\' || *p == L'/' || *p == L':') return NULL;
+    }
+    WCHAR path[600], staged[600];
+    AcquireSRWLockShared(&dllDirectoryLock);
+    DWORD length = 0;
+    while (dllDirectory[length]) { path[length] = dllDirectory[length]; ++length; }
+    ReleaseSRWLockShared(&dllDirectoryLock);
+    if (!length) return NULL;
+    path[length++] = L'\\';
+    DWORD i = 0;
+    while (name[i] && length + 5 < ARRAYSIZE(path)) path[length++] = name[i++];
+    if (name[i]) return NULL;
+    path[length] = 0;
+    if (length < 4 || CompareStringOrdinal(path + length - 4, 4, L".dll", 4, TRUE) != CSTR_EQUAL) {
+        path[length++] = L'.'; path[length++] = L'd'; path[length++] = L'l'; path[length++] = L'l';
+        path[length] = 0;
+    }
+    const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(path, staged, ARRAYSIZE(staged));
+    HMODULE result = LoadLibraryExW(companion ? staged : path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (result) {
+        const char trace[] = "asset dll-directory=loaded\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+    } else {
+        *error = GetLastError();
+    }
+    return result;
+}
+
 HANDLE WINAPI XboxLoadLibraryA(const char *name) {
     DWORD previous = GetLastError();
     RestoreWorkingDirectory();
     StartFaultTrace();
     WCHAR wide[512], staged[512];
-    const BOOL companion = name && DynamicCompanionsEnabled() &&
-        MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide)) &&
-        FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
+    const BOOL converted = name && MultiByteToWideChar(CP_ACP, 0, name, -1, wide, ARRAYSIZE(wide));
+    HANDLE result = converted ? LoadHostedXInput(wide) : NULL;
+    if (result) {
+        const char trace[] = "input xinput-library=hosted\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        Record(name, result, 1, TRUE, previous);
+        SetLastError(previous);
+        return result;
+    }
+    const BOOL companion = converted && DynamicCompanionsEnabled() && FindStagedCompanion(wide, staged, ARRAYSIZE(staged));
     SetLastError(previous);
-    HANDLE result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
+    result = companion ? LoadLibraryW(staged) : LoadLibraryA(name);
     DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND && converted) result = LoadFromDllDirectory(wide, &error);
     Record(name, result, 1, result != 0, error);
     SetLastError(error);
     return result;
@@ -511,7 +576,8 @@ HMODULE WINAPI XboxLoadLibraryW(LPCWSTR name) {
     const BOOL companion = DynamicCompanionsEnabled() && FindStagedCompanion(name, staged, ARRAYSIZE(staged));
     SetLastError(previous);
     result = LoadLibraryW(companion ? staged : name);
-    const DWORD error = GetLastError();
+    DWORD error = GetLastError();
+    if (!result && error == ERROR_MOD_NOT_FOUND) result = LoadFromDllDirectory(name, &error);
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
@@ -526,6 +592,8 @@ HMODULE WINAPI XboxLoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
     DWORD error = GetLastError();
     if (!result && error == ERROR_MOD_NOT_FOUND && !file && flags == LOAD_LIBRARY_SEARCH_SYSTEM32)
         result = LoadVerifiedSystemCompanion(name, &error);
+    if (!result && error == ERROR_MOD_NOT_FOUND && !file && !(flags & (LOAD_LIBRARY_AS_DATAFILE |
+            LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE))) result = LoadFromDllDirectory(name, &error);
     RecordWideLoad(name, result, error);
     SetLastError(error);
     return result;
@@ -675,6 +743,42 @@ static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
     return GetProcAddress(adapter, name);
 }
 
+
+// A profile that hosts XInput routes controllers through the hosted mailbox. Windows.Gaming.Input in the
+// game's child process sees no controller, so engines that prefer it (Unity's Input System) are told it is
+// unavailable and fall back to XInput. Other WinRT activations are forwarded unchanged.
+typedef HRESULT (WINAPI *ActivationFactory)(void *, REFIID, void **);
+typedef PCWSTR (WINAPI *StringBuffer)(void *, UINT32 *);
+static ActivationFactory nativeActivationFactory;
+
+static HRESULT WINAPI HostedRoGetActivationFactory(void *classId, REFIID iid, void **factory) {
+    static StringBuffer buffer;
+    if (!buffer) {
+        HMODULE combase = GetModuleHandleW(L"combase.dll");
+        if (combase) buffer = (StringBuffer)(void *)GetProcAddress(combase, "WindowsGetStringRawBuffer");
+    }
+    UINT32 length = 0;
+    const PCWSTR name = buffer && classId ? buffer(classId, &length) : NULL;
+    static const WCHAR prefix[] = L"Windows.Gaming.Input.";
+    if (name && length >= ARRAYSIZE(prefix) - 1 &&
+            CompareStringOrdinal(name, ARRAYSIZE(prefix) - 1, prefix, ARRAYSIZE(prefix) - 1, FALSE) == CSTR_EQUAL) {
+        if (factory) *factory = NULL;
+        const char trace[] = "input wgi=unavailable-for-hosted-xinput\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        return REGDB_E_CLASSNOTREG;
+    }
+    return nativeActivationFactory(classId, iid, factory);
+}
+
+static FARPROC HostedActivationExport(FARPROC native, const char *name) {
+    if (!native || !SameName(name, "RoGetActivationFactory")) return NULL;
+    WCHAR enabled[2];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", enabled, ARRAYSIZE(enabled)) != 1 || enabled[0] != L'1')
+        return NULL;
+    InterlockedCompareExchangePointer((PVOID volatile *)&nativeActivationFactory, (PVOID)native, NULL);
+    return (FARPROC)(void *)HostedRoGetActivationFactory;
+}
+
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     if (module && (ULONG_PTR)name <= 0xffffu) {
         const DWORD previous = GetLastError();
@@ -699,6 +803,16 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 const char trace[] = "asset dxgi-factory=hosted\r\n";
                 AppendTrace(trace, sizeof(trace) - 1);
                 result = hosted;
+            }
+        } else if (name[0] == 'R') {
+            const FARPROC hosted = HostedActivationExport(result, name);
+            if (hosted) result = hosted;
+        } else if (name[0] == 'S') {
+            const FARPROC scoped = ScopedShellExport((HMODULE)module, name);
+            if (scoped) {
+                const char trace[] = "asset known-folder=scoped\r\n";
+                AppendTrace(trace, sizeof(trace) - 1);
+                result = scoped;
             }
         }
     }

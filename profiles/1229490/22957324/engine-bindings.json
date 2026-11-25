@@ -1,0 +1,67 @@
+{
+  "user32.dll": {
+    "GetRawInputBuffer": "XboxWin32Input.dll",
+    "MapVirtualKeyExA": "XboxWin32Input.dll",
+    "RegisterClassExW": "XboxWin32Window.dll",
+    "RegisterClassW": "XboxWin32Window.dll",
+    "UnregisterClassW": "XboxWin32Window.dll",
+    "CreateWindowExW": "XboxWin32Window.dll",
+    "DestroyWindow": "XboxWin32Window.dll",
+    "DefWindowProcW": "XboxWin32Window.dll",
+    "GetClientRect": "XboxWin32Window.dll",
+    "GetWindowRect": "XboxWin32Window.dll",
+    "ClientToScreen": "XboxWin32Window.dll",
+    "ScreenToClient": "XboxWin32Window.dll",
+    "GetDC": "XboxWin32Window.dll",
+    "ReleaseDC": "XboxWin32Window.dll",
+    "ShowWindow": "XboxWin32Window.dll",
+    "IsWindowVisible": "XboxWin32Window.dll",
+    "GetActiveWindow": "XboxWin32Window.dll",
+    "GetParent": "XboxWin32Window.dll",
+    "GetForegroundWindow": "XboxWin32Window.dll",
+    "SetForegroundWindow": "XboxWin32Window.dll",
+    "GetFocus": "XboxWin32Window.dll",
+    "SetFocus": "XboxWin32Window.dll",
+    "SetWindowPos": "XboxWin32Window.dll",
+    "GetWindowLongPtrW": "XboxWin32Window.dll",
+    "SetWindowLongPtrW": "XboxWin32Window.dll",
+    "GetWindowLongA": "XboxWin32Window.dll",
+    "SetWindowLongA": "XboxWin32Window.dll",
+    "PeekMessageA": "XboxWin32Window.dll",
+    "GetMessageA": "XboxWin32Window.dll",
+    "PostQuitMessage": "XboxWin32Window.dll",
+    "SendMessageW": "XboxWin32Window.dll",
+    "MsgWaitForMultipleObjects": "XboxWin32Window.dll",
+    "DispatchMessageA": "XboxWin32Window.dll",
+    "MonitorFromWindow": "XboxWin32Window.dll",
+    "MonitorFromRect": "XboxWin32Window.dll",
+    "EnumDisplayMonitors": "XboxWin32Window.dll",
+    "GetMonitorInfoW": "XboxWin32Window.dll",
+    "GetMonitorInfoA": "XboxWin32Window.dll",
+    "EnumDisplaySettingsW": "XboxWin32Window.dll",
+    "GetSystemMetrics": "XboxWin32Window.dll",
+    "GetDisplayConfigBufferSizes": "XboxWin32HostedDisplay.dll",
+    "QueryDisplayConfig": "XboxWin32HostedDisplay.dll",
+    "DisplayConfigGetDeviceInfo": "XboxWin32HostedDisplay.dll",
+    "GetCursorPos": "XboxWin32Window.dll"
+  },
+  "kernel32.dll": {
+    "GetModuleFileNameW": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryA": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryW": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryExW": "XboxWin32LoaderTrace.dll",
+    "GetProcAddress": "XboxWin32LoaderTrace.dll",
+    "VirtualAlloc": "XboxWin32LoaderTrace.dll",
+    "SetDllDirectoryW": "XboxWin32LoaderTrace.dll"
+  },
+  "gdi32.dll": {
+    "GetDeviceCaps": "XboxWin32Window.dll"
+  },
+  "advapi32.dll": {
+    "RegCreateKeyW": "XboxWin32PlayerPrefs.dll",
+    "RegOpenKeyExW": "XboxWin32PlayerPrefs.dll"
+  },
+  "shell32.dll": {
+    "SHGetFolderPathW": "XboxWin32Desktop.dll"
+  }
+}

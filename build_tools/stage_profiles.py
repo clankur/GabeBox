@@ -11,8 +11,9 @@ from build_tools.verify_win32_source import read_profile, valid_win32_component
 
 WIN32_ADAPTERS = frozenset({
     "XboxWin32CrashReport.dll", "XboxWin32Desktop.dll", "XboxWin32DisplayConfig.dll", "XboxWin32Dxgi.dll",
-    "XboxWin32Input.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll", "XboxWin32StorageTrace.dll",
-    "XboxWin32Timer.dll", "XboxWin32Unity.dll", "XboxWin32Window.dll", "XboxWin32XInput910.dll", "ktmw32.dll",
+    "XboxWin32HostedDisplay.dll", "XboxWin32Input.dll", "XboxWin32LoaderTrace.dll", "XboxWin32PlayerPrefs.dll",
+    "XboxWin32SteamDiscovery.dll", "XboxWin32StorageTrace.dll", "XboxWin32Timer.dll", "XboxWin32Unity.dll",
+    "XboxWin32Window.dll", "XboxWin32XInput910.dll", "ktmw32.dll",
 })
 
 HOSTED_SDL_SCRIPT = re.compile(
@@ -116,6 +117,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     legacy_steam_sdk = False
     desktop_dxgi = False
     desktop_documents = False
+    unity_direct3d = False
+    local_low = False
+    hosted_xinput = False
+    player_prefs = False
     storage_trace = False
     hashed_companions = False
     system_companions = False
@@ -135,9 +140,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         fields = profile.decode("ascii").splitlines()
         if (not 2 <= len(fields) <= 8 or not re.fullmatch(r"[1-9][0-9]{0,19}", fields[0])
                 or not re.fullmatch(r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.exe", fields[1])
-                or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d12"))
+                or (len(fields) >= 3 and fields[2] not in ("", "opengl3", "d3d11", "d3d12"))
                 or (len(fields) >= 4 and fields[3] not in ("", "godot", "unity"))
                 or (len(fields) >= 3 and fields[2] and fields[3:4] not in (["godot"], ["unity"]))
+                or (fields[2:3] == ["d3d11"] and fields[3:4] != ["unity"])
                 or (len(fields) >= 5 and fields[4] and not re.fullmatch(
                     r"[A-Za-z0-9 _-][A-Za-z0-9 ._-]{0,95}\.(?:exe|dll)", fields[4]))
                 or (len(fields) >= 6 and len(fields[5]) > 260)
@@ -195,11 +201,42 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             files[crash_marker] = b""
             crash_reports = True
         dxgi_marker = f"steam-win32-dxgi-{app}.txt"
-        if (root / dxgi_marker).is_file():
-            if (root / dxgi_marker).stat().st_size or any(fields[2:4]):
-                raise ValueError(f"The DXGI marker requires the game's default native renderer for AppID {app}.")
+        has_dxgi = (root / dxgi_marker).is_file()
+        unity_dxgi = fields[3:4] == ["unity"] and fields[2:3] in (["d3d11"], ["d3d12"])
+        if has_dxgi:
+            if (root / dxgi_marker).stat().st_size or (any(fields[2:4]) and not unity_dxgi):
+                raise ValueError(f"The DXGI marker requires the game's default native renderer or Unity Direct3D 11 for AppID {app}.")
             files[dxgi_marker] = b""
             desktop_dxgi = True
+        elif unity_dxgi:
+            raise ValueError(f"Unity Direct3D requires the DXGI marker for AppID {app}.")
+        graphics_adapter = has_dxgi or fields[2:3] == ["opengl3"]
+        local_low_marker = f"steam-win32-local-low-{app}.txt"
+        if (root / local_low_marker).is_file():
+            if (root / local_low_marker).stat().st_size or not graphics_adapter:
+                raise ValueError(f"The LocalLow marker requires an empty file and a Win32 graphics adapter for AppID {app}.")
+            files[local_low_marker] = b""
+            local_low = True
+        xinput_marker = f"steam-win32-host-xinput-{app}.txt"
+        if (root / xinput_marker).is_file():
+            hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
+            if ((root / xinput_marker).stat().st_size or not graphics_adapter
+                    or not hosted.is_file() or hosted.read_text(encoding="ascii") != fields[0]):
+                raise ValueError(f"The XInput marker requires an empty file and a matching hosted profile for AppID {app}.")
+            files[xinput_marker] = b""
+            hosted_xinput = True
+        prefs_marker = f"steam-win32-player-prefs-{app}.txt"
+        if (root / prefs_marker).is_file():
+            with (root / prefs_marker).open("rb") as source:
+                settings = source.read(2049)
+            prefix = settings.decode("utf-8-sig").rstrip("\r\n")
+            parts = prefix.split("\\")
+            if (len(settings) > 2048 or len(parts) != 3 or parts[0] != "Software"
+                    or len(prefix.encode("utf-16le")) >= 1024 or any(ord(c) < 32 or ord(c) == 127 for c in prefix)
+                    or any(not 0 < len(part.encode("utf-16le")) <= 510 for part in parts[1:])):
+                raise ValueError(f"Expected one Software\\company\\product preference key for AppID {app}.")
+            files[prefs_marker] = prefix.encode("utf-8")
+            player_prefs = True
         documents_marker = f"steam-win32-documents-{app}.txt"
         if (root / documents_marker).is_file():
             if (root / documents_marker).stat().st_size:
@@ -232,11 +269,12 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         unity = fields[3:4] == ["unity"]
         if unity:
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
-            if (fields[2] != "opengl3" or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
+            if (fields[2] not in ("opengl3", "d3d11", "d3d12") or fields[4:5] != [""] or fields[6:7] != ["loader-trace"]
                     or not companions.is_file() or not hosted.is_file()
                     or hosted.read_text(encoding="ascii") != fields[0]):
-                raise ValueError(f"The Unity option needs a matching hosted OpenGL launcher and loader trace for AppID {app}.")
+                raise ValueError(f"The Unity option needs a matching hosted launcher and loader trace for AppID {app}.")
             unity_host = True
+            unity_direct3d |= unity_dxgi
         sdk_marker = f"steam-win32-steam-sdk-{app}.txt"
         sdk_profile = root / sdk_marker
         legacy_sdk_marker = f"steam-win32-steam-legacy-sdk-{app}.txt"
@@ -325,6 +363,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         required_adapters.add("XboxWin32LoaderTrace.dll")
     if storage_trace:
         required_adapters.add("XboxWin32StorageTrace.dll")
+    if hosted_xinput:
+        required_adapters.add("XboxWin32XInput910.dll")
+    if player_prefs:
+        required_adapters.add("XboxWin32PlayerPrefs.dll")
 
     available = set(package.namelist())
     missing = required_adapters - available
@@ -335,7 +377,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     if profiles:
         optional.add("XboxWin32XInput910.dll")
     if unity_host:
-        optional.add("XboxWin32DisplayConfig.dll")
+        optional.update(("XboxWin32DisplayConfig.dll", "XboxWin32HostedDisplay.dll"))
     for name in sorted(required_adapters | (optional & available)):
         files[name] = read_package_member(package, name)
 
@@ -349,6 +391,19 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_DOCUMENTS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Desktop.dll"]:
             raise ValueError("Use a Steam Core artifact with profile Documents support.")
+    if unity_direct3d and " -force-d3d12".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact with the Unity Direct3D launch paths.")
+    if local_low:
+        variable = "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32Desktop.dll"]:
+            raise ValueError("Use a Steam Core artifact with scoped LocalLow support.")
+    if hosted_xinput:
+        variable = "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le")
+        if variable not in native or variable not in files.get("XboxWin32LoaderTrace.dll", b""):
+            raise ValueError("Use a Steam Core artifact with hosted XInput support for every XInput version.")
+    if player_prefs:
+        if any(name.encode("utf-16le") not in native for name in ("XBOX_WIN32_PREFS_KEY\0", "XBOX_WIN32_PREFS_HIVE\0")):
+            raise ValueError("Use a Steam Core artifact with scoped PlayerPrefs support.")
     if legacy_steam_sdk:
         variable = "XBOX_STEAM_HANDOFF_LEGACY\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32SteamDiscovery.dll"]:

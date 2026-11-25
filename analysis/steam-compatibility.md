@@ -298,3 +298,169 @@ Build `1.0.230.132` captured both immediate Unity module-relative return address
 The downloaded Unity publisher PDB matched the installed engine's GUID and age. It identifies the paged calls as `MemoryManager::VirtualAllocator::ReserveMemoryBlock` and `MemoryManager::VirtualAllocator::CommitMemory`, both invoked by `DynamicHeapAllocator::RequestLargeAllocMemory`. Signed trial `1.0.230.138` adds a bounded walk using the installed engine's x64 unwind metadata to identify the upstream caller on Xbox. It preserves the allocator result and records only engine-relative offsets. The trial needs a console run. [Unity Windows debug symbols](https://docs.unity3d.com/Manual/WindowsDebugging-instructions.html)
 
 The matching Unity engine allocates 64 bytes per `DISPLAYCONFIG_MODE_INFO` entry at the same allocator source line as the crash. Three callers read counts from `GetDisplayConfigBufferSizes` and trust both outputs on success. The observed 32,722,834,112-byte request equals `0x1e79bb4b` entries, which is consistent with an invalid count. Signed trial `1.0.230.140` changes that one import. Its adapter passes through written counts and native errors. If native success leaves a count untouched across two initial values, the adapter returns `ERROR_NOT_SUPPORTED` so Unity can use its existing fallback. Run the `.138` unwind control first and compare its call path and allocation with `.140`. The console still needs to demonstrate that the display API returns unwritten counts and that handling them advances startup. [Display-count adapter](../runtime/win32/display-config.c)
+
+### Console state and display-count callers, 2026-11-24
+
+Read-only Device Portal reads of the Series X on OS `26100.9673.amd64fre.xb_flt_2610ge.261116-2200` found ULTRAKILL build `22957324` fully installed on the developer `D:` library (`StateFlags=4`, 3,144,432,800 bytes). The installed source images match the recorded hashes and have these sizes:
+
+| Path | Size | SHA-256 |
+| --- | --- | --- |
+| `ULTRAKILL.exe` | 666,624 | `e047d3bf…2f94` |
+| `UnityPlayer.dll` | 30,979,776 | `3beae3d0…5652` |
+| `MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll` | 7,895,744 | `43b9e110…af13` |
+
+The installed SteamCore package `1.0.232.50` comes from the mouse-input branch and carries no 1229490 profile. Its last report shows Big Picture Play run `1795560104370` for AppID 1229490 reaching `steam_launch_phase=game-running`. That run left no Unity log or shadow exit file.
+
+The newest Unity log on the console is `steam-unity-1229490-134398680774806809.log`, written 2026-11-23. It reports Unity `2022.3.29f1` and an OpenGL 4.6 Core device on Mesa 26.2.2 over D3D12. After assembly reload it fails a `TempOverflow` allocation of 32,412,455,616 bytes, which is 506,444,619 × 64 bytes. The earlier runs requested 32,722,834,112 bytes. The changing count fits uninitialized data better than a fixed topology value.
+
+Disassembly of the pinned `UnityPlayer.dll` finds three `GetDisplayConfigBufferSizes` calls through IAT slot `0x18186fbc0`:
+
+| Call | Flags | Count outputs |
+| --- | --- | --- |
+| `0x1809857c7` | `QDC_ONLY_ACTIVE_PATHS`, inside a COM/DXGI method | `[rsp+0x30]`, `[rbp+0xb8]` |
+| `0x1810d6664` | `QDC_DATABASE_CURRENT` | `[rbp+0x460]`, `[rsp+0x70]` |
+| `0x1810d83bd` | `QDC_ONLY_ACTIVE_PATHS` | `[rbp+0x130]`, `[rbp+0x138]` |
+
+None of the three writes its count slots before the call. On a zero return, each caller sizes a path vector (`0x1809861b0`) and a 64-byte mode vector (`0x180986130`) directly from those slots.
+
+So if Xbox User32 returns `ERROR_SUCCESS` without writing the counts, stack contents become the allocation size. That would explain this failure, but it remains inference until the read-only `--display-config` control runs on the console and reports a `3xx` result. Exit `0x51A7` with plausible counts would instead point at the hosted-display topology from `codex/unity-compatibility`, which does not depend on native counts.
+
+A focused reproduction must not run against `1.0.232.50`, because that package has no ULTRAKILL profile. The port plan from `codex/unity-compatibility` covers the profile, recipes, hosted-display adapter and display control.
+
+### Unity port onto the current runtime
+
+The Unity work from `codex/unity-compatibility` (`436addc`) now sits on the reorganized tree. The shared changes are listed below.
+
+- **Display:** the hosted display adapter supplies one virtual CCD path for `GetDisplayConfigBufferSizes`, `QueryDisplayConfig` and `DisplayConfigGetDeviceInfo`. It matches the legacy monitor exposed by the window adapter, so Unity never sizes an array from an unwritten count. [Hosted display adapter](../runtime/win32/hosted-display.c)
+- **Window adapter:** it gains `MonitorFromRect`, `PostQuitMessage`, `GetMessageA/W`, `SendMessageW`, `MsgWaitForMultipleObjects`, `GetWindowLongA`, `SetWindowLongA` and `GetParent` at ordinals 52–60. HEAD's activation, cursor and coordinate exports keep ordinals 47–51. ANSI and wide message pumps now share one hosted queue, with cross-thread sends and quit coalescing. [Window adapter](../runtime/win32/window.c)
+- **Scoped storage:** `SHGetKnownFolderPath(FOLDERID_LocalAppDataLow)` returns a per-account, per-title `LocalLow` when the profile selects it. Unity resolves the function dynamically, so the loader-trace `GetProcAddress` hands back the desktop adapter's export. PlayerPrefs registry calls for the profile's `Software\company\product` key use an app hive under the same profile. [Desktop adapter](../runtime/win32/desktop.c) · [PlayerPrefs adapter](../runtime/win32/player-prefs.c)
+- **XInput:** Unity 2022.3 calls `LoadLibraryA` for `xinput1_4.dll`, then `xinput1_3.dll`, then `xinput9_1_0.dll`. When a profile adds `steam-win32-host-xinput-APPID.txt`, the loader trace serves all three from the hosted controller mailbox. Without the marker only `xinput9_1_0.dll` is hosted, as before. [Hosted XInput loader](../runtime/win32/hosted-xinput-load.h)
+- **Packaging:** `stage_profiles.py` accepts the `d3d11`+`unity` renderer pair, which requires the DXGI marker. It also validates the LocalLow, host-XInput and PlayerPrefs markers against hints in the Steam Core artifact. ProbeNative adds Unity's `-force-d3d11` for that pair.
+- **Diagnostics:** the observer extracts Unity's renderer and allocation lines into `unity-startup.txt`.
+- **Configured Play:** `--play-installed-app-id` requests one Big Picture Play for an installed title.
+
+I dropped some branch pieces instead of porting them:
+
+- **Superseded by HEAD:** the branch's DXGI factory `GetProcAddress` (loader-trace now swaps hosted DXGI factories) and its XInput lookup header.
+- **Not ported:** the separate allocation-trace DLL, its `HeapAlloc` hook, and the branch's export-derived adapter staging. HEAD's declared `required_adapters` replaces that staging.
+- **Window control:** it keeps HEAD's activation-redirect checks and adds the branch's style, icon and cross-thread send checks (`0x6e1b`). The branch's close-to-quit `GetMessage` check conflicts with the activation teardown, so it is not in this control yet.
+
+The [build-pinned profile](../profiles/1229490/22957324) and [source fingerprints](../profiles/1229490/source.json) bind build `22957324`. `ULTRAKILL_Data/app.info` on the console reads `Hakita` / `ULTRAKILL`, which confirms the PlayerPrefs key. Device Portal exported the three images with matching hashes. `python3 -m build_tools.redirect_pe_imports --recipe` produced the launcher, engine (signed source `3beae3d0…`) and Mono (signed source `43b9e110…`) recipes from them, which confirms every binding names a real import. Each bound symbol is exported by its target adapter `.def`.
+
+Build Xbox probe run `45525796116` compiled every adapter, ProbeNative and the Steam Core template from commit `27f625c`. The profile staged against that exact `xbox-steam-core-template` artifact through `stage_win32_trial_profiles`. That staging checks the compiled ProbeNative, Desktop and LoaderTrace binaries for the `-force-d3d11`, LocalLow, hosted-XInput and PlayerPrefs hints. `llvm-objdump` confirmed that the compiled adapters export all 60 symbols the recipes bind or Unity resolves dynamically.
+
+**Still pending a console run:**
+
+- a signed package carrying the profile, which needs the pinned base APPX, `makemsix` and `osslsigncode`;
+- the `--display-config`, `--hosted-display`, `--known-folders`, `--player-prefs` and `--win32-opengl` controls;
+- an observed Big Picture Play of build `22957324`.
+
+#### Package and run the ULTRAKILL profile
+
+Run these commands from the repository root. Point `$owned` at a hash-matched ULTRAKILL `22957324` install. You can export the three pinned images from the Xbox with `python3 -m tools.xbox_deploy inspect-game --version "" --app-id 1229490 --source-profile profiles/1229490/source.json --export-inputs "$owned"`.
+
+```sh
+profile=profiles/1229490/22957324
+trial=$(mktemp -d)
+(cd "$owned" && shasum -a 256 -c "$OLDPWD/$profile/SOURCE-SHA256SUMS") || exit 1
+cp "$profile"/steam-win32-*.txt "$profile/steam-win32-adapters-1229490.json" "$trial/"
+cp profiles/1229490/source.json "$trial/steam-win32-source-1229490.json"
+python3 -m build_tools.redirect_pe_imports --recipe "$owned/ULTRAKILL.exe" \
+  "$profile/launcher-bindings.json" "$trial/steam-win32-shadow-1229490.xwp"
+python3 -m build_tools.redirect_pe_imports --recipe \
+  --signed-source-sha256 3beae3d0ca0b56d0f6264694d6e197685e0b107ca18b7a48266315629d7c5652 \
+  "$owned/UnityPlayer.dll" "$profile/engine-bindings.json" "$trial/steam-win32-shadow-1229490-engine.xwp"
+python3 -m build_tools.redirect_pe_imports --recipe \
+  --signed-source-sha256 43b9e1109889582050282d7f956a6e6b27ffca78f361d6b781cb63e3da66af13 \
+  "$owned/MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll" "$profile/mono-bindings.json" \
+  "$trial/steam-win32-shadow-1229490-mono.xwp"
+python3 -m build_tools.prepare_big_picture_library "$FHD_BASE" "$WEBVIEW" ./ultrakill-layout \
+  --version "$PACKAGE_VERSION" --session-artifact "$SESSION" --session-checksum "$SESSION_PIN" \
+  --primary-xaml "$PRIMARY" --primary-checksum "$PRIMARY_PIN" \
+  --presenter-artifact "$PRESENTER" --presenter-checksum "$PRESENTER_PIN" \
+  --surfaceless-profile 1229490=22957324 --win32-trial-profile "1229490=$trial" \
+  --play-installed-app-id 1229490
+bash build_tools/package.sh --layout ./ultrakill-layout ./ultrakill-signed
+```
+
+Take `$SESSION` from the `xbox-steam-core-template` artifact of Build Xbox probe run `45525796116` or a later run on this branch.
+
+Console checks, in order:
+
+1. **Graphics control:** `probe/graphics-runtime-control/build.sh --hosted-display` (then `--display-config`) must exit `0x51A7`. A `3xx` from `--display-config` confirms that native sizing leaves the counts unwritten.
+2. **First launch:** `python3 -m tools.xbox_deploy deploy` the signed package. Start `observe --app-id 1229490 --image-name ULTRAKILL.exe --frame-seconds 40`, then open the package so it submits the configured Play. Compare `unity-startup.txt` with the 32,412,455,616-byte `TempOverflow` failure.
+3. **Coverage:** record first frame, controller input, audio, save and reload (PlayerPrefs hive and `LocalLow`), and return to the library. Measure 30 settled seconds with `python3 -m tools.measure --require-gpu-60`.
+
+### ULTRAKILL black screen on Series X, 2026-11-25
+
+These results come from Series X Steam Core builds `1.0.232.61` through `1.0.233.5`, on a base reassembled as `1.0.232.60` (`b048d049…`), running ULTRAKILL `22957324`. Startup now passes every earlier blocker:
+
+- The hosted CCD display topology answers Unity's display queries.
+- `LocalLow` and the PlayerPrefs hive are scoped per account and title.
+- Hosted XInput loads through Unity's `LoadLibraryA`.
+- The hosted swap chain presents about 60 frames per second to the presenter, at 1920 × 1080, as GPU-shared textures with no CPU uploads.
+
+The game loads its tutorial content and writes `Saves/Slot1/generalprogress.bepis`. Every image is black.
+
+- **Frame probe:** the DXGI frame probe (`dxgi-frame.cpp`) reads back the presented buffer. Every swap-chain buffer is exactly zero, with `peak=0`, at published frames 60 through 7200, on Unity D3D11 and on Unity D3D12 (`-force-d3d12`). Single-threaded rendering (`-force-gfx-direct`) gives the same result.
+- **Rejected causes:**
+  - Window size and move messages (`b974e2a`).
+  - Masking of occlusion status (no `DXGI_STATUS_OCCLUDED` was ever returned).
+  - Staging the native Steam, Discord, occlusion-culling and Burst plugins as hash-pinned companions.
+  - The OpenGL Core renderer, which fails context activation and then faults.
+- **GPU work per frame:** a D3D11 pipeline-statistics query over one frame at each sample shows the work Unity submits:
+
+  | Frame | Vertices | Primitives | Pixel shader | Compute |
+  | --- | --- | --- | --- | --- |
+  | 60 | 84 | 28 | 29,030,400 | 2,073,600 |
+  | 600 | 114 | 38 | 39,398,400 | 2,073,600 |
+  | 1,800 | 54 | 18 | 18,662,400 | 2,073,600 |
+  | 3,600 | 6 | 2 | 2,073,600 | 2,077,696 |
+
+  Every pixel-shader count is a whole multiple of 1920 × 1080. So the cameras run full-screen post-processing over an image that contains no meshes and no UI.
+- **Likely cause:** `Assembly-CSharp` routes visibility through `ULTRAKILL.Portal.PortalRenderV2`. That path uses Intel's masked occlusion culling (`MaskedOcclusionCullingNative.dll`), Burst `UpdateOcclusionBurst`, and a GPU occlusion readback (`OnOcclusionReadbackCompleted`, `occlusionBitset`). If either step reports everything occluded, the result matches these statistics.
+
+**Next checks:**
+
+1. Toggle the game's own `PortalOcclusion` console command with remote input. The Device Portal remote-input route is on `claude/sts2-xbox-compat-6e11d5`.
+2. Trace Unity's `AsyncGPUReadback` completion on Xbox D3D11.
+3. Confirm that `MaskedOcclusionCullingNative.dll` loads and reports its SIMD implementation.
+
+Later runs, `1.0.233.6` through `1.0.235.2`, ruled out four more causes:
+
+- **Plugin loading.** Unity's `SetDllDirectoryW` has no effect in the app container, so bare-name plugin loads failed with `0x7E`. The loader trace now records the directory and retries there (`8614175`). `lib_burst_generated.dll` and `steam_api64.dll` now load from their staged companions. The frames stayed black.
+- **Render-target formats.** Every format the main camera renders to, including RGB565, supports render-target use on this device.
+- **Settings files.** `PrefsManager` treats empty prefs files as defaults.
+- **Graphics threading.** With `-force-gfx-direct`, Unity creates its device without a render thread or graphics jobs. The pipeline statistics still show only full-screen passes and one full-resolution compute pass per frame, with no scene geometry.
+
+The game's cameras submit no meshes or UI on either renderer, with or without threading. The remaining cause is above D3D: game or Unity logic that keeps the cameras from drawing anything. `PortalRenderV2`'s occlusion only gates portal visibility, so it does not explain the missing main scene. Reading the camera setup in `CameraController` and the `Bootstrap` and scene flow comes next. The decompiler path is `dotnet` plus `ilspycmd` with `DOTNET_ROLL_FORWARD=Major`.
+
+**ULTRAKILL boot flow.** Decompiled `Assembly-CSharp` shows `Bootstrap.Start` loading `Tutorial` until the tutorial and intro are complete. `IntroText` stops at `WaitForYesNo` prompts and the brightness `calibrationWindows`. It continues only on keyboard `Y`/`N` or Input System `Gamepad.current.buttonSouth`/`buttonEast`.
+
+On Xbox, Unity's Input System selects Windows.Gaming.Input for gamepads and fails to register Raw Input for keyboard and mouse. The child process probably has no input route into the intro. Visible rendering is still unexplained, because the intro text and calibration panels should draw.
+
+Two follow-ups remain:
+
+- Route hosted controller input to Unity's Input System. That needs either a Windows.Gaming.Input source that reports the hosted pad, or Input System XInput with WGI disabled.
+- Find why every camera submits no geometry.
+
+Two more D3D11 results:
+
+- Every engine target format reports render-target and blend support.
+- A vtable counter on the immediate context saw no `Draw` or `DrawIndexed` calls. It probably missed Unity's calls, so it is inconclusive.
+
+**Controller route for Unity (`07b7acf`).** When a profile hosts XInput, the loader trace answers Unity's dynamic `RoGetActivationFactory` lookups for `Windows.Gaming.Input.*` with `REGDB_E_CLASSNOTREG`. On `1.0.237.1`, Unity logged "Windows.Gaming.Input failed to initialize …, fallback to XInput / Using XInput". The trace recorded `xinput-sample=connected`, and then `active` after Device Portal remote-input A presses (cherry-picked `d682122` and `63ddb85` from the STS2 branch).
+
+The frames stayed all zero with the same full-screen-only GPU work. Rendering is not gated on input, and the empty cameras remain the open problem.
+
+**Constant-buffer scan (`40bfd4a`, `eab69e9`, `1.0.239.1`, single-threaded).** At every probe frame, the vertex constant buffers bound by the frame's last pass (64, 176 and 368 bytes) and the 64-byte pixel buffer contain no NaN or infinite floats. This does not support the hypothesis of a corrupted camera matrix. The cause of the empty cameras is still open.
+
+**Handoff, 2026-11-25 (off-console reading, no new console run).** Unity's `Player.log` from the D3D11 `1.0.23x` runs gives three findings:
+
+- **The Tutorial scene loads.** MeshCollider warnings name `4 - Health Room/Statue` and `5 - Wall Jump Room/...`, and the log has no managed exceptions. So the empty cameras are not an unloaded scene.
+- **Display-mode lookup fails.** Unity logs "Failed to find a valid fullscreen resolution for exclusiveFullscreen 1920x1080 … trying without exclusive fullscreen mode" and "MaximizedWindow is not currently supported on Windows, setting to FullsceenWindow". This is the next lead: check what the hosted DXGI output returns from `EnumOutputs`, `GetDisplayModeList` and `FindClosestMatchingMode`, and whether the camera's `pixelRect` or viewport collapses. The pipeline statistics still show full-resolution pixel work.
+- **Slow buffer uploads.** "LockBufferForWrite: Multiple uploads in flight … Falling back to slow path" appears 17 times. This is a performance note, probably not the cause.
+
+`PortalRenderV2` declares `SameFrameReadback` P/Invokes, but no code calls them, and the plugin is not in the install. `CullingOverride` is an empty `MonoBehaviour`. The decompiled project is regenerated with `ilspycmd -p -o <dir> ULTRAKILL_Data/Managed/Assembly-CSharp.dll`.
+
+The goal is still open. Visible gameplay, audio, save and reload, return to the library, and the 60 FPS gameplay sample all remain unverified.

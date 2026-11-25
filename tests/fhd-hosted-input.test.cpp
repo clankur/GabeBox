@@ -56,8 +56,9 @@ static HRESULT getState(void *, UINT *result) {
     *result = state;
     return S_OK;
 }
+static KeyStatus keyStatus = {1, 0, 0, 0, 0, 0};
 static HRESULT getKeyStatus(void *, KeyStatus *result) {
-    *result = {1, 0, 0, 0, 0, 0};
+    *result = keyStatus;
     return S_OK;
 }
 static HRESULT query(void *o, REFIID, void **result) {
@@ -250,6 +251,47 @@ int main() {
     state = 1;
     event(InputEnabledChanged, (IUnknown *)&arg);
     assert(foreground());
+    // Device Portal remote input arrives as VK_GAMEPAD_* key events and joins the hosted pad.
+    argVt[6] = (void *)getState;
+    physical = {};
+    physical.ly = .5;
+    FhdPollHostedInput(&box, &fakeWindow);
+    for (UINT key : {0xC3u, 0xCCu, 0xD3u, 0xD5u, 0xCAu}) {
+        state = key;
+        event(KeyDown, (IUnknown *)&arg);
+    }
+    clockMs += 16;
+    assert(!FhdPollHostedInput(&box, &fakeWindow));
+    assert(box.gamepad.buttons == (SDL_HOST_PAD_CONNECTED | 1 | 1 << 12));
+    // The partly deflected physical stick keeps its value; resting axes take the remote keys.
+    assert(box.gamepad.axes[0] == 32767 && box.gamepad.axes[1] == -16384 && box.gamepad.axes[5] == 32767);
+    for (UINT key : {0xC3u, 0xCCu, 0xD3u, 0xD5u, 0xCAu}) {
+        state = key;
+        event(KeyUp, (IUnknown *)&arg);
+    }
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[0] == 0 && box.gamepad.axes[5] == -32768);
+    // A release lost while the game was in the background does not leave the button held.
+    state = 0xC5;
+    event(KeyDown, (IUnknown *)&arg);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.buttons & (1 << 2));
+    state = 1;
+    event(Activated, (IUnknown *)&arg);
+    state = 0;
+    event(Activated, (IUnknown *)&arg);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!(box.gamepad.buttons & (1 << 2)));
+    // A navigation key without the extended flag is not its keypad twin.
+    keyStatus.scan = 0x48;
+    state = VK_UP;
+    event(KeyDown, (IUnknown *)&arg);
+    assert(box.keyboard.entries[(box.keyboard.write - 1) % SDL_HOST_KEY_QUEUE_SIZE].scan == 82);
+    state = VK_NUMPAD8;
+    event(KeyUp, (IUnknown *)&arg);
+    assert(box.keyboard.entries[(box.keyboard.write - 1) % SDL_HOST_KEY_QUEUE_SIZE].scan == 96);
+    keyStatus.scan = 0;
     FhdEndHostedInput();
     box.input_serial = box.input_pointer = 0;
     assert(FhdBeginHostedInput(&box, &fakeWindow) == S_OK);
