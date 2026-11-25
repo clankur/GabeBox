@@ -23,6 +23,26 @@ HOSTED_SDL_SCRIPT = re.compile(
 )
 
 
+# Persistent D3D12 pipeline cache marker: empty for passthrough (timing only, no
+# cache call on the device), or one line naming a mode and the console control
+# result (probe/graphics-runtime-control --d3d12-pipeline-cache) that proved it:
+# 0x5CCXLBFF with outcome 1 for the selected path (L library, B cached blobs).
+# Mirrors XboxPsoCacheParseMarker in runtime/win32/pipeline-cache-format.h.
+PIPELINE_CACHE_MARKER = re.compile(rb"mode=(?P<mode>library|blobs) control=0x(?P<code>5CC[0-9A-F]{5})(?:\r?\n)?")
+
+
+def pipeline_cache_mode(marker):
+    """Return passthrough, library or blobs for a marker's bytes, or None when malformed."""
+    if not marker:
+        return "passthrough"
+    match = PIPELINE_CACHE_MARKER.fullmatch(marker)
+    if not match:
+        return None
+    code = int(match["code"], 16)
+    outcome = (code >> 12) & 15 if match["mode"] == b"library" else (code >> 8) & 15
+    return match["mode"].decode("ascii") if outcome == 1 else None
+
+
 def hosted_sdl_script(apps, pointer_apps=()):
     pointer = f' data-pointer-apps="{" ".join(pointer_apps)}"' if pointer_apps else ""
     return f'<script id="steam-sdl-profiles" data-apps="{" ".join(apps)}"{pointer} src="steam-sdl-host.js"></script>'
@@ -229,9 +249,12 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 files[marker] = b""
         cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
         if (root / cache_marker).is_file():
-            if (root / cache_marker).stat().st_size or fields[6:7] != ["loader-trace"]:
-                raise ValueError(f"The D3D12 pipeline cache needs an empty marker and the loader trace for AppID {app}.")
-            files[cache_marker] = b""
+            content = (root / cache_marker).read_bytes() if (root / cache_marker).stat().st_size <= 64 else b"?"
+            if pipeline_cache_mode(content) is None or fields[6:7] != ["loader-trace"]:
+                raise ValueError(
+                    f"The D3D12 pipeline cache needs the loader trace and an empty marker (passthrough) or "
+                    f"'mode=library|blobs control=0x5CC…' with a passing control result for AppID {app}.")
+            files[cache_marker] = content
             pipeline_cache = True
         release_marker = f"steam-win32-release-renderer-{app}.txt"
         if (root / release_marker).is_file():
@@ -478,9 +501,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         if variable not in native or variable not in files["XboxWin32SteamDiscovery.dll"]:
             raise ValueError("Use a Steam Core artifact with legacy Steam SDK support.")
     if pipeline_cache:
-        variable = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
-        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
-            raise ValueError("Use a Steam Core artifact with the persistent Direct3D 12 pipeline cache.")
+        # The mode variable marks a runtime whose cache defaults to passthrough and
+        # checks for device removal; an older one probed CreatePipelineLibrary on
+        # the title's device and lost it on Xbox (1.0.246.1).
+        variables = ("XBOX_WIN32_PSO_CACHE\0", "XBOX_WIN32_PSO_CACHE_MODE\0")
+        if any(name.encode("utf-16le") not in binary for name in variables
+               for binary in (native, files["XboxWin32LoaderTrace.dll"])):
+            raise ValueError("Use a Steam Core artifact with the persistent Direct3D 12 pipeline cache "
+                             "and its profile-selected mode.")
     if system_companions:
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:

@@ -194,6 +194,91 @@ static void TestStatusNames() {
     }
 }
 
+static int Marker(const std::string &text, uint32_t *control = nullptr) {
+    return XboxPsoCacheParseMarker(text.data(), text.size(), control);
+}
+
+static void TestProfileMarker() {
+    // An empty marker is passthrough: the cache makes no call on the device.
+    assert(Marker("") == static_cast<int>(XBOX_PSO_CACHE_MODE_PASSTHROUGH));
+    // A cache mode names the control result that proved that path.
+    uint32_t control = 0;
+    assert(Marker("mode=blobs control=0x5CC05163\n", &control) == static_cast<int>(XBOX_PSO_CACHE_MODE_BLOBS));
+    assert(control == 0x5CC05163u);
+    assert(Marker("mode=library control=0x5CC01163\r\n") == static_cast<int>(XBOX_PSO_CACHE_MODE_LIBRARY));
+    assert(Marker("mode=blobs control=0x5CC41163") == static_cast<int>(XBOX_PSO_CACHE_MODE_BLOBS));
+    // The selected path must have reloaded and hit: the 1.0.246.1 failure
+    // (library removed the device, outcome 7) cannot opt into the library.
+    assert(Marker("mode=library control=0x5CC47163") == -1);
+    assert(Marker("mode=blobs control=0x5CC01663") == -1);
+    // Anything else is refused rather than guessed.
+    for (const char *bad : {"on", "mode=library", "mode=auto control=0x5CC01163", "mode=blobs control=0x5CC0116",
+                            "mode=blobs control=0x5cc01163", "mode=blobs control=0x5C071163", "mode=blobs  control=0x5CC01163",
+                            "mode=blobs control=0x5CC01163\n\n", "\n"})
+        assert(Marker(bad) == -1);
+    assert(std::string(XboxPsoCacheModeName(0)) == "passthrough");
+    assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_LIBRARY)) == "library");
+    assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_BLOBS)) == "blobs");
+}
+
+static void TestGuard() {
+    uint8_t identity[32], other[32];
+    for (int i = 0; i < 32; ++i) {
+        identity[i] = static_cast<uint8_t>(i * 7 + 1);
+        other[i] = identity[i];
+    }
+    other[3] ^= 1;
+    char text[XBOX_PSO_CACHE_GUARD_MAX];
+    for (uint32_t call = 1; call <= 15; ++call) {
+        const size_t size = XboxPsoCacheFormatGuard(text, call, identity);
+        assert(size <= XBOX_PSO_CACHE_GUARD_MAX);
+        int same = 0;
+        assert(XboxPsoCacheParseGuard(text, size, identity, &same) == call && same);
+        // Another driver, OS or d3d12.dll: the call is read, the identity differs.
+        assert(XboxPsoCacheParseGuard(text, size, other, &same) == call && !same);
+        assert(XboxPsoCacheParseGuard(text, size - 1, identity, &same) == call && !same);
+    }
+    const size_t size = XboxPsoCacheFormatGuard(text, XBOX_PSO_CALL_CREATE_LIBRARY, identity);
+    assert(std::string(text, size) == "XPSOGUARD call=04 identity=" + Hex(identity, 8) + " name=create-library\r\n");
+    int same = 1;
+    assert(XboxPsoCacheParseGuard("", 0, identity, &same) == 0 && !same);
+    std::string corrupt(text, size);
+    corrupt[15] = 'x';
+    assert(XboxPsoCacheParseGuard(corrupt.data(), corrupt.size(), identity, &same) == 0);
+    corrupt = std::string(text, size);
+    corrupt[15] = '0';
+    corrupt[16] = '0';
+    assert(XboxPsoCacheParseGuard(corrupt.data(), corrupt.size(), identity, &same) == 0);
+}
+
+static void TestCallsAndOutcomes() {
+    // Diagnostics use the loader-trace character set, and every call has a name.
+    for (uint32_t call = 0; call <= 15; ++call) {
+        const std::string name = XboxPsoCacheCallName(call);
+        for (char c : name) assert((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-');
+    }
+    for (uint32_t call : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 14u})
+        assert(std::string(XboxPsoCacheCallName(call)) != "unknown");
+    assert(std::string(XboxPsoCacheCallName(XBOX_PSO_CALL_CREATE_LIBRARY)) == "create-library");
+    assert(XboxPsoCacheRemovalOutcome(0x887A0005u) == XBOX_PSO_OUTCOME_REMOVED);
+    assert(XboxPsoCacheRemovalOutcome(0x887A0006u) == XBOX_PSO_OUTCOME_HUNG);
+    assert(XboxPsoCacheRemovalOutcome(0x887A0007u) == XBOX_PSO_OUTCOME_RESET);
+    assert(XboxPsoCacheRemovalOutcome(0x887A0020u) == XBOX_PSO_OUTCOME_INTERNAL);
+    assert(XboxPsoCacheRemovalOutcome(0xC0000005u) == XBOX_PSO_OUTCOME_DIED);
+    assert(XboxPsoCacheRemovalOutcome(0) == XBOX_PSO_OUTCOME_DIED);
+    // Outcomes fit the control's nibbles and stay distinct from the success code.
+    assert(XBOX_PSO_OUTCOME_DIED <= 15 && XBOX_PSO_OUTCOME_HIT == 1);
+}
+
+static void TestStreamAppend() {
+    // A CachedPSO subobject appended to a title's stream starts on an 8-byte
+    // boundary even when the last subobject was not padded.
+    assert(XboxPsoCacheAppendOffset(0) == 0);
+    assert(XboxPsoCacheAppendOffset(8) == 8);
+    assert(XboxPsoCacheAppendOffset(12) == 16);
+    assert(XboxPsoCacheAppendOffset(17) == 24);
+}
+
 int main() {
     TestSha256();
     TestKeys();
@@ -201,5 +286,9 @@ int main() {
     TestBlobRecords();
     TestWritePolicy();
     TestStatusNames();
+    TestProfileMarker();
+    TestGuard();
+    TestCallsAndOutcomes();
+    TestStreamAppend();
     return 0;
 }

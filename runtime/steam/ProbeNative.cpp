@@ -39,6 +39,7 @@
 #include "SteamCloudRestore.h"
 #include "SteamUserDataRedirect.h"
 #include "../shared/steam-handoff-control.h"
+#include "../win32/pipeline-cache-format.h"
 #include "steam-download-queue.h"
 #include "steam-launch-detail.h"
 #include "steam-session-cache-policy.h"
@@ -2281,6 +2282,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowHostedXInput = false;
     bool shadowJitTrace = false;
     bool shadowPipelineCache = false;
+    std::wstring shadowPipelineCacheMode;
     std::wstring shadowManagedWarmup;
     bool shadowDxgi = false;
     bool shadowD3d12DefaultAdapter = false;
@@ -2400,12 +2402,21 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     shadowJitTrace = true;
                 }
                 // Persistent Direct3D 12 pipeline cache, kept per AppID and build in LocalState.
+                // An empty marker is passthrough (timing only); a cache mode names the
+                // console control result that proved it (pipeline-cache-format.h).
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-d3d12-pipeline-cache-" + std::to_wstring(app) + L".txt")) {
                     const auto file = marker.try_as<StorageFile>();
-                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size() > 64) {
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
+                    const std::wstring text{co_await FileIO::ReadTextAsync(file)};
+                    std::string ascii;
+                    for (const wchar_t c : text) ascii.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+                    const int mode = XboxPsoCacheParseMarker(ascii.data(), ascii.size(), nullptr);
+                    if (mode < 0) co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    shadowPipelineCacheMode = mode == static_cast<int>(XBOX_PSO_CACHE_MODE_LIBRARY) ? L"library" :
+                        mode == static_cast<int>(XBOX_PSO_CACHE_MODE_BLOBS) ? L"blobs" : L"passthrough";
                     shadowPipelineCache = true;
                 }
                 // Managed first-use warm-up: the profile's plan names the game's IL-only
@@ -3306,7 +3317,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     pipelineCache.clear();
                 }
                 report += pipelineCache.empty() ? L"steam_shadow_pipeline_cache=unavailable\r\n" :
-                    L"steam_shadow_pipeline_cache=profile\r\n";
+                    L"steam_shadow_pipeline_cache=profile\r\nsteam_shadow_pipeline_cache_mode=" +
+                    shadowPipelineCacheMode + L"\r\n";
             }
             const auto managedWarmup = packageRoot + L"\\XboxManagedWarmup.dll";
             const std::pair<std::wstring, std::wstring> variables[] = {
@@ -3330,6 +3342,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"DOTNET_EnableEventPipe", shadowJitTrace ? L"1" : L""},
                 {L"XBOX_WIN32_PSO_TRACE", shadowJitTrace && shadowTrace ? L"1" : L""},
                 {L"XBOX_WIN32_PSO_CACHE", pipelineCache},
+                {L"XBOX_WIN32_PSO_CACHE_MODE", pipelineCache.empty() ? std::wstring{} : shadowPipelineCacheMode},
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},

@@ -360,9 +360,175 @@ static inline void XboxPsoCacheHexWide(const uint8_t *bytes, size_t size, uint16
     out[2 * size] = 0;
 }
 
+/* Profile selection. The marker steam-win32-d3d12-pipeline-cache-APPID.txt is
+   empty for passthrough (timing only: no cache call reaches the device), or one
+   line naming a mode and the console control result that proved it:
+
+     mode=library control=0x5CC0LBFF
+     mode=blobs control=0x5CC0LBFF
+
+   The control code must report outcome 1 (stored, reloaded in a second
+   process and hit) for the selected path: L for the library, B for cached
+   blobs. Returns the mode (0, 1 or 2), or -1 for a malformed marker. */
+#define XBOX_PSO_CACHE_MODE_PASSTHROUGH 0u
+
+static inline int XboxPsoCacheParseMarker(const char *text, size_t size, uint32_t *control) {
+    if (control) *control = 0;
+    if (!size) return (int)XBOX_PSO_CACHE_MODE_PASSTHROUGH;
+    if (size >= 2 && text[size - 2] == '\r' && text[size - 1] == '\n') size -= 2;
+    else if (text[size - 1] == '\n') size -= 1;
+    static const char library[] = "mode=library control=0x";
+    static const char blobs[] = "mode=blobs control=0x";
+    const char *prefix = NULL;
+    int mode = -1;
+    if (size == sizeof(library) - 1 + 8) {
+        prefix = library;
+        mode = (int)XBOX_PSO_CACHE_MODE_LIBRARY;
+    } else if (size == sizeof(blobs) - 1 + 8) {
+        prefix = blobs;
+        mode = (int)XBOX_PSO_CACHE_MODE_BLOBS;
+    } else {
+        return -1;
+    }
+    size_t at = 0;
+    for (; prefix[at]; ++at)
+        if (text[at] != prefix[at]) return -1;
+    uint32_t code = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        const char c = text[at + i];
+        const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'A' && c <= 'F' ?
+            (uint32_t)(c - 'A' + 10) : 16u;
+        if (digit > 15) return -1;
+        code = code << 4 | digit;
+    }
+    if ((code & 0xFFF00000u) != 0x5CC00000u) return -1;
+    const uint32_t outcome = mode == (int)XBOX_PSO_CACHE_MODE_LIBRARY ? (code >> 12) & 15 : (code >> 8) & 15;
+    if (outcome != 1) return -1;
+    if (control) *control = code;
+    return mode;
+}
+
+static inline const char *XboxPsoCacheModeName(uint32_t mode) {
+    return mode == XBOX_PSO_CACHE_MODE_LIBRARY ? "library" : mode == XBOX_PSO_CACHE_MODE_BLOBS ? "blobs" :
+        "passthrough";
+}
+
+/* Every call the cache makes into the D3D12 runtime on the title's device or
+   its objects. A device-removed check follows each one, and the ID of the call
+   that preceded a removal is recorded in the trace, the guard file and the
+   control's exit code. */
+typedef enum XboxPsoCacheCall {
+    XBOX_PSO_CALL_NONE = 0,
+    XBOX_PSO_CALL_ADAPTER_LUID = 1,     /* ID3D12Device::GetAdapterLuid */
+    XBOX_PSO_CALL_CHECK_SUPPORT = 2,    /* CheckFeatureSupport(D3D12_FEATURE_SHADER_CACHE) */
+    XBOX_PSO_CALL_QUERY_DEVICE1 = 3,    /* QueryInterface(ID3D12Device1) */
+    XBOX_PSO_CALL_CREATE_LIBRARY = 4,   /* ID3D12Device1::CreatePipelineLibrary */
+    XBOX_PSO_CALL_STORE = 5,            /* ID3D12PipelineLibrary::StorePipeline */
+    XBOX_PSO_CALL_LOAD = 6,             /* ID3D12PipelineLibrary(1)::Load*Pipeline */
+    XBOX_PSO_CALL_SERIALIZE = 7,        /* GetSerializedSize and Serialize */
+    XBOX_PSO_CALL_CACHED_BLOB = 8,      /* ID3D12PipelineState::GetCachedBlob */
+    XBOX_PSO_CALL_CACHED_PSO = 9,       /* pipeline creation with a CachedPSO blob */
+    XBOX_PSO_CALL_QUERY_LIBRARY1 = 10,  /* QueryInterface(ID3D12PipelineLibrary1) */
+    XBOX_PSO_CALL_GAME_CREATE = 14,     /* the title's own creation, unchanged */
+    XBOX_PSO_CALL_UNKNOWN = 15,
+} XboxPsoCacheCall;
+
+static inline const char *XboxPsoCacheCallName(uint32_t call) {
+    switch (call) {
+    case XBOX_PSO_CALL_NONE: return "none";
+    case XBOX_PSO_CALL_ADAPTER_LUID: return "adapter-luid";
+    case XBOX_PSO_CALL_CHECK_SUPPORT: return "check-shader-cache";
+    case XBOX_PSO_CALL_QUERY_DEVICE1: return "query-device1";
+    case XBOX_PSO_CALL_CREATE_LIBRARY: return "create-library";
+    case XBOX_PSO_CALL_STORE: return "store-pipeline";
+    case XBOX_PSO_CALL_LOAD: return "load-pipeline";
+    case XBOX_PSO_CALL_SERIALIZE: return "serialize-library";
+    case XBOX_PSO_CALL_CACHED_BLOB: return "get-cached-blob";
+    case XBOX_PSO_CALL_CACHED_PSO: return "create-cached-pso";
+    case XBOX_PSO_CALL_QUERY_LIBRARY1: return "query-library1";
+    case XBOX_PSO_CALL_GAME_CREATE: return "game-create";
+    }
+    return "unknown";
+}
+
+/* Guard file <prefix>.guard: written before the first call of each kind in a
+   process and deleted once it returns with the device intact, so a process
+   that dies inside a call leaves it behind. A guard for the same identity
+   (driver, OS and build) selects passthrough on later launches:
+
+     XPSOGUARD call=XX identity=HHHHHHHHHHHHHHHH name=NAME\r\n */
+#define XBOX_PSO_CACHE_GUARD_MAX 80u
+
+static inline size_t XboxPsoCacheFormatGuard(char *out, uint32_t call, const uint8_t identity[32]) {
+    static const char digits[] = "0123456789ABCDEF";
+    size_t used = 0;
+    for (const char *t = "XPSOGUARD call="; *t; ++t) out[used++] = *t;
+    out[used++] = digits[(call >> 4) & 15];
+    out[used++] = digits[call & 15];
+    for (const char *t = " identity="; *t; ++t) out[used++] = *t;
+    XboxPsoCacheHex(identity, 8, out + used);
+    used += 16;
+    for (const char *t = " name="; *t; ++t) out[used++] = *t;
+    for (const char *t = XboxPsoCacheCallName(call); *t; ++t) out[used++] = *t;
+    out[used++] = '\r';
+    out[used++] = '\n';
+    return used;
+}
+
+/* The call recorded in a guard (1..15), or 0 when malformed. *sameIdentity
+   says whether it was written for this identity. */
+static inline uint32_t XboxPsoCacheParseGuard(const char *text, size_t size, const uint8_t identity[32],
+        int *sameIdentity) {
+    char expected[XBOX_PSO_CACHE_GUARD_MAX];
+    if (sameIdentity) *sameIdentity = 0;
+    if (size < 44 || size > XBOX_PSO_CACHE_GUARD_MAX) return 0;
+    for (size_t i = 0; i < 15; ++i)
+        if (text[i] != "XPSOGUARD call="[i]) return 0;
+    uint32_t call = 0;
+    for (size_t i = 15; i < 17; ++i) {
+        const char c = text[i];
+        const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'A' && c <= 'F' ?
+            (uint32_t)(c - 'A' + 10) : 16u;
+        if (digit > 15) return 0;
+        call = call << 4 | digit;
+    }
+    if (!call || call > 15) return 0;
+    const size_t length = XboxPsoCacheFormatGuard(expected, call, identity);
+    if (sameIdentity) *sameIdentity = length == size && XboxPsoCacheSameBytes((const uint8_t *)expected,
+        (const uint8_t *)text, size);
+    return call;
+}
+
+/* Control outcomes for one path (the L and B nibbles of 0x5CCXLBFF). A
+   removal or a process that died is classified by its code: 7 to 10 name the
+   removal reason, 11 a process that exited with any other code. */
+#define XBOX_PSO_OUTCOME_HIT 1u
+#define XBOX_PSO_OUTCOME_REMOVED 7u
+#define XBOX_PSO_OUTCOME_HUNG 8u
+#define XBOX_PSO_OUTCOME_RESET 9u
+#define XBOX_PSO_OUTCOME_INTERNAL 10u
+#define XBOX_PSO_OUTCOME_DIED 11u
+
+static inline uint32_t XboxPsoCacheRemovalOutcome(uint32_t code) {
+    switch (code) {
+    case 0x887A0005u: return XBOX_PSO_OUTCOME_REMOVED;  /* DXGI_ERROR_DEVICE_REMOVED */
+    case 0x887A0006u: return XBOX_PSO_OUTCOME_HUNG;     /* DXGI_ERROR_DEVICE_HUNG */
+    case 0x887A0007u: return XBOX_PSO_OUTCOME_RESET;    /* DXGI_ERROR_DEVICE_RESET */
+    case 0x887A0020u: return XBOX_PSO_OUTCOME_INTERNAL; /* DXGI_ERROR_DRIVER_INTERNAL_ERROR */
+    }
+    return XBOX_PSO_OUTCOME_DIED;
+}
+
+/* A CachedPSO subobject appended to a stream starts at the next 8-byte
+   boundary, as every subobject does; returns its offset. */
+static inline size_t XboxPsoCacheAppendOffset(size_t streamSize) {
+    return (streamSize + 7) & ~(size_t)7;
+}
+
 /* Background serialization policy. Writing rewrites the whole file, so new
    pipelines are written once creation goes quiet, during a long burst only
-   every so often, and always at exit or device removal. A pipeline whose
+   every so often, and always at exit (not after a device removal, which stops
+   the cache). A pipeline whose
    creation took XBOX_PSO_CACHE_SLOW_US or longer is written immediately, so a
    crash or quit soon after a long compile still keeps it. */
 #define XBOX_PSO_CACHE_IDLE_MS 3000u
