@@ -47,8 +47,10 @@ jobs:
           foreach ($repo in @(@{ Dir = 'mesa'; Pin = $pin.source }, @{ Dir = 'meson'; Pin = $pin.meson })) {
             $dir = Join-Path $work $repo.Dir
             git init --quiet $dir
-            # Pinned hashes cover the LF bytes; the runner's global autocrlf would rewrite them.
+            # Pinned hashes and patches cover the LF bytes. Mesa's .gitattributes sets
+            # text=auto, which checks out CRLF on Windows unless core.eol is lf.
             git -C $dir config core.autocrlf false
+            git -C $dir config core.eol lf
             git -C $dir fetch --quiet --depth 1 $repo.Pin.repository $repo.Pin.commit
             git -C $dir -c advice.detachedHead=false checkout --quiet FETCH_HEAD
             if ((git -C $dir rev-parse HEAD) -ne $repo.Pin.commit) { throw "Unexpected $($repo.Dir) revision." }
