@@ -832,9 +832,19 @@ static BOOL ReadCursorPosition(LPPOINT position, const char *nativeName) {
     const ReadCursor native = user ? (ReadCursor)(void *)GetProcAddress(user, nativeName) : NULL;
     if (native) {
         SetLastError(error);
-        return native(position);
+        if (native(position)) return TRUE;
+        if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) return FALSE;
     }
-    SetLastError(ERROR_PROC_NOT_FOUND);
+    // Xbox User32 has no desktop cursor. Before hosted pointer input arrives, a hosted foreground
+    // window reports the centre of its client area, as a desktop cursor would always have a position.
+    const HWND foreground = VirtualForegroundWindow();
+    RECT bounds;
+    if (foreground && HostedWindowBounds(foreground, &bounds)) {
+        *position = (POINT){bounds.left + (bounds.right - bounds.left) / 2, bounds.top + (bounds.bottom - bounds.top) / 2};
+        SetLastError(error);
+        return TRUE;
+    }
+    SetLastError(native ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_PROC_NOT_FOUND);
     return FALSE;
 }
 
