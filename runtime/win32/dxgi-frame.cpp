@@ -447,11 +447,11 @@ void DxgiFramePublisher::ProbeConstantBuffers(UINT64 count) {
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (FAILED(context_->Map(copy.Get(), 0, D3D11_MAP_READ, 0, &mapped))) continue;
             const UINT* words = static_cast<const UINT*>(mapped.pData);
-            UINT nan = 0, inf = 0, first = UINT_MAX;
+            UINT nan = 0, inf = 0, first = 0xffffffffu;
             for (UINT i = 0; i < desc.ByteWidth / 4; ++i) {
                 if ((words[i] & 0x7f800000u) != 0x7f800000u) continue;
                 if (words[i] & 0x007fffffu) ++nan; else ++inf;
-                if (first == UINT_MAX) first = i;
+                if (first == 0xffffffffu) first = i;
             }
             context_->Unmap(copy.Get(), 0);
             char text[160], *out = text;
@@ -464,7 +464,7 @@ void DxgiFramePublisher::ProbeConstantBuffers(UINT64 count) {
             put("dxgi constants frame="); number(count); put(stage ? " stage=ps" : " stage=vs");
             put(" slot="); number(slot); put(" bytes="); number(desc.ByteWidth);
             put(" nan="); number(nan); put(" inf="); number(inf);
-            if (first != UINT_MAX) { put(" first-float="); number(first); }
+            if (first != 0xffffffffu) { put(" first-float="); number(first); }
             put("\r\n");
             AppendProbeTrace(text, static_cast<DWORD>(out - text));
         }
