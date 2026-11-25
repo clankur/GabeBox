@@ -318,21 +318,40 @@ class BigPicturePackageTests(unittest.TestCase):
                     archive.writestr(name, b"runtime fixture")
             return template
 
-        feature = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
+        feature = "XBOX_WIN32_PSO_CACHE\0XBOX_WIN32_PSO_CACHE_MODE\0".encode("utf-16le")
         current = runtime(feature, feature)
-        with self.assertRaisesRegex(ValueError, "empty marker and the loader trace"):
+        with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
             stage_trials(self.layout, [f"{app}={profile}"], current)
         shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
-        (profile / marker).write_text("on")
-        with self.assertRaisesRegex(ValueError, "empty marker and the loader trace"):
-            stage_trials(self.layout, [f"{app}={profile}"], current)
+        # A cache mode needs the control result that proved that path.
+        for text in ("on", "mode=library", "mode=auto control=0x5CC01163",
+                     # 1.0.246.1: CreatePipelineLibrary removed the device (library outcome 7).
+                     "mode=library control=0x5CC47163", "mode=blobs control=0x5CC01663"):
+            (profile / marker).write_text(text)
+            with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
+                stage_trials(self.layout, [f"{app}={profile}"], current)
         (profile / marker).write_bytes(b"")
-        for native, loader in ((b"old", feature), (feature, b"old")):
+        # A runtime without the profile-selected mode probed the title's device.
+        cache_only = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
+        for native, loader in ((b"old", feature), (feature, b"old"), (cache_only, feature), (feature, cache_only)):
             with self.assertRaisesRegex(ValueError, "persistent Direct3D 12 pipeline cache"):
                 stage_trials(self.layout, [f"{app}={profile}"], runtime(native, loader))
         stage_trials(self.layout, [f"{app}={profile}"], current)
         self.assertEqual((self.layout / marker).read_bytes(), b"")
         self.assertEqual((self.layout / "XboxWin32LoaderTrace.dll").read_bytes(), feature)
+        for text in (b"mode=blobs control=0x5CC47163\n", b"mode=library control=0x5CC01163\r\n"):
+            (profile / marker).write_bytes(text)
+            stage_trials(self.layout, [f"{app}={profile}"], current)
+            self.assertEqual((self.layout / marker).read_bytes(), text)
+
+    def test_pipeline_cache_marker_modes(self):
+        from build_tools.stage_profiles import pipeline_cache_mode
+        self.assertEqual(pipeline_cache_mode(b""), "passthrough")
+        self.assertEqual(pipeline_cache_mode(b"mode=blobs control=0x5CC05163"), "blobs")
+        self.assertEqual(pipeline_cache_mode(b"mode=library control=0x5CC01163\n"), "library")
+        for bad in (b"\n", b"mode=library control=0x5CC47163", b"mode=blobs control=0x5cc01163",
+                    b"mode=blobs control=0x5C071163", b"mode=blobs control=0x5CC01163\n\n"):
+            self.assertIsNone(pipeline_cache_mode(bad))
 
     def test_slay_the_spire_2_opengl_profile_selects_the_pipeline_cache(self):
         root = ROOT / "profiles/2868840/26655341"

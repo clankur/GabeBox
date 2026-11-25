@@ -10,6 +10,8 @@
 
    Timing (XBOX_WIN32_PSO_TRACE=1 or a cache): each creation of 2 ms or more
    is written as "pso kind=G|C|S utc=... us=... result=0x... cache=...".
+   Root signatures (slot 16) are wrapped only when a cache mode keys them;
+   passthrough patches exactly the timing slots 10, 11 and 47.
 
    Cache (XBOX_WIN32_PSO_CACHE=<LocalState>\D3D12PipelineCache\<app>-<build>):
    - Key: SHA-256 over the whole desc. Pointers are serialized by content: the
@@ -22,11 +24,31 @@
      revision, description and user-mode driver version, the OS version, and
      d3d12.dll's image stamp; the adapter LUID is only compared within the
      process. A mismatched, truncated or corrupt file is deleted and rebuilt.
-   - Mode: ID3D12PipelineLibrary when ID3D12Device1::CreatePipelineLibrary
-     works, otherwise per-pipeline ID3D12PipelineState::GetCachedBlob records
-     supplied back through CachedPSO when the device reports single-PSO cache
-     support, otherwise timing only. The library is bound to the first device
-     that creates a pipeline; other devices pass through.
+   - Mode: chosen by the profile, never by probing the title's device.
+     XBOX_WIN32_PSO_CACHE_MODE=library uses an ID3D12PipelineLibrary, =blobs
+     per-pipeline ID3D12PipelineState::GetCachedBlob records supplied back
+     through CachedPSO; anything else is passthrough, which only times
+     creation: the hooks forward every call and the cache makes no call on
+     the device. A profile names library or blobs only with a console control
+     result that proved that path in a separate process
+     (probe/graphics-runtime-control --d3d12-pipeline-cache). A library that
+     cannot be created, or blobs mode on a device without single-PSO support,
+     leaves the process in passthrough; one mode never falls back to the
+     other. The cache binds to the first device that creates a pipeline;
+     other devices pass through.
+   - Device safety: every cache call into the runtime (GetAdapterLuid,
+     CheckFeatureSupport, QueryInterface, CreatePipelineLibrary, Store, Load,
+     Serialize, GetCachedBlob, creation with CachedPSO) is followed by
+     ID3D12Device::GetDeviceRemovedReason. The first call of each kind in a
+     process is bracketed by "asset pso-cache call=NAME phase=before|after"
+     lines and by <prefix>.guard, written before the call and deleted after
+     it. A removal, seen after a cache call or reported by the title's own
+     creation, writes "asset pso-cache device-removed after=NAME ..." with a
+     DRED summary, leaves the guard naming that call, and stops the cache for
+     the rest of the process: no further cache call and no file write. A
+     guard left for the same identity (a process that died inside a call, or
+     a removal) selects passthrough on later launches; a driver, OS or game
+     build change starts over.
    - Contract: the hooked methods return exactly what the driver returns for
      the original desc, riid and ppPipelineState. A null ppPipelineState
      (validation only) and repeated creation of one desc in a process go to
@@ -39,9 +61,8 @@
    - Writes: a writer thread serializes after creation goes quiet, during long
      bursts every few seconds, immediately after any pipeline whose creation
      took 500 ms or more (multi-second compiles were measured on the console,
-     and a crash or quit right after one must not lose it), at process exit
-     and after device removal, to a temporary file that then replaces the
-     cache. Large pipelines are kept; only the 256 MiB total is bounded. Library calls are serialized
+     and a crash or quit right after one must not lose it) and at process
+     exit, to a temporary file that then replaces the cache. Large pipelines are kept; only the 256 MiB total is bounded. Library calls are serialized
      by one lock; driver compilation runs outside it, and a second creation of
      a key already in flight goes to the driver instead of racing its store.
 
@@ -157,6 +178,7 @@ static const GUID library1Iid = {0x80EABF42, 0x2568, 0x4E5E, {0xBD, 0x82, 0xC3, 
 static const GUID pipelineIid = {0x765A30F3, 0xF624, 0x4C6F, {0xA8, 0x28, 0xAC, 0xE9, 0x48, 0x62, 0x24, 0x45}};
 static const GUID factory1Iid = {0x770AAE78, 0xF26F, 0x4DBA, {0xA8, 0x29, 0x25, 0x3C, 0x83, 0xD1, 0xB3, 0x87}};
 static const GUID dxgiDeviceIid = {0x54EC77FA, 0x1377, 0x44E6, {0x8C, 0x32, 0x88, 0xFD, 0x5F, 0x44, 0xC8, 0x4C}};
+static const GUID dredIid = {0x98931D33, 0x5AE8, 0x4791, {0xAA, 0x3C, 0x1A, 0x73, 0xA2, 0x93, 0x4E, 0x71}};
 
 /* Root signatures by object, with the SHA-256 of node mask and blob. An
    address reused by a later root signature is overwritten. */
@@ -208,13 +230,25 @@ static struct {
     ULONGLONG serializedBytes;
     LONG unsaved;
     LONG slowPending;
-    LONG forcedMode;
+    LONG selected;      /* the profile's mode; 0 is passthrough */
     LONG writeFailures;
     ULONGLONG lastStoreTick;
     ULONGLONG lastWriteTick;
-    volatile LONG removed;
     volatile LONG exited;
+    volatile LONG passthrough;  /* timing only, with stats at exit */
     HANDLE wake;
+    /* Device safety: see "Device safety" above. */
+    WCHAR guardPath[480];
+    SRWLOCK guardLock;
+    LONG guardArmed;            /* calls in flight under the guard */
+    LONG guardSticky;           /* a removal: the guard stays */
+    volatile LONG stopped;
+    volatile LONG proven;       /* call kinds that returned with the device intact */
+    volatile LONG failedCalls;  /* call kinds whose failure was traced */
+    volatile LONG lastCall;
+    volatile LONG removedCall;
+    volatile LONG removedReason;
+    LONG guardCall;             /* a guard left by an earlier launch */
     struct {
         volatile LONG hits, misses, stores, duplicates, skipped, unkeyed, bypassed, writes, failures;
         volatile LONG64 loadUs, hitUs, missUs;
@@ -240,15 +274,16 @@ static void Fallback(int bit, const char *operation, HRESULT result) {
 }
 enum {
     FALLBACK_LOAD, FALLBACK_BLOB, FALLBACK_STORE, FALLBACK_QUERY, FALLBACK_CACHED_BLOB, FALLBACK_OTHER_DEVICE,
-    FALLBACK_EARLY, FALLBACK_FULL, FALLBACK_KEY, FALLBACK_WRITE, FALLBACK_STREAM_LIBRARY,
+    FALLBACK_EARLY, FALLBACK_FULL, FALLBACK_KEY, FALLBACK_WRITE, FALLBACK_STREAM_LIBRARY, FALLBACK_GUARD,
 };
 
 static const char *ModeName(LONG mode) {
-    return mode == XBOX_PSO_CACHE_MODE_LIBRARY ? "library" : mode == XBOX_PSO_CACHE_MODE_BLOBS ? "blobs" : "disabled";
+    return mode == XBOX_PSO_CACHE_MODE_LIBRARY ? "library" : mode == XBOX_PSO_CACHE_MODE_BLOBS ? "blobs" :
+        cache.passthrough ? "passthrough" : cache.stopped ? "stopped" : "disabled";
 }
 
 static void TraceStats(const char *reason) {
-    char line[200];
+    char line[320];
     char *out = Text(Text(line, "asset pso-cache stats at="), reason);
     out = Text(Text(out, " mode="), ModeName(cache.mode));
     out = Decimal(Text(out, " hits="), (ULONG)cache.stats.hits);
@@ -263,6 +298,152 @@ static void TraceStats(const char *reason) {
     out = Decimal(Text(out, " miss-ms="), (ULONGLONG)cache.stats.missUs / 1000);
     out = Decimal(Text(out, " writes="), (ULONG)cache.stats.writes);
     Line(line, out);
+}
+
+/* --------------------------------------------------------- device safety */
+
+typedef HRESULT (STDMETHODCALLTYPE *RemovedReasonMethod)(void *);
+
+/* ID3D12Device::GetDeviceRemovedReason, a status read with no side effects. */
+static HRESULT RemovedReason(void *device) {
+    return device ? METHOD(device, 37, RemovedReasonMethod)(device) : S_OK;
+}
+
+static char *HexDigits(char *out, ULONGLONG value, int digits) {
+    const char hex[] = "0123456789ABCDEF";
+    for (int shift = (digits - 1) * 4; shift >= 0; shift -= 4) *out++ = hex[(value >> shift) & 15];
+    return out;
+}
+
+static void CallLine(LONG call, const char *phase, HRESULT result, BOOL withResult) {
+    char line[120];
+    char *out = Text(Text(line, "asset pso-cache call="), XboxPsoCacheCallName((uint32_t)call));
+    out = Text(Text(out, " phase="), phase);
+    if (withResult) out = Hex32(Text(out, " result="), (DWORD)result);
+    Line(line, out);
+}
+
+/* With guardLock held. */
+static void WriteGuardLocked(LONG call) {
+    if (!cache.guardPath[0]) return;
+    char text[XBOX_PSO_CACHE_GUARD_MAX];
+    const DWORD size = (DWORD)XboxPsoCacheFormatGuard(text, (uint32_t)call, cache.identity);
+    HANDLE file = CreateFile2FromAppW(cache.guardPath, GENERIC_WRITE, 0, CREATE_ALWAYS, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        Fallback(FALLBACK_GUARD, "guard", HRESULT_FROM_WIN32(GetLastError()));
+        return;
+    }
+    DWORD written = 0;
+    if (!WriteFile(file, text, size, &written, NULL) || written != size)
+        Fallback(FALLBACK_GUARD, "guard", HRESULT_FROM_WIN32(GetLastError() ? GetLastError() : ERROR_WRITE_FAULT));
+    CloseHandle(file);
+}
+
+/* A compact DRED summary: whether the runtime kept removal data, the
+   breadcrumb nodes with the first incomplete one, and the page fault. DRED
+   is only populated when it was enabled before the device was created. */
+static void TraceDred(void *device) {
+    typedef HRESULT (STDMETHODCALLTYPE *Breadcrumbs)(void *, D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT *);
+    typedef HRESULT (STDMETHODCALLTYPE *PageFault)(void *, D3D12_DRED_PAGE_FAULT_OUTPUT *);
+    char line[240];
+    void *dred = NULL;
+    HRESULT result = device ? Query(device, &dredIid, &dred) : E_POINTER;
+    char *out = Hex32(Text(line, "asset pso-cache dred qi="), (DWORD)result);
+    if (SUCCEEDED(result) && dred) {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs;
+        crumbs.pHeadAutoBreadcrumbNode = NULL;
+        result = METHOD(dred, 3, Breadcrumbs)(dred, &crumbs);
+        out = Hex32(Text(out, " crumbs="), (DWORD)result);
+        volatile ULONG nodes = 0, incomplete = 0, done = 0, total = 0, op = 0;
+        __try {
+            for (const D3D12_AUTO_BREADCRUMB_NODE *node = SUCCEEDED(result) ? crumbs.pHeadAutoBreadcrumbNode : NULL;
+                    node && nodes < 4096; node = node->pNext) {
+                ++nodes;
+                if (!node->pCommandHistory || !node->pLastBreadcrumbValue ||
+                        *node->pLastBreadcrumbValue >= node->BreadcrumbCount) continue;
+                if (!incomplete) {
+                    done = *node->pLastBreadcrumbValue;
+                    total = node->BreadcrumbCount;
+                    op = (ULONG)node->pCommandHistory[done];
+                }
+                ++incomplete;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            out = Text(out, " walk=fault");
+        }
+        out = Decimal(Text(out, " nodes="), nodes);
+        out = Decimal(Text(out, " open="), incomplete);
+        if (incomplete) {
+            out = Decimal(Text(out, " done="), done);
+            out = Decimal(Text(out, " of="), total);
+            out = Decimal(Text(out, " op="), op);
+        }
+        D3D12_DRED_PAGE_FAULT_OUTPUT fault;
+        fault.PageFaultVA = 0;
+        result = METHOD(dred, 4, PageFault)(dred, &fault);
+        out = Hex32(Text(out, " fault="), (DWORD)result);
+        if (SUCCEEDED(result)) out = HexDigits(Text(out, " va=0x"), fault.PageFaultVA, 16);
+        Release(dred);
+    }
+    Line(line, out);
+}
+
+/* Records the first removal, keeps the guard naming the call that preceded
+   it and stops the cache for this process. */
+static void DeviceRemoved(void *device, LONG call, HRESULT result, HRESULT reason) {
+    if (InterlockedCompareExchange(&cache.stopped, 1, 0)) return;
+    InterlockedExchange(&cache.removedCall, call);
+    InterlockedExchange(&cache.removedReason, (LONG)reason);
+    InterlockedExchange(&cache.mode, 0);
+    AcquireSRWLockExclusive(&cache.guardLock);
+    cache.guardSticky = 1;
+    /* Passthrough made no cache call; an earlier guard keeps its call. */
+    if (!cache.passthrough) WriteGuardLocked(call);
+    ReleaseSRWLockExclusive(&cache.guardLock);
+    char line[200];
+    char *out = Text(Text(line, "asset pso-cache device-removed after="), XboxPsoCacheCallName((uint32_t)call));
+    out = Hex32(Text(out, " result="), (DWORD)result);
+    out = Hex32(Text(out, " reason="), (DWORD)reason);
+    out = Text(Text(out, " last-cache-call="), XboxPsoCacheCallName((uint32_t)cache.lastCall));
+    Line(line, out);
+    TraceDred(device);
+    TraceStats("device-removed");
+}
+
+/* Before a cache call: the first of each kind in this process writes the
+   guard and a "phase=before" line. Returns whether the guard was armed. */
+static BOOL BeforeCall(LONG call) {
+    InterlockedExchange(&cache.lastCall, call);
+    if (cache.proven & (1L << call)) return FALSE;
+    AcquireSRWLockExclusive(&cache.guardLock);
+    if (!cache.guardSticky) WriteGuardLocked(call);
+    ++cache.guardArmed;
+    ReleaseSRWLockExclusive(&cache.guardLock);
+    CallLine(call, "before", S_OK, FALSE);
+    return TRUE;
+}
+
+/* After a cache call: FALSE when the device is now removed (the cache has
+   stopped). Otherwise the call kind is proven for this process and the guard
+   is removed once no first call is in flight. */
+static BOOL AfterCall(void *device, LONG call, HRESULT result, BOOL armed) {
+    const HRESULT reason = RemovedReason(device);
+    const LONG bit = 1L << call;
+    if (reason != S_OK) {
+        if (armed) CallLine(call, "after", result, TRUE);
+        DeviceRemoved(device, call, result, reason);
+    } else if (armed) {
+        CallLine(call, "after", result, TRUE);
+        InterlockedOr(&cache.proven, bit);
+    } else if (FAILED(result) && !(InterlockedOr(&cache.failedCalls, bit) & bit)) {
+        CallLine(call, "after", result, TRUE);
+    }
+    if (armed) {
+        AcquireSRWLockExclusive(&cache.guardLock);
+        if (!--cache.guardArmed && !cache.guardSticky && cache.guardPath[0]) DeleteFileFromAppW(cache.guardPath);
+        ReleaseSRWLockExclusive(&cache.guardLock);
+    }
+    return reason == S_OK;
 }
 
 /* ---------------------------------------------------------- key building */
@@ -769,7 +950,7 @@ static HRESULT WriteAtomically(const WCHAR *path, const BYTE *data, ULONGLONG si
 
 /* Removes this title's caches for other builds or driver identities and any
    temporary file an interrupted write left behind. */
-static void RemoveStaleFiles(const WCHAR *prefix, const WCHAR *keep) {
+static void RemoveStaleFiles(const WCHAR *prefix, const WCHAR *keep, const WCHAR *guard) {
     WCHAR pattern[480], stale[520];
     SIZE_T directory = 0, length = 0, app = 0;
     for (; prefix[length]; ++length)
@@ -786,12 +967,15 @@ static void RemoveStaleFiles(const WCHAR *prefix, const WCHAR *keep) {
     do {
         SIZE_T size = 0;
         while (found.cFileName[size]) ++size;
-        const BOOL ours = size > 4 && (CompareStringOrdinal(found.cFileName + size - 4, 4, L".bin", 4, TRUE) == CSTR_EQUAL ||
-            CompareStringOrdinal(found.cFileName + size - 4, 4, L".tmp", 4, TRUE) == CSTR_EQUAL);
+        /* Caches, interrupted writes, and guards of other game builds. */
+        const BOOL ours = (size > 4 && (CompareStringOrdinal(found.cFileName + size - 4, 4, L".bin", 4, TRUE) == CSTR_EQUAL ||
+            CompareStringOrdinal(found.cFileName + size - 4, 4, L".tmp", 4, TRUE) == CSTR_EQUAL)) ||
+            (size > 6 && CompareStringOrdinal(found.cFileName + size - 6, 6, L".guard", 6, TRUE) == CSTR_EQUAL);
         if (!ours || (found.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) continue;
         pattern[directory] = 0;
         if (ComposePath(stale, ARRAYSIZE(stale), pattern, found.cFileName, NULL) &&
-                CompareStringOrdinal(stale, -1, keep, -1, TRUE) != CSTR_EQUAL)
+                CompareStringOrdinal(stale, -1, keep, -1, TRUE) != CSTR_EQUAL &&
+                CompareStringOrdinal(stale, -1, guard, -1, TRUE) != CSTR_EQUAL)
             DeleteFileFromAppW(stale);
         pattern[directory] = prefix[directory];
     } while (FindNextFileW(search, &found));
@@ -815,6 +999,8 @@ static BOOL AcquireBounded(SRWLOCK *lock, BOOL bounded) {
 }
 
 static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
+    /* After a removal nothing is serialized: the guard disables the cache. */
+    if (cache.stopped) return S_FALSE;
     if (!AcquireBounded(&cache.writeLock, bounded)) return HRESULT_FROM_WIN32(ERROR_BUSY);
     BYTE *buffer = NULL;
     ULONGLONG payload = 0;
@@ -832,17 +1018,25 @@ static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
     if (XboxPsoCacheShouldWrite((uint32_t)unsaved, now - cache.lastStoreTick, now - cache.lastWriteTick, final,
             cache.slowPending)) {
         result = E_OUTOFMEMORY;
-        if (mode == XBOX_PSO_CACHE_MODE_LIBRARY && cache.library) {
+        if (cache.stopped) {
+            result = S_FALSE;
+        } else if (mode == XBOX_PSO_CACHE_MODE_LIBRARY && cache.library) {
             typedef SIZE_T (STDMETHODCALLTYPE *SerializedSize)(void *);
             typedef HRESULT (STDMETHODCALLTYPE *Serialize)(void *, void *, SIZE_T);
+            BOOL armed = BeforeCall(XBOX_PSO_CALL_SERIALIZE);
             payload = METHOD(cache.library, 11, SerializedSize)(cache.library);
+            BOOL intact = AfterCall(cache.device, XBOX_PSO_CALL_SERIALIZE, S_OK, armed);
             cache.serializedBytes = payload;
-            if (!payload || payload > XBOX_PSO_CACHE_MAX_PAYLOAD) {
+            if (!intact) {
+                result = S_FALSE;
+            } else if (!payload || payload > XBOX_PSO_CACHE_MAX_PAYLOAD) {
                 result = payload ? HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE) : E_UNEXPECTED;
             } else if ((buffer = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(XBOX_PSO_CACHE_HEADER_SIZE + payload)))) {
                 SetReentrant(TRUE);
+                armed = BeforeCall(XBOX_PSO_CALL_SERIALIZE);
                 result = METHOD(cache.library, 12, Serialize)(cache.library, buffer + XBOX_PSO_CACHE_HEADER_SIZE,
                     (SIZE_T)payload);
+                if (!AfterCall(cache.device, XBOX_PSO_CALL_SERIALIZE, result, armed)) result = S_FALSE;
                 SetReentrant(FALSE);
             }
             pipelines = cache.pipelines;
@@ -900,26 +1094,11 @@ static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
     return result;
 }
 
-static void ReleaseLibrary(void) {
-    AcquireSRWLockExclusive(&cache.lock);
-    Release(cache.library1);
-    Release(cache.library);
-    cache.library1 = NULL;
-    cache.library = NULL;
-    cache.mode = 0;
-    ReleaseSRWLockExclusive(&cache.lock);
-}
-
 static DWORD WINAPI WriteInBackground(LPVOID unused) {
     (void)unused;
     for (;;) {
         WaitForSingleObject(cache.wake, 1000);
-        if (!cache.ready) continue;
-        if (cache.removed == 1 && InterlockedCompareExchange(&cache.removed, 2, 1) == 1) {
-            WriteCache(TRUE, "device-removed", FALSE);
-            ReleaseLibrary();
-            continue;
-        }
+        if (!cache.ready || cache.stopped) continue;
         WriteCache(FALSE, "background", FALSE);
     }
 }
@@ -945,71 +1124,109 @@ static void BindLocked(void *device) {
     const char *file = cache.fileStatus >= 0 ? XboxPsoCacheStatusName((XboxPsoCacheStatus)cache.fileStatus) : "absent";
     HRESULT result = S_OK;
     LONG mode = 0;
+    BOOL intact = TRUE;
+    const LONG selected = cache.selected;
     typedef LUID *(STDMETHODCALLTYPE *AdapterLuid)(void *, LUID *);
     LUID luid;
-    METHOD(device, 43, AdapterLuid)(device, &luid);
-    CheckSupport(device, &cache.supportFlags);
-    if (cache.haveLuid && (luid.LowPart != cache.luid.LowPart || luid.HighPart != cache.luid.HighPart)) {
+    luid.LowPart = 0;
+    luid.HighPart = 0;
+    const BOOL passthrough = selected != XBOX_PSO_CACHE_MODE_LIBRARY && selected != XBOX_PSO_CACHE_MODE_BLOBS;
+    if (passthrough) {
+        /* No call on the device at all. */
+        result = S_FALSE;
+        file = "passthrough";
+    } else {
+        BOOL armed = BeforeCall(XBOX_PSO_CALL_ADAPTER_LUID);
+        METHOD(device, 43, AdapterLuid)(device, &luid);
+        intact = AfterCall(device, XBOX_PSO_CALL_ADAPTER_LUID, S_OK, armed);
+        if (intact) {
+            armed = BeforeCall(XBOX_PSO_CALL_CHECK_SUPPORT);
+            result = CheckSupport(device, &cache.supportFlags);
+            intact = AfterCall(device, XBOX_PSO_CALL_CHECK_SUPPORT, result, armed);
+        }
+    }
+    if (!intact) {
+        result = (HRESULT)cache.removedReason;
+        file = "device-removed";
+    } else if (passthrough) {
+        /* Traced below. */
+    } else if (cache.haveLuid && (luid.LowPart != cache.luid.LowPart || luid.HighPart != cache.luid.HighPart)) {
         /* The identity describes the default adapter; another one is not keyed. */
         result = DXGI_ERROR_UNSUPPORTED;
         file = "other-adapter";
-    } else {
+    } else if (selected == XBOX_PSO_CACHE_MODE_LIBRARY) {
         const BOOL libraryFile = cache.fileStatus == XBOX_PSO_CACHE_OK && cache.view.mode == XBOX_PSO_CACHE_MODE_LIBRARY;
         void *device1 = NULL, *library = NULL;
         typedef HRESULT (STDMETHODCALLTYPE *CreateLibrary)(void *, const void *, SIZE_T, REFIID, void **);
-        /* The console control selects the cached-blob path explicitly. */
-        result = cache.forcedMode == XBOX_PSO_CACHE_MODE_BLOBS ? DXGI_ERROR_UNSUPPORTED :
-            Query(device, &device1Iid, &device1);
-        if (SUCCEEDED(result)) {
+        BOOL armed = BeforeCall(XBOX_PSO_CALL_QUERY_DEVICE1);
+        result = Query(device, &device1Iid, &device1);
+        intact = AfterCall(device, XBOX_PSO_CALL_QUERY_DEVICE1, result, armed);
+        if (intact && SUCCEEDED(result)) {
             SetReentrant(TRUE);
             /* The blob stays allocated for the library's lifetime, as the runtime requires. */
+            armed = BeforeCall(XBOX_PSO_CALL_CREATE_LIBRARY);
             result = METHOD(device1, 44, CreateLibrary)(device1, libraryFile ? cache.view.payload : NULL,
                 libraryFile ? (SIZE_T)cache.view.payloadSize : 0, &libraryIid, &library);
-            if (libraryFile && FAILED(result)) {
+            intact = AfterCall(device, XBOX_PSO_CALL_CREATE_LIBRARY, result, armed);
+            if (intact && libraryFile && FAILED(result)) {
                 /* A driver or runtime update invalidates the serialized library. */
                 file = result == D3D12_ERROR_DRIVER_VERSION_MISMATCH ? "driver-mismatch" :
                        result == D3D12_ERROR_ADAPTER_NOT_FOUND ? "adapter-mismatch" : "rejected";
                 DeleteFileFromAppW(cache.path);
                 cache.fileStatus = XBOX_PSO_CACHE_IDENTITY_MISMATCH;
                 library = NULL;
+                armed = BeforeCall(XBOX_PSO_CALL_CREATE_LIBRARY);
                 result = METHOD(device1, 44, CreateLibrary)(device1, NULL, 0, &libraryIid, &library);
+                intact = AfterCall(device, XBOX_PSO_CALL_CREATE_LIBRARY, result, armed);
                 HeapFree(GetProcessHeap(), 0, cache.file);
                 cache.file = NULL;
             }
             SetReentrant(FALSE);
-            Release(device1);
         }
+        Release(device1);
         cache.libraryResult = result;
-        if (SUCCEEDED(result) && library) {
+        if (intact && SUCCEEDED(result) && library) {
             cache.library = library;
-            if (FAILED(Query(library, &library1Iid, &cache.library1))) cache.library1 = NULL;
-            mode = XBOX_PSO_CACHE_MODE_LIBRARY;
+            armed = BeforeCall(XBOX_PSO_CALL_QUERY_LIBRARY1);
+            const HRESULT queried = Query(library, &library1Iid, &cache.library1);
+            intact = AfterCall(device, XBOX_PSO_CALL_QUERY_LIBRARY1, queried, armed);
+            if (FAILED(queried)) cache.library1 = NULL;
+            mode = intact ? XBOX_PSO_CACHE_MODE_LIBRARY : 0;
             cache.pipelines = libraryFile && cache.fileStatus == XBOX_PSO_CACHE_OK ? cache.view.entries : 0;
-        } else if ((cache.supportFlags & D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO) &&
-                cache.forcedMode != XBOX_PSO_CACHE_MODE_LIBRARY) {
-            mode = XBOX_PSO_CACHE_MODE_BLOBS;
-            if (cache.fileStatus == XBOX_PSO_CACHE_OK && cache.view.mode == XBOX_PSO_CACHE_MODE_BLOBS) {
-                uint64_t offset = 0;
-                XboxPsoCacheRecord record;
-                while (XboxPsoCacheNextRecord(cache.view.payload, cache.view.payloadSize, &offset, &record) > 0) {
-                    Entry *entry = FindEntry(record.key, TRUE);
-                    if (!entry || (entry->flags & ENTRY_BLOB)) continue;
-                    entry->blob = record.blob;
-                    entry->size = record.size;
-                    entry->kind = record.kind;
-                    entry->flags |= ENTRY_BLOB;
-                    cache.blobBytes += XboxPsoCacheRecordSize(record.size);
-                    ++cache.pipelines;
-                }
+        } else {
+            /* No fallback to cached blobs: that path was not selected. */
+            Release(library);
+            if (intact) Fallback(FALLBACK_LOAD, "create-library", result);
+            else file = "device-removed";
+        }
+    } else if (cache.supportFlags & D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO) {
+        /* Cached blobs: no further device call until the first pipeline. */
+        mode = XBOX_PSO_CACHE_MODE_BLOBS;
+        if (cache.fileStatus == XBOX_PSO_CACHE_OK && cache.view.mode == XBOX_PSO_CACHE_MODE_BLOBS) {
+            uint64_t offset = 0;
+            XboxPsoCacheRecord record;
+            while (XboxPsoCacheNextRecord(cache.view.payload, cache.view.payloadSize, &offset, &record) > 0) {
+                Entry *entry = FindEntry(record.key, TRUE);
+                if (!entry || (entry->flags & ENTRY_BLOB)) continue;
+                entry->blob = record.blob;
+                entry->size = record.size;
+                entry->kind = record.kind;
+                entry->flags |= ENTRY_BLOB;
+                cache.blobBytes += XboxPsoCacheRecordSize(record.size);
+                ++cache.pipelines;
             }
         }
+    } else {
+        result = DXGI_ERROR_UNSUPPORTED;
+        file = "no-single-pso";
     }
-    cache.mode = mode;
+    cache.mode = cache.stopped ? 0 : mode;
     InterlockedExchangePointer((PVOID volatile *)&cache.device, device);
 
-    char line[180];
-    char *out = Text(Text(line, "asset pso-cache bind mode="), ModeName(mode));
-    out = Hex32(Text(out, " library="), (DWORD)result);
+    char line[200];
+    char *out = Text(Text(line, "asset pso-cache bind mode="), ModeName(cache.mode));
+    out = Text(Text(out, " selected="), XboxPsoCacheModeName((uint32_t)selected));
+    out = Hex32(Text(out, selected == XBOX_PSO_CACHE_MODE_LIBRARY ? " library=" : " result="), (DWORD)result);
     out = Hex32(Text(out, " support="), (DWORD)cache.supportFlags);
     out = Text(Text(out, " file="), file);
     out = Decimal(Text(out, " pipelines="), cache.pipelines);
@@ -1018,6 +1235,7 @@ static void BindLocked(void *device) {
 
 /* NULL when the cache serves this device, otherwise the bypass reason. */
 static const char *Bind(void *device) {
+    if (cache.stopped) return "stopped";
     void *bound = cache.device;
     if (bound == device) return cache.mode ? NULL : "disabled";
     if (bound) {
@@ -1072,39 +1290,45 @@ static HRESULT CreateWithBlob(int kind, void *device, const void *desc, SIZE_T c
         return originalPipelines[kind](device, &copy, iid, out);
     }
     const D3D12_PIPELINE_STATE_STREAM_DESC *stream = (const D3D12_PIPELINE_STATE_STREAM_DESC *)desc;
-    const SIZE_T extra = cachedPso == NO_CACHED_PSO ? 8 + sizeof(D3D12_CACHED_PIPELINE_STATE) : 0;
-    BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, stream->SizeInBytes + extra);
+    /* An appended subobject starts on the next 8-byte boundary even when the
+       title's last subobject is not padded. */
+    const SIZE_T append = XboxPsoCacheAppendOffset(stream->SizeInBytes);
+    const SIZE_T total = cachedPso == NO_CACHED_PSO ? append + 8 + sizeof(D3D12_CACHED_PIPELINE_STATE) :
+        stream->SizeInBytes;
+    BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total);
     if (!copy) return E_OUTOFMEMORY;
     CopyBytes(copy, stream->pPipelineStateSubobjectStream, stream->SizeInBytes);
     SIZE_T at = cachedPso;
-    if (extra) {
-        *(UINT32 *)(copy + stream->SizeInBytes) = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO;
-        *(UINT32 *)(copy + stream->SizeInBytes + 4) = 0;
-        at = stream->SizeInBytes + 8;
+    if (cachedPso == NO_CACHED_PSO) {
+        *(UINT32 *)(copy + append) = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO;
+        at = append + 8;
     }
     CopyBytes(copy + at, &cached, sizeof(cached));
     D3D12_PIPELINE_STATE_STREAM_DESC patched;
-    patched.SizeInBytes = stream->SizeInBytes + extra;
+    patched.SizeInBytes = total;
     patched.pPipelineStateSubobjectStream = copy;
     const HRESULT result = originalPipelines[kind](device, &patched, iid, out);
     HeapFree(GetProcessHeap(), 0, copy);
     return result;
 }
 
-static void Store(int kind, const BYTE key[32], void *object, ULONGLONG createUs, const char **outcome) {
+static void Store(int kind, void *device, const BYTE key[32], void *object, ULONGLONG createUs, const char **outcome) {
     const BOOL slow = createUs >= XBOX_PSO_CACHE_SLOW_US;
     void *pipeline = NULL;
+    /* IUnknown on the title's new pipeline: an AddRef, released below. */
     HRESULT result = Query(object, &pipelineIid, &pipeline);
     if (FAILED(result) || !pipeline) {
         Fallback(FALLBACK_QUERY, "store-query", result);
         return;
     }
-    if (cache.mode == XBOX_PSO_CACHE_MODE_LIBRARY) {
+    if (cache.stopped) {
+        /* Removed while this pipeline was created: no further cache call. */
+    } else if (cache.mode == XBOX_PSO_CACHE_MODE_LIBRARY) {
         typedef HRESULT (STDMETHODCALLTYPE *StorePipeline)(void *, LPCWSTR, void *);
         WCHAR name[65];
         XboxPsoCacheHexWide(key, 32, (uint16_t *)name);
         AcquireSRWLockExclusive(&cache.lock);
-        if (!cache.library) {
+        if (!cache.library || cache.stopped) {
             result = S_FALSE;
         } else if (cache.serializedBytes > XBOX_PSO_CACHE_MAX_PAYLOAD || cache.pipelines >= ENTRY_SLOTS) {
             InterlockedIncrement(&cache.stats.skipped);
@@ -1112,9 +1336,13 @@ static void Store(int kind, const BYTE key[32], void *object, ULONGLONG createUs
             result = S_FALSE;
         } else {
             SetReentrant(TRUE);
+            const BOOL armed = BeforeCall(XBOX_PSO_CALL_STORE);
             result = METHOD(cache.library, 8, StorePipeline)(cache.library, name, pipeline);
+            if (!AfterCall(device, XBOX_PSO_CALL_STORE, result, armed)) result = S_FALSE;
             SetReentrant(FALSE);
-            if (SUCCEEDED(result)) {
+            if (result == S_FALSE) {
+                /* The device was removed: recorded by AfterCall. */
+            } else if (SUCCEEDED(result)) {
                 ++cache.pipelines;
                 ++cache.unsaved;
                 if (slow) cache.slowPending = 1;
@@ -1135,8 +1363,11 @@ static void Store(int kind, const BYTE key[32], void *object, ULONGLONG createUs
         typedef void *(STDMETHODCALLTYPE *BlobPointer)(void *);
         typedef SIZE_T (STDMETHODCALLTYPE *BlobSize)(void *);
         ID3DBlob *blob = NULL;
+        const BOOL armed = BeforeCall(XBOX_PSO_CALL_CACHED_BLOB);
         result = METHOD(pipeline, 8, GetCachedBlob)(pipeline, &blob);
-        if (SUCCEEDED(result) && blob) {
+        if (!AfterCall(device, XBOX_PSO_CALL_CACHED_BLOB, result, armed)) {
+            Release(blob);
+        } else if (SUCCEEDED(result) && blob) {
             const SIZE_T size = METHOD(blob, 4, BlobSize)(blob);
             const void *bytes = METHOD(blob, 3, BlobPointer)(blob);
             BYTE *copy = size && size <= XBOX_PSO_CACHE_MAX_RECORD && bytes ?
@@ -1203,20 +1434,28 @@ static HRESULT CachedPipeline(int kind, void *device, const void *desc, REFIID i
             XboxPsoCacheHexWide(key, 32, (uint16_t *)name);
             const LONGLONG start = Now();
             SetReentrant(TRUE);
+            const BOOL armed = BeforeCall(XBOX_PSO_CALL_LOAD);
             result = LoadFromLibrary(kind, name, desc, iid, out);
+            const BOOL intact = AfterCall(device, XBOX_PSO_CALL_LOAD, result, armed);
             SetReentrant(FALSE);
             const LONG64 loadUs = (LONG64)Microseconds(Now() - start);
             InterlockedAdd64(&cache.stats.loadUs, loadUs);
             ReleaseSRWLockExclusive(&cache.lock);
-            if (SUCCEEDED(result)) {
+            if (!intact) {
+                /* Removed: the title's own call below reports it. */
+                if (SUCCEEDED(result) && out && *out) Release(*out);
+                if (out) *out = NULL;
+                bypass = "stopped";
+            } else if (SUCCEEDED(result)) {
                 InterlockedAdd64(&cache.stats.hitUs, loadUs);
                 InterlockedIncrement(&cache.stats.hits);
                 *outcome = "hit";
                 return result;
+            } else {
+                if (out) *out = NULL;
+                /* E_INVALIDARG: the name is not in the library. */
+                if (result != E_INVALIDARG) Fallback(FALLBACK_LOAD, "load", result);
             }
-            if (out) *out = NULL;
-            /* E_INVALIDARG: the name is not in the library. */
-            if (result != E_INVALIDARG) Fallback(FALLBACK_LOAD, "load", result);
         } else if (!bypass && cache.mode == XBOX_PSO_CACHE_MODE_LIBRARY) {
             ReleaseSRWLockExclusive(&cache.lock);
             Fallback(FALLBACK_STREAM_LIBRARY, "stream-library", E_NOINTERFACE);
@@ -1226,18 +1465,22 @@ static HRESULT CachedPipeline(int kind, void *device, const void *desc, REFIID i
             const UINT32 size = entry->size;
             ReleaseSRWLockExclusive(&cache.lock);
             const LONGLONG start = Now();
+            const BOOL armed = BeforeCall(XBOX_PSO_CALL_CACHED_PSO);
             result = CreateWithBlob(kind, device, desc, cachedPso, blob, size, iid, out);
             *error = GetLastError();
+            const BOOL intact = AfterCall(device, XBOX_PSO_CALL_CACHED_PSO, result, armed);
             const LONG64 loadUs = (LONG64)Microseconds(Now() - start);
             InterlockedAdd64(&cache.stats.loadUs, loadUs);
-            if (SUCCEEDED(result)) {
+            if (intact && SUCCEEDED(result)) {
                 InterlockedAdd64(&cache.stats.hitUs, loadUs);
                 InterlockedIncrement(&cache.stats.hits);
                 *outcome = "hit";
                 return result;
             }
+            if (SUCCEEDED(result) && out && *out) Release(*out);
             if (out) *out = NULL;
-            Fallback(FALLBACK_CACHED_BLOB, "cached-pso", result);
+            if (!intact) bypass = "stopped";
+            else Fallback(FALLBACK_CACHED_BLOB, "cached-pso", result);
             AcquireSRWLockExclusive(&cache.lock);
             if (IsDriverMismatch(result)) {
                 /* Every blob from this driver is stale: drop them all. */
@@ -1266,7 +1509,7 @@ static HRESULT CachedPipeline(int kind, void *device, const void *desc, REFIID i
     InterlockedAdd64(&cache.stats.missUs, (LONG64)createUs);
     InterlockedIncrement(&cache.stats.misses);
     *outcome = "miss";
-    if (SUCCEEDED(result) && out && *out) Store(kind, key, *out, createUs, outcome);
+    if (SUCCEEDED(result) && out && *out) Store(kind, device, key, *out, createUs, outcome);
     return result;
 }
 
@@ -1303,11 +1546,19 @@ static HRESULT HookPipeline(int kind, void *device, const void *desc, REFIID iid
     } else {
         result = originalPipelines[kind](device, desc, iid, out);
         error = GetLastError();
+        if (cache.passthrough) {
+            InterlockedAdd64(&cache.stats.missUs, (LONG64)Microseconds(Now() - start));
+            InterlockedIncrement(&cache.stats.misses);
+        }
     }
     TraceTiming(kind, Now() - start, result, outcome);
-    if (cache.configured && IsRemoval(result) && device == cache.device &&
-            InterlockedCompareExchange(&cache.removed, 1, 0) == 0 && cache.wake)
-        SetEvent(cache.wake);
+    /* The title's own creation reports a removal: record it with the last
+       cache call (if any) and stop the cache. Only a status read is made. A
+       creation inside a cache call (a library load) is attributed by that
+       call's own check instead. */
+    if ((cache.passthrough || (cache.configured && device == cache.device)) && IsRemoval(result) && !cache.stopped &&
+            !Reentrant())
+        DeviceRemoved(device, XBOX_PSO_CALL_GAME_CREATE, result, RemovedReason(device));
     SetLastError(error);
     return result;
 }
@@ -1362,16 +1613,45 @@ HRESULT XboxPipelineHooksInstall(void *device, BOOL keyRoots) {
     void *const hooks[4] = {(void *)HookGraphics, (void *)HookCompute, (void *)HookStream, (void *)HookRootSignature};
     void **originals[4] = {(void **)&originalPipelines[0], (void **)&originalPipelines[1],
         (void **)&originalPipelines[2], (void **)&originalRootSignature};
+    /* Slot 16 only when keys are built: timing alone patches 10, 11 and 47. */
+    const int count = keyRoots ? 4 : 3;
     ULONG previous = 0;
     if (!VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), PAGE_READWRITE, &previous))
         return HRESULT_FROM_WIN32(GetLastError());
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < count; ++i) {
         if (methods[slots[i]] == hooks[i]) continue;
         *originals[i] = methods[slots[i]];
         InterlockedExchangePointer(&methods[slots[i]], hooks[i]);
     }
     VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), previous, &previous);
     return S_OK;
+}
+
+/* The call named by a guard file, or 0; *same says whether it was written
+   for this identity (identity NULL: any). */
+static LONG ReadGuard(const WCHAR *path, const BYTE *identity, int *same) {
+    *same = 0;
+    const DWORD previous = GetLastError();
+    HANDLE file = CreateFile2FromAppW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, OPEN_EXISTING, NULL);
+    SetLastError(previous);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    char text[XBOX_PSO_CACHE_GUARD_MAX];
+    DWORD read = 0;
+    if (!ReadFile(file, text, sizeof(text), &read, NULL)) read = 0;
+    CloseHandle(file);
+    static const BYTE none[32] = {0};
+    const LONG call = (LONG)XboxPsoCacheParseGuard(text, read, identity ? identity : none, same);
+    /* An unreadable or malformed guard still means a process died inside a call. */
+    return call ? call : XBOX_PSO_CALL_UNKNOWN;
+}
+
+LONG XboxPipelineCacheTakeGuard(const WCHAR *prefix) {
+    WCHAR path[480];
+    int same = 0;
+    if (!prefix || !ComposePath(path, ARRAYSIZE(path), prefix, L".guard", NULL)) return 0;
+    const LONG call = ReadGuard(path, NULL, &same);
+    if (call) DeleteFileFromAppW(path);
+    return call;
 }
 
 HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
@@ -1382,9 +1662,11 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
     if (!cache.entries)
         cache.entries = (Entry *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ENTRY_SLOTS * sizeof(Entry));
     if (!cache.entries) result = E_OUTOFMEMORY;
-    else if (!ComposePath(cache.prefix, ARRAYSIZE(cache.prefix), prefix, NULL, NULL))
+    else if (!ComposePath(cache.prefix, ARRAYSIZE(cache.prefix), prefix, NULL, NULL) ||
+             !ComposePath(cache.guardPath, ARRAYSIZE(cache.guardPath), prefix, L".guard", NULL))
         result = HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
     char hex[17];
+    hex[0] = 0;
     if (SUCCEEDED(result)) {
         ComputeIdentity(cache.prefix, cache.identity, &cache.luid, &cache.haveLuid);
         XboxPsoCacheHex(cache.identity, 8, hex);
@@ -1395,11 +1677,28 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
         if (!ComposePath(cache.path, ARRAYSIZE(cache.path), cache.prefix, suffix, L".bin"))
             result = HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
     }
+    /* A guard from an earlier launch: a process died inside a cache call or
+       the device was removed. The same identity stays in passthrough; a new
+       driver, OS or d3d12.dll gets a fresh start. */
+    cache.guardCall = 0;
+    if (SUCCEEDED(result)) {
+        int same = 0;
+        const LONG call = ReadGuard(cache.guardPath, cache.identity, &same);
+        if (call && same) cache.guardCall = call;
+        else if (call) DeleteFileFromAppW(cache.guardPath);
+    }
+    const BOOL usable = (cache.selected == XBOX_PSO_CACHE_MODE_LIBRARY || cache.selected == XBOX_PSO_CACHE_MODE_BLOBS) &&
+        !cache.guardCall;
     ULONGLONG size = 0;
     DWORD error = ERROR_SUCCESS;
     cache.fileStatus = -1;
-    if (SUCCEEDED(result)) {
-        RemoveStaleFiles(cache.prefix, cache.path);
+    if (SUCCEEDED(result) && !usable) {
+        /* Passthrough: the hooks only time creation. */
+        cache.configured = 0;
+        cache.passthrough = 1;
+        error = ERROR_CANCELLED;
+    } else if (SUCCEEDED(result)) {
+        RemoveStaleFiles(cache.prefix, cache.path, cache.guardPath);
         cache.file = ReadWholeFile(cache.path, &size, &error);
         if (cache.file) {
             cache.fileStatus = XboxPsoCacheValidate(cache.file, size, cache.identity, &cache.view);
@@ -1423,12 +1722,15 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
     ReleaseSRWLockExclusive(&cache.lock);
     ReleaseSRWLockExclusive(&cache.writeLock);
 
-    char line[180];
+    char line[240];
     char *out = Text(line, "asset pso-cache open file=");
     out = Text(out, cache.fileStatus >= 0 ? XboxPsoCacheStatusName((XboxPsoCacheStatus)cache.fileStatus) :
-        error == ERROR_FILE_NOT_FOUND ? "absent" : "unreadable");
-    if (cache.fileStatus < 0 && error != ERROR_FILE_NOT_FOUND && error != ERROR_SUCCESS)
+        error == ERROR_CANCELLED ? "unused" : error == ERROR_FILE_NOT_FOUND ? "absent" : "unreadable");
+    if (cache.fileStatus < 0 && error != ERROR_FILE_NOT_FOUND && error != ERROR_SUCCESS && error != ERROR_CANCELLED)
         out = Hex32(Text(out, " error="), error);
+    out = Text(Text(out, " mode="), usable ? XboxPsoCacheModeName((uint32_t)cache.selected) : "passthrough");
+    out = Text(Text(out, " selected="), XboxPsoCacheModeName((uint32_t)cache.selected));
+    if (cache.guardCall) out = Text(Text(out, " guard="), XboxPsoCacheCallName((uint32_t)cache.guardCall));
     out = Decimal(Text(out, " bytes="), size);
     if (cache.fileStatus == XBOX_PSO_CACHE_OK) out = Decimal(Text(out, " pipelines="), cache.view.entries);
     if (SUCCEEDED(result)) out = Text(Text(out, " identity="), hex);
@@ -1460,8 +1762,21 @@ void XboxPipelineCacheClose(BOOL removeFile) {
     cache.unsaved = 0;
     cache.writeFailures = 0;
     cache.slowPending = 0;
-    InterlockedExchange(&cache.removed, 0);
+    cache.configured = 0;
+    cache.passthrough = 0;
+    cache.guardCall = 0;
     InterlockedExchange(&cache.fallbackMask, 0);
+    InterlockedExchange(&cache.stopped, 0);
+    InterlockedExchange(&cache.proven, 0);
+    InterlockedExchange(&cache.failedCalls, 0);
+    InterlockedExchange(&cache.lastCall, 0);
+    InterlockedExchange(&cache.removedCall, 0);
+    InterlockedExchange(&cache.removedReason, 0);
+    AcquireSRWLockExclusive(&cache.guardLock);
+    /* A guard on disk stays for the next Open or XboxPipelineCacheTakeGuard. */
+    cache.guardArmed = 0;
+    cache.guardSticky = 0;
+    ReleaseSRWLockExclusive(&cache.guardLock);
     if (removeFile && cache.path[0]) DeleteFileFromAppW(cache.path);
     ReleaseSRWLockExclusive(&cache.lock);
     ReleaseSRWLockExclusive(&cache.writeLock);
@@ -1469,7 +1784,7 @@ void XboxPipelineCacheClose(BOOL removeFile) {
 
 void XboxPipelineCacheSelectMode(LONG mode) {
     AcquireSRWLockExclusive(&cache.lock);
-    cache.forcedMode = mode;
+    cache.selected = mode == XBOX_PSO_CACHE_MODE_LIBRARY || mode == XBOX_PSO_CACHE_MODE_BLOBS ? mode : 0;
     ReleaseSRWLockExclusive(&cache.lock);
 }
 
@@ -1485,10 +1800,21 @@ void XboxPipelineCacheGetCounters(XboxPipelineCacheCounters *counters) {
     counters->bypassed = cache.stats.bypassed + cache.stats.unkeyed;
     counters->writes = cache.stats.writes;
     counters->libraryResult = cache.libraryResult;
+    counters->selected = cache.selected;
+    counters->lastCall = cache.lastCall;
+    counters->removedCall = cache.removedCall;
+    counters->removedReason = (HRESULT)cache.removedReason;
+    counters->guardCall = cache.guardCall;
     ReleaseSRWLockShared(&cache.lock);
 }
 
 void WINAPI XboxD3D12PipelineCacheFlush(void) {
+    if (cache.passthrough && !cache.stopped && !InterlockedExchange(&cache.exited, 1)) {
+        const DWORD error = GetLastError();
+        TraceStats("exit");
+        SetLastError(error);
+        return;
+    }
     if (!cache.ready || InterlockedExchange(&cache.exited, 1)) return;
     const DWORD error = GetLastError();
     const HRESULT result = WriteCache(TRUE, "exit", TRUE);
@@ -1502,28 +1828,45 @@ void WINAPI XboxD3D12PipelineCacheFlush(void) {
 
 static DWORD WINAPI StartHooks(LPVOID prefix) {
     typedef HRESULT (WINAPI *CreateDevice)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
+    const BOOL keyed = prefix && cache.selected;
     HMODULE d3d12 = NULL;
-    /* Wait for the title's own runtime load; 2 ms polling keeps the window
-       before the first root signature short. */
-    for (int i = 0; i < 30000 && !d3d12; ++i) {
+    /* Wait for the title's own runtime load, up to 60 s. A cache mode polls
+       every 2 ms to keep the window before the first root signature short;
+       timing alone polls every 50 ms, as the measured timing build did. */
+    const DWORD interval = keyed ? 2 : 50;
+    for (DWORD waited = 0; waited < 60000 && !d3d12; waited += interval) {
         d3d12 = GetModuleHandleW(L"d3d12.dll");
-        if (!d3d12) Sleep(2);
+        if (!d3d12) Sleep(interval);
     }
     const CreateDevice create = d3d12 ? (CreateDevice)(void *)GetProcAddress(d3d12, "D3D12CreateDevice") : NULL;
     void *device = NULL;
     HRESULT result = create ? create(NULL, D3D_FEATURE_LEVEL_11_0, &deviceIid, &device) :
         HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
-    if (SUCCEEDED(result) && device) result = XboxPipelineHooksInstall(device, prefix != NULL);
+    if (SUCCEEDED(result) && device) result = XboxPipelineHooksInstall(device, keyed);
     Release(device);
-    char line[64];
+    char line[120];
     Line(line, Hex32(Text(line, "pso timing result="), (DWORD)result));
     if (prefix) {
-        if (SUCCEEDED(result)) XboxPipelineCacheOpen((const WCHAR *)prefix);
-        else {
-            Line(line, Hex32(Text(line, "asset pso-cache hooks result="), (DWORD)result));
-        }
+        char *out = Hex32(Text(line, "asset pso-cache hooks result="), (DWORD)result);
+        out = Text(out, keyed ? " slots=10-11-47-16" : " slots=10-11-47");
+        out = Text(Text(out, " selected="), XboxPsoCacheModeName((uint32_t)cache.selected));
+        Line(line, out);
+        if (SUCCEEDED(result) && keyed) XboxPipelineCacheOpen((const WCHAR *)prefix);
+        else if (FAILED(result)) cache.configured = 0;
         HeapFree(GetProcessHeap(), 0, prefix);
     }
+    return 0;
+}
+
+/* XBOX_WIN32_PSO_CACHE_MODE from the profile: library, blobs or (anything
+   else) passthrough. */
+static LONG SelectedMode(void) {
+    WCHAR value[16];
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_PSO_CACHE_MODE", value, ARRAYSIZE(value));
+    if (!length || length >= ARRAYSIZE(value)) return 0;
+    if (CompareStringOrdinal(value, (int)length, L"library", -1, FALSE) == CSTR_EQUAL)
+        return XBOX_PSO_CACHE_MODE_LIBRARY;
+    if (CompareStringOrdinal(value, (int)length, L"blobs", -1, FALSE) == CSTR_EQUAL) return XBOX_PSO_CACHE_MODE_BLOBS;
     return 0;
 }
 
@@ -1543,8 +1886,10 @@ void XboxPipelineHooksStart(void) {
         }
     }
     traceTiming = 1;
+    cache.selected = prefix ? SelectedMode() : 0;
     /* Creations before the file is read are counted as early bypasses. */
-    if (prefix) cache.configured = 1;
+    if (prefix && cache.selected) cache.configured = 1;
+    else if (prefix) cache.passthrough = 1;
     HANDLE thread = CreateThread(NULL, 0, StartHooks, prefix, 0, NULL);
     if (thread) CloseHandle(thread);
     else if (prefix) HeapFree(GetProcessHeap(), 0, prefix);
