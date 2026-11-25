@@ -11,6 +11,7 @@
   "kernel32.dll": {
     "CreateDirectoryW": "XboxWin32StorageTrace.dll",
     "ExitProcess": "XboxWin32StorageTrace.dll",
+    "GetCurrentDirectoryW": "XboxWin32StorageTrace.dll",
     "GetFileAttributesW": "XboxWin32StorageTrace.dll",
     "GetProcAddress": "XboxWin32Window.dll",
     "LoadLibraryA": "XboxWin32LoaderTrace.dll",

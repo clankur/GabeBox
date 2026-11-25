@@ -131,10 +131,143 @@ BOOL WINAPI XboxTraceCreateDirectoryW(LPCWSTR path, LPSECURITY_ATTRIBUTES securi
     return ok;
 }
 
+/* Long current directories.
+
+   The process current directory cannot exceed MAX_PATH on Xbox, so
+   SetCurrentDirectoryW fails with ERROR_FILENAME_EXCED_RANGE for a deep but
+   existing directory that the file APIs still reach through \\?\ paths.
+   Godot's DirAccess::change_dir sets the directory, reads it back with
+   GetCurrentDirectoryW and immediately restores the previous one; when the
+   change fails, ShaderGLES3::initialize treats the existing shader-cache
+   folder as uncreatable and returns before it records the texture-unit
+   limit. For that error only, an existing absolute or cwd-relative directory
+   becomes a virtual current directory: SetCurrentDirectoryW succeeds and
+   GetCurrentDirectoryW reports it until the next successful change. The
+   process directory itself does not move, so other relative file operations
+   still resolve against the last directory the system accepted. Paths with
+   "." or ".." components keep the original failure. */
+static SRWLOCK currentLock = SRWLOCK_INIT;
+static WCHAR *virtualCurrent;
+static DWORD virtualLength;
+static volatile LONG virtualTraced;
+
+static BOOL HasDotComponent(const WCHAR *path) {
+    for (const WCHAR *part = path; *part;) {
+        if (IsSeparator(*part)) {
+            ++part;
+            continue;
+        }
+        const WCHAR *end = part;
+        while (*end && !IsSeparator(*end)) ++end;
+        if ((end - part == 1 && part[0] == L'.') || (end - part == 2 && part[0] == L'.' && part[1] == L'.'))
+            return TRUE;
+        part = end;
+    }
+    return FALSE;
+}
+
+/* Returns a heap copy of the directory path in DOS form with backslashes. */
+static WCHAR *LongDirectory(const WCHAR *path, DWORD *length) {
+    if (!path || !*path || HasDotComponent(path)) return NULL;
+    const WCHAR *dos = IsExtendedDosPath(path) ? path + 4 : path;
+    const WCHAR *base = NULL;
+    WCHAR *real = NULL;
+    DWORD baseLength = 0;
+    if (!HasDrive(dos)) {
+        if (IsSeparator(*dos)) return NULL;
+        if (virtualCurrent) {
+            base = virtualCurrent;
+            baseLength = virtualLength;
+        } else {
+            const DWORD size = GetCurrentDirectoryW(0, NULL);
+            real = size ? (WCHAR *)HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR)) : NULL;
+            baseLength = real ? GetCurrentDirectoryW(size, real) : 0;
+            if (!baseLength || baseLength >= size) {
+                if (real) HeapFree(GetProcessHeap(), 0, real);
+                return NULL;
+            }
+            base = real;
+        }
+    }
+    DWORD tail = 0;
+    while (dos[tail]) ++tail;
+    while (tail && IsSeparator(dos[tail - 1])) --tail;
+    while (baseLength && IsSeparator(base[baseLength - 1])) --baseLength;
+    const DWORD total = (base ? baseLength + 1 : 0) + tail;
+    WCHAR *joined = tail && total < 32000 ? (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (total + 1) * sizeof(WCHAR)) : NULL;
+    if (joined) {
+        DWORD out = 0;
+        if (base) {
+            for (DWORD i = 0; i < baseLength; ++i) joined[out++] = base[i] == L'/' ? L'\\' : base[i];
+            joined[out++] = L'\\';
+        }
+        for (DWORD i = 0; i < tail; ++i) {
+            if (IsSeparator(dos[i]) && out && joined[out - 1] == L'\\') continue;
+            joined[out++] = dos[i] == L'/' ? L'\\' : dos[i];
+        }
+        joined[out] = 0;
+        *length = out;
+    }
+    if (real) HeapFree(GetProcessHeap(), 0, real);
+    return joined;
+}
+
+static BOOL IsExistingDirectory(const WCHAR *dos, DWORD length) {
+    WCHAR *extended = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (length + 5) * sizeof(WCHAR));
+    if (!extended) return FALSE;
+    extended[0] = extended[1] = extended[3] = L'\\';
+    extended[2] = L'?';
+    for (DWORD i = 0; i <= length; ++i) extended[4 + i] = dos[i];
+    const DWORD attributes = GetFileAttributesW(extended);
+    HeapFree(GetProcessHeap(), 0, extended);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 BOOL WINAPI XboxTraceSetCurrentDirectoryW(LPCWSTR path) {
-    const BOOL ok = SetCurrentDirectoryW(path);
+    AcquireSRWLockExclusive(&currentLock);
+    BOOL ok = SetCurrentDirectoryW(path);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
     ObservePath(Change, path, ok);
+    WCHAR *replaced = NULL;
+    if (ok) {
+        replaced = virtualCurrent;
+        virtualCurrent = NULL;
+        virtualLength = 0;
+    } else if (error == ERROR_FILENAME_EXCED_RANGE) {
+        DWORD length = 0;
+        WCHAR *directory = LongDirectory(path, &length);
+        if (directory && IsExistingDirectory(directory, length)) {
+            replaced = virtualCurrent;
+            virtualCurrent = directory;
+            virtualLength = length;
+            directory = NULL;
+            ok = TRUE;
+            error = ERROR_SUCCESS;
+            if (!InterlockedExchange(&virtualTraced, 1)) RecordResult("SetCurrentDirectoryW", "virtual-long",
+                "existing", ContainsShaderCache(path), TRUE, ERROR_SUCCESS);
+        }
+        if (directory) HeapFree(GetProcessHeap(), 0, directory);
+    }
+    ReleaseSRWLockExclusive(&currentLock);
+    if (replaced) HeapFree(GetProcessHeap(), 0, replaced);
+    SetLastError(error);
     return ok;
+}
+
+DWORD WINAPI XboxTraceGetCurrentDirectoryW(DWORD size, LPWSTR buffer) {
+    AcquireSRWLockShared(&currentLock);
+    if (!virtualCurrent) {
+        ReleaseSRWLockShared(&currentLock);
+        return GetCurrentDirectoryW(size, buffer);
+    }
+    DWORD result = virtualLength + 1;
+    if (buffer && size > virtualLength) {
+        for (DWORD i = 0; i <= virtualLength; ++i) buffer[i] = virtualCurrent[i];
+        result = virtualLength;
+    }
+    ReleaseSRWLockShared(&currentLock);
+    SetLastError(ERROR_SUCCESS);
+    return result;
 }
 
 DWORD WINAPI XboxTraceStorageAttributesW(LPCWSTR path) {
