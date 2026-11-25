@@ -26,7 +26,8 @@ keeps launch, world, wander and return for a recheck of a known title.
 | 8 | `audio` | 12 s | 10 s | trigger a named sound | input; audio checkpoints come from the collect step |
 | 9 | `save` | 12 s | 10 s | save the way the game saves | input, render |
 | 10 | `reload` | 14 s | 10 s | leave, reload that save, compare the state | input, render |
-| 11 | `return` | 10 s | 6 s | exit to the library | input, panel menu |
+| 11 | `overlay` | 16 s | 10 s | open the Steam menu over the game with F10, then resume | input, panel menu |
+| 12 | `return` | 10 s | 6 s | exit to the library | input, panel menu |
 
 Then one collect step for the whole session: `observe --run-id` for the artifacts and
 the frame trace, `inspect-loader` for the exit code where the title is a staged Win32
@@ -91,6 +92,10 @@ The phases are roles, not a literal script:
   open the journal.
 - **Anything with a loading boundary**: cross it inside a sampled phase. Load
   transitions are where shared-texture and pacing problems surface.
+- **The Steam menu**: `key:F10` reaches the same request as holding View and Menu, but the
+  chord itself cannot be injected, so test the physical chord with a person at least once
+  per title. The phase runs second to last, so a menu that focuses **Quit to library**
+  rather than **Resume** costs only the exit that was coming anyway.
 - **Pointer-driven titles**: remote input's mouse messages do not raise host pointer
   events, so these cannot be driven this way. A person has to play them, or the pointer
   checks stay unobserved.

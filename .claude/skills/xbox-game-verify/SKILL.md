@@ -133,6 +133,7 @@ delivery, audio, save and reload, and return to the library. In short:
 | Controller | `inspect-input` showing `host-activity` and an acknowledged serial while a named input was held, plus the on-screen response |
 | Keyboard | the same, for the key queue, plus the text actually appearing in the game |
 | Audio | initialization from the SDL audio checkpoints or the loader trace's `asset xaudio27-activation` record, plus a person confirming a named sound — this project measures no audio signal |
+| The Steam menu | `inspect-input --panel-menu` recording a menu request during the window, plus captures showing the menu over the game and the game resuming afterwards |
 | Save and reload | a save created in one session and its state present after a reload, named concretely |
 | Return to library | the game exits, Big Picture is responsive, and the app stays open |
 

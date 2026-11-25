@@ -171,6 +171,36 @@ This project measures **no audio signal**. What exists:
 On an unattended run, audio output is `unobserved`. Do not infer it from the game
 reaching a scene that should have music.
 
+## The Steam menu over a running game
+
+While a game is running, holding **View and Menu together** — or pressing **F10** — asks
+the presenter to bring the library forward over it. That is the player's only way back to
+Steam without quitting, and it has broken before: on the Hades trial that launched the
+game before Big Picture registered a running game, the pad worked and the Steam menu did
+not open at all.
+
+Drive it with `key:F10`, which reaches the same `requestOverlay()` path as the chord. The
+chord itself cannot be injected — remote input sends one button down and up before the
+next step, so View and Menu never overlap — so a physical chord test still needs a person.
+
+```sh
+python3 -m tools.xbox_remote_input key:F10 wait:4 shot:overlay-open.png A wait:3
+python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$app_id" \
+    --run-id "$run_id" --seconds 10 --panel-menu --output overlay-check
+```
+
+The presenter writes `menu_chord=held` and `menu_request=ready` as it handles the request,
+and `--panel-menu` returns them as the counts `chord_held` and `menu_request`. Those
+counts are package-scoped and cumulative, so read the `added` delta for your window: a
+request recorded during the window is the machine evidence that the menu opened. Pair it
+with the captures either side of the request — one with the menu over the game, one after
+resuming — because the count proves the request reached the host, not that the menu drew
+or that the game came back.
+
+Closing it is the player menu's own business: D-pad and **A** choose **Resume** or **Quit
+to library**, so a driven run presses A expecting Resume. If a title's menu focuses
+something else, drive the phase from your own script instead.
+
 ## Save and reload
 
 Create a save the game itself recognizes — its own save point, slot or autosave — and

@@ -50,6 +50,10 @@ CYCLES = {
     'audio': (['A', 'wait:2', 'B', 'wait:2'], 6),
     'save': (['MENU', 'wait:2', 'A', 'wait:3', 'B', 'wait:1'], 9),
     'reload': (['A', 'wait:3', 'A', 'wait:3'], 9),
+    # F10 reaches the presenter's requestOverlay() exactly as the View+Menu chord
+    # does; the chord itself cannot be sent, because remote input steps never overlap.
+    # A then activates the focused player-menu action, which is Resume by default.
+    'overlay': (['key:F10', 'wait:4', 'A', 'wait:3'], 9),
     'return': (['MENU', 'wait:2', 'B', 'wait:1', 'B', 'wait:2'], 8),
 }
 
@@ -78,6 +82,10 @@ PHASES = (
      12, 10, ('input', 'render'), False, 'Did the game report the save completing?'),
     ('reload', 'Leave to the menu, reload that save, and compare the state.',
      14, 10, ('input', 'render'), False, 'Did the reloaded state match what you saved?'),
+    ('overlay', 'Open the Steam player menu over the running game (hold View and Menu together, '
+     'or F10), then resume. The chord cannot be injected, so a driven run sends F10.',
+     16, 10, ('input',), False,
+     'Did the Steam menu appear over the game, and did the game resume when you closed it?'),
     ('return', 'Exit to the library the way a player would.',
      10, 6, ('input',), False, 'Did the game exit, the app stay open, and Big Picture respond?'),
 )
@@ -86,7 +94,7 @@ SMOKE = ('launch', 'world', 'wander', 'return')
 # Coverage counts a title on these five checks (tools/steam_compatibility.py CHECKS).
 COVERAGE_CHECKS = ('gameplay', 'controller', 'audio', 'save-reload', 'return-to-library')
 CHECKS = ('gameplay_visible', 'scene_fidelity', 'controller', 'keyboard', 'audio',
-          'fps_average', 'save_reload', 'return_to_library')
+          'fps_average', 'steam_overlay', 'save_reload', 'return_to_library')
 # Phases whose captures are of the running game, so worth screening for artifacts.
 SCENE_PHASES = ('world', 'wander', 'interact', 'systems', 'reload')
 # A frame screen flag that means the picture itself is wrong.
@@ -174,7 +182,10 @@ class Session:
             # Screenshots cost the game about half a second, so they bracket the
             # measured window (which runs from +8 s) rather than falling inside it:
             # one before it opens, one after it closes.
-            if phase_dir is not None and name in ('title',) + SCENE_PHASES:
+            if name == 'overlay' and phase_dir is not None:
+                steps = ([steps[0], f'shot:{phase_dir}/overlay-open.png'] + steps[1:]
+                         + [f'shot:{phase_dir}/overlay-closed.png'])
+            elif phase_dir is not None and name in ('title',) + SCENE_PHASES:
                 steps = ([f'shot:{phase_dir}/{name}-open.png'] + steps
                          + [f'shot:{phase_dir}/{name}-close.png'])
         command += steps
@@ -254,7 +265,7 @@ class Session:
             command = self.deploy('inspect-input', '--version', self.args.version,
                                   '--app-id', self.args.app_id, '--run-id', run_id,
                                   '--seconds', str(min(sample, SAMPLE_CAP)))
-            if name in ('title', 'systems', 'return'):
+            if name in ('title', 'systems', 'overlay', 'return'):
                 command += ['--panel-menu']
             target = self.folder(f'phase-{name}-input')
             if target:
@@ -394,6 +405,15 @@ def scene_verdict(screen: dict, answers: dict) -> tuple:
                           'represent the game — open them and say')
 
 
+def overlay_requests(record: dict) -> dict:
+    """What the presenter recorded while the player menu was requested."""
+    for step in record.get('steps', ()):
+        menu = (step.get('result') or {}).get('panel_menu') or {}
+        if menu.get('state') == 'observed':
+            return menu.get('added') or {}
+    return {}
+
+
 def verdicts(records: list[dict], measured: list[dict], sdl_trace: str, output: Path | None,
              screen: dict | None = None) -> dict:
     by_name = {record['phase']: record for record in records}
@@ -440,6 +460,28 @@ def verdicts(records: list[dict], measured: list[dict], sdl_trace: str, output: 
         out['gameplay_visible'] = ('unobserved', 'no gameplay capture and no operator confirmation')
 
     out['scene_fidelity'] = scene_verdict(screen or {}, answers)
+
+    if 'overlay' in by_name:
+        added = overlay_requests(by_name['overlay'])
+        requests = added.get('menu_request', 0) + added.get('chord_held', 0)
+        driven = 'input_driver' in by_name['overlay']
+        if requests and answers.get('overlay') == 'yes':
+            out['steam_overlay'] = ('pass', f'the presenter recorded {requests} menu request(s) and '
+                                            'the Steam menu appeared over the game, which resumed')
+        elif answers.get('overlay') == 'no':
+            out['steam_overlay'] = ('fail', f'{requests} menu request(s) recorded, but the Steam menu '
+                                            'did not appear or the game did not resume')
+        elif requests:
+            out['steam_overlay'] = ('unobserved', f'the presenter recorded {requests} menu '
+                                                  'request(s); nobody confirmed the menu appeared '
+                                                  'over the game — check the overlay captures')
+        elif driven:
+            out['steam_overlay'] = ('fail', 'F10 was sent and the presenter recorded no menu '
+                                            'request, so the player menu never opened')
+        else:
+            out['steam_overlay'] = ('unobserved', 'no panel-menu evidence for this launch')
+    else:
+        out['steam_overlay'] = ('unobserved', 'the overlay phase did not run')
 
     sampled = [entry for entry in measured if (entry.get('result') or {}).get('fps') is not None]
     if sampled:
