@@ -155,9 +155,6 @@ bool matchesCommittedAccount(Uri const& uri, Uri const& qualified)
 void configureXboxInput(Window const& window, WebView const& account) {
     if (Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() != L"Windows.Xbox") return;
     using namespace Windows::UI::Core;
-    // The renderer enables hit testing when it hands the account view to a
-    // game. QR, authenticated Steam, and the transition between them use focus.
-    account.IsHitTestVisible(false);
     auto core = window.CoreWindow();
     auto cursor = std::make_shared<steam_input::ShellCursor<CoreCursor>>();
     auto update = [control = make_weak(account), cursor](CoreWindow const& sender) {
@@ -305,7 +302,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
                     // Only native code installs this receipt. The renderer reads the
                     // successfully committed document without accessing WebView.Source.
                     sender.Tag(local);
-                    if (!sender.IsHitTestVisible()) sender.Focus(FocusState::Programmatic);
+                    sender.Focus(FocusState::Programmatic);
                     checkpoint("account-document-verified");
                 });
                 account.FrameNavigationStarting([](auto const&, auto const& event) { event.Cancel(true); });

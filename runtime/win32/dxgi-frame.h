@@ -13,7 +13,8 @@ public:
     DxgiFramePublisher(const DxgiFramePublisher&) = delete;
     DxgiFramePublisher& operator=(const DxgiFramePublisher&) = delete;
     void SetQueue(ID3D12CommandQueue* queue) { queue_ = queue; }
-    HRESULT Publish(IDXGISwapChain1* chain, UINT backBuffer);
+    HRESULT Prepare(IDXGISwapChain1* chain, UINT backBuffer, unsigned& index);
+    void Commit(unsigned index);
     bool IsActive() const { return generation_ != 0 && status_ == S_OK; }
     const char* FailureStage() const { return failureStage_; }
     HRESULT Reset();
@@ -28,6 +29,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commands;
         HANDLE handles[3]{};
         UINT64 queued12 = 0;
+        UINT64 copied = 0;
         UINT64 submitted = 0;
         void Close();
     };
@@ -37,10 +39,9 @@ private:
     HRESULT Connect(ID3D12Resource* source, const D3D12_RESOURCE_DESC& desc);
     HRESULT CreateSlots(ID3D12Device* share, ID3D11Device5* d3d11, LUID adapter,
         UINT width, UINT height, DXGI_FORMAT format);
-    HRESULT Publish11(IDXGISwapChain1* chain);
-    HRESULT Publish12(IDXGISwapChain1* chain, UINT backBuffer);
+    HRESULT Prepare11(IDXGISwapChain1* chain, unsigned& index);
+    HRESULT Prepare12(IDXGISwapChain1* chain, UINT backBuffer, unsigned& index);
     HRESULT FailedAt(const char* stage, HRESULT error);
-    void PublishSequence(unsigned index);
 
     SdlHostMailbox* base_ = nullptr;
     SdlGpuMailbox* gpu_ = nullptr;

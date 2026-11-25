@@ -2,12 +2,15 @@
 
 #include "../shared/sdl-host-protocol.h"
 #include "../shared/sdl-gpu-protocol.h"
+#include "../shared/sdl-rumble-protocol.h"
 #include "sdl-frame-copy.h"
 #include "../win32/SteamWin32Stage.h"
 
 class SteamSdlSurface {
     winrt::handle file_;
     winrt::handle gpuFile_;
+    winrt::handle rumbleFile_;
+    PTP_WAIT childExit_ = nullptr;
     bool gpuFrameSequence_ = false;
     SdlHostMailbox *view_ = nullptr;
     mutable winrt::Windows::Storage::Streams::Buffer transfer_{nullptr};
@@ -16,6 +19,10 @@ class SteamSdlSurface {
     std::vector<std::uint8_t> previousPixels_;
     std::vector<std::uint16_t> encodedPixels_;
     SdlHostFrame previousHeader_{};
+
+    static void CALLBACK ChildExited(PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT result) {
+        if (result == WAIT_OBJECT_0) static_cast<SteamSdlSurface*>(context)->Quit();
+    }
 
     std::uint32_t PublishGamepad(std::uint32_t buttons,
             std::array<std::int32_t, SDL_HOST_PAD_AXES> const& axes) const {
@@ -53,6 +60,11 @@ public:
 
     ~SteamSdlSurface() {
         Quit();
+        if (childExit_) {
+            SetThreadpoolWait(childExit_, nullptr, nullptr);
+            WaitForThreadpoolWaitCallbacks(childExit_, TRUE);
+            CloseThreadpoolWait(childExit_);
+        }
         if (view_) UnmapViewOfFile(view_);
         if (stagedGame_) steam_win32_stage::RemoveStageAfterExit(std::move(stagedGame_), std::move(process_));
     }
@@ -73,9 +85,24 @@ public:
         return true;
     }
 
+    bool OpenRumble(std::wstring const& path) {
+        childExit_ = CreateThreadpoolWait(ChildExited, this, nullptr);
+        if (!childExit_) return false;
+        try {
+            auto* rumble = OpenMailbox<SdlRumbleMailbox>(path + SDL_RUMBLE_SUFFIX, rumbleFile_, SDL_RUMBLE_MAGIC);
+            UnmapViewOfFile(rumble);
+            return true;
+        } catch (winrt::hresult_error const&) {
+            CloseThreadpoolWait(childExit_);
+            childExit_ = nullptr;
+            return false;
+        }
+    }
+
     void Attach(winrt::handle process, winrt::Windows::Storage::StorageFolder stagedGame = nullptr) {
         process_ = std::move(process);
         stagedGame_ = std::move(stagedGame);
+        if (childExit_ && process_) SetThreadpoolWait(childExit_, process_.get(), nullptr);
     }
     void PrimeGamepadConnection() const {
         if (view_ && !process_) PublishGamepad(SDL_HOST_PAD_CONNECTED, {0, 0, 0, 0, -32768, -32768});

@@ -1,0 +1,6 @@
+Factorio/saves
+Factorio/scenarios
+Factorio/temp
+Factorio/mods
+Factorio/archive
+Factorio/script-output

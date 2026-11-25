@@ -26,7 +26,9 @@ typedef struct SdlGpuMailbox {
        refreshes heartbeat_ms with GetTickCount(), and clears acceptance on exit.
        Wait for ready[i] >= sequence[i] before reading each texture. Signal
        done[i] = sequence[i] after the last GPU read, even for skipped frames.
-       Producer reuses a slot only after both ready and done have completed. */
+       The producer waits for its last copy and the last published consumer
+       acknowledgement before reusing the slot. An unpublished copy needs
+       only producer completion and can leave a gap in the sequence. */
     volatile LONG accepted_generation;
     volatile LONG heartbeat_ms;
     volatile LONG supports_cursor; /* presenter advertises RGBA overlay */

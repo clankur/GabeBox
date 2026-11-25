@@ -37,14 +37,23 @@
     function openPanel(host, path, events, nativePad, screen, mainId) {
         var owner = ++activeSession, closed = false, opened = false, covered = false, shown = false;
         var nativeInput = false, menuRequests = 0, covering;
+        var textResume;
         var timer, stopped, sampleStart, sampleWindow = 0, started = performance.now(), nextReport = 0;
         function resetSample() { sampleStart = null; }
+        function finishTextResume(visible) {
+            if (!textResume) return;
+            var pending = textResume;
+            textResume = null;
+            pending.resolve(visible);
+        }
+        function panelVisible(stats) { return !covered && /^visible=1\r?$/m.test(stats); }
         function reportError(error) {
             if (events.mediaError) events.mediaError("panel", (error && (error.number || error.code) || 0) >>> 0);
         }
         function close() {
             if (closed) return stopped;
             closed = true;
+            finishTextResume(false);
             clearInterval(timer);
             document.removeEventListener("visibilitychange", resetSample);
             window.removeEventListener("blur", resetSample);
@@ -68,6 +77,7 @@
                 var error = /^error=([0-9]+)\r?$/m.exec(stats);
                 if (error && +error[1]) { fail({code: Number(error[1])}); return; }
                 nativeInput = /^native_input=1\r?$/m.test(stats);
+                if (textResume && (panelVisible(stats) || now >= textResume.deadline)) finishTextResume(panelVisible(stats));
                 var request = /^native_menu_requests=([0-9]{1,15})\r?$/m.exec(stats);
                 if (nativeInput && request && +request[1] > menuRequests) {
                     menuRequests = +request[1];
@@ -118,14 +128,7 @@
                 window.steamBigPictureHost.samplePresenter("presenter_foreground");
             }
         }).catch(fail);
-        return {primary: true, ownsInput: function () { return !closed && (!opened || nativeInput); }, close: close, cover: function () {
-            if (closed || covered) return covering;
-            covered = true;
-            resetSample();
-            covering = queuePanel(function () { if (!closed) return host.setPanelVisible(false); })
-                .then(function () { return !closed; }, function (error) { fail(error); return false; });
-            return covering;
-        }, resume: function (fromView) {
+        function resume(fromView) {
             if (closed || owner !== activeSession) return Promise.resolve(false);
             return Promise.resolve().then(function () {
                 if (fromView) return window.steamBigPictureHost.switchView(mainId, fromView);
@@ -151,6 +154,24 @@
                         return restoreSteamAfterResumeFailure(fromView, mainId);
                     });
                 });
+        }
+        return {primary: true, ownsInput: function () { return !closed && (!opened || nativeInput); }, close: close, cover: function () {
+            if (closed || covered) return covering;
+            finishTextResume(false);
+            covered = true;
+            resetSample();
+            covering = queuePanel(function () { if (!closed) return host.setPanelVisible(false); })
+                .then(function () { return !closed; }, function (error) { fail(error); return false; });
+            return covering;
+        }, resume: resume, resumeForText: function () {
+            return resume().then(function (shown) {
+                if (!shown || closed || owner !== activeSession) return false;
+                if (panelVisible(host.panelStatus())) return true;
+                return new Promise(function (resolve) {
+                    finishTextResume(false);
+                    textResume = {resolve: resolve, deadline: performance.now() + 2000};
+                });
+            });
         }};
     }
 

@@ -72,6 +72,10 @@ python3 -m tools.xbox_deploy inspect-input --version "$version" --app-id "$steam
 
 `--panel-menu` reads the package's optional native presenter milestones independently of game input. `added` counts readiness, held chords, and menu requests recorded during a sampling window when the checkpoint sequence still contains the baseline. The file is package-scoped and its cumulative counts may include earlier activity. The command reads mailbox metadata only and rechecks the launch before emitting JSON or saving it.
 
+Add `--keyboard` to read the queue's read, write, and reset counters when the game enables it. The sample contains no key events or text.
+
+Add `--rumble` to read the selected launch's optional vibration mailbox after a controller effect. The connection state can be `armed`, `disarmed`, or `updating`. On an instrumented build, `bridge_attached` and `presenter_attached` identify the endpoints. The flags show whether a connected XInput slot requested a nonzero effect, the bridge accepted it, and the presenter received a successful WinRT result. `stop_applied` records a successful zero command after a nonzero attempt. `device_error` records any failed WinRT vibration call. These flags accumulate for the launch, including while the controller is disconnected or the presenter is covered. They can capture an effect that starts and stops between two diagnostic reads. Older sidecars leave the flags clear. Confirm physical vibration and cancellation on the controller.
+
 ## Drive a hosted game with remote input
 
 `python3 -m tools.xbox_remote_input` sends controller, keyboard and mouse input through Device Portal's `/ext/remoteinput` WebSocket. The presenter merges the controller presses into the hosted pad, so games reading hosted XInput receive them as controller input. Each step can be followed by a screenshot:
@@ -109,6 +113,14 @@ The command reads the live trace from a single staging directory created within 
 The JSON summary gives the latest filtered records and counts for graphics pipeline compilation, boot waits, and shell requests. Counts cover recorded events, including repeats. If the runtime records graphics or compute pipeline request ordinals, `pipelines` reports the highest recorded request for each kind, the most recent sampled commit headroom, and the last observed failure HRESULT when present. The request ordinal is a lower bound and can include an in-flight request. If the runtime also samples its cumulative counters, `latest_counter_sample` gives the counter values and whether a pipeline call was active at that instant.
 
 The inspector reads up to 1 MiB of the live trace and marks `truncated` when more bytes are available. A record still being written is skipped. A terminal report must include its completion marker. Pass `--output` to save the summary and the complete allowlisted records within the read limit. The inspection only reads the selected package's diagnostics through Device Portal.
+
+A focused Win32 profile can redirect `ExitProcess` and `TerminateProcess` to `XboxWin32LoaderTrace.dll` to record the exit API, code, and caller. For a self-exit with `0xFFFFFFFF`, the adapter also attempts to record up to eight module-relative frames from the terminating thread. A trace can show a direct exit from an engine worker. When the engine returns through `main` first, the stack only shows the remaining runtime frames. The trace distinguishes a missing capture export, a missing module lookup, an empty stack, and a stack with no mapped frames. The adapter's x64 build includes unwind metadata for its own frames.
+
+A profile that redirects `RaiseException` can also capture up to eight module-relative frames for each of the first four MSVC C++ throws as `fault cxx-stack`. This records the throw site before the game's exception handler runs. The adapter forwards the exception code, flags and arguments unchanged.
+
+A signed working-directory profile records `asset cwd-before`, `asset cwd-set` and `asset cwd-after`. These checkpoints identify whether the current directory matches the verified install directory and whether the native set operation succeeded. For profiles that also redirect the executable path, the adapter attempts the change on the first executable path query or DLL load, whichever occurs first.
+
+For path canonicalization, a focused recipe can route `CreateFileW` and `GetFinalPathNameByHandleW` through the storage adapter. It records metadata-only opens and final-path query results as `asset storage=` records. Open records classify the input by scope and path form. Final-path records identify the requested form. After a denied normalized DOS query, the adapter tries to obtain the volume-relative name from `FileNameInfo` on the same handle. It accepts a path within the launcher's scoped roaming or verified install directory after checking for reparse points along the scoped path and verifying the volume and file ID against the original handle. The trace omits the paths.
 
 ## Collect and measure
 

@@ -22,7 +22,10 @@ from zipfile import BadZipFile, ZipFile
 
 
 from probe.catalog import (
-    BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
+    BIG_PICTURE_NAME, BIG_PICTURE_REPORT, CASES, CONTROLLER_POINTER_PROBE_NAME, CONTROLLER_POINTER_REPORT,
+    GRAPHICS_CONTROL_NAME, PACKAGE_CASES,
+    NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT, NATIVE_MOUSE_INDEPENDENT_REPORT,
+    NATIVE_MOUSE_PROBE_NAME, NATIVE_MOUSE_STARTUP_REPORT,
     PROBE_CONTROL_NAME, PROBE_NAME, PROBE_REPORT, PROBE_STEAM_CORE_NAME, WEBVIEW_REPORT,
 )
 from probe.runner import report_fields, run_case
@@ -33,6 +36,7 @@ from tools.device_portal import PACKAGE_API, DevicePortal, PortalError
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
 ACTIVATION_REPORT = 'big-picture-activation.txt'
 BIG_PICTURE_REPORTS = {BIG_PICTURE_REPORT, WEBVIEW_REPORT, ACTIVATION_REPORT}
+NATIVE_MOUSE_REPORTS = {NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT, NATIVE_MOUSE_INDEPENDENT_REPORT}
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 LIFETIME_REPORT = 'lifetime-report.txt'
@@ -155,7 +159,31 @@ SDL_INPUT_MAGIC = 0x53444C31
 SDL_INPUT_HEADER = Struct('<9I')
 SDL_INPUT_GAMEPAD = Struct('<II6iII')
 SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
+SDL_INPUT_KEYBOARD_COUNTERS = Struct('<3I')
+# The gamepad snapshot ends at the first keyboard word (available).
+SDL_INPUT_KEYBOARD_COUNTERS_OFFSET = SDL_INPUT_GAMEPAD_OFFSET + SDL_INPUT_GAMEPAD.size
 SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
+SDL_INPUT_RUMBLE = Struct('<4IQ')
+SDL_INPUT_RUMBLE_EVENTS = ('presenter_attached', 'nonzero_requested', 'nonzero_published',
+                           'nonzero_applied', 'stop_applied', 'device_error', 'bridge_attached')
+
+
+def host_rumble_snapshot(raw):
+    if raw is None:
+        return {'state': 'unavailable'}
+    if len(raw) != SDL_INPUT_RUMBLE.size:
+        return {'state': 'invalid'}
+    magic, active, generation, evidence, command = SDL_INPUT_RUMBLE.unpack(raw)
+    if magic != 0x53445231:
+        return {'state': 'invalid'}
+    if active and active == generation == command >> 32:
+        state = 'armed'
+    elif not active and not command:
+        state = 'disarmed'
+    else:
+        state = 'updating'
+    return {'state': state,
+            **{event: bool(evidence & (1 << bit)) for bit, event in enumerate(SDL_INPUT_RUMBLE_EVENTS)}}
 
 
 def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
@@ -216,14 +244,23 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
             if pad[1] & ~0x17FFF or any(not -32768 <= axis <= 32767 for axis in pad[2:8]):
                 raise ValueError('The hosted SDL gamepad state does not match the expected protocol.')
             gamepad.update(connected=bool(pad[1] & 0x10000), buttons=f'0x{pad[1]:08x}', axes=pad[2:8])
+        keyboard_queue = None
+        if args.keyboard and pad[9]:
+            read, write, reset = SDL_INPUT_KEYBOARD_COUNTERS.unpack(
+                read_range(SDL_INPUT_KEYBOARD_COUNTERS_OFFSET, SDL_INPUT_KEYBOARD_COUNTERS.size))
+            keyboard_queue = {'read': read, 'write': write, 'reset': reset}
         elapsed = clock() - start
-        samples.append({'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
-                        'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])})
+        sample = {'elapsed_seconds': round(elapsed, 3), 'gamepad': gamepad, 'pointer': pointer,
+                  'keyboard_ready': bool(pad[9]), 'closing': bool(head[8])}
+        if keyboard_queue is not None:
+            sample['keyboard_queue'] = keyboard_queue
+        samples.append(sample)
         if elapsed >= args.seconds or head[8]:
             break
         pause(min(0.5, args.seconds - elapsed))
 
     panel_after = panel_trace() if args.panel_menu else None
+    rumble = blob(mailbox + '.rumble', SDL_INPUT_RUMBLE.size) if args.rumble else None
     last = launch_report()
     if (not matching_probe(last, args.run_id, args.app_id)
             or any(first.get(key) != last.get(key) for key in ('run_id', 'steam_sdl_mailbox'))):
@@ -244,6 +281,8 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
                 added = panel_after[len(panel_before):]
                 menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
         result['panel_menu'] = menu
+    if args.rumble:
+        result['rumble'] = host_rumble_snapshot(rumble)
     if args.output:
         save_observation(args.output, result, {})
     return result
@@ -415,9 +454,44 @@ def export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, pro
     print(f'Exported {len(entries)} verified inputs for Steam build {build} to {output}.')
 
 
-def inspect_game(portal, package, app_id, executable, source_profile=None, export_inputs=None):
+def fingerprint_game_input(portal, package, app_id, knownfolder, steamapps, raw, expected_build, relative):
+    from build_tools.verify_win32_source import valid_win32_component
+    from tools.steam_compatibility import parse_installed_manifest
+
+    build, install, state = parse_installed_manifest(raw, app_id)
+    if build != expected_build or state != '4':
+        raise ValueError(f'Steam must show a complete installation of build {expected_build}.')
+    if not GAME_PATH_COMPONENT.fullmatch(install):
+        raise ValueError('The Steam manifest has no usable local install folder.')
+    parts = relative.split('/')
+    if (len(relative) > 260 or not parts[-1].lower().endswith(('.exe', '.dll'))
+            or any(not re.fullmatch(r'[A-Za-z0-9_. -]{1,255}', part) or not valid_win32_component(part)
+                   for part in parts)):
+        raise ValueError('Use a game-relative .exe or .dll path with forward slashes.')
+    folder = '\\'.join((steamapps, 'common', install, *parts[:-1]))
+
+    def receive(response):
+        digest = hashlib.sha256()
+        size = 0
+        for chunk in iter(lambda: response.read(1024 * 1024), b''):
+            digest.update(chunk)
+            size += len(chunk)
+        if not size:
+            raise ValueError(f'Xbox returned an empty game file: {relative}.')
+        return {'path': relative, 'size': size, 'sha256': digest.hexdigest()}
+
+    _, fingerprint = portal.request('GET', game_file_url(package, folder, parts[-1], knownfolder), receive=receive)
+    fresh = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf',
+                           1024 * 1024 + 1, knownfolder=knownfolder)
+    if fresh is None or parse_installed_manifest(fresh, app_id) != (build, install, state):
+        raise ValueError('The Xbox Steam installation changed during fingerprinting.')
+    return {build: [fingerprint]}
+
+
+def inspect_game(portal, package, app_id, executable, source_profile=None, export_inputs=None, *,
+                 fingerprint_input=None, expected_build=None):
     libraries = (('D', 'DevelopmentFiles', DEVELOPER_STEAMAPPS_PATH), ('local', 'LocalAppData', STEAMAPPS_PATH))
-    manifest_limit = 1024 * 1024 + 1 if export_inputs is not None else 65536
+    manifest_limit = 1024 * 1024 + 1 if export_inputs is not None or fingerprint_input is not None else 65536
     for drive, knownfolder, steamapps in libraries:
         raw = read_game_file(portal, package, steamapps, f'appmanifest_{app_id}.acf', manifest_limit, knownfolder=knownfolder)
         if raw is not None:
@@ -433,6 +507,10 @@ def inspect_game(portal, package, app_id, executable, source_profile=None, expor
             print(f'{field}={match[1]}')
     if export_inputs is not None:
         export_game_inputs(portal, package, app_id, knownfolder, steamapps, raw, source_profile, export_inputs)
+    if fingerprint_input is not None:
+        fingerprint = fingerprint_game_input(portal, package, app_id, knownfolder, steamapps, raw, expected_build,
+                                            fingerprint_input)
+        print('steam_input_fingerprint=' + json.dumps(fingerprint, separators=(',', ':')))
     if executable is None:
         return
     install = re.search(r'^[ \t]*"installdir"[ \t]+"([^"\r\n]+)"', manifest, re.MULTILINE | re.IGNORECASE)
@@ -847,6 +925,16 @@ def main():
                                 const='slay-console', help='summarize the publisher console diagnostic for this launch')
     report_variant.add_argument('--stardew-host', dest='report_file', action='store_const',
                                 const='stardew-host', help='summarize the current Stardew Valley .NET host trace')
+    report_variant.add_argument('--mouse-source', dest='report_file', action='store_const',
+                                const='fhd-mouse-source.txt', help='read the opted-in foreground native mouse probe')
+    report_variant.add_argument('--native-mouse-capture', dest='report_file', action='store_const',
+                                const=NATIVE_MOUSE_CAPTURE_REPORT, help='read the standalone XAML mouse capture counters')
+    report_variant.add_argument('--native-mouse-devices', dest='report_file', action='store_const',
+                                const=NATIVE_MOUSE_DEVICE_REPORT, help='read the standalone GameInput mouse samples')
+    report_variant.add_argument('--native-independent-mouse', dest='report_file', action='store_const',
+                                const=NATIVE_MOUSE_INDEPENDENT_REPORT, help='read the independent panel mouse counters')
+    report_variant.add_argument('--controller-pointer', dest='report_file', action='store_const',
+                                const=CONTROLLER_POINTER_REPORT, help='read the standalone controller enumeration')
     report_variant.add_argument('--sdl-frame', type=Path, metavar='BMP', help='save the current trial’s SDL frame')
     report_command.set_defaults(report_file=PROBE_REPORT)
     observe_command = commands.add_parser('observe', help='watch Steam startup or a game launch without controlling the Xbox')
@@ -882,12 +970,18 @@ def main():
                                              help='sample duration, 0 for one snapshot (default 0, maximum 30)')
     inspections['inspect-input'].add_argument('--panel-menu', action='store_true',
                                              help='read optional package-level panel and menu checkpoints')
+    inspections['inspect-input'].add_argument('--rumble', action='store_true',
+                                             help='read optional hosted rumble checkpoints for the selected launch')
+    inspections['inspect-input'].add_argument('--keyboard', action='store_true',
+                                             help='read keyboard queue counters for the selected launch')
     game = commands.add_parser('inspect-game', help='read one Steam install manifest and optional executable header')
     game.add_argument('--version', required=True, help='installed Steam package version')
     game.add_argument('--app-id', type=int, required=True, help='Steam AppID')
     game.add_argument('--executable', help='relative .exe path within the game folder')
     game.add_argument('--source-profile', type=Path, help='trusted Win32 fingerprint file for exporting owned inputs')
     game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
+    game.add_argument('--fingerprint-input', help='hash one installed game-relative EXE or DLL without saving its contents')
+    game.add_argument('--expected-build', help='required exact Steam build ID for --fingerprint-input')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -975,6 +1069,10 @@ def main():
             game.error('--app-id must be a positive Steam AppID')
         if (args.source_profile is None) != (args.export_inputs is None):
             game.error('Use --source-profile and --export-inputs together')
+        if (args.fingerprint_input is None) != (args.expected_build is None):
+            game.error('Use --fingerprint-input and --expected-build together')
+        if args.expected_build is not None and not re.fullmatch(r'[1-9][0-9]{0,19}', args.expected_build):
+            game.error('--expected-build must be a positive Steam build ID')
 
     if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
         sdl.error('--frame-timeout must be between 1 and 120 seconds')
@@ -1066,7 +1164,12 @@ def main():
         print(json.dumps(result, indent=2))
         return
     if args.command == 'report':
-        name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
+        if args.report_file in NATIVE_MOUSE_REPORTS:
+            name = NATIVE_MOUSE_PROBE_NAME
+        elif args.report_file == CONTROLLER_POINTER_REPORT:
+            name = CONTROLLER_POINTER_PROBE_NAME
+        else:
+            name = BIG_PICTURE_NAME if args.report_file in BIG_PICTURE_REPORTS else PROBE_STEAM_CORE_NAME
         if args.report_file == 'steam-core-webview':
             args.report_file = WEBVIEW_REPORT
         app = find_installed_probe(portal, name, args.version)
@@ -1084,7 +1187,8 @@ def main():
                                    r'gpu_interop=published|gpu_first_copy=submitted|gpu_failure=[a-z-]{1,32}:0x[0-9a-fA-F]{8}|'
                                    r'gpu_followup=host_bound=[01] accepted=[01] heartbeat_fresh=[01] cursor_supported=[01]|'
                                    r'gpu_(?:mesa_flush|gl_flush|mesa_export)=(?:begin|returned)|'
-                                   r'init_flags=0x[0-9A-F]{8})|win32_(?:window_class=registered|window=created|'
+                                   r'init_flags=0x[0-9A-F]{8})|win32_(?:window_class=registered|'
+                                   r'window=(?:created|message-only-created)|window_callproc=hosted-nccreate|'
                                    r'window_create=(?:begin|nccreate|create|thread-unsupported|class-missing|parent-or-menu-unsupported|'
                                    r'limit-reached|invalid-size|nccreate-refused|create-refused)|'
                                    r'host_exit=[a-z-]{1,32}|host_exit_(?:error|code)=0x[0-9a-fA-F]{8}|'
@@ -1118,13 +1222,18 @@ def main():
         report = decode_report(raw)
         if not report.endswith('\n'):
             raise ValueError('The app is writing its report. Try again.')
+        if args.report_file in NATIVE_MOUSE_REPORTS:
+            run = re.search(r'^run_id=([0-9]{1,20})(?:[ \t]|\r?$)', report, re.MULTILINE)
+            if run and run[1] != report_fields(read_probe_report(portal, app, NATIVE_MOUSE_STARTUP_REPORT)).get('run_id'):
+                raise ValueError('The standalone mouse report does not match the current probe run. Try again.')
         if args.sdl_frame is not None:
             read_sdl_frame(portal, app, report, args.sdl_frame)
         print(report, end='')
         return
     if args.command == 'inspect-game':
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
-        inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs)
+        inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs,
+                     fingerprint_input=args.fingerprint_input, expected_build=args.expected_build)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)

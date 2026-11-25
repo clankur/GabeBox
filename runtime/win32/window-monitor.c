@@ -4,6 +4,7 @@
 #define XBOX_DISPLAY_DC ((HDC)(ULONG_PTR)0x584244000002ULL)
 
 static const WCHAR displayName[] = L"\\\\.\\DISPLAY1";
+static const char displayNameA[] = "\\\\.\\DISPLAY1";
 
 static BOOL SameDisplayName(LPCWSTR name) {
     return name && CompareStringOrdinal(name, -1, displayName, -1, TRUE) == CSTR_EQUAL;
@@ -87,7 +88,7 @@ int WINAPI XboxGetDeviceCaps(HDC dc, int index) {
     case TECHNOLOGY: return DT_RASDISPLAY;
     case HORZRES: case DESKTOPHORZRES: return bounds.right;
     case VERTRES: case DESKTOPVERTRES: return bounds.bottom;
-    case LOGPIXELSX: case LOGPIXELSY: return 96;
+    case LOGPIXELSX: case LOGPIXELSY: return XBOX_WINDOW_DPI;
     case BITSPIXEL: return 32;
     case PLANES: return 1;
     case VREFRESH: return 60;
@@ -146,9 +147,8 @@ BOOL WINAPI XboxGetMonitorInfoW(HMONITOR monitor, MONITORINFO *info) {
 BOOL WINAPI XboxGetMonitorInfoA(HMONITOR monitor, MONITORINFO *info) {
     if (!MonitorInfo(monitor, info)) return FALSE;
     if (info->cbSize >= sizeof(MONITORINFOEXA)) {
-        const char name[] = "\\\\.\\DISPLAY1";
         MONITORINFOEXA *extended = (MONITORINFOEXA *)info;
-        for (UINT i = 0; i < ARRAYSIZE(name); ++i) extended->szDevice[i] = name[i];
+        for (UINT i = 0; i < ARRAYSIZE(displayNameA); ++i) extended->szDevice[i] = displayNameA[i];
     }
     return TRUE;
 }
@@ -170,5 +170,28 @@ BOOL WINAPI XboxEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW *setti
     settings->dmPelsHeight = bounds.bottom;
     settings->dmDisplayFlags = 0;
     settings->dmDisplayFrequency = 60;
+    return TRUE;
+}
+
+BOOL WINAPI XboxEnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA *settings) {
+    WCHAR wideName[CCHDEVICENAME];
+    if (!settings || settings->dmSize < sizeof(*settings) ||
+            (device && !MultiByteToWideChar(CP_ACP, 0, device, -1, wideName, ARRAYSIZE(wideName)))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    DEVMODEW wide;
+    wide.dmSize = sizeof(wide);
+    if (!XboxEnumDisplaySettingsW(device ? wideName : NULL, mode, &wide)) return FALSE;
+    for (UINT i = 0; i < ARRAYSIZE(settings->dmDeviceName); ++i)
+        settings->dmDeviceName[i] = i < ARRAYSIZE(displayNameA) ? displayNameA[i] : 0;
+    settings->dmDriverExtra = 0;
+    settings->dmFields = wide.dmFields;
+    settings->dmPosition = wide.dmPosition;
+    settings->dmBitsPerPel = wide.dmBitsPerPel;
+    settings->dmPelsWidth = wide.dmPelsWidth;
+    settings->dmPelsHeight = wide.dmPelsHeight;
+    settings->dmDisplayFlags = wide.dmDisplayFlags;
+    settings->dmDisplayFrequency = wide.dmDisplayFrequency;
     return TRUE;
 }

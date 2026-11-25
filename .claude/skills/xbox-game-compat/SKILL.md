@@ -51,11 +51,15 @@ evidence and coverage, and this skill is how to apply them to one title.
    the script layout (`probe/*.py`, `xbox-deploy.py`, `probe/win32-runtime/`); check
    before you copy a command from an old note, and run `--help` on anything you have not
    used this session, because flags move.
-3. **Check what you can reach.** Is Device Portal configured (`.env`,
+3. **Take your turn before driving the console.** Several sessions share one Series X:
+   claim it through the console queue (the `xbox-queue` skill) before deploying,
+   launching, or sending input, and release it when you finish. Read-only Device Portal
+   queries are fine meanwhile.
+4. **Check what you can reach.** Is Device Portal configured (`.env`,
    `tools.xbox_deploy fingerprint`)? Is the title installed on the console
    (`inspect-game`)? Is `rea` on PATH? Does a local Windows install of the game exist to
    audit? Say plainly which of these you have before planning around them.
-4. **Find where the evidence lives.** Much of the recorded console history sits on
+5. **Find where the evidence lives.** Much of the recorded console history sits on
    feature branches and in the worktrees under `.claude/worktrees/`, not on `main` — a
    title you are about to investigate may already have twenty recorded passes and
    adapters that the current checkout lacks. Before deriving anything, search the other

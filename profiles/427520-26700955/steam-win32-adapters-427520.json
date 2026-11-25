@@ -1,0 +1,40 @@
+{
+  "build_id": "26700955",
+  "required_adapters": [
+    "XboxWin32ControllerNotify.dll",
+    "XboxWin32DefaultAudio.dll",
+    "XboxWin32Desktop.dll",
+    "XboxWin32Dxgi.dll",
+    "XboxWin32GdiPlus.dll",
+    "XboxWin32Input.dll",
+    "XboxWin32LoaderTrace.dll",
+    "XboxWin32SteamDiscovery.dll",
+    "XboxWin32StorageTrace.dll",
+    "XboxWin32Window.dll",
+    "XboxWin32XInput910.dll"
+  ],
+  "required_exports": {
+    "XboxWin32LoaderTrace.dll": [
+      "ExitProcess",
+      "RaiseException",
+      "TerminateProcess"
+    ],
+    "XboxWin32StorageTrace.dll": [
+      "CreateFileW",
+      "GetFinalPathNameByHandleW"
+    ],
+    "XboxWin32Window.dll": [
+      "CallWindowProcW",
+      "GetAsyncKeyState",
+      "GetKeyboardState",
+      "GetKeyState",
+      "IsIconic",
+      "IsZoomed",
+      "TranslateMessage"
+    ],
+    "XboxWin32SteamDiscovery.dll": [
+      "SteamAPI_RestartAppIfNecessary",
+      "SteamInternal_SteamAPI_Init"
+    ]
+  }
+}

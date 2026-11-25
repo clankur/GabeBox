@@ -13,6 +13,14 @@ enum {
     SDL_HOST_READY,
     SDL_HOST_READING,
     SDL_HOST_POINTER_MAX = 4095,
+    SDL_HOST_POINTER_LEFT = 1 << 24,
+    SDL_HOST_POINTER_RIGHT = 1 << 25,
+    SDL_HOST_POINTER_MIDDLE = 1 << 26,
+    SDL_HOST_POINTER_X1 = 1 << 27,
+    SDL_HOST_POINTER_X2 = 1 << 28,
+    SDL_HOST_POINTER_BUTTONS = 31 << 24,
+    SDL_HOST_POINTER_VISIBLE = 1 << 29,
+    SDL_HOST_WHEEL_HORIZONTAL = 1 << 7,
     SDL_HOST_PAD_BUTTONS = 15,
     SDL_HOST_PAD_AXES = 6,
     SDL_HOST_PAD_CONNECTED = 1 << 16,
@@ -63,6 +71,7 @@ typedef struct SdlHostMailbox {
     volatile LONG frame_state;
     volatile LONG frame_sequence;
     volatile LONG input_pointer;
+    /* Legacy keys occupy bits 0–6, with direction at bit 7 and signed wheel delta at bits 16–31. */
     volatile LONG input_keys;
     volatile LONG input_serial;
     volatile LONG input_ack;

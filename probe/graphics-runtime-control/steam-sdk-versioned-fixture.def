@@ -1,0 +1,10 @@
+LIBRARY steam_api64.dll
+EXPORTS
+    SteamFixtureConfigure
+    SteamFixtureCounts
+    SteamAPI_RestartAppIfNecessary
+    SteamInternal_SteamAPI_Init
+    SteamAPI_Shutdown
+    SteamAPI_SteamUser_v023
+    SteamAPI_ISteamUser_BLoggedOn
+    SteamAPI_ISteamUser_GetSteamID

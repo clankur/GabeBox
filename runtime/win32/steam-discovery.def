@@ -1,6 +1,7 @@
 LIBRARY XboxWin32SteamDiscovery.dll
 EXPORTS
-    XboxSteamInitialize
-    SteamAPI_Init=XboxLegacySteamInit
-    SteamAPI_IsSteamRunning=XboxLegacySteamIsRunning
-    SteamAPI_RestartAppIfNecessary=XboxLegacySteamRestart
+    SteamAPI_Init=XboxLegacySteamInit @1
+    SteamAPI_IsSteamRunning=XboxLegacySteamIsRunning @2
+    SteamAPI_RestartAppIfNecessary=XboxLegacySteamRestart @3
+    XboxSteamInitialize @4
+    SteamInternal_SteamAPI_Init=XboxSteamInitWithVersions @5

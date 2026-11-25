@@ -13,11 +13,191 @@ Install the corresponding signed package before running a case. The JSON include
 | --- | --- |
 | Startup, process creation, and named pipes | The packaged process test and startup control below. |
 | Process lifetime across a foreground switch | The [multi-app lifetime control](DEVELOPMENT.md#test-a-foreground-switch), run with `xbox_deploy lifetime`. |
-| Loader, SDL, XInput, desktop windowing, and DXGI | The [graphics runtime control](graphics-runtime-control/build.sh) and its build options. |
+| Loader, SDL, XInput, raw input, desktop windowing, and DXGI | The [graphics runtime control](graphics-runtime-control/build.sh) and its build options. |
+| Physical relative mouse motion | The hosted UWP mouse source control below. |
 | Steam DLL loading and native Big Picture launcher | The [Steam Core Loader Probe](../docs/STEAM-CORE.md#run-the-on-console-sign-in) and [native launcher](../analysis/big-picture.md). |
 | WebView and window activation | The [primary XAML](big-picture-primary/), [WebView smoke](big-picture-webview/), [renderer integration](big-picture-integration-control/), and [windowed](big-picture-windowed/) controls. |
 
 When adding a single-package control, reuse the relevant runtime adapter and report the operation's outcome and a per-launch `run_id`. Register the package and its terminal checks in [`catalog.py`](catalog.py). The [runner](runner.py) handles fresh reports, deadlines, and verdicts. Use [normal Big Picture Play](../docs/GAME-LAUNCH.md#verification) to verify a title after the control passes.
+
+## Physical mouse input
+
+A sideloaded Dev Mode package cannot read an attached Xbox mouse on any documented
+route. Dev Mode runs in the console's `SystemOS` partition while the mouse-capable
+GameInput runtime ships inside a GDK title's `GameOs.xvd`, the remaining Win32 raw input
+entry points are either unexported or return `ERROR_CALL_NOT_IMPLEMENTED`, no HID
+collection enumerates a device, and the restricted input capabilities install without
+effect. Ten console builds established this; the evidence, the citation trail, and the
+branches holding the retired probes are in [physical mouse input on an Xbox Dev Mode
+package](../analysis/xbox-mouse-input.md).
+
+A cursor therefore has to be driven from a source this layer can read: Xbox mouse mode,
+a keyboard, a host-supplied delta source, or the controller route below.
+
+This branch is one of those branches: it still carries the probes, and the three
+sections below document them. They have no measurement left to make, so treat them as
+the reference copy rather than a starting point.
+
+Build `--raw-input` to exercise `XboxWin32Input.dll` through the same redirected `GetRawInputBuffer` import used by game profiles. The child starts with an empty input queue and checks both a size query and a read with a supplied buffer. The child expects zero records, zero reported bytes, and an untouched output buffer. An invalid header size must fail with `ERROR_INVALID_PARAMETER`. Exit codes `0x6D01xxxx` and `0x6D03xxxx` include the Win32 error for the query and read. `0x6D020000`, `0x6D040000`, and `0x6D050000` identify a query, read, or invalid-header contract mismatch. [Wine raw input tests](https://github.com/wine-mirror/wine/blob/master/dlls/user32/tests/input.c#L2530-L2555)
+
+Build `--ime-filename` to exercise the redirected `ImmGetIMEFileNameA` import. A null layout must return zero and preserve the caller's output and last error. The child also compares the size query and the returned filename length for the active keyboard layout. Exit codes `0x6F01xxxx` through `0x6F06xxxx` identify the first failed check. [Wine IME tests](https://github.com/wine-mirror/wine/blob/master/dlls/imm32/tests/imm32.c#L4159-L4227)
+
+Build `--wic-stream` to check the Windows Imaging Component path used by Wine's GDI+ implementation. The child encodes synthetic alpha PNG and odd-width BGR JPEG at an explicit quality into seekable memory streams. It copies the encoded bytes into a write-only `IStream` like Factorio's and then decodes the copied bytes and checks every pixel. The JPEG case exercises DWORD-aligned row padding. The high word of an exit other than `0x51A7` identifies the first failed stage in the [control source](graphics-runtime-control/wic-stream-child.cpp). [WIC stream decoder](https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nf-wincodec-iwicimagingfactory-createdecoderfromstream)
+
+Build `--ani-cursor` to exercise file-backed cursor creation with `LoadImageW`. The child writes original single-frame and two-frame ANI fixtures to its temporary directory. It checks that duplicate loads produce independent handles, deletes the files, then verifies cursor dimensions, hotspot, and the RGB pixels drawn for each frame index. Exit codes `0x7201xxxx` through `0x7223xxxx` identify the first failed operation in the [control source](graphics-runtime-control/ani-cursor-child.cpp). A failed GDI metadata or drawing check leaves file loading and animated-frame behavior as separate observations. [Windows ANI format](https://learn.microsoft.com/en-us/windows/win32/menurc/resource-file-formats) · [DrawIconEx frame indices](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-drawiconex)
+
+Build `--ani-cursor-adapter` to run the same fixtures through the redirected `CreateIconFromResourceEx` import in `XboxWin32Input.dll`. Run the direct `--ani-cursor` control first to establish whether the underlying native file load works. The adapter forwards to the original User32 export when present.
+
+Build `--gdi-plus` to exercise all 15 GDI+ imports used by the Factorio trial through `XboxWin32GdiPlus.dll`. The child checks GDI+ startup, wrapper allocation, encoder enumeration, bitmap locking, independent cloning, and write-only-stream encode and decode. It checks PNG alpha, odd-width row padding, and pixel output for all five encoder MIME types. Exit codes starting at `0x7310xxxx` identify the first operation in the PNG round trip, followed by `0x7320xxxx` for JPEG, `0x7330xxxx` for BMP, `0x7340xxxx` for GIF, and `0x7350xxxx` for TIFF. [GDI+ ABI control](graphics-runtime-control/gdi-plus-child.cpp)
+
+Build `--window-properties` to exercise the hosted window imports used during Factorio's SDL window setup. The child checks `SetPropW` during creation, property replacement and lookup, window style, per-window isolation, removal during `WM_NCDESTROY`, and cleanup when the adapter reuses a window slot. Exit codes from `0x73600000` through `0x736a0000` identify the first failed operation. [Window properties control](graphics-runtime-control/window-properties-child.c)
+
+Build `--window-geometry` to check the hosted window messages used for Factorio’s mode changes. The child changes style through `SetWindowLongW`, modifies a proposed resize, and reads the committed client rectangle and maximize or minimize state inside `WM_WINDOWPOSCHANGED`. It checks normal bounds restoration, restore to maximized, a rejected restore, and nested position messages. It also checks visibility, default move and size messages, and destruction during a pending move. Run signed control `1.0.231.63` with `--case window-geometry`. The expected exit is `0x51A7`. Codes `0x7530xxxx` through `0x7542xxxx` identify the first failed operation. [Window geometry control](graphics-runtime-control/window-geometry-child.c)
+
+Build `--window-frame` to exercise the same static and dynamic Window imports as Factorio. The child verifies that disabled and malformed opt-ins retain native resolution, that enabled resolution selects the two hosted DPI exports, and that the popup tool-window shape still calls native User32. It applies a menu-free windowed style and checks that a requested 1920×1080 client area keeps its dimensions at the hosted 96 DPI. Run signed control `1.0.231.59` with `--case window-frame`. The expected exit is `0x51A7`. Codes `0x7540xxxx` through `0x754cxxxx` identify the first failed operation. [Window frame control](graphics-runtime-control/window-frame-child.c)
+
+Build `--window-keyboard` to check the Direct3D hosted window's keyboard mailbox. The child checks that peeking without removal preserves key state, that UTF-8 text arrives as complete UTF-16 characters, and that a reset releases Shift and drops stale input. It checks keyboard readiness across focus changes, combined left Shift and right Ctrl in mouse messages, and async button state through a synthetic drag and release. The expected exit is `0x51A7`. Codes `0x7550xxxx` through `0x7558xxxx` identify the first failed operation. [Hosted keyboard control](graphics-runtime-control/window-keyboard-child.c)
+
+Build `--d3d11-combined` to call native `D3D11CreateDeviceAndSwapChain` on a hosted window using Factorio's default-hardware, discard-swap-chain fallback. It retries without feature level 11.1 on `E_INVALIDARG`. The child returns the full native HRESULT if creation fails. Exit codes `0x7370xxxx` through `0x7378xxxx` identify the first failed setup or follow-up check. Success checks the chain's parent factory, window association, and back buffer. [D3D11 combined-call control](graphics-runtime-control/d3d11-combined-child.cpp)
+
+Build `--d3d11-hosted` for the same control with the game loader's DLL and procedure bindings. It opts into hosted DXGI and checks that the resolved entry point belongs to the adapter. It also checks the wrapped factory's window association and verifies that an invalid swap-chain description returns the DXGI error and clears the caller's outputs. Exit codes from `0x73790000` through `0x737d0000` identify the hosted checks. [Hosted D3D11 control](graphics-runtime-control/d3d11-combined-child.cpp)
+
+Build `--d3d11-hosted-output` to exercise legacy adapter and output selection before hosted D3D11 creation. The child reads the native result with `EnumAdapters1`, then verifies either the original output or, on `DXGI_ERROR_NOT_FOUND`, the hosted monitor name, handle, current mode, and closest-mode result. It creates the device with the selected adapter and `D3D_DRIVER_TYPE_UNKNOWN`, then checks that the resulting device has the same adapter LUID. Run signed control `1.0.231.51` with `--case d3d11-hosted-output`. Expected exit is `0x51A7`. Codes `0x7510xxxx` through `0x751dxxxx` identify the first failed selection or device check. Native enumeration errors are returned as full HRESULTs. [Explicit adapter control](graphics-runtime-control/d3d11-combined-child.cpp)
+
+Build `--d3d11-nonblocking-present` to check the hosted chain under resize contention. The child acquires the native D3D11 device guard and starts a worker resize. Both `Present` and `Present1` must return `DXGI_ERROR_WAS_STILL_DRAWING` for `DXGI_PRESENT_DO_NOT_WAIT` while the resize holds the adapter lock. The child releases the guard, verifies the new back-buffer dimensions, and retries a test present. Use signed control `1.0.231.55` with `--case d3d11-nonblocking-present`. The expected exit is `0x51A7`. Codes `0x7520xxxx` through `0x752exxxx` identify the first failed operation. `0x75250000` means native resize completed before contention was observed, and `0x752d0000` means the five-second watchdog stopped the control child. [Nonblocking present control](graphics-runtime-control/d3d11-combined-child.cpp) · [Native D3D11 device guard](https://learn.microsoft.com/en-us/windows/win32/api/d3d11_4/nf-d3d11_4-id3d11multithread-enter)
+
+Build `--wgl-loader SDL_ARTIFACT 2.30.9` to check the packaged OpenGL load and WGL lookups through the game’s loader bindings. The child selects and describes the hosted pixel format, verifies a WGL address belongs to the Window adapter, and exercises legacy bootstrap followed by a real OpenGL 3.3 core context. It checks rendering with a pixel readback and swaps the frame. Signed control `1.0.231.49` runs with `--case wgl-loader` and expects exit `0x51A7`. Codes `0x6e1b` through `0x6e20` identify the launch flag, pixel format, installed format, WGL address, core version and profile, and unsupported sharing checks. [Dynamic WGL control](graphics-runtime-control/window-child.c)
+
+Build `--dxgi-present-commit` to exercise a three-buffer RGBA8 D3D11 chain through the shared adapter. A test present must leave the mailbox unopened. The child copies a magenta frame before DXGI rejects the invalid sync interval and checks that the mailbox advertises no frame. A successful present then publishes a cyan frame through the shared GPU texture. Signed control `1.0.231.44` runs through `python3 -m tools.xbox_deploy probe --case dxgi-present-commit --version 1.0.231.44 --json`. The expected exit is `0x51A7`. Exit codes `0x6c10xxxx` through `0x6c12xxxx` identify the test present, native rejection, and unpublished-frame checks. [DXGI exchange control](graphics-runtime-control/dxgi-child.cpp)
+
+Build `--dxgi-d3d11-resize` to test the hosted D3D11 exchange across a rejected resize and a successful resize. The child holds a back-buffer reference to force the native rejection, checks that the current frame stays available, and reads a second color from the same GPU generation. It releases the buffer and resizes from 64×64 to 80×80, then reads a third frame from a new GPU generation. Signed control `1.0.231.53` runs with `--case dxgi-d3d11-resize` and expects exit `0x51A7`. Exit codes `0x6c13xxxx` through `0x6c1cxxxx` identify the first failed stage. [DXGI resize control](graphics-runtime-control/dxgi-child.cpp)
+
+Build `--dxgi-output-native` to check the adapter zero and output zero selection used by Factorio when SDL cannot map its display name. The child reports the full native `EnumOutputs` HRESULT if enumeration fails. If an output resolves, it queries its monitor and current display mode through the ANSI APIs and requests the closest RGBA8 mode without a D3D device. Build `--dxgi-output-hosted` to repeat the path through the hosted monitor and display-mode imports. The hosted control first checks that the ANSI and Unicode queries return the same settings for the virtual monitor and that the ANSI call respects the caller’s buffer.
+
+Run signed control `1.0.231.46` with `--case dxgi-output-native` and signed control `1.0.231.47` with `--case dxgi-output-hosted`. The expected exit is `0x51A7`. An exit starting with `0x887A` comes from native output enumeration. Codes `0x7501xxxx` through `0x7508xxxx` identify factory, adapter, output descriptor, ANSI export, monitor, display-mode, closest-mode, and refresh-result checks. Codes `0x750axxxx` through `0x750fxxxx` cover hosted setup and its virtual-monitor checks. Factorio can continue with refresh `0/1` after a mode-matching failure. [DXGI output control](graphics-runtime-control/dxgi-output-child.cpp)
+
+Build `--hosted-xinput` to exercise the Xbox controller mailbox through the redirected `XInputGetState`, `XInputGetCapabilities`, and `XInputSetState` imports. The child stops publication between updating the connection bit and committing the sample. Exit codes `0x6f08` and `0x6f09` identify a read that exposed a partial connection or disconnection. Capability and vibration calls leave the state acknowledgment for the next `XInputGetState` call. [Hosted XInput control](graphics-runtime-control/xinput-child.c)
+
+Build `--hosted-xinput-loader` to use the same mailbox fixture with Factorio's dynamic loader calls. The child checks native selection for unselected versions and qualified paths, the legacy 9.1.0 route, and hosted selection for the bare DLL names under the opt-in. It resolves the three required functions by name and checks that SDL's optional ordinal and battery lookups can fall back. Exit codes `0x6f0a` through `0x6f0f` identify the loader checks. [Dynamic XInput control](graphics-runtime-control/xinput-child.c)
+
+Build `--hosted-xinput-rumble` to exercise two-motor commands through the redirected XInput adapter and a synthetic `.rumble` sidecar. The child checks the zero-motor startup probe, both packed amplitudes, stop, loss of readiness, a rejected stale-generation request, and controller disconnect. Exit codes `0x6f100000` through `0x6f160000` identify the rumble stages. The native input test covers controller replacement, transient stop failure, pause, a switch to pointer mode, and quit. Physical vibration uses the real native presenter in a game trial. [XInput control](graphics-runtime-control/xinput-child.c) · [Native presenter test](../tests/fhd-hosted-input.test.cpp)
+
+Build `--controller-notification` to test the native Configuration Manager calls used by Factorio. The child loads `cfgmgr32.dll`, resolves the two notification exports and registers and unregisters a callback for the HID interface class. Exit codes from `0x73800000` through `0x73860000` identify the first failed operation. A successful run establishes registration and cleanup. Physical attach and detach events need a separate check. [Controller notification control](graphics-runtime-control/controller-notification-child.c)
+
+Build `--hosted-controller-notification` to drive committed controller samples through the shared notification adapter and read availability through hosted XInput. The child checks callback data, initial connection, disconnection, reconnect, and unregister. Two subscriptions distinguish initial device state from a later arrival. The control also checks that partial samples and ordinary motion produce no notification. Exit codes from `0x73900000` through `0x739d0001` identify failed checks. [Hosted controller notification control](graphics-runtime-control/controller-notification-child.c)
+
+Build `--wasapi-desktop` to reproduce SDL's desktop activation of the default render endpoint. Build `--wasapi-async` to exercise UWP default-render activation. The async child links the SDK import for `ActivateAudioInterfaceAsync` at ordinal 17 of `MMDevAPI.DLL`, so an unresolved import appears before the activation checkpoint. Both controls request 44.1 kHz and a 512-frame period where supported, initialize a shared event-driven stream, verify that two buffer refills follow a drop in padding, and stop and reset the stream. The fixture uses silent samples. Exit codes in the `0x7401xxxx` through `0x7419xxxx` range identify the first failed operation and carry the low word of its HRESULT. [WASAPI render control](graphics-runtime-control/wasapi-child.cpp)
+
+Build `--wasapi-hosted` to run the same stream checks through the packaged default-render adapter. The child checks the default and enumerated endpoint IDs, COM identity, friendly name, absent format metadata, empty capture list and notification results before opening the stream. Run the signed `1.0.231.39` package with `python3 -m tools.xbox_deploy probe --case wasapi-hosted --version 1.0.231.39 --json`. Exit code `0x51A7` indicates success. Exit codes `0x741Axxxx` and `0x741Bxxxx` identify adapter load and discovery failures. Stream failures use the same operation codes as the native controls. [Hosted WASAPI control](graphics-runtime-control/wasapi-child.cpp)
+
+Build `--desktop-documents` to exercise the shared `SHGetFolderPathW` import for Documents and Roaming AppData. The child checks unscoped native behavior, scoped directory checks and creation, and a write and reopen in each temporary directory. The Roaming case includes a Unicode path. Run signed control `1.0.231.41` with `python3 -m tools.xbox_deploy probe --case profile-folders --version 1.0.231.41 --json`. Exit code `0x51A7` indicates success. Codes `0x6D000001` through `0x6D00000A` cover Documents and `0x6D001001` through `0x6D00100A` cover Roaming AppData. [Profile folder control](graphics-runtime-control/documents-child.c)
+
+Build `--steam-sdk-versioned` to exercise the redirected `SteamInternal_SteamAPI_Init` and restart calls. The fixture SDK checks pointer forwarding, exact result codes, and the optional error buffer. The control verifies that a matched account keeps the SDK initialized and a mismatched account causes shutdown. It also checks that disabled discovery or an unexpected module path prevents calls into the fixture. Run signed control `1.0.231.62` with `python3 -m tools.xbox_deploy probe --case steam-sdk-versioned --version 1.0.231.62 --json`. Exit code `0x51A7` indicates success and `0x74300001` through `0x74300009` identify the first failed check. The control uses a synthetic SDK DLL and exercises the native-function forwarding path. A live discovery trial uses the publisher’s installed Steamworks DLL and the authenticated Steam client. [Versioned Steam SDK control](graphics-runtime-control/steam-sdk-versioned-child.c)
+
+Run a signed graphics control with `python3 -m tools.xbox_deploy probe --case graphics-control --version "$version" --json`. These variants expect child exit `0x51A7`.
+
+## Hosted UWP mouse source control
+
+```sh
+bash probe/build.sh --mouse-source "$version" "$build"
+bash build_tools/package.sh --layout "$build/package" "$signed"
+python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
+python3 -m tools.xbox_deploy probe --case mouse-source --version "$version" --timeout 45 --json
+```
+
+Move, click, and scroll with the physical mouse for 25 seconds after the control opens and leave the controller idle. The hosted app counts `MouseDevice.MouseMoved` callbacks and browser pointer events separately. If no nonzero relative delta arrives in the first 10 seconds and the host exposes a CoreWindow, it also tries pointer capture. The report includes document visibility, reported mouse capabilities, relative callbacks and deltas, browser event counts, and the available activation and capture results. The CLI passes when it observes `relative_motion=observed`. Browser events and hosted game delivery are separate results. [Xbox ATG Mouse UWP sample](https://github.com/microsoft/Xbox-ATG-Samples/blob/main/UWPSamples/System/MouseCursor/Main.cpp)
+
+## Standalone Xbox mouse capture
+
+Build [native-app.cpp](mouse-source/native-app.cpp) as an x64 C++20 UWP executable with the Windows SDK C++/WinRT projection. Link it as a Windows subsystem AppContainer executable against `WindowsApp.lib`. The layout uses its own package identity and has no Steam dependencies or account requirements.
+
+```sh
+python3 -m build_tools.prepare_mouse_capture "$executable" "$version" "$layout"
+bash build_tools/package.sh --layout "$layout" "$signed"
+python3 -m tools.xbox_deploy deploy "$signed/PackagedProcessProbe-x64.appx"
+python3 -m tools.xbox_deploy probe --case native-mouse-ready --version "$version" --restart --json
+python3 -m tools.xbox_deploy report --version "$version" --native-mouse-capture
+```
+
+Readiness requires a fresh run with `visible=1` and `registered=0x3f`. For a physical test, leave the controller idle, move the mouse, hold the left button inside the teal target, drag outside, release, and scroll. Record the `mouse-capture.txt` counters before and after the gesture and match `start_tick`. A successful XAML capture increments `xaml_accepted` and `verified_pointer_in_capture_list`. The same pointer moving outside the target while held advances `same_pointer_moves_outside`. `mouse_present=1` reports the view's mouse capability. Use the relative and CoreWindow counters in the standalone app's `LocalState/fhd-mouse-source.txt` to check whether this run received input. [XAML pointer capture contract](https://learn.microsoft.com/en-us/uwp/api/windows.ui.xaml.uielement.capturepointer)
+
+Build with `prepare_mouse_capture --controller-control` for a separate run using Xbox controller pointer emulation. Hold A over the target and use the analog stick to cross its edge before releasing. Record this run with its controller input source. [Xbox controller pointer emulation](https://learn.microsoft.com/en-us/windows/uwp/ui-input/gamepad-and-remote-interactions)
+
+For per-device mouse diagnostics, build the standalone executable with `MOUSE_PROBE_GAMEINPUT_V0` defined. Add `native/include/v0` from the pinned Microsoft.GameInput `4.1.315` package to the compiler include path. The v0 header SHA-256 is `4bda852f78a43f715837c1d97af7cf78fa14aa35dba4e755d305985364bf1196`. The probe loads the console's system `gameinput.dll` and samples for up to three minutes while the view stays foreground. It records each connection transition and polls mouse movement, buttons, wheel, and reading timestamps. Read the device report with `python3 -m tools.xbox_deploy report --version "$version" --native-mouse-devices`. [Microsoft.GameInput package](https://www.nuget.org/packages/Microsoft.GameInput/4.1.315) · [GameInput devices](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-devices)
+
+To identify the active mouse stream, collect a baseline while the probe is foreground, unplug the mouse or its receiver, reconnect it, then move, click, and scroll after the connection settles. Check that all reports share a run ID. Each slot generation marks one connection and starts a fresh reading baseline. A higher `reads` count with the same `timestamp` and `distinct_readings` means repeated polls of the same reading. Compare steady samples within one generation to attribute input changes. [GameInput readings](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-readings)
+
+To check foreground input delivery, hold a physical keyboard key for two seconds and release it while testing mouse movement. Compare the CoreWindow key event counts in `--native-mouse-capture` with the GameInput keyboard timestamp and key count changes in `--native-mouse-devices`. The probe records counts and timestamps. It samples the raw report timestamp only when a mouse slot advertises raw report support. [GameInput focus](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-fundamentals) · [GameInput raw reports](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/input/gameinput/interfaces/igameinputreading/methods/igameinputreading_getrawreport)
+
+Add `MOUSE_PROBE_GAMEINPUT_VERSIONS` and the same package's `native/include` directory to query the console runtime for v1 through v4 and count sampled timestamp changes. For the isolated packaged-runtime experiment, also define `MOUSE_PROBE_GAMEINPUT_REDIST` and stage the package's `native/bin/xbox/GameInputRedist.dll` beside the test executable with its license and notice files. The Xbox DLL SHA-256 is `470720a88107b1fdada5af232718385feae32e0453b09f68718f285276aea760`. This build uses the typed v4 API on the packaged DLL, with independent load, factory, and first-reading checkpoints. [Xbox runtime requirements](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-xbox)
+
+## Native game panel mouse capture
+
+Add an empty `fhd-mouse-source.txt` to the root of a test APPX layout containing the matching native presenter DLL and WinRT metadata. Install the signed build and open a hosted game through Big Picture. Leave the controller idle, move the physical mouse over the game, press and hold the left button while moving, release, and scroll.
+
+```sh
+python3 -m tools.xbox_deploy report --version "$version" --mouse-source
+```
+
+Capture a report before and after input while `visible=1`. Match `start_tick` between the observations. `registered=0x3f` indicates that all six subscriptions succeeded. The probe counts relative motion and CoreWindow mouse events after the game presents its first frame and while its panel is foreground. `panel_mouse_down` counts routed mouse presses. `capture_attempts` advances only during contact on that panel. `capture_hr=0` records a successful `SetPointerCapture` call and `release_hr=0` records a successful explicit release. A zero attempt count leaves capture untested. Track the game's mailbox alongside these counters to locate where input stopped. [Microsoft capture requirements](https://learn.microsoft.com/en-us/uwp/api/windows.ui.core.corewindow.setpointercapture)
+
+## Xbox controller pointer
+
+A physical mouse cannot reach a Dev Mode package, but an adapter that presents the
+mouse as a game controller can. [native-app.cpp](controller-pointer/native-app.cpp) is a
+standalone XAML app with its own package identity and no Steam dependencies. It lists every
+controller `Windows.Gaming.Input` exposes and measures how each one's readings behave.
+The [build workflow](../.github/workflows/xbox-controller-pointer.yml) produces two
+layouts with `prepare_controller_pointer`: `baseline` declares no capabilities, and
+`hid` also declares the HID joystick (`0001 0004`) and gamepad (`0001 0005`)
+collections and enumerates them. [Mouse as a controller](../analysis/xbox-mouse-input.md#mouse-as-a-controller)
+
+```sh
+gh run download "$run" -n xbox-controller-pointer-x64 -D pointer
+python3 -m tools.xbox_deploy deploy pointer/XboxControllerPointer-hid-1.0.2.1.appx \
+    --certificate pointer/XboxControllerPointer.cer --timeout 180
+python3 -m tools.xbox_deploy probe --case controller-pointer --version 1.0.2.1 --restart --timeout 60
+python3 -m tools.xbox_deploy report --version 1.0.2.1 --controller-pointer
+```
+
+The case passes once the view has stayed foreground for three consecutive one-second
+snapshots, both HID watchers have finished their first enumeration, and every device
+they found has finished its open attempt. That is when the app first
+writes `status=controller-sampling`. The report is rewritten every second for the life
+of the app, and the HID watchers keep running, so a device plugged in later appears
+without a relaunch. Read the report again after each step:
+
+1. **Positive control.** With only an Xbox controller connected, `raw_controllers`,
+   `gamepads` and `controllers_seen` are at least 1, and that controller's record shows
+   `gamepad=1`.
+2. **Generic HID joystick.** Plug in a board that presents as a plain USB HID joystick or
+   gamepad, such as an RP2040 running hid-remapper. A new `controllerN` record with
+   `gamepad=0` and advancing `distinct`, or `opened` above zero on the `hid_joystick` or
+   `hid_gamepad` line of the `hid` layout, means the package can read it without
+   accessory authentication. A nonzero `hid_*_found` with `open_failed` above zero means
+   the console lists the collection but refuses access; `open_hr` records why. The open
+   runs on the UI thread so a consent prompt can appear; accept it if the console shows
+   one, since an unanswered prompt holds the case at `controller-starting`. If nothing changes
+   and `raw_added` stays the same, that route is closed for this console build.
+3. **Adapter characterization.** With a mouse-to-joystick adapter connected (directly,
+   or through an Xbox Adaptive Controller), leave it still for five seconds, then move
+   the mouse in slow and fast strokes on each axis and press each button. Record
+   `vid` and `pid`. Each `controllerN_axisM` line gives `first` (the resting value),
+   `min` and `max` (the travel reached), and `step`, the smallest change between two
+   readings, which estimates the resolution that reaches the package. In
+   `controllerN_readings`, `distinct` counts timestamp changes out of `polls`, and
+   `read_failures` with `last_read_hr` records rejected reads. The sampler paces itself
+   with a high-resolution waitable timer and reports its measured loop period as
+   `sampler_period_us`. While that period is shorter than the device's,
+   `interval_min` and `interval_avg` describe the device's own update interval in the
+   reading's timestamp units. `above_32` counts presses on buttons past the 32-bit
+   `seen` mask. The
+   `controllerN_gamepad_*` lines record the same device through the typed `Gamepad`
+   reading that the hosted presenter uses. A gap between the raw and typed axes there
+   points to a deadzone or curve applied above the raw reading.
+
+The app selects `RequiresPointerMode::WhenRequested`, so the console does not turn the
+controller into the system pointer. [RawGameController](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.rawgamecontroller) · [Raw game controller guide](https://learn.microsoft.com/en-us/windows/uwp/gaming/raw-game-controller)
 
 ## Xbox packaged process test
 

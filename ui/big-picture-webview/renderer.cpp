@@ -211,7 +211,7 @@ struct View : implements<View, IFrameworkView> {
 
     void showPrimaryShell(bool show) {
         if (!primaryPanel) return;
-        const bool acceptPointer = !show && (!xboxDisplay || gameForeground);
+        const bool acceptPointer = !show;
         if (accountPanel.IsHitTestVisible() != acceptPointer) accountPanel.IsHitTestVisible(acceptPointer);
         if (primaryShellVisible == show) return;
         primaryShellVisible = show;

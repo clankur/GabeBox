@@ -42,12 +42,13 @@ implementer change the code, and verify the next build.
 
 ## Before touching the console
 
-1. **The Xbox is shared, and this session drives it.** Before launching a game or
-   sending input, tell the other sessions working on the console what you are about to
-   do and for roughly how long, and wait for no objection — through the repository's
-   console queue if it has one, otherwise by messaging them. Read-only Device Portal
-   queries are fine meanwhile; `deploy`, a launch, and every `tools.xbox_remote_input`
-   step are not. If the user is playing, stay read-only until they say it is free.
+1. **The Xbox is shared, and this session drives it.** Take your turn through the
+   console queue — the `xbox-queue` skill (`xboxq`), described in
+   [docs/XBOX-QUEUE.md](../../../docs/XBOX-QUEUE.md) — before launching a game or sending
+   input, and hold it for the whole session rather than per command. Read-only Device
+   Portal queries are fine meanwhile; `deploy`, a launch, and every
+   `tools.xbox_remote_input` step are not. If the user is playing, stay read-only until
+   they say the console is free, and release the queue when you finish.
 2. **Pin what you are verifying.** Steam AppID and build ID, package version, console
    model and OS build, the commit or branch the package was built from, and the
    acceptance criteria you were given. A verification that cannot name its build verifies

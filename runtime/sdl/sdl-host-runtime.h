@@ -209,7 +209,7 @@ void XboxSdlPollHostInput(void)
     if (xbox_host_has_keyboard) XboxSdlPollHostKeyboard(&mailbox->keyboard, window);
     serial = SdlHostLoad(&mailbox->input_serial);
     if (serial == last_serial || (serial & 1)) return;
-    pointer = SdlHostLoad(&mailbox->input_pointer);
+    pointer = SdlHostLoad(&mailbox->input_pointer) & (0xffffff | SDL_HOST_POINTER_LEFT);
     pressed = SdlHostLoad(&mailbox->input_keys);
     if (SdlHostLoad(&mailbox->input_serial) != serial) return;
     if (pointer != last_pointer) {
