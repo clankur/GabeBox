@@ -620,7 +620,7 @@
         ["mouseReports", "Mouse reports"],
         ["miceConnected", "Mice connected"],
         ["backlogClipped", "Counts dropped by backlog cap"],
-        ["flashSaves", "Flash saves since boot"],
+        ["flashSaves", "Saves completed since boot"],
         ["status", "Settings"],
         ["reportRate", "Joystick reports"]
     ]);
@@ -655,7 +655,7 @@
         hid = null;
         setDeviceEnabled();
     } else {
-        $("device-support").textContent = "Plug the Feather into this computer, not the XAC, and press Connect. The console never sends feature reports.";
+        $("device-support").textContent = "Plug the Feather into this computer, not the XAC, and press Connect.";
         setDeviceEnabled();
     }
 

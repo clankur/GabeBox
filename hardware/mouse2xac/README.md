@@ -125,13 +125,17 @@ no valid record. Settings take effect at the next output period after they are w
 The record in flash, written with arduino-pico's `EEPROM` library, holds a magic number
 (`M2XC`), a record version, its size, the six values, and an FNV-1a checksum. The board
 falls back to the defaults if any of those is wrong or a value is out of range. Saving
-erases a 4 KB flash sector with both cores paused, which stops the mouse host for tens
-of milliseconds.
+erases a 4 KB flash sector with both cores paused, which stops the mouse host for about
+45 ms, and longer in the worst case. No start-of-frame packets reach the mouse in that
+time, so it will probably enter USB suspend. Whether it resumes without a replug is
+unverified.
 
 ## Config protocol
 
-Tune the board with it plugged into a computer. The console never sends feature reports,
-so the channel is idle while the board is on the XAC.
+Tune the board with it plugged into a computer. While the board is on the XAC, the XAC is
+its USB host. The XAC is not expected to send feature reports, but nobody has checked.
+Upstream stalled every feature request. This firmware answers them, and it would act on a
+`SET_FEATURE` from the XAC.
 
 The channel is the 4-byte vendor feature report (usage page `0xFF00`, usage `0x01`, no
 report ID) that the upstream report descriptor already declares. The descriptor is
@@ -159,8 +163,8 @@ bits 8–15, bits 16–23}`. To read a register, select it and then get it.
 | `0x13` | Mice connected |
 | `0x14` | Counts dropped by the backlog cap since boot or the last clear, saturating at 2^24 − 1 |
 | `0x15` | Status: bit 0 flash holds valid settings, bit 1 save pending, bit 2 unsaved changes, bit 3 last save failed |
-| `0x16` | Flash saves since boot |
-| `0xFF` | Last error: byte 0 code, byte 1 command, byte 2 low byte of the value |
+| `0x16` | Save requests completed since boot, including ones that found the record unchanged and wrote nothing |
+| `0xFF` | Last error: byte 0 code, byte 1 command, byte 2 the value's low byte, or the setting ID when the write named an unknown setting |
 
 A rejected command selects `0xFF`. Error codes are 1 for an unknown command, 2 for an
 unknown register or setting, and 3 for a value out of range. A rejected write leaves the
@@ -223,7 +227,10 @@ it has.
    typed readings.
 3. Write and save settings over the config channel from a computer, then confirm they
    survive a power cycle, that a corrupt or empty record falls back to the defaults, and
-   that the XAC still accepts the board.
+   that the XAC still accepts the board. Check that the mouse comes back after a save
+   without a replug, and that Chrome's feature-report handling works on Windows and
+   macOS. On the XAC, confirm the settings are unchanged after a session; that shows
+   the XAC sent no `SET_FEATURE`.
 4. Set the output period and full scale from the probe results and update the decoding
    contract to match.
 5. Add a pointer-stick profile to the hosted presenter that decodes this contract, then
