@@ -7,6 +7,7 @@
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
+#include <mmdeviceapi.h>
 
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
@@ -409,6 +410,111 @@ static LONG WINAPI ObserveFault(EXCEPTION_POINTERS *exception) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* Audio output evidence.
+
+   A person at the console is the final audio check, but the mixed signal can
+   be observed without one: the default render endpoint's peak meter reports
+   what the console is about to play. While loader tracing is enabled, a
+   background thread samples IAudioMeterInformation every 100 ms for up to
+   15 minutes and writes one line per 10-second window with the highest peak
+   (in thousandths of full scale) and how many samples were audible
+   (peak > 0.001). The thread only reads the meter. */
+static volatile LONG audioMeterStarted;
+static const GUID audioEnumeratorClass =
+    {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
+static const GUID audioEnumeratorInterface =
+    {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
+static const GUID audioMeterInterface =
+    {0xC02216F6, 0x8C67, 0x4B5B, {0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}};
+
+/* The first method of IAudioMeterInformation, after IUnknown. */
+typedef struct AudioMeter AudioMeter;
+typedef struct AudioMeterMethods {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(AudioMeter *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(AudioMeter *);
+    ULONG (STDMETHODCALLTYPE *Release)(AudioMeter *);
+    HRESULT (STDMETHODCALLTYPE *GetPeakValue)(AudioMeter *, float *);
+} AudioMeterMethods;
+struct AudioMeter {
+    const AudioMeterMethods *lpVtbl;
+};
+
+static char *Unsigned(char *out, unsigned long value) {
+    char digits[10];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value && count < 10);
+    while (count) *out++ = digits[--count];
+    return out;
+}
+
+static void TraceAudioStage(const char *stage, HRESULT result) {
+    char line[96];
+    char *out = Hex(Text(Text(Text(line, "audio meter=unavailable stage="), stage), " result=0x"),
+        (unsigned long)result, 8);
+    *out++ = '\r';
+    *out++ = '\n';
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static DWORD WINAPI SampleAudioMeter(LPVOID unused) {
+    (void)unused;
+    HRESULT result = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(result)) {
+        TraceAudioStage("com", result);
+        return 0;
+    }
+    IMMDeviceEnumerator *enumerator = NULL;
+    IMMDevice *device = NULL;
+    AudioMeter *meter = NULL;
+    result = CoCreateInstance(&audioEnumeratorClass, NULL, CLSCTX_INPROC_SERVER, &audioEnumeratorInterface,
+        (void **)&enumerator);
+    if (FAILED(result)) TraceAudioStage("enumerator", result);
+    else if (FAILED(result = enumerator->lpVtbl->GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device)))
+        TraceAudioStage("endpoint", result);
+    else if (FAILED(result = device->lpVtbl->Activate(device, &audioMeterInterface, CLSCTX_INPROC_SERVER, NULL,
+            (void **)&meter)))
+        TraceAudioStage("meter", result);
+    if (meter) {
+        const char ready[] = "audio meter=ready\r\n";
+        AppendTrace(ready, sizeof(ready) - 1);
+        for (unsigned long window = 1; window <= 90; ++window) {
+            float highest = 0.0f;
+            unsigned long audible = 0, read = 0;
+            for (int sample = 0; sample < 100; ++sample) {
+                Sleep(100);
+                float peak = 0.0f;
+                if (FAILED(meter->lpVtbl->GetPeakValue(meter, &peak))) continue;
+                ++read;
+                if (peak > highest) highest = peak;
+                if (peak > 0.001f) ++audible;
+            }
+            char line[96];
+            char *out = Unsigned(Text(line, "audio window="), window);
+            out = Unsigned(Text(out, " peak-milli="), (unsigned long)(int)(highest * 1000.0f));
+            out = Unsigned(Text(out, " audible="), audible);
+            out = Unsigned(Text(out, "/"), read);
+            *out++ = '\r';
+            *out++ = '\n';
+            AppendTrace(line, (DWORD)(out - line));
+        }
+        meter->lpVtbl->Release(meter);
+    }
+    if (device) device->lpVtbl->Release(device);
+    if (enumerator) enumerator->lpVtbl->Release(enumerator);
+    CoUninitialize();
+    return 0;
+}
+
+static void StartAudioMeter(void) {
+    if (InterlockedExchange(&audioMeterStarted, 1)) return;
+    HANDLE thread = CreateThread(NULL, 0, SampleAudioMeter, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+    else TraceAudioStage("thread", HRESULT_FROM_WIN32(GetLastError()));
+}
+
 static void StartFaultTrace(void) {
     if (InterlockedExchange(&faultTraceStarted, 1) ||
             GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", NULL, 0) <= 1) return;
@@ -422,6 +528,7 @@ static void StartFaultTrace(void) {
     DWORD length = 0;
     while (line[length]) ++length;
     AppendTrace(line, length);
+    StartAudioMeter();
 }
 
 static void RecordProcessExit(const char *api, DWORD code, const void *caller) {
