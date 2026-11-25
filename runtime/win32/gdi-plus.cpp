@@ -6,6 +6,11 @@
 #include <wrl/client.h>
 #include "wic-stream.h"
 
+// The encoder quality path uses floating point, so the compiler references
+// _fltused. This adapter links with /nodefaultlib, so no CRT supplies it.
+// The probe children define the same symbol for the same reason.
+extern "C" int _fltused = 0;
+
 namespace {
 
 using namespace Gdiplus;
