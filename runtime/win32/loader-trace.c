@@ -820,6 +820,30 @@ static FARPROC HostedDxgiFactory(HMODULE module, const char *name) {
     return adapter ? GetProcAddress(adapter, name) : NULL;
 }
 
+/* With hosted XInput the Xbox host owns the controller, and the Steam client cannot
+   see the hosted pad. A native Steam Input title that finds a Steam-side controller
+   keeps reading Steam Input actions that never arrive, so Steam Input reports no
+   connected controllers for these titles. Titles that fall back to their own gamepad
+   input when Steam Input has none then read the hosted pad. */
+static int __cdecl NoSteamInputControllers(void *input, unsigned long long *handles) {
+    (void)input;
+    (void)handles;
+    static volatile LONG traced;
+    if (!InterlockedExchange(&traced, 1)) {
+        const char trace[] = "input steam-input-controllers=hosted-none\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+    }
+    return 0;
+}
+
+static FARPROC HostedSteamInput(HMODULE module, const char *name) {
+    WCHAR hosted[2];
+    if (!SameName(name, "SteamAPI_ISteamInput_GetConnectedControllers") ||
+            GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", hosted, ARRAYSIZE(hosted)) != 1 || hosted[0] != L'1' ||
+            !module || module != GetModuleHandleW(L"steam_api64.dll")) return NULL;
+    return (FARPROC)(void *)NoSteamInputControllers;
+}
+
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     if (module && (ULONG_PTR)name <= 0xffffu) {
         const DWORD previous = GetLastError();
@@ -847,6 +871,8 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
                 else AppendTrace(compositionTrace, sizeof(compositionTrace) - 1);
                 result = hosted;
             }
+        } else if (name[0] == 'S' && HostedSteamInput((HMODULE)module, name)) {
+            result = HostedSteamInput((HMODULE)module, name);
         } else if (name[0] == 'S') {
             const FARPROC scoped = ScopedShellExport((HMODULE)module, name);
             if (scoped) {

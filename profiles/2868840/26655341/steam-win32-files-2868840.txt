@@ -9,7 +9,7 @@ data_sts2_windows_x86_64/clretwrc.dll
 data_sts2_windows_x86_64/clrgc.dll
 data_sts2_windows_x86_64/clrgcexp.dll
 data_sts2_windows_x86_64/clrjit.dll
-data_sts2_windows_x86_64/coreclr.dll
+data_sts2_windows_x86_64/coreclr.dll	coreclr
 data_sts2_windows_x86_64/createdump.exe
 data_sts2_windows_x86_64/GodotSharp.dll
 data_sts2_windows_x86_64/hostfxr.dll
