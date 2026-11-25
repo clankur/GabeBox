@@ -55,7 +55,8 @@ jobs:
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' -CertStoreLocation Cert:\CurrentUser\My
           & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out\Fhd.Native.dll"
           Export-Certificate -Cert $cert -FilePath "$out\Fhd.Native.cer" | Out-Null
-          Get-FileHash "$out\Fhd.Native.dll","$out\Fhd.Native.winmd" | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" } | Set-Content -Encoding ascii "$out\SHA256SUMS"
+          $sums = Get-FileHash "$out\Fhd.Native.dll","$out\Fhd.Native.winmd" | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" }
+          [IO.File]::WriteAllText("$out\SHA256SUMS", ($sums -join "`n") + "`n")
       - uses: actions/upload-artifact@v4
         with:
           name: xbox-fhd-present-x64

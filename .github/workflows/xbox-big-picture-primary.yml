@@ -58,15 +58,16 @@ jobs:
           try {
             & "$kits/bin/$kit/x64/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out/SteamPrimary.exe"
             $pin = (Get-FileHash "$out/SteamPrimary.exe").Hash.ToLowerInvariant()
-            "$pin  SteamPrimary.exe" | Set-Content -Encoding ascii "$out/SHA256SUMS"
+            [IO.File]::WriteAllText("$out/SHA256SUMS", "$pin  SteamPrimary.exe`n")
             $checksumsPin = (Get-FileHash "$out/SHA256SUMS").Hash.ToLowerInvariant()
             & python -m build_tools.prepare_primary_control "$work/control-layout" $out $checksumsPin
             & "$kits/bin/$kit/x64/makeappx.exe" pack /d "$work/control-layout" /p "$control/SteamPrimaryControl.appx" /o
             & "$kits/bin/$kit/x64/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$control/SteamPrimaryControl.appx"
             Export-Certificate -Cert $cert -FilePath "$control/SteamPrimaryControl.cer" | Out-Null
-            Get-ChildItem $control -File | Get-FileHash | ForEach-Object {
+            $sums = Get-ChildItem $control -File | Get-FileHash | ForEach-Object {
               "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
-            } | Set-Content -Encoding ascii "$control/SHA256SUMS"
+            }
+            [IO.File]::WriteAllText("$control/SHA256SUMS", ($sums -join "`n") + "`n")
           } finally { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" }
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'

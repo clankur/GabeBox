@@ -94,9 +94,11 @@ jobs:
             & "$tool\makeappx.exe" pack /d $layout /p "$out\BigPictureTemplate-x64.appx"
             & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out\BigPictureTemplate-x64.appx"
             Export-Certificate -Cert $cert -FilePath "$out\BigPictureTemplate.cer" | Out-Null
-            Get-FileHash "$out\BigPictureTemplate-x64.appx","$out\BigPictureTemplate.cer" | ForEach-Object {
+            # LF line endings, so `shasum -a 256 -c` accepts the file.
+            $sums = Get-FileHash "$out\BigPictureTemplate-x64.appx","$out\BigPictureTemplate.cer" | ForEach-Object {
               "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
-            } | Set-Content -Encoding ascii "$out\SHA256SUMS"
+            }
+            [IO.File]::WriteAllText("$out\SHA256SUMS", ($sums -join "`n") + "`n")
           } finally {
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
           }
