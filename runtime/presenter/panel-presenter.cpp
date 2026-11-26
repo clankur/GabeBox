@@ -19,11 +19,13 @@
 #include <string>
 
 #include "frame-trace.h"
+#include "gpu-receiver.h"
 #include "hosted-input.h"
 #include "../../probe/mouse-source/native-panel.h"
 
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
+extern "C" void FhdMediaGpuCounters(LONG, HostedGpuCounters&);
 extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
 extern "C" void FhdReleaseMedia(LONG);
 extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG, SdlRumbleMailbox**);
@@ -637,7 +639,11 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         Status s;
         { std::lock_guard guard(statusLock); s = published; }
         UINT64 cpuSeq = 0, gpuSeq = 0;
-        if (s.token) FhdMediaSequences(s.token, cpuSeq, gpuSeq);
+        HostedGpuCounters exchange{};
+        if (s.token) {
+            FhdMediaSequences(s.token, cpuSeq, gpuSeq);
+            FhdMediaGpuCounters(s.token, exchange);
+        }
         std::wstring text = L"primary_panel=1\r\n";
         auto field = [&](const wchar_t* name, UINT64 value) {
             text += name; text += L"="; text += std::to_wstring(value); text += L"\r\n";
@@ -648,6 +654,11 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"source_sequence", s.sequence); field(L"gpu_sequence", gpuSeq); field(L"cpu_sequence", cpuSeq);
         field(L"render_callbacks", s.renderCallbacks); field(L"source_empty_callbacks", s.sourceEmpty);
         field(L"present_busy_callbacks", s.presentBusy);
+        // Shared-texture exchange (gpu-receiver.h): frames left undrawn because the producer's
+        // copy had not completed, frames held or superseded, and the last drawn fence values.
+        field(L"gpu_wait_producer", exchange.notReady); field(L"gpu_held", exchange.held);
+        field(L"gpu_released_unshown", exchange.released); field(L"gpu_drawn", exchange.drawn);
+        field(L"gpu_ready_fence", exchange.readyValue); field(L"gpu_done_fence", exchange.doneValue);
         field(L"panel_hidden", s.hidden); field(L"panel_hidden_shell", s.hiddenShell);
         field(L"panel_hidden_panel", s.hiddenPanel); field(L"panel_hidden_window", s.hiddenWindow);
         field(L"panel_uncovered", s.uncovered); field(L"panel_reordered", s.reordered);

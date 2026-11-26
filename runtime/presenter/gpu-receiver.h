@@ -3,6 +3,16 @@
 #include <d3d11_4.h>
 #include "../shared/sdl-gpu-protocol.h"
 
+// How the shared-texture exchange behaved since Open, for the session and panel reports.
+// notReady: polls that found a published frame whose producer copy had not yet completed;
+//   the frame was left for a later refresh, never drawn (the ready-fence gate at work).
+// held: polls that kept a completed frame, newer than the one drawn, for the next refresh.
+// released: frames acknowledged on the done fence without being drawn (superseded).
+// drawn: frames drawn after a GPU wait on their ready fence.
+// readyValue/doneValue: the drawn slot's completed producer fence when it was polled,
+//   and the consumer fence value signalled for it (the drawn sequence).
+struct HostedGpuCounters { UINT64 notReady, held, released, drawn, readyValue, doneValue; };
+
 // Use on the thread owning the dedicated presentation context; drawing replaces its pipeline state.
 class HostedGpuReceiver {
 public:
@@ -22,10 +32,12 @@ public:
     const char *Stage() const { return stage_; }
     bool Active() const;
     UINT64 ProducerSequence() const;
+    HostedGpuCounters Counters() const { return counters_; }
     void Close();
 private:
     struct Resources;
     Resources *resources_ = nullptr, *cpu_ = nullptr;
+    HostedGpuCounters counters_{};
     UINT lastWidth_=0, lastHeight_=0;
     SdlGpuMailbox *mailbox_ = nullptr;
     HANDLE file_ = INVALID_HANDLE_VALUE;

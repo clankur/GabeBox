@@ -301,6 +301,16 @@ Add `--measure-sdl-frames` to a repeat launch of an enabled SDL profile to recor
 python3 -m tools.measure fhd-present-times.bin --start-utc "$scene_start_plus_eight_seconds" --duration 30
 ```
 
+The exchange never shows a frame the GPU has not finished writing. The game's GL renderbuffer is never shared. Mesa's `MesaGLInteropEGLFlushObjects` moves it to `COMMON`, and `glFlush` submits the game's work on Mesa's graphics queue. The producer then records a copy into one of two exchange textures on that same queue and signals that slot's shared `ready` fence after the copy ([`sdl-gpu-producer.cpp`](../runtime/sdl/sdl-gpu-producer.cpp)). Because the published sequence number can arrive before the copy completes, the player draws a slot only when `ready` has reached its sequence. It also queues a GPU `Wait` on that fence before sampling, then signals the slot's `done` fence after its draw ([`gpu-receiver.cpp`](../runtime/presenter/gpu-receiver.cpp)). The producer reuses a slot only after both fences have passed its previous sequence. While the other slot is still held, it drops the frame rather than overwrite a texture the player may be reading. The DXGI publisher follows the same protocol ([`dxgi-frame.cpp`](../runtime/win32/dxgi-frame.cpp)).
+
+The panel status and the hosted session report include exchange counters:
+
+- `gpu_wait_producer` counts polls that found a published frame whose copy had not completed. Each such frame was left for a later refresh.
+- `gpu_held` counts polls that kept a newer completed frame for the next refresh.
+- `gpu_released_unshown` counts frames acknowledged without being drawn.
+- `gpu_drawn` counts frames drawn after the fence wait.
+- `gpu_ready_fence` and `gpu_done_fence` give the last drawn slot's completed producer fence and the consumer value signalled for it. `gpu_ready_fence` is always at least `gpu_done_fence`.
+
 The current GPU receiver checks the presenter's DXGI adapter flags and confirms that its adapter LUID matches the game's shared textures. The fullscreen and primary XAML presenters write version 2 frame traces. Use `python3 -m tools.measure --require-gpu-60` to require a scene of at least 30 seconds, exclusively hardware shared-texture frames, an average of at least 59.5 FPS, and at least 57 distinct frames in each rolling second. The average threshold accommodates nominal 60 Hz displays such as 59.94 Hz. Supply observed `--internal-resolution` and `--output-resolution` as `WIDTHxHEIGHT`. The trace measures cadence and transport; the game renderer and display settings establish the two dimensions. Record the observed gameplay sample as `performance_scene: "gameplay"` and include its measured summary as `performance`. The compatibility coverage tool's `--require-gpu-60` check requires both dimensions to be 1920×1080. [DXGI adapter flags](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ne-dxgi-dxgi_adapter_flag)
 
 The summary's `startup` values report the time from trace open to the first present and the longest interval ending before the measured scene. Use the launch observer for stalls before trace open. Record any deliberate engine caps and fixed internal resolutions alongside the cadence results.

@@ -217,6 +217,7 @@ HRESULT HostedGpuReceiver::Open(const wchar_t *mailboxPath) {
     if (!created && load(&mailbox_->magic)!=SDL_GPU_MAGIC) {Close();return E_INVALIDARG;}
     InterlockedExchange(&mailbox_->supports_cursor,1);
     InterlockedExchange(&mailbox_->magic,SDL_GPU_MAGIC);
+    counters_={};
     stage_="waiting-for-producer";
     return S_OK;
 }
@@ -296,7 +297,7 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
     }
     InterlockedExchange(&mailbox_->heartbeat_ms,static_cast<LONG>(GetTickCount64()));
     auto &r=*resources_;
-    UINT64 seq[SDL_GPU_SLOTS]{};
+    UINT64 seq[SDL_GPU_SLOTS]{}, completed[SDL_GPU_SLOTS]{};
     // Draw the oldest completed frame newer than the last one shown and keep a
     // newer one for the next refresh. When producer and display clocks drift,
     // two frames can complete within one refresh; showing the newest would drop
@@ -311,8 +312,10 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
         if (ready==UINT64_MAX) {
             stage_="producer-device-removed"; failedGeneration_=generation; Disconnect(); return DXGI_ERROR_DEVICE_REMOVED;
         }
-        if (ready<value) continue;
-        seq[i]=value;
+        // Mesa submits asynchronously: the sequence is published as soon as the copy is
+        // queued, so a frame can be visible here before the GPU has written it.
+        if (ready<value) { ++counters_.notReady; continue; }
+        seq[i]=value; completed[i]=ready;
         if (value>r.latest && (next<0 || value<seq[next])) next=i;
     }
     if (load(&mailbox_->generation)!=generation) { Disconnect(); return S_FALSE; }
@@ -321,7 +324,7 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
     for (int i=0;i<SDL_GPU_SLOTS;i++) {
         if (!seq[i]) continue;
         // Hold a newer completed frame for the next refresh.
-        if (active && i!=next && seq[i]>r.latest) continue;
+        if (active && i!=next && seq[i]>r.latest) { ++counters_.held; continue; }
         auto &slot=r.slots[i];
         if (i==next) {
             HRESULT wait=r.fences->Wait(slot.ready.Get(),seq[i]);
@@ -334,6 +337,8 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
         HRESULT hr=r.fences->Signal(slot.done.Get(),seq[i]);
         if (FAILED(hr)) { stage_="consumer-fence-signal"; failedGeneration_=generation; Disconnect(); return hr; }
         slot.retired=seq[i];
+        if (i==next) { ++counters_.drawn; counters_.readyValue=completed[i]; counters_.doneValue=seq[i]; }
+        else ++counters_.released;
     }
     if (!seq[0] && !seq[1]) return S_FALSE;
     context->Flush();
