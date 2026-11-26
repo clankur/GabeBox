@@ -278,6 +278,10 @@ def main():
     parser.add_argument('--recipe', action='append', default=[], help='restore archive name to include (repeatable)')
     parser.add_argument('--reference-toc', choices=('asset-index.tsv', 'runtime-toc.tsv'), default='asset-index.tsv',
                         help='reference route recipe to follow; base overlay routes it leaves original are reverted')
+    parser.add_argument('--revert-asset', type=int, action='append', default=[],
+                        help='return this base overlay route to its original archive (repeatable)')
+    parser.add_argument('--revert-reference-archive', action='append', default=[],
+                        help='return every asset the reference routes to this archive to its original route')
     parser.add_argument('--portal-env', type=Path, help='Device Portal settings for archives missing locally')
     parser.add_argument('--remote-archives', action='store_true',
                         help='read every source archive through the cache and Device Portal; use only the local toc')
@@ -324,13 +328,21 @@ def main():
         for name, count in sorted(overridden.items()):
             print(f'Restore routes replace {count:,} base routes into {name}.', flush=True)
         # The reference's runtime-toc.tsv leaves some authored-LOD vehicle models on their original routes.
+        require(set(args.revert_reference_archive) <= set(added), 'Unknown --revert-reference-archive.')
+        dropped = {len(original.archives) + added.index(name) for name in args.revert_reference_archive}
         reverted = {}
         for item in range(base.count):
-            if base.route(item)[0] >= len(original.archives) and item not in routes:
+            if base.route(item)[0] >= len(original.archives) and (
+                    item not in routes or routes[item][0] in dropped or item in args.revert_asset):
                 reverted[item] = original.route(item)
-        for item in sorted(reverted):
+        require(set(args.revert_asset) <= reverted.keys(), '--revert-asset names an asset without an overlay route.')
+        for item in sorted(reverted) if len(reverted) <= 32 else ():
             target = base.archives[base.route(item)[0]]
-            print(f'Asset {item}: {args.reference_toc} keeps it original, so its {target} route is reverted.', flush=True)
+            reason = (f'{args.reference_toc} keeps it original' if item not in routes else 'requested')
+            print(f'Asset {item}: {reason}, so its {target} route is reverted.', flush=True)
+        if len(reverted) > 32:
+            print(f'Reverted {len(reverted):,} base overlay routes to their original archives '
+                  f'({sum(route[2] for route in reverted.values()):,} original bytes).', flush=True)
         for recipe, rows in plan:
             routed = sum(item is not None for _, item in rows)
             note = '' if routed else '; the reference routes none of its assets here, so it is verified only'
