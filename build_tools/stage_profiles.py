@@ -316,7 +316,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         # The STEAM_OVERRIDES options are Steam title overrides served by the loader trace's
         # GetProcAddress for steam_api64.dll.
         title_overrides = set()
-        for option in ("d3d12-default-adapter", "streamline-unavailable", *STEAM_OVERRIDES):
+        for option in ("d3d12-default-adapter", "streamline-unavailable", "d3d12-pipeline-replay", *STEAM_OVERRIDES):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
                 if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:

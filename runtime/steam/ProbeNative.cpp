@@ -2329,6 +2329,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     // Diagnostic shift tests: milliseconds as decimal digits, or empty.
     std::wstring shadowSteamRelayDelay;
     std::wstring shadowSteamInitDelay;
+    bool shadowD3d12PipelineReplay = false;
     bool shadowWorkingDirectory = false;
     bool shadowOriginalExecutable = false;
     bool shadowDynamicCompanions = false;
@@ -2488,6 +2489,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowD3d12DefaultAdapter = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-d3d12-pipeline-replay-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowD3d12PipelineReplay = true;
                 }
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-streamline-unavailable-" + std::to_wstring(app) + L".txt")) {
@@ -2765,7 +2774,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (shadowDefaultAudio && (!shadowRecipe || !sourceProfile || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32DefaultAudio.dll") ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
-                        ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable || shadowSteamRelayStub ||
+                        ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable || shadowD3d12PipelineReplay || shadowSteamRelayStub ||
                             shadowSteamCallbackTrace || shadowSteamRelayWorker || shadowSteamRelayStatus ||
                             !shadowSteamInitDelay.empty()) &&
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
@@ -3713,6 +3722,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_STEAM_RELAY_STATUS", shadowSteamRelayStatus ? L"1" : L""},
                 {L"XBOX_WIN32_STEAM_RELAY_DELAY_MS", shadowSteamRelayDelay},
                 {L"XBOX_WIN32_STEAM_INIT_DELAY_MS", shadowSteamInitDelay},
+                {L"XBOX_WIN32_D3D12_PIPELINE_REPLAY", shadowD3d12PipelineReplay ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_DXGI_ADAPTER_BUDGET", shadowDxgiAdapterBudget ? L"1" : L""},

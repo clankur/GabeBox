@@ -751,3 +751,34 @@ Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--
 **State left behind.**
 - **Saves.** The gameplay drives advanced the tutorial and autosaved. The changed save is backed up, and the earlier snapshot was restored with matching checksums.
 - **Console.** It holds `1.0.317.5`: the play configuration with the processor fix in the trace DLL.
+
+### Pipeline replay removes first-use compile stalls (November 26, evening)
+
+**The driver cache is not available.** On `1.0.340.1`, `D3D12_FEATURE_SHADER_CACHE` returned flags `0x63`, but `GetCachedBlob` and `CreatePipelineLibrary` both failed with `0x887A0005`. About 20 s later the probe run faulted at `exe+0x01CBCA70`, so neither method is used.
+
+**Record and replay.** The shared, title-independent `runtime/win32/d3d12-pipeline-replay.h` does the work.
+
+- **Recording.** It records each graphics and compute pipeline in a canonical, pointer-free form, with deduplicated shader bytecode and the root-signature blob. Records go to `d3d12-pipelines.xpr` beside the account- and AppID-scoped Documents folder, bound to the executable's header.
+- **Replay.** On the next launch a below-normal thread precompiles the recorded pipelines through the compile slot. A request whose description, shaders and root signature all match gets the precompiled object; anything else compiles normally.
+- **Root signatures.** On Xbox, identical root-signature blobs return the same object.
+- **Enabling it.** `XBOX_WIN32_D3D12_PIPELINE_REPLAY=1` enables it in `loader-trace.c`. The host sets that variable from the marker `steam-win32-d3d12-pipeline-replay-<app>.txt` (`ProbeNative.cpp`, `stage_profiles.py`).
+- **Not yet verified.** The shared path is not built by CI or run on the console. The measured builds carried it in the play loader DLL.
+
+**Measurements.** All runs: 30 s windows, 1920×1080 output and internal resolution, shared GPU textures, and no CPU uploads.
+
+| Run | Database | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| `1.0.317.4` (no replay) | none | 56.1 | 10 | 16.69 / 18.5 / 818 ms | false |
+| `1.0.340.1` cold | recorded | 59.73 | 53 | 16.69 / 18.53 / 33.9 ms | false |
+| `1.0.340.2` warm, window at drive +4 s | 1,515 pipelines | 59.77 | 55 | 16.69 / 17.98 / 37.6 ms | false |
+| `1.0.340.2` warm, window from 22:39:58 UTC (drive +8 s) | 1,515 pipelines | **59.93** | **59** | **16.69 / 17.92 / 20.9 ms** | **true** |
+| `1.0.401.1` warm, different route | 1,531 pipelines | 59.27 | 45 | 16.69 / 18.38 / 248.9 ms | false |
+
+- **Hits and commit.** On the warm run every in-world pipeline request was a replay hit: `replayed=334 failed=0 hits=73 waited-hits=247`. Gameplay commit stayed at 4,667–4,672 MiB, the same as cold.
+- **New pipelines.** The second warm run took a different route and compiled five unrecorded pipelines, which caused one 249 ms gap. They are now recorded; the database holds 1,574 pipelines in 17.5 MB.
+
+**Remaining limit: a dip after the first swing input.**
+
+- About 1.5–2 s after the first RT or A input, a cluster of six 33–37 ms frames recurs in every run, with no compile, heap or other traced event.
+- It fails windows that include the swing start; windows after it pass.
+- The cause is not identified. Per-frame timing of the main and render threads is the next instrument.
