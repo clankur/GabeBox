@@ -578,3 +578,57 @@ The table gives per-batch averages over two 30–32 s instrumented world windows
 Next step: put GPU timestamps around each pipeline (or root-signature) span inside `0x018D8CBC` lists and key them by pipeline. That will tell whether the cost lies in specific shaders or in the graphics-to-compute switches.
 
 The console was returned to the play configuration as `1.0.280.239`, without autoplay. The SteamCore package identity is shared with the STS2 session, whose `1.0.279.3` this version replaces.
+
+### Where the frame rate is lost (November 26, afternoon)
+
+**The game produces about 60 frames per second. The host panel shows about 31.**
+
+**Per-pipeline GPU time.** Build `1.0.282.240` put timestamps at `Reset`, before every `SetPipelineState` and at `Close` in every other direct or compute command list. It credited each span's GPU time to the bound pipeline (ordinal and shader digest).
+
+- In the world, the timed lists accounted for 3.5–4.8 s of GPU time per 30–34 s window. That is about 5.4 ms per frame for the timed half of the lists.
+- The largest single pipeline was a compute pass (ordinal 6, 62 KB shader) at about 0.7 ms per frame. No pipeline dominated.
+- The 19 ms per batch at `exe+0x018D8CBC` reported by fence timing was queue waiting, not shader work.
+
+**Queue timeline.** Build `1.0.290.242` recorded every submit, queue `Signal` and `Wait`, CPU fence call and completion for 2.5 s of a settled in-world window (5,258 events).
+
+- **Steady 16.7 ms cycle on the render thread.** Each cycle has four batches at `0x018D8E15`, the native `dxgi.dll` back-buffer `Wait`, and one batch at `0x018D8CBC`. Then our adapter's presenter thread copies the frame (`XboxWin32Dxgi+0x7706`) and signals the shared slot.
+- **Rates.** That is 141 render batches (56/s) and 150 presenter copies (60/s) in 2.5 s.
+- **The GPU keeps up.** Every batch of a frame, including the copy, completed within about 2–3 ms of submission.
+- **No CPU fence signals.** The game never calls `ID3D12Fence::Signal` or `SetEventOnCompletion`; it polls `GetCompletedValue`.
+- **Presents are accepted.** The adapter traced present interval 1, native interval 0 (it paces to 60 Hz itself), and no rejected present. So every copied frame is committed to the shared mailbox.
+
+**Delivered rate.** `panel_presented` in `fhd-panel-stats.txt` counts host panel presents of new producer frames (`panel_repeat_presents` stayed 0).
+
+| Build | What it adds | In-world panel presents per second |
+| --- | --- | --- |
+| `1.0.290.242` | Queue-timeline profiler | 25.6 |
+| `1.0.290.244` | None (play loader with autoplay) | 31.5 |
+| `1.0.290.246` | `.244` with the panel swap chain patched from 2 to 3 buffers (test-only binary patch of `Fhd.Native.dll`) | 31.2, 31.2 |
+
+A third buffer changed nothing, so `DXGI_ERROR_WAS_STILL_DRAWING` on a two-buffer chain is not the limit. Slay the Spire 2 holds 59.9 FPS through the same presenter.
+
+**The host app keeps GPU engine 5 busy by itself.** Device Portal `systemperf`, engine 5:
+
+| State | Engine 5 |
+| --- | --- |
+| Spider-Man in the world | 85–89% |
+| About 10–25 s after Spider-Man was ended, host app still running | 80–90% |
+| Host app at the idle Big Picture library, no game launched | 99.6–100% |
+| Same, after ending every `msedgewebview2.exe` | 98.6–98.8% |
+| Host app stopped (dashboard) | 0% |
+
+The host app process (`SteamPrimary.exe`) used 0.0–0.4% CPU in these states and Spider-Man 22–26% of total CPU, with the system 76% idle.
+
+**Interpretation:**
+
+- The 30 FPS world limit sits in the compatibility layer's host, not in the game.
+- The host app holds the 3D engine near saturation even without the Valve webview. The likely candidates are its remaining XAML content: the EdgeHTML account `WebView` running `steam-signin.html`, which stays composed at opacity 0, and the composition host.
+- That load would make the panel's draw and present miss every other vsync.
+- Not yet established: whether engine-5 utilization measures real work or queue occupancy, and which host element produces it.
+
+**Next steps.** Both need Windows CI builds of the host components (`SteamPrimary.exe`, `BigPictureView.Native.dll`, `Fhd.Native.dll`).
+
+- Remove or collapse host XAML content while a game is in the foreground (the account `WebView` and the composition host), and remeasure engine 5 and `panel_presented`.
+- Export `render_callbacks`, `source_empty_callbacks` and `present_busy_callbacks` to `fhd-panel-stats.txt`, to show whether the XAML `Rendering` callback itself runs at 30 Hz.
+
+The console was returned to the play configuration as `1.0.290.247`, without autoplay. The SteamCore package identity is shared with the STS2 session; this version replaces its `1.0.281.2`.
