@@ -48,7 +48,7 @@ When a game reports a bug or error (from a player, an observer run, saved checkp
 
 1. Brief the agent with the report as written, the Steam AppID and build ID if known, the package version on the console, and any checkpoints, observer output, or frame traces. Have it load the `xbox-game-compat` skill.
 2. The agent reproduces the failure on the Xbox, records the first failing operation, and traces it end to end. It fixes the cause in the shared layer or in a build-matched profile, following [Design for reuse](#design-for-reuse).
-3. The agent runs the Python and JavaScript checks, builds and signs the APPX, and installs it with `python3 -m tools.xbox_deploy deploy`. Because the Xbox is shared, it coordinates with other sessions before deploying or launching. Then it reruns the game through Big Picture.
+3. The agent runs the Python and JavaScript checks, builds and signs the APPX, and installs it with `python3 -m tools.xbox_deploy deploy`. Because the Xbox is shared, it takes a turn through the [Xbox queue](docs/XBOX-QUEUE.md) before deploying or launching. Then it reruns the game through Big Picture.
 4. A separate verifier agent using the `xbox-game-verify` skill confirms the fix and checks for regressions, as described in [Verify before counting coverage](#verify-before-counting-coverage).
 5. The agent opens a pull request with the reproduction, root cause, fix, deployed package version, and verification result. If it cannot fix the bug, it documents the alternatives tested and the specific runtime limitation that remains.
 
