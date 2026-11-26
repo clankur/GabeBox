@@ -64,7 +64,16 @@ DRED_RECORD = re.compile(rf'dxgi dred-node queue={DRED_NAME} list={DRED_NAME} co
                          rf'dxgi dred-fault va=0x[0-9A-F]{{16}}(?: (?:existing|freed)={DRED_NAME}:0x[0-9A-F]{{2}}){{0,8}}')
 # SteamAPI_RunCallbacks calls of 2 ms or more (XBOX_WIN32_STEAM_CALLBACK_TRACE=1), stamped when the call returned.
 STEAM_CALLBACK = re.compile(r'asset steam-run-callbacks us=([0-9]{1,10}) utc=[0-9]{8}T[0-9]{6}\.[0-9]{3}Z')
-DIAGNOSTIC_TRACE = (AUDIO_METER, AUDIO_WINDOW, PSO_TIMING, PSO_EVENT, DRED_RECORD, STEAM_CALLBACK)
+# Steam Datagram Relay status changes from GetRelayNetworkStatus (XBOX_WIN32_STEAM_RELAY_STATUS=1): overall,
+# network config and any-relay availability (ESteamNetworkingAvailability, 100 is Current), whether ping measurement
+# is in progress, milliseconds since InitRelayNetworkAccess, and Steam's debug text in the record character set.
+STEAM_RELAY_STATUS = re.compile(r'asset steam-relay-status avail=(-?[0-9]{1,10}) config=(-?[0-9]{1,10}) '
+                                r'relay=(-?[0-9]{1,10}) ping=([01]) init_ms=([0-9]{1,10}) '
+                                r'utc=([0-9]{8}T[0-9]{6}\.[0-9]{3}Z) msg=[a-zA-Z0-9._?@$#-]{0,48}')
+# GetRelayNetworkStatus polls of 2 ms or more: another thread held the networking lock.
+STEAM_RELAY_SLOW = re.compile(r'asset steam-relay-status-slow us=([0-9]{1,10}) utc=[0-9]{8}T[0-9]{6}\.[0-9]{3}Z')
+DIAGNOSTIC_TRACE = (AUDIO_METER, AUDIO_WINDOW, PSO_TIMING, PSO_EVENT, DRED_RECORD, STEAM_CALLBACK,
+                    STEAM_RELAY_STATUS, STEAM_RELAY_SLOW)
 DIAGNOSTIC_LIMIT = 4096
 LOADER_TRACE = re.compile('|'.join([r'(?:load|export|fault|asset|dxgi|input) [a-zA-Z0-9 ._?@$#=-]{1,174}',
                                     *(pattern.pattern for pattern in DIAGNOSTIC_TRACE)]))
@@ -77,8 +86,8 @@ LIVE_LOADER_EVENTS = {
     # Direct3D 12 residency: the selected mode, the hook install, per-second Evict/MakeResident counts and
     # the 60-second totals (runtime/win32/d3d12-residency.c).
     'residency': re.compile(r'asset residency(?:[ -]|$)'),
-    # Steam title overrides: the relay start-up stub and SteamAPI_RunCallbacks calls of 2 ms or
-    # more (runtime/win32/loader-trace.c).
+    # Steam title overrides: the relay start-up stub or worker, relay status changes and slow status polls,
+    # and SteamAPI_RunCallbacks calls of 2 ms or more (runtime/win32/loader-trace.c).
     'steam': re.compile(r'asset steam-(?:relay|run-callbacks)(?:[ =-]|$)'),
 }
 PIPELINE_MARKER = re.compile(r'asset (graphics|compute)-pso-(before|after) bytes=0x[0-9a-fA-F]{16} '
@@ -179,7 +188,8 @@ def filtered_lines(report, pattern, count=128):
 
 
 def diagnostic_record(line):
-    return line.startswith(('audio ', 'pso ', 'dxgi dred-', 'asset steam-run-callbacks us=')) and any(
+    return line.startswith(('audio ', 'pso ', 'dxgi dred-', 'asset steam-run-callbacks us=',
+                            'asset steam-relay-status ', 'asset steam-relay-status-slow ')) and any(
         pattern.fullmatch(line) for pattern in DIAGNOSTIC_TRACE)
 
 
@@ -199,7 +209,7 @@ def unique_loader_lines(lines):
 
 
 def diagnostic_summary(lines):
-    """Summarize audio meter windows, pipeline timing, Steam callback timing and device-removed records."""
+    """Summarize audio meter windows, pipeline timing, Steam callback and relay records, and device-removed records."""
     summary = {}
     meter = next((match[1] for match in map(AUDIO_METER.fullmatch, lines) if match), None)
     windows = [tuple(map(int, match.groups())) for match in map(AUDIO_WINDOW.fullmatch, lines) if match]
@@ -251,6 +261,26 @@ def diagnostic_summary(lines):
             'slowest': [line for line, _ in slowest],
             # The runtime stops recording after 4096 calls.
             'event_limit_reached': len(callbacks) >= 4096,
+        }
+    relay = [(line, match) for line, match in ((line, STEAM_RELAY_STATUS.fullmatch(line)) for line in lines) if match]
+    slow_polls = [(line, int(match[1])) for line, match in ((line, STEAM_RELAY_SLOW.fullmatch(line)) for line in lines)
+                  if match]
+    if relay or slow_polls:
+        current = next((match for _, match in relay if int(match[1]) == 100), None)
+        slowest = sorted(slow_polls, key=lambda poll: poll[1], reverse=True)[:5]
+        summary['steam_relay'] = {
+            'changes': len(relay),
+            # k_ESteamNetworkingAvailability_Current: relay initialization has completed.
+            'reached_current': current is not None,
+            'current_init_ms': int(current[5]) if current else None,
+            'current_utc': current[6] if current else None,
+            'latest_avail': int(relay[-1][1][1]) if relay else None,
+            'records': [line for line, _ in relay][:16],
+            'slow_polls': len(slow_polls),
+            'slow_max_ms': round(slowest[0][1] / 1000, 3) if slowest else None,
+            'slowest': [line for line, _ in slowest],
+            # The runtime stops recording after 256 changes and 1024 slow polls.
+            'event_limit_reached': len(relay) >= 256 or len(slow_polls) >= 1024,
         }
     dred = [line for line in lines if line.startswith('dxgi dred-')]
     if dred:

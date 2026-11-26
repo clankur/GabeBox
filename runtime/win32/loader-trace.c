@@ -1288,14 +1288,268 @@ static void __cdecl TimedSteamRunCallbacks(void) {
     SetLastError(error);
 }
 
+/* Steam Datagram Relay start-up off the game thread, and relay status recording.
+
+   XBOX_WIN32_STEAM_RELAY_WORKER=1 keeps the real
+   SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess at start-up, but runs it on a
+   dedicated thread so the caller returns at once. The export returns void, and its effect
+   is asynchronous anyway: the SDK's isteamnetworkingutils.h says initialization typically
+   completes in a few seconds and is reported through GetRelayNetworkStatus or the
+   SteamRelayNetworkStatus_t callback. Steamworks allows calls from more than one thread
+   (each thread gets its own parameter memory, freed by SteamAPI_ReleaseCurrentThreadMemory,
+   which this worker calls before it exits), and the networking library guards its state
+   with a global lock that its own service thread also takes.
+
+   XBOX_WIN32_STEAM_RELAY_STATUS=1 polls GetRelayNetworkStatus every 250 ms on its own
+   thread once InitRelayNetworkAccess has returned. It records each change of
+   SteamRelayNetworkStatus_t (overall, network config, any relay, ping measurement and
+   Steam's debug text) and every poll of 2 ms or more. A slow poll means the networking
+   lock was held, which is what a game-thread RunCallbacks would also wait on. Without the
+   worker, InitRelayNetworkAccess still runs on the caller's thread and its duration is
+   recorded.
+
+   Both stop before SteamAPI_Shutdown: the wrapped shutdown sets a stop flag and waits up
+   to 5 s for a call in flight, so no thread calls into a released interface. */
+typedef void (__cdecl *SteamRelayAccess)(void *);
+typedef int (__cdecl *SteamRelayStatus)(void *, void *);
+typedef void (__cdecl *SteamVoidCall)(void);
+static PVOID volatile steamRelayAccess;
+static PVOID volatile steamRelayStatus;
+static PVOID volatile steamRelayUtils;
+static PVOID volatile steamShutdown;
+static PVOID volatile steamReleaseThreadMemory;
+static SRWLOCK steamRelayLock = SRWLOCK_INIT;
+static volatile LONG steamRelayStopped;
+static volatile LONG steamRelayCalls;
+static volatile LONG steamRelayPolling;
+static LARGE_INTEGER steamRelayStart;
+
+/* The SDK's SteamRelayNetworkStatus_t: four 32-bit fields and a 256-byte message, 272
+   bytes. The buffer is larger so a future field cannot overrun it. Only the poll thread
+   uses it; static storage avoids the memset a zeroed local would need. */
+static struct {
+    int avail;
+    int pingMeasurementInProgress;
+    int availNetworkConfig;
+    int availAnyRelay;
+    char debugMsg[256];
+    char reserved[256];
+} steamRelayDetails;
+
+static char *Signed(char *out, int value) {
+    if (value < 0) {
+        *out++ = '-';
+        return Unsigned(out, (unsigned long)(-(long long)value));
+    }
+    return Unsigned(out, (unsigned long)value);
+}
+
+static ULONGLONG ElapsedMicroseconds(const LARGE_INTEGER *start, const LARGE_INTEGER *end) {
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 || end->QuadPart <= start->QuadPart)
+        return 0;
+    return (ULONGLONG)(end->QuadPart - start->QuadPart) * 1000000u / (ULONGLONG)frequency.QuadPart;
+}
+
+static unsigned long Clamped(ULONGLONG value) {
+    return value > 0xFFFFFFFFu ? 0xFFFFFFFFu : (unsigned long)value;
+}
+
+static BOOL SteamRelayStopped(void) {
+    return InterlockedCompareExchange(&steamRelayStopped, 0, 0) != 0;
+}
+
+/* Frees this thread's Steamworks parameter memory. Called with the relay lock held shared. */
+static void ReleaseSteamThreadMemory(void) {
+    const SteamVoidCall release = (SteamVoidCall)InterlockedCompareExchangePointer(&steamReleaseThreadMemory, NULL, NULL);
+    if (release && !SteamRelayStopped()) release();
+}
+
+static void TraceRelayCall(const char *kind, LONG call, BOOL timed, ULONGLONG us) {
+    char line[112];
+    char *out = Unsigned(Text(Text(Text(line, "asset steam-relay="), kind), " call="), (unsigned long)call);
+    if (timed) out = Unsigned(Text(out, " us="), Clamped(us));
+    out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static DWORD WINAPI PollSteamRelayStatus(LPVOID unused) {
+    (void)unused;
+    const SteamRelayStatus status = (SteamRelayStatus)InterlockedCompareExchangePointer(&steamRelayStatus, NULL, NULL);
+    void *const utils = InterlockedCompareExchangePointer(&steamRelayUtils, NULL, NULL);
+    const char ready[] = "asset steam-relay-status=polling interval_ms=250 slow_us=2000\r\n";
+    AppendTrace(ready, sizeof(ready) - 1);
+    int last[4] = {0x7fffffff, 0, 0, 0};
+    unsigned long polls = 0, changes = 0, slow = 0;
+    for (;;) {
+        steamRelayDetails.avail = 0;
+        steamRelayDetails.pingMeasurementInProgress = 0;
+        steamRelayDetails.availNetworkConfig = 0;
+        steamRelayDetails.availAnyRelay = 0;
+        steamRelayDetails.debugMsg[0] = 0;
+        LARGE_INTEGER before, after;
+        AcquireSRWLockShared(&steamRelayLock);
+        if (SteamRelayStopped()) {
+            ReleaseSRWLockShared(&steamRelayLock);
+            break;
+        }
+        QueryPerformanceCounter(&before);
+        const int avail = status(utils, &steamRelayDetails);
+        QueryPerformanceCounter(&after);
+        if (++polls % 240 == 0) ReleaseSteamThreadMemory();
+        ReleaseSRWLockShared(&steamRelayLock);
+        const ULONGLONG us = ElapsedMicroseconds(&before, &after);
+        char line[192];
+        if (us >= 2000 && ++slow <= 1024) {
+            char *out = Unsigned(Text(line, "asset steam-relay-status-slow us="), Clamped(us));
+            out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+            AppendTrace(line, (DWORD)(out - line));
+        }
+        const int current[4] = {avail, steamRelayDetails.availNetworkConfig, steamRelayDetails.availAnyRelay,
+            steamRelayDetails.pingMeasurementInProgress != 0};
+        if (current[0] != last[0] || current[1] != last[1] || current[2] != last[2] || current[3] != last[3]) {
+            if (++changes <= 256) {
+                /* Steam's English debug text, cut to 48 characters of the record character set. */
+                steamRelayDetails.debugMsg[48] = 0;
+                char *out = Signed(Text(line, "asset steam-relay-status avail="), current[0]);
+                out = Signed(Text(out, " config="), current[1]);
+                out = Signed(Text(out, " relay="), current[2]);
+                out = Unsigned(Text(out, " ping="), (unsigned long)current[3]);
+                out = Unsigned(Text(out, " init_ms="), Clamped(ElapsedMicroseconds(&steamRelayStart, &after) / 1000));
+                out = UtcMilliseconds(Text(out, " utc="));
+                out = Text(Token(Text(out, " msg="), steamRelayDetails.debugMsg, 0), "\r\n");
+                AppendTrace(line, (DWORD)(out - line));
+            }
+            for (UINT index = 0; index < 4; ++index) last[index] = current[index];
+        }
+        Sleep(250);
+    }
+    char line[96];
+    char *out = Unsigned(Text(line, "asset steam-relay-status=stopped polls="), polls);
+    out = Text(Unsigned(Text(out, " changes="), changes), "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+    return 0;
+}
+
+static void StartSteamRelayStatus(void) {
+    if (!SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STATUS") || InterlockedExchange(&steamRelayPolling, 1)) return;
+    HANDLE thread = InterlockedCompareExchangePointer(&steamRelayStatus, NULL, NULL)
+        ? CreateThread(NULL, 0, PollSteamRelayStatus, NULL, 0, NULL) : NULL;
+    if (thread) {
+        CloseHandle(thread);
+        return;
+    }
+    const char trace[] = "asset steam-relay-status=unavailable\r\n";
+    AppendTrace(trace, sizeof(trace) - 1);
+}
+
+/* Runs the real InitRelayNetworkAccess unless SteamAPI_Shutdown has begun. */
+static BOOL RunSteamRelayAccess(void *utils, ULONGLONG *us) {
+    LARGE_INTEGER before, after;
+    AcquireSRWLockShared(&steamRelayLock);
+    const BOOL run = !SteamRelayStopped();
+    QueryPerformanceCounter(&before);
+    if (run) ((SteamRelayAccess)InterlockedCompareExchangePointer(&steamRelayAccess, NULL, NULL))(utils);
+    QueryPerformanceCounter(&after);
+    ReleaseSRWLockShared(&steamRelayLock);
+    *us = ElapsedMicroseconds(&before, &after);
+    return run;
+}
+
+static DWORD WINAPI SteamRelayWorker(LPVOID parameter) {
+    const LONG call = (LONG)(LONG_PTR)parameter;
+    ULONGLONG us;
+    const BOOL ran = RunSteamRelayAccess(InterlockedCompareExchangePointer(&steamRelayUtils, NULL, NULL), &us);
+    if (call <= 8) TraceRelayCall(ran ? "worker-done" : "worker-skipped", call, ran, us);
+    if (ran) StartSteamRelayStatus();
+    AcquireSRWLockShared(&steamRelayLock);
+    ReleaseSteamThreadMemory();
+    ReleaseSRWLockShared(&steamRelayLock);
+    return 0;
+}
+
+static void __cdecl SteamRelayAccessOverride(void *utils) {
+    const DWORD previous = GetLastError();
+    const LONG call = InterlockedIncrement(&steamRelayCalls);
+    if (call == 1) QueryPerformanceCounter(&steamRelayStart);
+    InterlockedCompareExchangePointer(&steamRelayUtils, utils, NULL);
+    if (SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_WORKER")) {
+        if (call <= 8) TraceRelayCall("worker", call, FALSE, 0);
+        HANDLE thread = CreateThread(NULL, 0, SteamRelayWorker, (LPVOID)(LONG_PTR)call, 0, NULL);
+        if (thread) {
+            CloseHandle(thread);
+            SetLastError(previous);
+            return;
+        }
+        /* Bounded fallback: without a thread the call runs here, as the title expects. */
+        if (call <= 8) TraceRelayCall("worker-inline", call, FALSE, 0);
+    }
+    ULONGLONG us;
+    const BOOL ran = RunSteamRelayAccess(utils, &us);
+    if (call <= 8) TraceRelayCall(ran ? "traced" : "skipped", call, ran, us);
+    if (ran) StartSteamRelayStatus();
+    SetLastError(previous);
+}
+
+static void __cdecl SteamShutdownOverride(void) {
+    const SteamVoidCall shutdown = (SteamVoidCall)InterlockedCompareExchangePointer(&steamShutdown, NULL, NULL);
+    if (!InterlockedExchange(&steamRelayStopped, 1)) {
+        const DWORD error = GetLastError();
+        LARGE_INTEGER before, after;
+        QueryPerformanceCounter(&before);
+        BOOL acquired = FALSE;
+        for (UINT attempt = 0; attempt < 5000 && !(acquired = TryAcquireSRWLockExclusive(&steamRelayLock)); ++attempt)
+            Sleep(1);
+        if (acquired) ReleaseSRWLockExclusive(&steamRelayLock);
+        QueryPerformanceCounter(&after);
+        char line[96];
+        char *out = Text(line, acquired ? "asset steam-relay=shutdown wait_us=" : "asset steam-relay=shutdown-busy wait_us=");
+        out = Text(Unsigned(out, Clamped(ElapsedMicroseconds(&before, &after))), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+        SetLastError(error);
+    }
+    shutdown();
+}
+
+static FARPROC SteamRelayOverride(HMODULE module, const char *name, FARPROC resolved) {
+    const BOOL worker = SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_WORKER");
+    const BOOL status = SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STATUS");
+    if (!resolved || !(worker || status)) return NULL;
+    if (SameName(name, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess")) {
+        const PVOID first = InterlockedCompareExchangePointer(&steamRelayAccess, (PVOID)resolved, NULL);
+        if (first && first != (PVOID)resolved) return NULL;
+        if (!first) {
+            InterlockedExchangePointer(&steamRelayStatus,
+                (PVOID)GetProcAddress(module, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus"));
+            InterlockedExchangePointer(&steamReleaseThreadMemory,
+                (PVOID)GetProcAddress(module, "SteamAPI_ReleaseCurrentThreadMemory"));
+            const char *trace = worker && status ? "asset steam-relay-override=InitRelayNetworkAccess mode=worker-status\r\n"
+                : worker ? "asset steam-relay-override=InitRelayNetworkAccess mode=worker\r\n"
+                : "asset steam-relay-override=InitRelayNetworkAccess mode=status\r\n";
+            DWORD length = 0;
+            while (trace[length]) ++length;
+            AppendTrace(trace, length);
+        }
+        return (FARPROC)(void *)SteamRelayAccessOverride;
+    }
+    if (SameName(name, "SteamAPI_Shutdown")) {
+        const PVOID first = InterlockedCompareExchangePointer(&steamShutdown, (PVOID)resolved, NULL);
+        if (first && first != (PVOID)resolved) return NULL;
+        return (FARPROC)(void *)SteamShutdownOverride;
+    }
+    return NULL;
+}
+
 static FARPROC SteamTitleOverride(HMODULE module, const char *name, FARPROC resolved) {
     if (!module || module != GetModuleHandleW(L"steam_api64.dll")) return NULL;
     if (SameName(name, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess")) {
-        if (!SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STUB")) return NULL;
+        /* The diagnostic stub wins; staging and the launcher refuse it beside the worker or status options. */
+        if (!SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STUB")) return SteamRelayOverride(module, name, resolved);
         const char trace[] = "asset steam-relay-override=InitRelayNetworkAccess\r\n";
         AppendTrace(trace, sizeof(trace) - 1);
         return (FARPROC)(void *)NoSteamRelayAccess;
     }
+    if (SameName(name, "SteamAPI_Shutdown")) return SteamRelayOverride(module, name, resolved);
     if (resolved && SameName(name, "SteamAPI_RunCallbacks") && SteamOptionEnabled(L"XBOX_WIN32_STEAM_CALLBACK_TRACE")) {
         const PVOID first = InterlockedCompareExchangePointer(&steamRunCallbacks, (PVOID)resolved, NULL);
         if (first && first != (PVOID)resolved) return NULL;

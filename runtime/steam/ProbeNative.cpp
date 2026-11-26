@@ -2302,6 +2302,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowStreamlineUnavailable = false;
     bool shadowSteamRelayStub = false;
     bool shadowSteamCallbackTrace = false;
+    bool shadowSteamRelayWorker = false;
+    bool shadowSteamRelayStatus = false;
     bool shadowWorkingDirectory = false;
     bool shadowOriginalExecutable = false;
     bool shadowDynamicCompanions = false;
@@ -2463,8 +2465,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     shadowStreamlineUnavailable = true;
                 }
                 // Reversible Steam title overrides, served by the loader trace's GetProcAddress
-                // for steam_api64.dll: a no-op SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess
-                // and timing of SteamAPI_RunCallbacks.
+                // for steam_api64.dll: a no-op SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess,
+                // the real call on a worker thread, relay status recording and timing of
+                // SteamAPI_RunCallbacks.
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-no-steam-relay-" + std::to_wstring(app) + L".txt")) {
                     const auto file = marker.try_as<StorageFile>();
@@ -2480,6 +2483,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowSteamCallbackTrace = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-steam-relay-worker-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowSteamRelayWorker = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-steam-relay-status-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowSteamRelayStatus = true;
+                }
+                // The stub skips relay start-up, so it cannot be combined with the options that run it.
+                if (shadowSteamRelayStub && (shadowSteamRelayWorker || shadowSteamRelayStatus)) {
+                    co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 }
                 auto hostedXInput = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-host-xinput-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
@@ -2658,7 +2681,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32DefaultAudio.dll") ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable || shadowSteamRelayStub ||
-                            shadowSteamCallbackTrace) &&
+                            shadowSteamCallbackTrace || shadowSteamRelayWorker || shadowSteamRelayStatus) &&
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         ((shadowWorkingDirectory || shadowOriginalExecutable) && (!shadowRecipe ||
@@ -3583,6 +3606,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_STREAMLINE_UNAVAILABLE", shadowStreamlineUnavailable ? L"1" : L""},
                 {L"XBOX_WIN32_STEAM_RELAY_STUB", shadowSteamRelayStub ? L"1" : L""},
                 {L"XBOX_WIN32_STEAM_CALLBACK_TRACE", shadowSteamCallbackTrace ? L"1" : L""},
+                {L"XBOX_WIN32_STEAM_RELAY_WORKER", shadowSteamRelayWorker ? L"1" : L""},
+                {L"XBOX_WIN32_STEAM_RELAY_STATUS", shadowSteamRelayStatus ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_WINDOW_FRAME", shadowWindowFrame && hostedSdl ? L"1" : L""},
@@ -3658,6 +3683,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (!shadowManagedWarmup.empty()) report += L"steam_shadow_managed_warmup=selected\r\n";
             if (shadowSteamRelayStub) report += L"steam_shadow_steam_relay=stubbed\r\n";
             if (shadowSteamCallbackTrace) report += L"steam_shadow_steam_callback_trace=loader-trace\r\n";
+            if (shadowSteamRelayWorker) report += L"steam_shadow_steam_relay=worker\r\n";
+            if (shadowSteamRelayStatus) report += L"steam_shadow_steam_relay_status=loader-trace\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");
             if (!call) co_return winrt::hstring(report + L"steam_launch=request-rejected\r\n");

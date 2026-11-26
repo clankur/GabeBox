@@ -109,7 +109,11 @@ MANAGED_WARMUP = "XboxManagedWarmup.dll"
 STEAM_OVERRIDES = {
     "no-steam-relay": "XBOX_WIN32_STEAM_RELAY_STUB",
     "steam-callback-trace": "XBOX_WIN32_STEAM_CALLBACK_TRACE",
+    "steam-relay-worker": "XBOX_WIN32_STEAM_RELAY_WORKER",
+    "steam-relay-status": "XBOX_WIN32_STEAM_RELAY_STATUS",
 }
+# The relay stub skips InitRelayNetworkAccess, so it cannot be combined with the options that run it.
+STEAM_RELAY_RUNNERS = ("steam-relay-worker", "steam-relay-status")
 WARMUP_ASSEMBLY = re.compile(
     r"assembly=([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})"
     r"(?: mvid=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
@@ -298,8 +302,9 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The storage marker requires an empty file and a loader trace for AppID {app}.")
             files[storage_marker] = b""
             storage_trace = True
-        # no-steam-relay and steam-callback-trace are Steam title overrides served by the
-        # loader trace's GetProcAddress for steam_api64.dll.
+        # The STEAM_OVERRIDES options are Steam title overrides served by the loader trace's
+        # GetProcAddress for steam_api64.dll.
+        title_overrides = set()
         for option in ("d3d12-default-adapter", "streamline-unavailable", *STEAM_OVERRIDES):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
@@ -307,7 +312,11 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                     raise ValueError(f"The {option} option needs an empty marker, source profile and loader trace for AppID {app}.")
                 files[marker] = b""
                 if option in STEAM_OVERRIDES:
-                    steam_overrides.add(option)
+                    title_overrides.add(option)
+        if "no-steam-relay" in title_overrides and title_overrides.intersection(STEAM_RELAY_RUNNERS):
+            raise ValueError(f"The no-steam-relay option cannot be combined with "
+                             f"{' or '.join(sorted(title_overrides.intersection(STEAM_RELAY_RUNNERS)))} for AppID {app}.")
+        steam_overrides |= title_overrides
         cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
         if (root / cache_marker).is_file():
             content = (root / cache_marker).read_bytes() if (root / cache_marker).stat().st_size <= 64 else b"?"

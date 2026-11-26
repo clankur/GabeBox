@@ -1008,7 +1008,9 @@ class BigPicturePackageTests(unittest.TestCase):
         runtime = self.work / "steam-override-runtime.appx"
         trial = [f"{app}={profile}"]
         for option, name in (("no-steam-relay", "XBOX_WIN32_STEAM_RELAY_STUB"),
-                             ("steam-callback-trace", "XBOX_WIN32_STEAM_CALLBACK_TRACE")):
+                             ("steam-callback-trace", "XBOX_WIN32_STEAM_CALLBACK_TRACE"),
+                             ("steam-relay-worker", "XBOX_WIN32_STEAM_RELAY_WORKER"),
+                             ("steam-relay-status", "XBOX_WIN32_STEAM_RELAY_STATUS")):
             marker = f"steam-win32-{option}-{app}.txt"
             (profile / marker).touch()
             variable = (name + "\0").encode("utf-16le")
@@ -1034,6 +1036,39 @@ class BigPicturePackageTests(unittest.TestCase):
                 stage_trials(self.layout, trial, runtime)
             shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
             (profile / marker).unlink()
+
+    def test_steam_relay_stub_cannot_be_combined_with_relay_worker_or_status(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        variables = b"".join((name + "\0").encode("utf-16le") for name in (
+            "XBOX_WIN32_STEAM_RELAY_STUB", "XBOX_WIN32_STEAM_RELAY_WORKER", "XBOX_WIN32_STEAM_RELAY_STATUS"))
+        runtime = self.work / "steam-relay-runtime.appx"
+        with ZipFile(runtime, "w") as package:
+            for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                package.writestr(member, b"runtime fixture")
+            package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variables)
+            package.writestr("XboxWin32LoaderTrace.dll", variables)
+        trial = [f"{app}={profile}"]
+        (profile / f"steam-win32-no-steam-relay-{app}.txt").touch()
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            (profile / f"steam-win32-{option}-{app}.txt").touch()
+            with self.assertRaisesRegex(ValueError, f"no-steam-relay option cannot be combined with {option}"):
+                stage_trials(self.layout, trial, runtime)
+            (profile / f"steam-win32-{option}-{app}.txt").unlink()
+        # The worker and the status trace stage together, which is arm B2 of the T97 matrix.
+        (profile / f"steam-win32-no-steam-relay-{app}.txt").unlink()
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            (profile / f"steam-win32-{option}-{app}.txt").touch()
+        stage_trials(self.layout, trial, runtime)
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            self.assertEqual((self.layout / f"steam-win32-{option}-{app}.txt").read_bytes(), b"")
 
     def test_hosted_dxgi_output_requires_matching_profile_and_runtime(self):
         self.layout.mkdir()

@@ -1186,6 +1186,39 @@ class LoaderDiagnosticTests(unittest.TestCase):
         self.assertEqual(unavailable['audio']['meter'], 'unavailable: stage=endpoint result=0x80070490')
         self.assertEqual(unavailable['audio']['windows'], 0)
 
+    def test_steam_relay_worker_and_status_records_are_listed_and_summarized(self):
+        general = ['asset steam-relay-override=InitRelayNetworkAccess mode=worker-status',
+                   'asset steam-relay=worker call=1 utc=20261126T015010.112Z',
+                   'asset steam-relay=worker-done call=1 us=830 utc=20261126T015010.113Z',
+                   'asset steam-relay-status=polling interval_ms=250 slow_us=2000',
+                   'asset steam-relay=shutdown wait_us=12']
+        status = ['asset steam-relay-status avail=3 config=3 relay=1 ping=0 init_ms=1 utc=20261126T015010.114Z '
+                  'msg=Fetching_network_config',
+                  'asset steam-relay-status avail=3 config=100 relay=3 ping=1 init_ms=1840 utc=20261126T015011.953Z msg=',
+                  'asset steam-relay-status avail=100 config=100 relay=100 ping=0 init_ms=4102 '
+                  'utc=20261126T015014.215Z msg=OK',
+                  'asset steam-relay-status avail=-10 config=100 relay=-101 ping=0 init_ms=101550 '
+                  'utc=20261126T015151.663Z msg=Retrying']
+        slow = ['asset steam-relay-status-slow us=2400 utc=20261126T015011.000Z',
+                'asset steam-relay-status-slow us=120500 utc=20261126T015151.600Z']
+        lines = general + status + slow
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in general))
+        self.assertTrue(all(diagnostics.diagnostic_record(line) for line in status + slow))
+        self.assertFalse(diagnostics.diagnostic_record('asset steam-relay-status avail=100 config=100 relay=100 ping=0 '
+                                                       'init_ms=1 utc=20261126T015014.215Z msg=a b'))
+        summary = diagnostics.loader_summary(lines, 1024)
+        self.assertEqual(summary['events']['steam']['count'], len(lines))
+        self.assertEqual(summary['recent'], general)
+        self.assertEqual(summary['diagnostics']['steam_relay'], {
+            'changes': 4, 'reached_current': True, 'current_init_ms': 4102, 'current_utc': '20261126T015014.215Z',
+            'latest_avail': -10, 'records': status, 'slow_polls': 2, 'slow_max_ms': 120.5,
+            'slowest': [slow[1], slow[0]], 'event_limit_reached': False})
+        never = diagnostics.diagnostic_summary(status[:2])['steam_relay']
+        self.assertFalse(never['reached_current'])
+        self.assertIsNone(never['current_init_ms'])
+        self.assertEqual(never['slow_polls'], 0)
+
     def test_pipeline_events_from_a_replay_mode_are_summarized_by_outcome(self):
         lines = ['pso timing result=0x00000000',
                  'pso kind=S utc=10:00:00.000 us=5800000 result=0x00000000 cache=miss',
