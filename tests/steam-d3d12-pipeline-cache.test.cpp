@@ -104,8 +104,12 @@ static void TestLibraryFile() {
     XboxPsoCachePut32(corrupt.data() + 8, 2);
     assert(XboxPsoCacheValidate(corrupt.data(), corrupt.size(), identity, &view) == XBOX_PSO_CACHE_BAD_VERSION);
     corrupt = file;
-    XboxPsoCachePut32(corrupt.data() + 12, 3);
+    // 3 is a replay file; 4 (replay-idle) only selects a start policy and is never written.
+    XboxPsoCachePut32(corrupt.data() + 12, XBOX_PSO_CACHE_MODE_REPLAY_IDLE);
     assert(XboxPsoCacheValidate(corrupt.data(), corrupt.size(), identity, &view) == XBOX_PSO_CACHE_BAD_MODE);
+    corrupt = MakeFile(XBOX_PSO_CACHE_MODE_REPLAY, identity, payload, 7);
+    assert(XboxPsoCacheValidate(corrupt.data(), corrupt.size(), identity, &view) == XBOX_PSO_CACHE_OK);
+    assert(view.mode == XBOX_PSO_CACHE_MODE_REPLAY);
     corrupt = file;
     XboxPsoCachePut32(corrupt.data() + 92, 1);
     assert(XboxPsoCacheValidate(corrupt.data(), corrupt.size(), identity, &view) == XBOX_PSO_CACHE_BAD_MODE);
@@ -219,6 +223,18 @@ static void TestProfileMarker() {
     assert(std::string(XboxPsoCacheModeName(0)) == "passthrough");
     assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_LIBRARY)) == "library");
     assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_BLOBS)) == "blobs");
+    // Record and replay makes only the title's own creation calls: no control result.
+    assert(Marker("mode=replay") == static_cast<int>(XBOX_PSO_CACHE_MODE_REPLAY));
+    assert(Marker("mode=replay\n") == static_cast<int>(XBOX_PSO_CACHE_MODE_REPLAY));
+    assert(Marker("mode=replay-idle\r\n", &control) == static_cast<int>(XBOX_PSO_CACHE_MODE_REPLAY_IDLE));
+    assert(control == 0);
+    for (const char *bad : {"mode=replay ", "mode=Replay", "mode=replay control=0x5CC01163", "mode=replay-", "mode=replays",
+                            "mode=replay-idle\n\n", "mode=replay\r"})
+        assert(Marker(bad) == -1);
+    assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_REPLAY)) == "replay");
+    assert(std::string(XboxPsoCacheModeName(XBOX_PSO_CACHE_MODE_REPLAY_IDLE)) == "replay-idle");
+    assert(XboxPsoCacheIsReplay(XBOX_PSO_CACHE_MODE_REPLAY) && XboxPsoCacheIsReplay(XBOX_PSO_CACHE_MODE_REPLAY_IDLE));
+    assert(!XboxPsoCacheIsReplay(XBOX_PSO_CACHE_MODE_LIBRARY) && !XboxPsoCacheIsReplay(0));
 }
 
 static void TestGuard() {
@@ -257,9 +273,16 @@ static void TestCallsAndOutcomes() {
         const std::string name = XboxPsoCacheCallName(call);
         for (char c : name) assert((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-');
     }
-    for (uint32_t call : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 14u})
+    for (uint32_t call : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 14u})
         assert(std::string(XboxPsoCacheCallName(call)) != "unknown");
     assert(std::string(XboxPsoCacheCallName(XBOX_PSO_CALL_CREATE_LIBRARY)) == "create-library");
+    assert(std::string(XboxPsoCacheCallName(XBOX_PSO_CALL_REPLAY_CREATE)) == "replay-create");
+    // Guards name replay calls like any other.
+    uint8_t identity[32] = {1};
+    char guard[XBOX_PSO_CACHE_GUARD_MAX];
+    const size_t size = XboxPsoCacheFormatGuard(guard, XBOX_PSO_CALL_REPLAY_CREATE, identity);
+    int same = 0;
+    assert(XboxPsoCacheParseGuard(guard, size, identity, &same) == XBOX_PSO_CALL_REPLAY_CREATE && same);
     assert(XboxPsoCacheRemovalOutcome(0x887A0005u) == XBOX_PSO_OUTCOME_REMOVED);
     assert(XboxPsoCacheRemovalOutcome(0x887A0006u) == XBOX_PSO_OUTCOME_HUNG);
     assert(XboxPsoCacheRemovalOutcome(0x887A0007u) == XBOX_PSO_OUTCOME_RESET);

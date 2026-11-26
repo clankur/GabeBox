@@ -44,7 +44,9 @@ WINDOW_TRACE = re.compile(r'(?:win32|sdl)_[a-z0-9_]{1,72}=[a-z0-9_.=-]{1,72}', r
 AUDIO_METER = re.compile(r'audio meter=(ready|unavailable stage=[a-z]{1,16} result=0x[0-9A-F]{8})')
 AUDIO_WINDOW = re.compile(r'audio window=([0-9]{1,5}) peak-milli=([0-9]{1,6}) audible=([0-9]{1,3})/([0-9]{1,3})')
 PSO_TIMING = re.compile(r'pso timing result=0x([0-9A-F]{8})')
-PSO_EVENT = re.compile(r'pso kind=([GCS]) utc=[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} us=([0-9]{1,10}) result=0x([0-9A-F]{8})')
+# A cache or replay mode appends its outcome for the creation (hit, miss, early, ...).
+PSO_EVENT = re.compile(r'pso kind=([GCS]) utc=[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} us=([0-9]{1,10}) result=0x([0-9A-F]{8})'
+                       r'(?: cache=([a-z][a-z-]{0,23}))?')
 # Debug object names keep the general record character set, so a name with a path is dropped.
 DRED_NAME = r'[a-zA-Z0-9._?@$#=-]{1,96}'
 DRED_RECORD = re.compile(rf'dxgi dred-node queue={DRED_NAME} list={DRED_NAME} completed=0x[0-9A-F]{{4}}/0x[0-9A-F]{{4}} '
@@ -199,12 +201,17 @@ def diagnostic_summary(lines):
     if timing or events:
         names = {'G': 'graphics', 'C': 'compute', 'S': 'stream'}
         kinds = {}
-        for _, kind, _, _ in events:
+        outcomes = {}
+        for _, kind, _, _, outcome in events:
             kinds[names[kind]] = kinds.get(names[kind], 0) + 1
+            if outcome:
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
         slowest = sorted(events, key=lambda event: int(event[2]), reverse=True)[:5]
         summary['pipelines'] = {
             'timing': 'unreported' if timing is None else 'ready' if not int(timing, 16) & 0x80000000 else f'0x{timing}',
             'events_over_2ms': len(events), 'kinds': kinds,
+            # Present only for cache and replay modes: events over 2 ms by outcome.
+            **({'outcomes': outcomes} if outcomes else {}),
             'total_ms': round(sum(int(event[2]) for event in events) / 1000, 3),
             'max_ms': round(int(slowest[0][2]) / 1000, 3) if slowest else None,
             'failures': sum(int(event[3], 16) & 0x80000000 != 0 for event in events),

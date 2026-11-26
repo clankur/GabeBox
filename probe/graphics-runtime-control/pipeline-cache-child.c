@@ -40,7 +40,11 @@
    0C the reload process failed (RRR = its stage << 4 | its low nibble).
    A round process exits 0x5EXMO0FF. The reload process exits 0x5DC0M00H on
    success (H hits), 0x5D0DMXO0 after a removal, or 0x5DSSMRRR with stage 06
-   reporting the cache file status + 1 and 08 RRR = hits << 4 | misses. */
+   reporting the cache file status + 1 and 08 RRR = hits << 4 | misses.
+
+   Built with -DXBOX_PSO_REPLAY_CONTROL (build.sh --d3d12-pipeline-replay),
+   the top process runs the record-and-replay rounds instead; see
+   ReplayControl below for its 0x5AXODRMM code. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
@@ -73,6 +77,7 @@ static UINT RoundCode(UINT call, UINT mode, UINT outcome, UINT support) {
 }
 
 typedef struct Setup {
+    HMODULE d3d12;
     void *device;
     void *root;
 } Setup;
@@ -102,22 +107,29 @@ static HRESULT CreateDeviceLikeMesa(HMODULE d3d12, void **device) {
     return result;
 }
 
-/* Returns 0, or the failing stage with *result set. */
-static UINT Prepare(Setup *setup, HRESULT *result) {
+/* Loads d3d12.dll, creates the device and installs the shared hooks.
+   Returns 0, or the failing stage with *result set. */
+static UINT PrepareDevice(Setup *setup, HRESULT *result) {
+    setup->device = setup->root = NULL;
+    setup->d3d12 = LoadLibraryW(L"d3d12.dll");
+    if (!setup->d3d12) {
+        *result = HRESULT_FROM_WIN32(GetLastError());
+        return 1;
+    }
+    if (FAILED(*result = CreateDeviceLikeMesa(setup->d3d12, &setup->device)) || !setup->device) return 2;
+    if (FAILED(*result = XboxPipelineHooksInstall(setup->device, TRUE))) return 3;
+    return 0;
+}
+
+/* The control's root signature, created through the device's method table
+   as a title's would be. Returns 0, or the failing stage. */
+static UINT CreateRoot(Setup *setup, HRESULT *result) {
     typedef HRESULT (WINAPI *SerializeRoot)(const D3D12_ROOT_SIGNATURE_DESC *, D3D_ROOT_SIGNATURE_VERSION, ID3DBlob **,
         ID3DBlob **);
     typedef HRESULT (STDMETHODCALLTYPE *CreateRoot)(void *, UINT, const void *, SIZE_T, REFIID, void **);
     typedef void *(STDMETHODCALLTYPE *BlobPointer)(void *);
     typedef SIZE_T (STDMETHODCALLTYPE *BlobSize)(void *);
-    setup->device = setup->root = NULL;
-    const HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
-    if (!d3d12) {
-        *result = HRESULT_FROM_WIN32(GetLastError());
-        return 1;
-    }
-    if (FAILED(*result = CreateDeviceLikeMesa(d3d12, &setup->device)) || !setup->device) return 2;
-    if (FAILED(*result = XboxPipelineHooksInstall(setup->device, TRUE))) return 3;
-    const SerializeRoot serialize = (SerializeRoot)(void *)GetProcAddress(d3d12, "D3D12SerializeRootSignature");
+    const SerializeRoot serialize = (SerializeRoot)(void *)GetProcAddress(setup->d3d12, "D3D12SerializeRootSignature");
     D3D12_ROOT_SIGNATURE_DESC desc;
     desc.NumParameters = 0;
     desc.pParameters = NULL;
@@ -134,6 +146,12 @@ static UINT Prepare(Setup *setup, HRESULT *result) {
         METHOD(blob, 4, BlobSize)(blob), &rootIid, &setup->root);
     Release(blob);
     return FAILED(*result) ? 5 : 0;
+}
+
+/* Returns 0, or the failing stage with *result set. */
+static UINT Prepare(Setup *setup, HRESULT *result) {
+    const UINT stage = PrepareDevice(setup, result);
+    return stage ? stage : CreateRoot(setup, result);
 }
 
 static HRESULT CreatePipeline(const Setup *setup, void **pipeline) {
@@ -346,6 +364,216 @@ static UINT Control(void) {
     return 0x5CC00000u | (removal & 15) << 16 | outcomes[1] << 12 | outcomes[2] << 8 | (support & 0xFF);
 }
 
+#ifdef XBOX_PSO_REPLAY_CONTROL
+/* Record and replay (build.sh --d3d12-pipeline-replay). The top process makes
+   no D3D12 call and starts one record process. That process selects replay
+   before its first root signature, as a profile would, records a compute
+   pipeline (CreateComputePipelineState) and the same shader as a subobject
+   stream (ID3D12Device2::CreatePipelineState), times both creations, writes
+   the file and starts a replay process. The replay process reads the file,
+   attaches the replay to its device before creating any root signature, so
+   the replay creates its own root signature from the recorded blob and
+   pre-creates both pipelines; it then creates its root signature through the
+   method table (which tells whether the runtime returned the replay's object
+   for the same blob) and the two pipelines, which must be served from the
+   replay.
+
+   Exit code 0x5AXODRMM:
+     X  the XboxPsoCacheCall before the first device removal (0 none,
+        B replay-root, C replay-create, E the control's own creation)
+     O  1 both pipelines served from the replay and faster than the record
+          process created them
+        2 both served, not faster
+        3 one served
+        4 neither served
+        5 the replay process found no valid file
+        6 the replay built fewer than two pipelines
+        7-A the device was removed (removed, hung, reset, internal error)
+        B  a process exited with another code (X from its guard)
+        C  the replay did not finish within 30 s
+     D  root-signature identity: 1 the runtime returned the replay's object
+        for the same blob, 2 a new object (the replay rebuilt with the title's),
+        0 not observed
+     R  floor(log2(record time / serve time)), at most 15
+     MM the record process's creation time for both, in 10 us units (FF: 2.55 ms+)
+   Any other code is a failure 0x5CSS3RRR (stages as above; 0E replay idle
+   timeout, 0F built count, 10 serve counts), or from the replay process
+   0x5DSS3RRR. */
+
+typedef struct ComputeStream {
+    struct {
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+        void *root;
+    } root;
+    struct {
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+        D3D12_SHADER_BYTECODE cs;
+    } cs;
+} ComputeStream;
+
+static LONGLONG Ticks(void) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+static ULONGLONG ElapsedUs(LONGLONG start) {
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return frequency.QuadPart ? (ULONGLONG)(Ticks() - start) * 1000000 / (ULONGLONG)frequency.QuadPart : 0;
+}
+
+static HRESULT CreateStreamPipeline(const Setup *setup, void **pipeline) {
+    typedef HRESULT (STDMETHODCALLTYPE *CreateState)(void *, const D3D12_PIPELINE_STATE_STREAM_DESC *, REFIID, void **);
+    ComputeStream stream;
+    for (UINT i = 0; i < sizeof(stream); ++i) ((volatile BYTE *)&stream)[i] = 0;
+    stream.root.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE;
+    stream.root.root = setup->root;
+    stream.cs.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS;
+    stream.cs.cs.pShaderBytecode = controlComputeShader;
+    stream.cs.cs.BytecodeLength = sizeof(controlComputeShader);
+    D3D12_PIPELINE_STATE_STREAM_DESC desc;
+    desc.SizeInBytes = sizeof(stream);
+    desc.pPipelineStateSubobjectStream = &stream;
+    *pipeline = NULL;
+    /* ID3D12Device2::CreatePipelineState, slot 47 of the shared table. */
+    return METHOD(setup->device, 47, CreateState)(setup->device, &desc, &pipelineIid, pipeline);
+}
+
+/* Creates both pipelines, timing them. Returns 0 or the failing stage. */
+static UINT CreateBoth(const Setup *setup, ULONGLONG *us, HRESULT *result) {
+    void *compute = NULL, *stream = NULL;
+    const LONGLONG start = Ticks();
+    *result = CreatePipeline(setup, &compute);
+    if (SUCCEEDED(*result)) *result = CreateStreamPipeline(setup, &stream);
+    *us = ElapsedUs(start);
+    Release(compute);
+    Release(stream);
+    return FAILED(*result) ? 7 : 0;
+}
+
+static UINT ReplayCode(UINT call, UINT outcome, UINT identity, UINT ratio, UINT units) {
+    return 0x5A000000u | (call & 15) << 20 | (outcome & 15) << 16 | (identity & 15) << 12 | (ratio & 15) << 8 |
+        (units > 255 ? 255 : units);
+}
+
+/* The replay process: exits 0x5D8DHUUU on success (D identity, H pipelines
+   served, UUU the serve time in us, at most 0xFFF), 0x5D0D3XO0 after a
+   removal, or 0x5DSS3RRR. */
+static UINT Replay(const WCHAR *prefix) {
+    const UINT base = 0x5D000000u, mode = XBOX_PSO_CACHE_MODE_REPLAY;
+    Setup setup;
+    HRESULT result;
+    UINT stage = PrepareDevice(&setup, &result);
+    if (stage) return Code(base, stage, mode, (UINT)result);
+    XboxPipelineCacheSelectMode((LONG)mode);
+    XboxPipelineReplayConfigure(0, 0);
+    if (FAILED(result = XboxPipelineCacheOpen(prefix))) return Code(base, 6, mode, (UINT)result);
+    XboxPipelineCacheCounters counters;
+    XboxPipelineCacheGetCounters(&counters);
+    if (counters.fileStatus != 0) return Code(base, 6, mode, (UINT)(counters.fileStatus + 1));
+    /* Before any root signature of the control's: the replay creates its own. */
+    if (FAILED(result = XboxPipelineReplayAttach(setup.device))) return Code(base, 6, mode, (UINT)result);
+    UINT call = 0, outcome = 0;
+    if (!XboxPipelineReplayWaitIdle(30000)) return Code(base, 14, mode, 0);
+    if (Removed(&call, &outcome)) return Code(base, 13, mode, call << 8 | outcome << 4);
+    XboxPipelineReplayCounters replay;
+    XboxPipelineReplayGetCounters(&replay);
+    if (replay.built != 2) return Code(base, 15, mode, (UINT)((replay.built & 15) << 8 | (replay.failed & 15) << 4 |
+        (replay.mismatched & 15)));
+    if ((stage = CreateRoot(&setup, &result))) return Code(base, stage, mode, (UINT)result);
+    /* A new root object for the blob: the replay rebuilds with the control's. */
+    if (!XboxPipelineReplayWaitIdle(30000)) return Code(base, 14, mode, 1);
+    ULONGLONG us = 0;
+    stage = CreateBoth(&setup, &us, &result);
+    if (Removed(&call, &outcome)) return Code(base, 13, mode, call << 8 | outcome << 4);
+    if (stage) return Code(base, stage, mode, (UINT)result);
+    XboxPipelineReplayGetCounters(&replay);
+    const UINT served = (UINT)(replay.hits + replay.waitHits);
+    const UINT identity = replay.rootSame ? 1 : replay.rootDistinct ? 2 : 0;
+    XboxPipelineCacheClose(FALSE);
+    Release(setup.root);
+    Release(setup.device);
+    if (served < 2) return Code(base, 16, mode, served << 8 | (UINT)(replay.rootMismatch & 15) << 4 | (UINT)(replay.early & 15));
+    return 0x5D800000u | identity << 16 | served << 12 | (UINT)(us > 0xFFF ? 0xFFF : us);
+}
+
+/* The record process: records both pipelines, then runs the replay process. */
+static UINT Record(const WCHAR *prefix) {
+    const UINT base = 0x5C000000u, mode = XBOX_PSO_CACHE_MODE_REPLAY;
+    Setup setup;
+    HRESULT result;
+    UINT stage = PrepareDevice(&setup, &result);
+    if (stage) return Code(base, stage, mode, (UINT)result);
+    /* As a profile selects it: before the first root signature. */
+    XboxPipelineCacheSelectMode((LONG)mode);
+    XboxPipelineReplayConfigure(0, 0);
+    if (FAILED(result = XboxPipelineCacheOpen(prefix))) return Code(base, 6, mode, (UINT)result);
+    if ((stage = CreateRoot(&setup, &result))) return Code(base, stage, mode, (UINT)result);
+    ULONGLONG recordUs = 0;
+    stage = CreateBoth(&setup, &recordUs, &result);
+    UINT call = 0, outcome = 0;
+    if (Removed(&call, &outcome)) return ReplayCode(call, outcome, 0, 0, 0);
+    if (stage) {
+        XboxPipelineCacheClose(TRUE);
+        return Code(base, stage, mode, (UINT)result);
+    }
+    XboxPipelineReplayCounters replay;
+    XboxPipelineReplayGetCounters(&replay);
+    if (replay.recorded != 2) {
+        XboxPipelineCacheClose(TRUE);
+        return Code(base, 8, mode, (UINT)((replay.recorded & 15) << 4 | (replay.unrecorded & 15)));
+    }
+    result = XboxPipelineCacheWriteNow();
+    XboxPipelineCacheCounters counters;
+    XboxPipelineCacheGetCounters(&counters);
+    XboxPipelineCacheClose(FALSE);
+    Release(setup.root);
+    Release(setup.device);
+    if (FAILED(result) || counters.writes < 1) {
+        XboxPipelineCacheClose(TRUE);
+        return Code(base, 9, mode, (UINT)result);
+    }
+    DWORD exit = 0;
+    const UINT failed = RunSelf(L"reload", mode, prefix, &exit);
+    XboxPipelineCacheClose(TRUE);
+    if (failed) return Code(base, failed, mode, exit);
+    const UINT units = (UINT)(recordUs / 10);
+    if ((exit & 0xFFF00000u) == 0x5D800000u) {
+        const UINT identity = (exit >> 16) & 15, served = (exit >> 12) & 15, serveUs = exit & 0xFFF;
+        UINT ratio = 0;
+        for (ULONGLONG quotient = recordUs / (serveUs ? serveUs : 1); quotient > 1 && ratio < 15; quotient >>= 1) ++ratio;
+        const UINT verdict = served == 2 ? (recordUs > serveUs ? 1 : 2) : served == 1 ? 3 : 4;
+        return ReplayCode(0, verdict, identity, ratio, units);
+    }
+    if ((exit & 0xFFFF0000u) == 0x5D0D0000u) return ReplayCode((exit >> 8) & 15, (exit >> 4) & 15, 0, 0, units);
+    if ((exit & 0xFF000000u) == 0x5D000000u) {
+        const UINT replayStage = (exit >> 16) & 0xFF;
+        if (replayStage == 6) return ReplayCode(0, 5, 0, 0, units);
+        if (replayStage == 15) return ReplayCode(0, 6, 0, 0, units);
+        if (replayStage == 14) return ReplayCode(0, 12, 0, 0, units);
+        if (replayStage == 16) return ReplayCode(0, ((exit >> 8) & 15) ? 3 : 4, 0, 0, units);
+        return Code(base, 12, mode, replayStage << 4 | (exit & 15));
+    }
+    /* The replay process died: the guard names the call it was in. */
+    const LONG guard = XboxPipelineCacheTakeGuard(prefix);
+    return ReplayCode(guard ? (UINT)guard : XBOX_PSO_CALL_UNKNOWN, XboxPsoCacheRemovalOutcome(exit), 0, 0, units);
+}
+
+static UINT ReplayControl(void) {
+    static WCHAR prefix[400];
+    const UINT mode = XBOX_PSO_CACHE_MODE_REPLAY;
+    if (!Prefix(prefix, ARRAYSIZE(prefix), mode)) return Code(0x5C000000u, 6, mode, ERROR_PATH_NOT_FOUND);
+    DWORD exit = 0;
+    const UINT failed = RunSelf(L"round", mode, prefix, &exit);
+    if (failed) return Code(0x5C000000u, failed, mode, exit);
+    const LONG guard = XboxPipelineCacheTakeGuard(prefix);
+    if ((exit & 0xFF000000u) == 0x5A000000u || (exit & 0xFF000000u) == 0x5C000000u) return exit;
+    /* The record process died: its guard names the call. */
+    return ReplayCode(guard ? (UINT)guard : XBOX_PSO_CALL_UNKNOWN, XboxPsoCacheRemovalOutcome(exit), 0, 0, 0);
+}
+#endif
+
 /* "<verb> <mode> <prefix>" after the image name, or NULL. */
 static const WCHAR *Argument(const WCHAR *line, const WCHAR *verb, UINT *mode) {
     for (const WCHAR *p = line; p && *p; ++p) {
@@ -354,7 +582,8 @@ static const WCHAR *Argument(const WCHAR *line, const WCHAR *verb, UINT *mode) {
         while (verb[i] && p[1 + i] == verb[i]) ++i;
         if (verb[i] || p[1 + i] != L' ') continue;
         const WCHAR *selected = p + 2 + i;
-        if ((*selected != L'1' && *selected != L'2') || selected[1] != L' ' || !selected[2]) return NULL;
+        if ((*selected != L'1' && *selected != L'2' && *selected != L'3') || selected[1] != L' ' || !selected[2])
+            return NULL;
         *mode = (UINT)(*selected - L'0');
         return selected + 2;
     }
@@ -365,8 +594,21 @@ void WINAPI ChildEntry(void) {
     const WCHAR *line = GetCommandLineW();
     UINT mode = 0;
     const WCHAR *prefix = Argument(line, L"reload", &mode);
+#ifdef XBOX_PSO_REPLAY_CONTROL
+    if (prefix && mode == XBOX_PSO_CACHE_MODE_REPLAY) ExitProcess(Replay(prefix));
     if (prefix) ExitProcess(Reload(mode, prefix));
     prefix = Argument(line, L"round", &mode);
+    if (prefix && mode == XBOX_PSO_CACHE_MODE_REPLAY) ExitProcess(Record(prefix));
+    if (prefix) ExitProcess(Round(mode, prefix));
+    /* The library and blob rounds stay reachable by verb; the top process runs replay only. */
+    (void)Control;
+    ExitProcess(ReplayControl());
+#else
+    if (prefix && mode == XBOX_PSO_CACHE_MODE_REPLAY) prefix = NULL;
+    if (prefix) ExitProcess(Reload(mode, prefix));
+    prefix = Argument(line, L"round", &mode);
+    if (prefix && mode == XBOX_PSO_CACHE_MODE_REPLAY) prefix = NULL;
     if (prefix) ExitProcess(Round(mode, prefix));
     ExitProcess(Control());
+#endif
 }

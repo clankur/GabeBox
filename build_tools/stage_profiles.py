@@ -25,17 +25,23 @@ HOSTED_SDL_SCRIPT = re.compile(
 
 
 # Persistent D3D12 pipeline cache marker: empty for passthrough (timing only, no
-# cache call on the device), or one line naming a mode and the console control
-# result (probe/graphics-runtime-control --d3d12-pipeline-cache) that proved it:
-# 0x5CCXLBFF with outcome 1 for the selected path (L library, B cached blobs).
+# cache call on the device), one line naming a driver cache mode and the console
+# control result (probe/graphics-runtime-control --d3d12-pipeline-cache) that
+# proved it: 0x5CCXLBFF with outcome 1 for the selected path (L library, B cached
+# blobs), or mode=replay / mode=replay-idle, which pre-creates recorded pipelines
+# with the title's own creation calls and needs no control result.
 # Mirrors XboxPsoCacheParseMarker in runtime/win32/pipeline-cache-format.h.
 PIPELINE_CACHE_MARKER = re.compile(rb"mode=(?P<mode>library|blobs) control=0x(?P<code>5CC[0-9A-F]{5})(?:\r?\n)?")
+PIPELINE_REPLAY_MARKER = re.compile(rb"mode=(?P<mode>replay|replay-idle)(?:\r?\n)?")
 
 
 def pipeline_cache_mode(marker):
-    """Return passthrough, library or blobs for a marker's bytes, or None when malformed."""
+    """Return passthrough, library, blobs, replay or replay-idle for a marker's bytes, or None when malformed."""
     if not marker:
         return "passthrough"
+    replay = PIPELINE_REPLAY_MARKER.fullmatch(marker)
+    if replay:
+        return replay["mode"].decode("ascii")
     match = PIPELINE_CACHE_MARKER.fullmatch(marker)
     if not match:
         return None
@@ -188,6 +194,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     hashed_companions = False
     system_companions = False
     pipeline_cache = False
+    pipeline_replay = False
     managed_warmup = False
     hostfxr_warmup = False
     gl_trace = False
@@ -253,12 +260,15 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
         if (root / cache_marker).is_file():
             content = (root / cache_marker).read_bytes() if (root / cache_marker).stat().st_size <= 64 else b"?"
-            if pipeline_cache_mode(content) is None or fields[6:7] != ["loader-trace"]:
+            cache_mode = pipeline_cache_mode(content)
+            if cache_mode is None or fields[6:7] != ["loader-trace"]:
                 raise ValueError(
-                    f"The D3D12 pipeline cache needs the loader trace and an empty marker (passthrough) or "
-                    f"'mode=library|blobs control=0x5CC…' with a passing control result for AppID {app}.")
+                    f"The D3D12 pipeline cache needs the loader trace and an empty marker (passthrough), "
+                    f"'mode=replay', 'mode=replay-idle' or 'mode=library|blobs control=0x5CC…' with a passing "
+                    f"control result for AppID {app}.")
             files[cache_marker] = content
             pipeline_cache = True
+            pipeline_replay |= cache_mode.startswith("replay")
         release_marker = f"steam-win32-release-renderer-{app}.txt"
         if (root / release_marker).is_file():
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
@@ -525,6 +535,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                for binary in (native, files["XboxWin32LoaderTrace.dll"])):
             raise ValueError("Use a Steam Core artifact with the persistent Direct3D 12 pipeline cache "
                              "and its profile-selected mode.")
+        # An older runtime reads an unknown mode as passthrough: replay would silently not run.
+        if pipeline_replay and ("replay-idle\0".encode("utf-16le") not in files["XboxWin32LoaderTrace.dll"]
+                                or b"mode=replay-idle\0" not in native):
+            raise ValueError("Use a Steam Core artifact with Direct3D 12 pipeline record and replay.")
     if system_companions:
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:

@@ -1066,6 +1066,23 @@ class LoaderDiagnosticTests(unittest.TestCase):
         self.assertEqual(unavailable['audio']['meter'], 'unavailable: stage=endpoint result=0x80070490')
         self.assertEqual(unavailable['audio']['windows'], 0)
 
+    def test_pipeline_events_from_a_replay_mode_are_summarized_by_outcome(self):
+        lines = ['pso timing result=0x00000000',
+                 'pso kind=S utc=10:00:00.000 us=5800000 result=0x00000000 cache=miss',
+                 'pso kind=S utc=10:00:30.000 us=2100 result=0x00000000 cache=wait-hit',
+                 'pso kind=S utc=10:01:00.000 us=105000 result=0x00000000 cache=early',
+                 'pso kind=G utc=10:01:01.000 us=38000 result=0x00000000 cache=root-mismatch',
+                 'pso kind=G utc=10:01:02.000 us=3000 result=0x00000000']
+        self.assertTrue(all(diagnostics.diagnostic_record(line) for line in lines))
+        pipelines = diagnostics.diagnostic_summary(lines)['pipelines']
+        self.assertEqual(pipelines['events_over_2ms'], 5)
+        self.assertEqual(pipelines['kinds'], {'stream': 3, 'graphics': 2})
+        self.assertEqual(pipelines['outcomes'], {'miss': 1, 'wait-hit': 1, 'early': 1, 'root-mismatch': 1})
+        self.assertEqual(pipelines['max_ms'], 5800.0)
+        # Passthrough events carry no outcome, and the summary keeps its shape.
+        self.assertNotIn('outcomes', diagnostics.diagnostic_summary(lines[-1:])['pipelines'])
+        self.assertFalse(diagnostics.diagnostic_record('pso kind=G utc=10:01:02.000 us=3000 result=0x00000000 cache=C:\\x'))
+
     def test_loader_inspection_keeps_measurement_lines_and_summarizes_them(self):
         launch = EPOCH_MS + 1
         fixture = Fixture([{

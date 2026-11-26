@@ -2404,8 +2404,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     shadowJitTrace = true;
                 }
                 // Persistent Direct3D 12 pipeline cache, kept per AppID and build in LocalState.
-                // An empty marker is passthrough (timing only); a cache mode names the
-                // console control result that proved it (pipeline-cache-format.h).
+                // An empty marker is passthrough (timing only); a driver cache mode names the
+                // console control result that proved it; mode=replay and mode=replay-idle
+                // record and pre-create pipelines with the title's own calls (pipeline-cache-format.h).
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-d3d12-pipeline-cache-" + std::to_wstring(app) + L".txt")) {
                     const auto file = marker.try_as<StorageFile>();
@@ -2417,8 +2418,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     for (const wchar_t c : text) ascii.push_back(c < 0x80 ? static_cast<char>(c) : '?');
                     const int mode = XboxPsoCacheParseMarker(ascii.data(), ascii.size(), nullptr);
                     if (mode < 0) co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
-                    shadowPipelineCacheMode = mode == static_cast<int>(XBOX_PSO_CACHE_MODE_LIBRARY) ? L"library" :
-                        mode == static_cast<int>(XBOX_PSO_CACHE_MODE_BLOBS) ? L"blobs" : L"passthrough";
+                    // XboxPsoCacheModeName: passthrough, library, blobs, replay or replay-idle.
+                    const char *const name = XboxPsoCacheModeName(static_cast<uint32_t>(mode));
+                    shadowPipelineCacheMode.assign(name, name + std::char_traits<char>::length(name));
                     shadowPipelineCache = true;
                 }
                 // Managed first-use warm-up: the profile's plan names the game's IL-only

@@ -36,6 +36,13 @@
      leaves the process in passthrough; one mode never falls back to the
      other. The cache binds to the first device that creates a pipeline;
      other devices pass through.
+   - Replay: XBOX_WIN32_PSO_CACHE_MODE=replay (or replay-idle, which starts at
+     the title's first idle period) records each desc the title compiles and,
+     on later launches, pre-creates the recorded pipelines on the title's
+     device from a background thread with the title's own creation calls.
+     It needs no control result: it makes no driver persistence call (no
+     pipeline library, GetCachedBlob or CachedPSO). See "replay" below for
+     the serving contract and the root-signature identity rule.
    - Device safety: every cache call into the runtime (GetAdapterLuid,
      CheckFeatureSupport, QueryInterface, CreatePipelineLibrary, Store, Load,
      Serialize, GetCachedBlob, creation with CachedPSO) is followed by
@@ -69,12 +76,14 @@
      by one lock; driver compilation runs outside it, and a second creation of
      a key already in flight goes to the driver instead of racing its store.
 
-   Diagnostics use "asset pso-cache ..." lines so the launcher's trace filters
-   keep them. */
+   Diagnostics use "asset pso-cache ..." and "asset pso-replay ..." lines so
+   the launcher's trace filters keep them. */
 #define WIN32_LEAN_AND_MEAN
 #include "loader-trace-output.h"
 #include "d3d12-pipeline-cache.h"
 #include "pipeline-cache-format.h"
+#include "pipeline-replay-format.h"
+#include <stddef.h>
 #include <d3d12.h>
 #include <dxgi1_2.h>
 
@@ -277,13 +286,15 @@ static void Fallback(int bit, const char *operation, HRESULT result) {
 }
 enum {
     FALLBACK_LOAD, FALLBACK_BLOB, FALLBACK_STORE, FALLBACK_QUERY, FALLBACK_CACHED_BLOB, FALLBACK_OTHER_DEVICE,
-    FALLBACK_EARLY, FALLBACK_FULL, FALLBACK_KEY, FALLBACK_WRITE, FALLBACK_STREAM_LIBRARY, FALLBACK_GUARD,
+    FALLBACK_EARLY, FALLBACK_FULL, FALLBACK_KEY, FALLBACK_WRITE, FALLBACK_STREAM_LIBRARY, FALLBACK_GUARD, FALLBACK_REPLAY,
 };
 
 static const char *ModeName(LONG mode) {
-    return mode == XBOX_PSO_CACHE_MODE_LIBRARY ? "library" : mode == XBOX_PSO_CACHE_MODE_BLOBS ? "blobs" :
-        cache.passthrough ? "passthrough" : cache.stopped ? "stopped" : "disabled";
+    return mode == XBOX_PSO_CACHE_MODE_LIBRARY || mode == XBOX_PSO_CACHE_MODE_BLOBS || XboxPsoCacheIsReplay((uint32_t)mode) ?
+        XboxPsoCacheModeName((uint32_t)mode) : cache.passthrough ? "passthrough" : cache.stopped ? "stopped" : "disabled";
 }
+
+static void ReplayTraceStats(const char *reason);
 
 static void TraceStats(const char *reason) {
     char line[320];
@@ -301,6 +312,7 @@ static void TraceStats(const char *reason) {
     out = Decimal(Text(out, " miss-ms="), (ULONGLONG)cache.stats.missUs / 1000);
     out = Decimal(Text(out, " writes="), (ULONG)cache.stats.writes);
     Line(line, out);
+    if (XboxPsoCacheIsReplay((uint32_t)cache.selected) && !cache.passthrough) ReplayTraceStats(reason);
 }
 
 /* --------------------------------------------------------- device safety */
@@ -463,7 +475,8 @@ static BOOL AfterCall(void *device, LONG call, HRESULT result, BOOL armed) {
     }
     if (armed) {
         AcquireSRWLockExclusive(&cache.guardLock);
-        if (!--cache.guardArmed && !cache.guardSticky && cache.guardPath[0]) DeleteFileFromAppW(cache.guardPath);
+        if (cache.guardArmed > 0 && !--cache.guardArmed && !cache.guardSticky && cache.guardPath[0])
+            DeleteFileFromAppW(cache.guardPath);
         ReleaseSRWLockExclusive(&cache.guardLock);
     }
     return reason == S_OK;
@@ -763,17 +776,16 @@ static BOOL BuildKey(int kind, const void *desc, BYTE key[32], SIZE_T *cachedPso
     return keyed;
 }
 
-static void RememberRoot(void *object, UINT nodeMask, const void *blob, SIZE_T size) {
+/* Records the root signature's digest by object; FALSE when the blob
+   faults. digest (optional) receives it. */
+static BOOL RememberRoot(void *object, UINT nodeMask, const void *blob, SIZE_T size, BYTE *digestOut) {
     BYTE digest[32];
     __try {
-        XboxSha256 hash;
-        XboxSha256Init(&hash);
-        XboxPsoKeyU32(&hash, nodeMask);
-        XboxPsoKeyBytes(&hash, blob, size);
-        XboxSha256Final(&hash, digest);
+        XboxPsoReplayRootHash(nodeMask, blob, size, digest);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
+        return FALSE;
     }
+    if (digestOut) CopyBytes(digestOut, digest, 32);
     AcquireSRWLockExclusive(&rootLock);
     if (roots) {
         const UINT first = (UINT)(((ULONG_PTR)object >> 4) % ROOT_SLOTS);
@@ -786,6 +798,7 @@ static void RememberRoot(void *object, UINT nodeMask, const void *blob, SIZE_T s
         }
     }
     ReleaseSRWLockExclusive(&rootLock);
+    return TRUE;
 }
 
 /* -------------------------------------------------------------- entries */
@@ -1021,6 +1034,1118 @@ static BOOL AcquireBounded(SRWLOCK *lock, BOOL bounded) {
     return FALSE;
 }
 
+/* ----------------------------------------------------------------- replay */
+
+/* Record and replay (XBOX_WIN32_PSO_CACHE_MODE=replay or replay-idle).
+
+   Record: every pipeline the title compiles itself in 1 ms or more is
+   serialized by content (pipeline-replay-format.h): the desc as a graph of
+   chunks with the root signature by its blob, plus its order, the loading
+   phase it fell in and its creation time. Root signatures are recorded as
+   the title creates them.
+
+   Replay: once the title's device is known (its first root signature or
+   pipeline) and the file is read, one below-normal-priority thread creates
+   the recorded pipelines on that device with the ordinary
+   CreateGraphicsPipelineState, CreateComputePipelineState or
+   CreatePipelineState, in the title's recorded order. Each
+   rebuilt desc is keyed again and must reproduce the recorded key before it
+   is created. The root signature is the title's own object for that blob
+   when the title has created it; otherwise the replay creates one from the
+   recorded blob with CreateRootSignature.
+
+   Serve: a title creation whose key matches a pre-created pipeline, on the
+   same device, whose desc names the very root-signature object the pipeline
+   was created with, receives that pipeline (QueryInterface to the title's
+   riid; the replay's reference is released, so the title holds the only
+   one, as after a fresh creation). A different root-signature object is a
+   miss: when the runtime returns a new object for a blob the replay already
+   created, the replay rebuilds the affected pipelines with the title's
+   object and from then on waits for the title's roots. A pipeline the replay
+   is building makes the title wait for it, with the replay thread raised to
+   the title thread's priority; one the replay has not started is claimed by
+   the title and skipped. No desc is compiled twice at once.
+
+   Bounded: at most XBOX_PSO_REPLAY_MAX_PIPELINES records and 64 MiB; a
+   record the title has not asked for in 8 launches is dropped; pre-created
+   pipelines the title has not taken are released XBOX_PSO_REPLAY_HOLD_MS
+   after the replay starts. The replay never calls CreatePipelineLibrary,
+   GetCachedBlob or creation with CachedPSO. Its whole pass runs under the
+   guard (call replay-create), so a removal or a process that dies during the
+   pass selects passthrough on later launches with the same identity. */
+
+static BOOL IsRemoval(HRESULT result);
+
+enum { REPLAY_PENDING, REPLAY_BUILDING, REPLAY_READY, REPLAY_TAKEN, REPLAY_FAILED };
+#define REPLAY_USED 1u
+#define REPLAY_REQUESTED 2u
+#define REPLAY_HEAP 4u
+#define REPLAY_DEFERRED 8u
+#define REPLAY_WRITE 16u
+#define REPLAY_EXPIRED 32u  /* released or never built before the hold ended */
+#define REPLAY_NONE 0xFFFFFFFFu
+
+typedef struct ReplayEntry {
+    BYTE key[32];
+    const BYTE *record;  /* a whole payload entry: the file's bytes or a heap copy */
+    UINT32 recordSize;
+    UINT32 rootIndex;
+    XboxPsoReplayMeta meta;
+    void *pipeline;      /* REPLAY_READY: the replay's reference */
+    void *root;          /* the root-signature object it was created with */
+    UINT32 state, flags;
+} ReplayEntry;
+
+typedef struct ReplayRoot {
+    BYTE hash[32];
+    UINT32 nodeMask, size;
+    BYTE *blob;          /* heap copy */
+    void *title;         /* the title's object, with a reference while the replay holds pipelines */
+    void *own;           /* created by the replay from the blob */
+    BOOL failed;
+} ReplayRoot;
+
+static const GUID rootIid = {0xC54A6B66, 0x72DF, 0x4EE8, {0x8B, 0xE5, 0xA9, 0x46, 0xA1, 0x42, 0x92, 0x14}};
+
+static struct {
+    SRWLOCK lock;                /* everything below except the counters */
+    CONDITION_VARIABLE changed;  /* a build finished or work became available */
+    ReplayEntry *entries;        /* ENTRY_SLOTS, open addressing by key */
+    UINT32 used;
+    UINT32 *queue;               /* loaded records in replay order */
+    UINT32 queued;
+    ReplayRoot *roots;
+    UINT32 rootCount;
+    void *volatile device;
+    HANDLE thread;
+    volatile LONG stop;
+    volatile LONG done;          /* held pipelines and references released */
+    volatile LONG building;
+    volatile LONG inFlight;      /* title creations in progress */
+    LONG boost;
+    LONG rootsDistinct;
+    LONGLONG firstTick, lastTick;
+    UINT32 phase, order;
+    ULONG recordMinUs, holdMs;
+    struct {
+        volatile LONG loaded, built, failed, mismatched, hits, waitHits, early, repeats, rootMismatch, rootSame,
+            rootDistinct, recorded, unrecorded, released, deferred, requeued, concurrent, ownRoots;
+        volatile LONG64 buildUs, maxBuildUs, hitUs, waitUs, savedUs, missUs, concurrentUs;
+    } stats;
+} replay = {.recordMinUs = XBOX_PSO_REPLAY_RECORD_US, .holdMs = XBOX_PSO_REPLAY_HOLD_MS};
+
+typedef ULONG (STDMETHODCALLTYPE *AddRefMethod)(void *);
+
+static void AddRef(void *object) {
+    if (object) METHOD(object, 1, AddRefMethod)(object);
+}
+
+static ULONG Milliseconds(LONGLONG ticks) {
+    const ULONGLONG ms = Microseconds(ticks) / 1000;
+    return ms > 0xFFFFFFFFull ? 0xFFFFFFFFu : (ULONG)ms;
+}
+
+static int KindIndex(UINT32 kind) {
+    return kind == 'G' ? KIND_GRAPHICS : kind == 'C' ? KIND_COMPUTE : KIND_STREAM;
+}
+
+/* With the lock held: the tables, allocated at first use. */
+static BOOL ReplayTablesLocked(void) {
+    if (!replay.entries)
+        replay.entries = (ReplayEntry *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ENTRY_SLOTS * sizeof(ReplayEntry));
+    if (!replay.roots)
+        replay.roots = (ReplayRoot *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            XBOX_PSO_REPLAY_MAX_ROOTS * sizeof(ReplayRoot));
+    if (!replay.queue)
+        replay.queue = (UINT32 *)HeapAlloc(GetProcessHeap(), 0, XBOX_PSO_REPLAY_MAX_PIPELINES * sizeof(UINT32));
+    return replay.entries && replay.roots && replay.queue;
+}
+
+static ReplayEntry *ReplayFindLocked(const BYTE key[32], BOOL insert) {
+    const UINT first = ((UINT)key[0] | (UINT)key[1] << 8 | (UINT)key[2] << 16) % ENTRY_SLOTS;
+    for (UINT i = 0; i < ENTRY_SLOTS; ++i) {
+        ReplayEntry *entry = &replay.entries[(first + i) % ENTRY_SLOTS];
+        if (!(entry->flags & REPLAY_USED)) {
+            /* Keep probes short: three quarters full is full. */
+            if (!insert || replay.used >= ENTRY_SLOTS / 4 * 3) return NULL;
+            CopyBytes(entry->key, key, 32);
+            entry->flags = REPLAY_USED;
+            entry->state = REPLAY_TAKEN;
+            entry->rootIndex = REPLAY_NONE;
+            ++replay.used;
+            return entry;
+        }
+        if (XboxPsoCacheSameBytes(entry->key, key, 32)) return entry;
+    }
+    return NULL;
+}
+
+static UINT32 ReplayFindRootLocked(const BYTE hash[32]) {
+    for (UINT32 i = 0; i < replay.rootCount; ++i)
+        if (XboxPsoCacheSameBytes(replay.roots[i].hash, hash, 32)) return i;
+    return REPLAY_NONE;
+}
+
+static UINT32 ReplayAddRootLocked(const BYTE hash[32], UINT32 nodeMask, const void *blob, SIZE_T size) {
+    UINT32 index = ReplayFindRootLocked(hash);
+    if (index != REPLAY_NONE) return index;
+    if (replay.rootCount >= XBOX_PSO_REPLAY_MAX_ROOTS || !size || size > XBOX_PSO_REPLAY_MAX_BODY) return REPLAY_NONE;
+    BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
+    if (!copy) return REPLAY_NONE;
+    CopyBytes(copy, blob, size);
+    ReplayRoot *root = &replay.roots[replay.rootCount];
+    ZeroBytes(root, sizeof(*root));
+    CopyBytes(root->hash, hash, 32);
+    root->nodeMask = nodeMask;
+    root->size = (UINT32)size;
+    root->blob = copy;
+    return replay.rootCount++;
+}
+
+/* With the lock held: this creation's place in the process (order, time
+   since the first creation, loading phase). */
+static void ReplayStampLocked(XboxPsoReplayMeta *meta) {
+    const LONGLONG now = Now();
+    const BOOL first = !replay.firstTick;
+    if (first) replay.firstTick = now;
+    else if (!replay.inFlight && XboxPsoReplayNewPhase(Milliseconds(now - replay.lastTick), 0)) ++replay.phase;
+    replay.lastTick = now;
+    meta->order = replay.order++;
+    meta->atMs = Milliseconds(now - replay.firstTick);
+    meta->phase = replay.phase;
+    meta->age = 0;
+}
+
+/* The root-signature object a desc names (NULL when none). The desc was
+   keyed already, so it is well formed. */
+static void *DescRoot(int kind, const void *desc) {
+    void *volatile root = NULL;
+    __try {
+        if (kind == KIND_GRAPHICS) {
+            root = ((const D3D12_GRAPHICS_PIPELINE_STATE_DESC *)desc)->pRootSignature;
+        } else if (kind == KIND_COMPUTE) {
+            root = ((const D3D12_COMPUTE_PIPELINE_STATE_DESC *)desc)->pRootSignature;
+        } else {
+            const D3D12_PIPELINE_STATE_STREAM_DESC *stream = (const D3D12_PIPELINE_STATE_STREAM_DESC *)desc;
+            const BYTE *bytes = (const BYTE *)stream->pPipelineStateSubobjectStream;
+            for (SIZE_T offset = 0; offset + 4 <= stream->SizeInBytes;) {
+                SIZE_T valueOffset, valueSize;
+                const UINT32 type = *(const UINT32 *)(bytes + offset);
+                if (!StreamValue(type, &valueOffset, &valueSize)) break;
+                if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
+                    root = *(void *const *)(bytes + offset + valueOffset);
+                    break;
+                }
+                offset += (valueOffset + valueSize + 7) & ~(SIZE_T)7;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        root = NULL;
+    }
+    return root;
+}
+
+/* The digest RememberRoot recorded for a root-signature object. */
+static BOOL RootHashOf(void *root, BYTE hash[32]) {
+    BOOL found = FALSE;
+    AcquireSRWLockShared(&rootLock);
+    if (roots) {
+        const UINT first = (UINT)(((ULONG_PTR)root >> 4) % ROOT_SLOTS);
+        for (UINT i = 0; i < ROOT_SLOTS; ++i) {
+            const RootEntry *entry = &roots[(first + i) % ROOT_SLOTS];
+            if (!entry->object) break;
+            if (entry->object == root) {
+                CopyBytes(hash, entry->hash, 32);
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&rootLock);
+    return found;
+}
+
+/* ------------------------------------------------- desc serialization */
+
+static void WalkShader(XboxPsoReplayBuilder *builder, UINT32 chunk, SIZE_T at, const D3D12_SHADER_BYTECODE *shader) {
+    const SIZE_T slot = at + offsetof(D3D12_SHADER_BYTECODE, pShaderBytecode);
+    if (!shader->pShaderBytecode) {
+        XboxPsoReplayAddFixup(builder, chunk, slot, XBOX_PSO_REPLAY_FIXUP_NULL);
+        return;
+    }
+    const UINT32 code = XboxPsoReplayAddChunk(builder, shader->pShaderBytecode, shader->BytecodeLength);
+    XboxPsoReplayAddFixup(builder, chunk, slot, code);
+}
+
+static void WalkString(XboxPsoReplayBuilder *builder, UINT32 chunk, SIZE_T slot, const char *text) {
+    if (!text) {
+        XboxPsoReplayAddFixup(builder, chunk, slot, XBOX_PSO_REPLAY_FIXUP_NULL);
+        return;
+    }
+    SIZE_T length = 0;
+    while (text[length] && length < 4096) ++length;
+    if (text[length]) builder->overflow = 1; /* the key hashes at most 4096 characters */
+    XboxPsoReplayAddFixup(builder, chunk, slot, XboxPsoReplayAddChunk(builder, text, length + 1));
+}
+
+static void WalkInputLayout(XboxPsoReplayBuilder *builder, UINT32 chunk, SIZE_T at, const D3D12_INPUT_LAYOUT_DESC *layout) {
+    const SIZE_T slot = at + offsetof(D3D12_INPUT_LAYOUT_DESC, pInputElementDescs);
+    if (!layout->pInputElementDescs) {
+        XboxPsoReplayAddFixup(builder, chunk, slot, XBOX_PSO_REPLAY_FIXUP_NULL);
+        return;
+    }
+    const UINT32 elements = XboxPsoReplayAddChunk(builder, layout->pInputElementDescs,
+        (UINT64)layout->NumElements * sizeof(D3D12_INPUT_ELEMENT_DESC));
+    XboxPsoReplayAddFixup(builder, chunk, slot, elements);
+    for (UINT i = 0; i < layout->NumElements && !builder->overflow; ++i)
+        WalkString(builder, elements, i * sizeof(D3D12_INPUT_ELEMENT_DESC) + offsetof(D3D12_INPUT_ELEMENT_DESC, SemanticName),
+            layout->pInputElementDescs[i].SemanticName);
+}
+
+static void WalkStreamOutput(XboxPsoReplayBuilder *builder, UINT32 chunk, SIZE_T at, const D3D12_STREAM_OUTPUT_DESC *output) {
+    const SIZE_T entriesSlot = at + offsetof(D3D12_STREAM_OUTPUT_DESC, pSODeclaration);
+    const SIZE_T stridesSlot = at + offsetof(D3D12_STREAM_OUTPUT_DESC, pBufferStrides);
+    if (output->pSODeclaration) {
+        const UINT32 entries = XboxPsoReplayAddChunk(builder, output->pSODeclaration,
+            (UINT64)output->NumEntries * sizeof(D3D12_SO_DECLARATION_ENTRY));
+        XboxPsoReplayAddFixup(builder, chunk, entriesSlot, entries);
+        for (UINT i = 0; i < output->NumEntries && !builder->overflow; ++i)
+            WalkString(builder, entries, i * sizeof(D3D12_SO_DECLARATION_ENTRY) +
+                offsetof(D3D12_SO_DECLARATION_ENTRY, SemanticName), output->pSODeclaration[i].SemanticName);
+    } else {
+        XboxPsoReplayAddFixup(builder, chunk, entriesSlot, XBOX_PSO_REPLAY_FIXUP_NULL);
+    }
+    XboxPsoReplayAddFixup(builder, chunk, stridesSlot, output->pBufferStrides ?
+        XboxPsoReplayAddChunk(builder, output->pBufferStrides, (UINT64)output->NumStrides * sizeof(UINT)) :
+        XBOX_PSO_REPLAY_FIXUP_NULL);
+}
+
+static void WalkGraphics(XboxPsoReplayBuilder *builder, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
+    const UINT32 top = XboxPsoReplayAddChunk(builder, desc, sizeof(*desc));
+    XboxPsoReplayAddFixup(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, pRootSignature),
+        desc->pRootSignature ? XBOX_PSO_REPLAY_FIXUP_ROOT : XBOX_PSO_REPLAY_FIXUP_NULL);
+    WalkShader(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, VS), &desc->VS);
+    WalkShader(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, PS), &desc->PS);
+    WalkShader(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, DS), &desc->DS);
+    WalkShader(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, HS), &desc->HS);
+    WalkShader(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, GS), &desc->GS);
+    WalkStreamOutput(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, StreamOutput), &desc->StreamOutput);
+    WalkInputLayout(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, InputLayout), &desc->InputLayout);
+    /* Keyed descs carry no cached blob. */
+    XboxPsoReplayAddFixup(builder, top, offsetof(D3D12_GRAPHICS_PIPELINE_STATE_DESC, CachedPSO) +
+        offsetof(D3D12_CACHED_PIPELINE_STATE, pCachedBlob), XBOX_PSO_REPLAY_FIXUP_NULL);
+}
+
+static void WalkCompute(XboxPsoReplayBuilder *builder, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc) {
+    const UINT32 top = XboxPsoReplayAddChunk(builder, desc, sizeof(*desc));
+    XboxPsoReplayAddFixup(builder, top, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, pRootSignature),
+        desc->pRootSignature ? XBOX_PSO_REPLAY_FIXUP_ROOT : XBOX_PSO_REPLAY_FIXUP_NULL);
+    WalkShader(builder, top, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, CS), &desc->CS);
+    XboxPsoReplayAddFixup(builder, top, offsetof(D3D12_COMPUTE_PIPELINE_STATE_DESC, CachedPSO) +
+        offsetof(D3D12_CACHED_PIPELINE_STATE, pCachedBlob), XBOX_PSO_REPLAY_FIXUP_NULL);
+}
+
+/* The same subobject walk as HashStream. */
+static void WalkStream(XboxPsoReplayBuilder *builder, const D3D12_PIPELINE_STATE_STREAM_DESC *desc) {
+    const BYTE *stream = (const BYTE *)desc->pPipelineStateSubobjectStream;
+    const UINT32 top = XboxPsoReplayAddChunk(builder, stream, desc->SizeInBytes);
+    for (SIZE_T offset = 0; offset < desc->SizeInBytes && !builder->overflow;) {
+        SIZE_T valueOffset, valueSize;
+        const UINT32 type = *(const UINT32 *)(stream + offset);
+        if (!StreamValue(type, &valueOffset, &valueSize)) {
+            builder->overflow = 1;
+            break;
+        }
+        const SIZE_T at = offset + valueOffset;
+        const BYTE *value = stream + at;
+        switch (type) {
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+            XboxPsoReplayAddFixup(builder, top, at, *(void *const *)value ? XBOX_PSO_REPLAY_FIXUP_ROOT :
+                XBOX_PSO_REPLAY_FIXUP_NULL);
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+            WalkShader(builder, top, at, (const D3D12_SHADER_BYTECODE *)value);
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
+            WalkStreamOutput(builder, top, at, (const D3D12_STREAM_OUTPUT_DESC *)value);
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
+            WalkInputLayout(builder, top, at, (const D3D12_INPUT_LAYOUT_DESC *)value);
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
+            XboxPsoReplayAddFixup(builder, top, at + offsetof(D3D12_CACHED_PIPELINE_STATE, pCachedBlob),
+                XBOX_PSO_REPLAY_FIXUP_NULL);
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: {
+            const D3D12_VIEW_INSTANCING_DESC *views = (const D3D12_VIEW_INSTANCING_DESC *)value;
+            XboxPsoReplayAddFixup(builder, top, at + offsetof(D3D12_VIEW_INSTANCING_DESC, pViewInstanceLocations),
+                views->pViewInstanceLocations ? XboxPsoReplayAddChunk(builder, views->pViewInstanceLocations,
+                    (UINT64)views->ViewInstanceCount * sizeof(D3D12_VIEW_INSTANCE_LOCATION)) : XBOX_PSO_REPLAY_FIXUP_NULL);
+            break;
+        }
+        default:
+            break; /* Values without pointers are kept as bytes. */
+        }
+        offset += (valueOffset + valueSize + 7) & ~(SIZE_T)7;
+    }
+}
+
+/* Serializes a desc the title just compiled into a heap payload entry, or
+   NULL. Runs on the title's thread before the desc can be freed. */
+static BYTE *SerializeDesc(int kind, const void *desc, const BYTE key[32], const BYTE *rootHash,
+        const XboxPsoReplayMeta *meta, UINT32 *size) {
+    XboxPsoReplayBuilder *builder = (XboxPsoReplayBuilder *)HeapAlloc(GetProcessHeap(), 0, sizeof(XboxPsoReplayBuilder));
+    if (!builder) return NULL;
+    XboxPsoReplayBuilderInit(builder);
+    BYTE *volatile entry = NULL;
+    __try {
+        if (kind == KIND_GRAPHICS) WalkGraphics(builder, (const D3D12_GRAPHICS_PIPELINE_STATE_DESC *)desc);
+        else if (kind == KIND_COMPUTE) WalkCompute(builder, (const D3D12_COMPUTE_PIPELINE_STATE_DESC *)desc);
+        else WalkStream(builder, (const D3D12_PIPELINE_STATE_STREAM_DESC *)desc);
+        const UINT32 body = XboxPsoReplayPipelineBodySize(builder);
+        const UINT64 total = body ? XboxPsoReplayEntrySize(body) : 0;
+        entry = total ? (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)total) : NULL;
+        if (entry) {
+            XboxPsoReplayWritePipeline(entry, builder, key, rootHash, meta);
+            *size = (UINT32)total;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (entry) HeapFree(GetProcessHeap(), 0, entry);
+        entry = NULL;
+    }
+    HeapFree(GetProcessHeap(), 0, builder);
+    return entry;
+}
+
+/* ----------------------------------------------------------- the thread */
+
+/* Three lines, each within the launch report's 180-character trace records. */
+static void ReplayTraceStats(const char *reason) {
+    char line[200];
+    char *out = Text(Text(line, "asset pso-replay stats at="), reason);
+    out = Decimal(Text(out, " loaded="), (ULONG)replay.stats.loaded);
+    out = Decimal(Text(out, " built="), (ULONG)replay.stats.built);
+    out = Decimal(Text(out, " failed="), (ULONG)replay.stats.failed);
+    out = Decimal(Text(out, " bad="), (ULONG)replay.stats.mismatched);
+    out = Decimal(Text(out, " hits="), (ULONG)replay.stats.hits);
+    out = Decimal(Text(out, " wait-hits="), (ULONG)replay.stats.waitHits);
+    out = Decimal(Text(out, " early="), (ULONG)replay.stats.early);
+    out = Decimal(Text(out, " root-mismatch="), (ULONG)replay.stats.rootMismatch);
+    out = Decimal(Text(out, " recorded="), (ULONG)replay.stats.recorded);
+    out = Decimal(Text(out, " released="), (ULONG)replay.stats.released);
+    Line(line, out);
+    out = Text(Text(line, "asset pso-replay ms at="), reason);
+    out = Decimal(Text(out, " build="), (ULONGLONG)replay.stats.buildUs / 1000);
+    out = Decimal(Text(out, " max-build="), (ULONGLONG)replay.stats.maxBuildUs / 1000);
+    out = Decimal(Text(out, " hit="), (ULONGLONG)replay.stats.hitUs / 1000);
+    out = Decimal(Text(out, " wait="), (ULONGLONG)replay.stats.waitUs / 1000);
+    out = Decimal(Text(out, " saved="), (ULONGLONG)replay.stats.savedUs / 1000);
+    out = Decimal(Text(out, " miss="), (ULONGLONG)replay.stats.missUs / 1000);
+    out = Decimal(Text(out, " concurrent="), (ULONG)replay.stats.concurrent);
+    out = Decimal(Text(out, " concurrent-ms="), (ULONGLONG)replay.stats.concurrentUs / 1000);
+    Line(line, out);
+    out = Text(Text(line, "asset pso-replay roots at="), reason);
+    out = Decimal(Text(out, " same="), (ULONG)replay.stats.rootSame);
+    out = Decimal(Text(out, " distinct="), (ULONG)replay.stats.rootDistinct);
+    out = Decimal(Text(out, " own="), (ULONG)replay.stats.ownRoots);
+    out = Decimal(Text(out, " requeued="), (ULONG)replay.stats.requeued);
+    out = Decimal(Text(out, " deferred="), (ULONG)replay.stats.deferred);
+    out = Decimal(Text(out, " repeats="), (ULONG)replay.stats.repeats);
+    out = Decimal(Text(out, " unrecorded="), (ULONG)replay.stats.unrecorded);
+    Line(line, out);
+}
+
+/* With the lock held: the next record to build in replay order, or
+   REPLAY_NONE. *needRoot names a root the replay must create first. */
+static UINT32 ReplayNextLocked(void **root, UINT32 *needRoot) {
+    *needRoot = REPLAY_NONE;
+    for (UINT32 i = 0; i < replay.queued; ++i) {
+        const UINT32 index = replay.queue[i];
+        ReplayEntry *entry = &replay.entries[index];
+        if (entry->state != REPLAY_PENDING) continue;
+        if (entry->rootIndex == REPLAY_NONE) {
+            *root = NULL;
+            return index;
+        }
+        ReplayRoot *signature = &replay.roots[entry->rootIndex];
+        if (signature->title) {
+            *root = signature->title;
+            return index;
+        }
+        if (signature->failed) {
+            entry->state = REPLAY_FAILED;
+            InterlockedIncrement(&replay.stats.failed);
+            continue;
+        }
+        if (replay.rootsDistinct) {
+            /* The runtime does not share root objects: wait for the title's. */
+            if (!(entry->flags & REPLAY_DEFERRED)) InterlockedIncrement(&replay.stats.deferred);
+            entry->flags |= REPLAY_DEFERRED;
+            continue;
+        }
+        if (signature->own) {
+            *root = signature->own;
+            return index;
+        }
+        *needRoot = entry->rootIndex;
+        return REPLAY_NONE;
+    }
+    return REPLAY_NONE;
+}
+
+/* With the lock held: whether the replay has work it can do now. */
+static BOOL ReplayBusyLocked(void) {
+    if (replay.building) return TRUE;
+    for (UINT32 i = 0; i < replay.queued; ++i) {
+        const ReplayEntry *entry = &replay.entries[replay.queue[i]];
+        if (entry->state != REPLAY_PENDING) continue;
+        if (entry->rootIndex == REPLAY_NONE) return TRUE;
+        const ReplayRoot *signature = &replay.roots[entry->rootIndex];
+        if (signature->title || (!signature->failed && !replay.rootsDistinct)) return TRUE;
+    }
+    return FALSE;
+}
+
+/* Creates the replay's own root signature from a recorded blob. FALSE after
+   a device removal. */
+static BOOL ReplayCreateRoot(void *device, UINT32 index) {
+    AcquireSRWLockShared(&replay.lock);
+    const ReplayRoot *signature = &replay.roots[index];
+    const UINT32 nodeMask = signature->nodeMask, size = signature->size;
+    const BYTE *blob = signature->blob; /* freed only by XboxPipelineCacheClose */
+    ReleaseSRWLockShared(&replay.lock);
+    void *object = NULL;
+    const BOOL armed = BeforeCall(XBOX_PSO_CALL_REPLAY_ROOT);
+    const HRESULT result = originalRootSignature(device, nodeMask, blob, size, &rootIid, &object);
+    const BOOL intact = AfterCall(device, XBOX_PSO_CALL_REPLAY_ROOT, result, armed);
+    if (SUCCEEDED(result) && object) RememberRoot(object, nodeMask, blob, size, NULL);
+    AcquireSRWLockExclusive(&replay.lock);
+    ReplayRoot *target = &replay.roots[index];
+    if (!intact || FAILED(result) || !object) {
+        target->failed = TRUE;
+    } else if (!target->title && !target->own) {
+        target->own = object;
+        object = NULL;
+        InterlockedIncrement(&replay.stats.ownRoots);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+    Release(object);
+    return intact;
+}
+
+/* Rebuilds one record's desc, checks that it reproduces the recorded key and
+   creates it. FALSE after a device removal. */
+static BOOL ReplayBuild(void *device, UINT32 index, void *root) {
+    ReplayEntry *entry = &replay.entries[index];
+    const BYTE *record = entry->record; /* stable while BUILDING */
+    XboxPsoReplayPipeline pipeline;
+    const int kind = KindIndex(entry->meta.kind);
+    BYTE *arena = NULL;
+    const void *desc = NULL;
+    D3D12_PIPELINE_STATE_STREAM_DESC stream;
+    if (XboxPsoReplayParsePipeline(record + 8, XboxPsoCacheGet32(record + 4), &pipeline)) {
+        const UINT64 arenaSize = XboxPsoReplayArenaSize(&pipeline);
+        arena = arenaSize <= XBOX_PSO_REPLAY_MAX_BODY ? (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)arenaSize) : NULL;
+        const UINT32 top = XboxPsoReplayChunkSize(&pipeline, 0);
+        if (arena && ((kind == KIND_GRAPHICS && top == sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC)) ||
+                (kind == KIND_COMPUTE && top == sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC)) || kind == KIND_STREAM)) {
+            void *built = XboxPsoReplayBuild(&pipeline, arena, root);
+            stream.SizeInBytes = top;
+            stream.pPipelineStateSubobjectStream = built;
+            desc = kind == KIND_STREAM ? (const void *)&stream : built;
+        }
+    }
+    BYTE key[32];
+    SIZE_T cachedPso;
+    const BOOL same = desc && BuildKey(kind, desc, key, &cachedPso) && XboxPsoCacheSameBytes(key, entry->key, 32);
+    HRESULT result = E_INVALIDARG, reason = S_OK;
+    void *created = NULL;
+    LONG64 us = 0;
+    if (same) {
+        InterlockedExchange(&replay.building, 1);
+        const LONGLONG start = Now();
+        result = originalPipelines[kind](device, desc, &pipelineIid, &created);
+        us = (LONG64)Microseconds(Now() - start);
+        InterlockedExchange(&replay.building, 0);
+        reason = RemovedReason(device);
+    }
+    if (arena) HeapFree(GetProcessHeap(), 0, arena);
+    const BOOL intact = reason == S_OK && !IsRemoval(result);
+
+    AcquireSRWLockExclusive(&replay.lock);
+    if (entry->state == REPLAY_BUILDING) {
+        const ReplayRoot *signature = entry->rootIndex == REPLAY_NONE ? NULL : &replay.roots[entry->rootIndex];
+        if (!same) {
+            entry->state = REPLAY_FAILED;
+            InterlockedIncrement(&replay.stats.mismatched);
+        } else if (!intact || FAILED(result) || !created) {
+            entry->state = REPLAY_FAILED;
+            InterlockedIncrement(&replay.stats.failed);
+        } else if (signature && signature->title && signature->title != root) {
+            /* The title created this blob as another object while it was built. */
+            entry->state = REPLAY_PENDING;
+            InterlockedIncrement(&replay.stats.requeued);
+        } else {
+            entry->state = REPLAY_READY;
+            entry->pipeline = created;
+            entry->root = root;
+            created = NULL;
+            InterlockedIncrement(&replay.stats.built);
+            InterlockedAdd64(&replay.stats.buildUs, us);
+            if (us > replay.stats.maxBuildUs) InterlockedExchange64(&replay.stats.maxBuildUs, us);
+        }
+    }
+    if (replay.boost != THREAD_PRIORITY_BELOW_NORMAL) {
+        replay.boost = THREAD_PRIORITY_BELOW_NORMAL;
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+    WakeAllConditionVariable(&replay.changed);
+    ReleaseSRWLockExclusive(&replay.lock);
+    Release(created);
+    if (!intact) DeviceRemoved(device, XBOX_PSO_CALL_REPLAY_CREATE, result, reason != S_OK ? reason : result);
+    return intact;
+}
+
+static ULONGLONG CommitAvailable(void) {
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    return GlobalMemoryStatusEx(&status) ? status.ullAvailPageFile : 0;
+}
+
+/* Releases every pre-created pipeline the title has not taken and every
+   reference the replay holds. */
+static void ReplayRelease(const char *reason) {
+    const ULONGLONG before = CommitAvailable();
+    ULONG held = 0;
+    AcquireSRWLockExclusive(&replay.lock);
+    InterlockedExchange(&replay.done, 1);
+    for (UINT32 i = 0; replay.entries && i < ENTRY_SLOTS; ++i) {
+        ReplayEntry *entry = &replay.entries[i];
+        if (entry->state == REPLAY_READY) {
+            Release(entry->pipeline);
+            entry->pipeline = NULL;
+            entry->state = REPLAY_TAKEN;
+            entry->flags |= REPLAY_EXPIRED;
+            ++held;
+        } else if (entry->state == REPLAY_PENDING) {
+            entry->state = REPLAY_TAKEN;
+            entry->flags |= REPLAY_EXPIRED;
+        }
+    }
+    for (UINT32 i = 0; i < replay.rootCount; ++i) {
+        Release(replay.roots[i].title);
+        Release(replay.roots[i].own);
+        replay.roots[i].title = replay.roots[i].own = NULL;
+    }
+    WakeAllConditionVariable(&replay.changed);
+    ReleaseSRWLockExclusive(&replay.lock);
+    InterlockedAdd(&replay.stats.released, (LONG)held);
+    const ULONGLONG after = CommitAvailable();
+    char line[200];
+    char *out = Text(Text(line, "asset pso-replay release at="), reason);
+    out = Decimal(Text(out, " unused="), held);
+    out = Decimal(Text(out, " served="), (ULONG)(replay.stats.hits + replay.stats.waitHits));
+    out = Text(out, " commit-freed-kib=");
+    if (before && after > before) out = Decimal(out, (after - before) / 1024);
+    else *out++ = '0';
+    Line(line, out);
+}
+
+static DWORD WINAPI ReplayThread(LPVOID unused) {
+    (void)unused;
+    void *device = replay.device;
+    const LONGLONG begin = Now();
+    /* Open reads the file on the hooks thread. */
+    while (!cache.ready && !cache.passthrough && !cache.stopped && !replay.stop && Milliseconds(Now() - begin) < 60000)
+        Sleep(10);
+    const BOOL idleStart = cache.selected == XBOX_PSO_CACHE_MODE_REPLAY_IDLE;
+    while (idleStart && cache.ready && !cache.stopped && !replay.stop &&
+            Milliseconds(Now() - begin) < XBOX_PSO_REPLAY_IDLE_WAIT_MS) {
+        /* The title's first idle period: loading has gone quiet (the menu). */
+        if (replay.firstTick && !replay.inFlight && Milliseconds(Now() - replay.lastTick) >= XBOX_PSO_REPLAY_IDLE_MS)
+            break;
+        Sleep(50);
+    }
+    if (!cache.ready || cache.stopped || replay.stop) {
+        ReplayRelease(cache.stopped ? "stopped" : "disabled");
+        Release(device);
+        return 0;
+    }
+    char line[200];
+    char *out = Decimal(Text(line, "asset pso-replay start records="), replay.queued);
+    out = Decimal(Text(out, " roots="), replay.rootCount);
+    out = Text(Text(out, " start="), idleStart ? "idle" : "immediate");
+    out = Decimal(Text(out, " wait-ms="), Milliseconds(Now() - begin));
+    Line(line, out);
+
+    const LONGLONG started = Now();
+    const BOOL armed = BeforeCall(XBOX_PSO_CALL_REPLAY_CREATE);
+    BOOL intact = TRUE, ended = FALSE;
+    AcquireSRWLockExclusive(&replay.lock);
+    for (;;) {
+        if (replay.stop || cache.stopped || !intact) break;
+        UINT32 needRoot;
+        void *root = NULL;
+        const UINT32 index = ReplayNextLocked(&root, &needRoot);
+        if (index != REPLAY_NONE) {
+            replay.entries[index].state = REPLAY_BUILDING;
+            replay.entries[index].flags &= ~REPLAY_DEFERRED;
+            ReleaseSRWLockExclusive(&replay.lock);
+            intact = ReplayBuild(device, index, root);
+            AcquireSRWLockExclusive(&replay.lock);
+            continue;
+        }
+        if (needRoot != REPLAY_NONE) {
+            ReleaseSRWLockExclusive(&replay.lock);
+            intact = ReplayCreateRoot(device, needRoot);
+            AcquireSRWLockExclusive(&replay.lock);
+            continue;
+        }
+        if (!ended) {
+            ended = TRUE;
+            ReleaseSRWLockExclusive(&replay.lock);
+            out = Decimal(Text(line, "asset pso-replay end built="), (ULONG)replay.stats.built);
+            out = Decimal(Text(out, " failed="), (ULONG)replay.stats.failed);
+            out = Decimal(Text(out, " bad="), (ULONG)replay.stats.mismatched);
+            out = Decimal(Text(out, " deferred="), (ULONG)replay.stats.deferred);
+            out = Decimal(Text(out, " own-roots="), (ULONG)replay.stats.ownRoots);
+            out = Decimal(Text(out, " build-ms="), (ULONGLONG)replay.stats.buildUs / 1000);
+            out = Decimal(Text(out, " elapsed-ms="), Milliseconds(Now() - started));
+            out = Decimal(Text(out, " hits="), (ULONG)(replay.stats.hits + replay.stats.waitHits));
+            out = Decimal(Text(out, " early="), (ULONG)replay.stats.early);
+            Line(line, out);
+            /* The pass is over: the guard goes. Later rebuilds (a root the
+               title created as another object) run without it. */
+            intact = AfterCall(device, XBOX_PSO_CALL_REPLAY_CREATE, S_OK, armed);
+            AcquireSRWLockExclusive(&replay.lock);
+            continue;
+        }
+        const ULONG elapsed = Milliseconds(Now() - started);
+        if (elapsed >= replay.holdMs) break;
+        const ULONG remaining = replay.holdMs - elapsed;
+        SleepConditionVariableSRW(&replay.changed, &replay.lock, remaining < 1000 ? remaining : 1000, 0);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+    if (!ended && intact) AfterCall(device, XBOX_PSO_CALL_REPLAY_CREATE, S_OK, armed);
+    ReplayRelease(cache.stopped ? "stopped" : replay.stop ? "close" : "hold-expired");
+    ReplayTraceStats("release");
+    Release(device);
+    return 0;
+}
+
+/* The device the title creates pipelines on: the first one seen. */
+static void ReplayAttach(void *device) {
+    if (replay.device || replay.done || cache.stopped || cache.passthrough || !device) return;
+    if (InterlockedCompareExchangePointer((PVOID volatile *)&replay.device, device, NULL)) return;
+    AddRef(device);
+    if (!cache.device) InterlockedExchangePointer((PVOID volatile *)&cache.device, device);
+    replay.boost = THREAD_PRIORITY_BELOW_NORMAL;
+    replay.thread = CreateThread(NULL, 0, ReplayThread, NULL, CREATE_SUSPENDED, NULL);
+    if (!replay.thread) {
+        Fallback(FALLBACK_REPLAY, "replay-thread", HRESULT_FROM_WIN32(GetLastError()));
+        InterlockedExchange(&replay.done, 1);
+        Release(device);
+        return;
+    }
+    SetThreadPriority(replay.thread, THREAD_PRIORITY_BELOW_NORMAL);
+    ResumeThread(replay.thread);
+}
+
+/* The title created a root signature: keep its blob for records, use the
+   object for the replay, and learn whether the runtime returned the object
+   the replay already created for that blob. */
+static void ReplayNoteRoot(void *device, void *object, UINT nodeMask, const void *blob, SIZE_T size, const BYTE hash[32]) {
+    if (cache.stopped || cache.passthrough) return;
+    ReplayAttach(device);
+    AcquireSRWLockExclusive(&replay.lock);
+    const UINT32 index = ReplayTablesLocked() ? ReplayAddRootLocked(hash, nodeMask, blob, size) : REPLAY_NONE;
+    ReplayRoot *signature = index == REPLAY_NONE ? NULL : &replay.roots[index];
+    if (signature && !signature->title && device == replay.device && !replay.done) {
+        if (signature->own == object) {
+            InterlockedIncrement(&replay.stats.rootSame);
+        } else if (signature->own) {
+            /* A new object for the same blob: pipelines built with the
+               replay's object cannot be served. Rebuild them with the title's
+               and wait for the title's roots from now on. */
+            InterlockedIncrement(&replay.stats.rootDistinct);
+            replay.rootsDistinct = 1;
+            for (UINT32 i = 0; i < replay.queued; ++i) {
+                ReplayEntry *entry = &replay.entries[replay.queue[i]];
+                if (entry->rootIndex != index || entry->state != REPLAY_READY || entry->root != signature->own) continue;
+                Release(entry->pipeline);
+                entry->pipeline = NULL;
+                entry->state = REPLAY_PENDING;
+                InterlockedIncrement(&replay.stats.requeued);
+            }
+        }
+        signature->title = object;
+        AddRef(object);
+        WakeAllConditionVariable(&replay.changed);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+}
+
+/* Records a pipeline the title compiled itself. */
+static void ReplayRecord(int kind, const void *desc, const BYTE key[32], XboxPsoReplayMeta meta) {
+    void *root = DescRoot(kind, desc);
+    BYTE rootHash[32];
+    UINT32 rootIndex = REPLAY_NONE;
+    if (root) {
+        if (!RootHashOf(root, rootHash)) {
+            InterlockedIncrement(&replay.stats.unrecorded);
+            return;
+        }
+        AcquireSRWLockShared(&replay.lock);
+        rootIndex = ReplayFindRootLocked(rootHash);
+        ReleaseSRWLockShared(&replay.lock);
+        if (rootIndex == REPLAY_NONE) {
+            /* A root created before the hooks: its blob is unknown. */
+            InterlockedIncrement(&replay.stats.unrecorded);
+            return;
+        }
+    }
+    meta.kind = (UINT32)kindNames[kind];
+    UINT32 size = 0;
+    BYTE *entry = SerializeDesc(kind, desc, key, root ? rootHash : NULL, &meta, &size);
+    if (!entry) {
+        InterlockedIncrement(&replay.stats.unrecorded);
+        return;
+    }
+    AcquireSRWLockExclusive(&replay.lock);
+    ReplayEntry *slot = ReplayFindLocked(key, FALSE);
+    if (slot && !slot->record) {
+        slot->record = entry;
+        slot->recordSize = size;
+        slot->rootIndex = rootIndex;
+        slot->meta = meta;
+        slot->flags |= REPLAY_HEAP;
+        entry = NULL;
+        InterlockedIncrement(&replay.stats.recorded);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+    if (entry) HeapFree(GetProcessHeap(), 0, entry);
+}
+
+/* A file entry or a new record changed what the next write would hold. */
+static void ReplayUnsaved(BOOL slow) {
+    AcquireSRWLockExclusive(&cache.lock);
+    ++cache.unsaved;
+    if (slow) cache.slowPending = 1;
+    cache.lastStoreTick = GetTickCount64();
+    ReleaseSRWLockExclusive(&cache.lock);
+    if (slow && cache.wake) SetEvent(cache.wake);
+}
+
+/* The title's creation in replay mode. */
+static HRESULT ReplayPipeline(int kind, void *device, const void *desc, REFIID iid, void **out, const char **outcome,
+        DWORD *error) {
+    BYTE key[32];
+    SIZE_T cachedPso;
+    if (!BuildKey(kind, desc, key, &cachedPso)) {
+        InterlockedIncrement(&cache.stats.unkeyed);
+        *outcome = "unkeyed";
+        const HRESULT result = originalPipelines[kind](device, desc, iid, out);
+        *error = GetLastError();
+        return result;
+    }
+    if (!cache.stopped) ReplayAttach(device);
+    const char *bypass = cache.stopped ? "stopped" : device != replay.device ? "other-device" : NULL;
+    XboxPsoReplayMeta meta;
+    ZeroBytes(&meta, sizeof(meta));
+    void *taken = NULL;
+    BOOL record = FALSE, waited = FALSE, unsaved = FALSE;
+    UINT32 savedUs = 0;
+    LONGLONG start = Now();
+    if (!bypass) {
+        AcquireSRWLockExclusive(&replay.lock);
+        ReplayStampLocked(&meta);
+        ReplayEntry *entry = ReplayTablesLocked() ? ReplayFindLocked(key, TRUE) : NULL;
+        if (!entry) {
+            bypass = "full";
+        } else if (!(entry->flags & REPLAY_REQUESTED) && !entry->record) {
+            /* New: the title compiles it and it is recorded. */
+            entry->flags |= REPLAY_REQUESTED;
+            record = TRUE;
+        } else {
+            if (!(entry->flags & REPLAY_REQUESTED)) {
+                /* A record from an earlier launch: this launch's place. */
+                entry->flags |= REPLAY_REQUESTED;
+                entry->meta.order = meta.order;
+                entry->meta.atMs = meta.atMs;
+                entry->meta.phase = meta.phase;
+                entry->meta.age = 0;
+                unsaved = TRUE;
+            } else {
+                *outcome = "repeat";
+            }
+            while (entry->state == REPLAY_BUILDING && !cache.stopped) {
+                /* The replay started it first: wait, at this thread's priority. */
+                const int priority = GetThreadPriority(GetCurrentThread());
+                if (priority != THREAD_PRIORITY_ERROR_RETURN && priority > replay.boost && replay.thread) {
+                    replay.boost = priority;
+                    SetThreadPriority(replay.thread, priority);
+                }
+                waited = TRUE;
+                SleepConditionVariableSRW(&replay.changed, &replay.lock, 100, 0);
+            }
+            if (entry->state == REPLAY_READY) {
+                if (DescRoot(kind, desc) == entry->root) {
+                    taken = entry->pipeline;
+                    savedUs = entry->meta.createUs;
+                } else {
+                    InterlockedIncrement(&replay.stats.rootMismatch);
+                    *outcome = "root-mismatch";
+                    Release(entry->pipeline);
+                }
+                entry->pipeline = NULL;
+                entry->state = REPLAY_TAKEN;
+            } else if (entry->state == REPLAY_PENDING) {
+                /* Not started: the title compiles it and the replay skips it. */
+                entry->state = REPLAY_TAKEN;
+                InterlockedIncrement(&replay.stats.early);
+                *outcome = "early";
+            } else if (entry->flags & REPLAY_EXPIRED) {
+                entry->flags &= ~REPLAY_EXPIRED;
+                *outcome = "expired";
+            } else if (!*outcome) {
+                *outcome = entry->state == REPLAY_FAILED ? "replay-failed" : "repeat";
+                if (entry->state != REPLAY_FAILED) InterlockedIncrement(&replay.stats.repeats);
+            }
+        }
+        ReleaseSRWLockExclusive(&replay.lock);
+    }
+    /* After the stamp, which starts a new phase only with no creation in flight. */
+    InterlockedIncrement(&replay.inFlight);
+    HRESULT result;
+    if (taken) {
+        /* The title gets the only reference, as after a fresh creation. */
+        result = Query(taken, iid, out);
+        Release(taken);
+        if (SUCCEEDED(result)) {
+            const LONG64 us = (LONG64)Microseconds(Now() - start);
+            InterlockedIncrement(waited ? &replay.stats.waitHits : &replay.stats.hits);
+            InterlockedAdd64(waited ? &replay.stats.waitUs : &replay.stats.hitUs, us);
+            InterlockedAdd64(&replay.stats.savedUs, (LONG64)savedUs);
+            InterlockedIncrement(&cache.stats.hits);
+            InterlockedAdd64(&cache.stats.hitUs, us);
+            *outcome = waited ? "wait-hit" : "hit";
+            InterlockedDecrement(&replay.inFlight);
+            if (unsaved) ReplayUnsaved(FALSE);
+            return result;
+        }
+        /* An interface the pipeline does not expose: the driver answers. */
+        *out = NULL;
+        *outcome = "query-failed";
+    }
+    if (bypass) {
+        InterlockedIncrement(&cache.stats.bypassed);
+        *outcome = bypass;
+    } else if (!*outcome) {
+        *outcome = "miss";
+    }
+    const BOOL concurrent = replay.building != 0;
+    start = Now();
+    result = originalPipelines[kind](device, desc, iid, out);
+    *error = GetLastError();
+    const ULONGLONG createUs = Microseconds(Now() - start);
+    if (!bypass) {
+        InterlockedIncrement(&cache.stats.misses);
+        InterlockedAdd64(&cache.stats.missUs, (LONG64)createUs);
+        InterlockedAdd64(&replay.stats.missUs, (LONG64)createUs);
+        if (concurrent) {
+            InterlockedIncrement(&replay.stats.concurrent);
+            InterlockedAdd64(&replay.stats.concurrentUs, (LONG64)createUs);
+        }
+    }
+    AcquireSRWLockExclusive(&replay.lock);
+    replay.lastTick = Now();
+    ReleaseSRWLockExclusive(&replay.lock);
+    InterlockedDecrement(&replay.inFlight);
+    if (record && SUCCEEDED(result) && out && *out && createUs >= replay.recordMinUs) {
+        meta.createUs = createUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : (UINT32)createUs;
+        ReplayRecord(kind, desc, key, meta);
+        unsaved = TRUE;
+        InterlockedIncrement(&cache.stats.stores);
+    }
+    if (unsaved) ReplayUnsaved(createUs >= XBOX_PSO_CACHE_SLOW_US);
+    return result;
+}
+
+/* Loads a validated replay payload: roots, then pipelines in replay order.
+   The records keep pointing into the payload. */
+static BOOL ReplayLoad(const BYTE *payload, ULONGLONG size, UINT32 *pipelines, UINT32 *late) {
+    UINT32 records = 0, rootRecords = 0;
+    *pipelines = *late = 0;
+    if (!XboxPsoReplayValidatePayload(payload, size, &records, &rootRecords)) return FALSE;
+    XboxPsoReplayMeta *metas = (XboxPsoReplayMeta *)HeapAlloc(GetProcessHeap(), 0,
+        (SIZE_T)(records ? records : 1) * sizeof(XboxPsoReplayMeta));
+    UINT32 *order = (UINT32 *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(records ? records : 1) * 2 * sizeof(UINT32));
+    BOOL loaded = FALSE;
+    AcquireSRWLockExclusive(&replay.lock);
+    if (metas && order && ReplayTablesLocked()) {
+        UINT64 offset = 0;
+        UINT32 tag, bodySize;
+        const uint8_t *body;
+        while (XboxPsoReplayNextEntry(payload, size, &offset, &tag, &body, &bodySize) > 0) {
+            XboxPsoReplayRoot root;
+            if (tag == XBOX_PSO_REPLAY_TAG_ROOT && XboxPsoReplayParseRoot(body, bodySize, &root))
+                ReplayAddRootLocked(root.hash, root.nodeMask, root.blob, root.size);
+        }
+        UINT32 count = 0;
+        UINT32 *slots = order + records;
+        offset = 0;
+        while (XboxPsoReplayNextEntry(payload, size, &offset, &tag, &body, &bodySize) > 0) {
+            XboxPsoReplayPipeline pipeline;
+            if (tag != XBOX_PSO_REPLAY_TAG_PIPELINE || !XboxPsoReplayParsePipeline(body, bodySize, &pipeline)) continue;
+            const UINT32 rootIndex = XboxPsoReplayHasRoot(&pipeline) ? ReplayFindRootLocked(pipeline.rootHash) : REPLAY_NONE;
+            if (XboxPsoReplayHasRoot(&pipeline) && rootIndex == REPLAY_NONE) continue;
+            ReplayEntry *entry = ReplayFindLocked(pipeline.key, TRUE);
+            /* Already created by the title in this process: nothing to warm. */
+            if (!entry || entry->record || (entry->flags & REPLAY_REQUESTED)) continue;
+            entry->record = body - 8;
+            entry->recordSize = (UINT32)XboxPsoReplayEntrySize(bodySize);
+            entry->rootIndex = rootIndex;
+            entry->meta = pipeline.meta;
+            entry->state = REPLAY_PENDING;
+            metas[count] = pipeline.meta;
+            slots[count] = (UINT32)(entry - replay.entries);
+            order[count] = count;
+            if (pipeline.meta.phase) ++*late;
+            ++count;
+        }
+        XboxPsoReplaySort(order, count, metas);
+        for (UINT32 i = 0; i < count; ++i) replay.queue[i] = slots[order[i]];
+        replay.queued = count;
+        *pipelines = count;
+        InterlockedExchange(&replay.stats.loaded, (LONG)count);
+        loaded = TRUE;
+        WakeAllConditionVariable(&replay.changed);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+    if (metas) HeapFree(GetProcessHeap(), 0, metas);
+    if (order) HeapFree(GetProcessHeap(), 0, order);
+    return loaded;
+}
+
+/* Called by WriteCache with the cache lock held. The title's records of
+   this launch go first, then older ones by replay order, within the bounds;
+   a record not asked for in MAX_AGE launches is dropped. */
+static HRESULT ReplaySerialize(BYTE **buffer, ULONGLONG *payload, UINT32 *pipelines, BOOL bounded) {
+    *buffer = NULL;
+    *payload = 0;
+    *pipelines = 0;
+    if (!AcquireBounded(&replay.lock, bounded)) return HRESULT_FROM_WIN32(ERROR_BUSY);
+    HRESULT result = E_UNEXPECTED;
+    BYTE *rootUsed = replay.entries ? (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, XBOX_PSO_REPLAY_MAX_ROOTS) : NULL;
+    if (rootUsed) {
+        ULONGLONG total = 0;
+        UINT32 count = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (UINT32 i = 0; i < ENTRY_SLOTS; ++i) {
+                ReplayEntry *entry = &replay.entries[i];
+                const BOOL requested = (entry->flags & REPLAY_REQUESTED) != 0;
+                if (!entry->record || (pass == 0) != requested ||
+                        XboxPsoReplayNextAge(entry->meta.age, requested) < 0 || count >= XBOX_PSO_REPLAY_MAX_PIPELINES)
+                    continue;
+                ULONGLONG size = entry->recordSize;
+                const ReplayRoot *root = entry->rootIndex == REPLAY_NONE ? NULL : &replay.roots[entry->rootIndex];
+                if (root && !rootUsed[entry->rootIndex])
+                    size += XboxPsoReplayEntrySize(XBOX_PSO_REPLAY_ROOT_HEADER + root->size);
+                if (total + size > XBOX_PSO_REPLAY_MAX_PAYLOAD) continue;
+                if (root) rootUsed[entry->rootIndex] = 1;
+                entry->flags |= REPLAY_WRITE;
+                total += size;
+                ++count;
+            }
+        }
+        BYTE *out = total ? (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(XBOX_PSO_CACHE_HEADER_SIZE + total)) : NULL;
+        if (out) {
+            BYTE *at = out + XBOX_PSO_CACHE_HEADER_SIZE;
+            for (UINT32 i = 0; i < replay.rootCount; ++i)
+                if (rootUsed[i])
+                    at += XboxPsoReplayWriteRoot(at, replay.roots[i].hash, replay.roots[i].nodeMask, replay.roots[i].blob,
+                        replay.roots[i].size);
+            for (UINT32 i = 0; i < ENTRY_SLOTS; ++i) {
+                ReplayEntry *entry = &replay.entries[i];
+                if (!(entry->flags & REPLAY_WRITE)) continue;
+                CopyBytes(at, entry->record, entry->recordSize);
+                XboxPsoReplayMeta meta = entry->meta;
+                meta.age = (UINT32)XboxPsoReplayNextAge(entry->meta.age, (entry->flags & REPLAY_REQUESTED) != 0);
+                XboxPsoReplayPutMeta(at + 8, &meta);
+                at += entry->recordSize;
+            }
+            *buffer = out;
+            *payload = total;
+            *pipelines = count;
+            result = S_OK;
+        } else {
+            result = total ? E_OUTOFMEMORY : S_FALSE;
+        }
+        for (UINT32 i = 0; i < ENTRY_SLOTS; ++i) replay.entries[i].flags &= ~REPLAY_WRITE;
+        HeapFree(GetProcessHeap(), 0, rootUsed);
+    }
+    ReleaseSRWLockExclusive(&replay.lock);
+    return result;
+}
+
+/* Process exit during the pass: the replay stops, and with the device intact
+   its guard goes, so a quit is not taken for a crash on the next launch. */
+static void ReplayExit(void) {
+    if (!replay.device || replay.done) return;
+    InterlockedExchange(&replay.stop, 1);
+    if (cache.stopped || RemovedReason(replay.device) != S_OK) return;
+    AcquireSRWLockExclusive(&cache.guardLock);
+    if (cache.guardArmed && !cache.guardSticky && cache.guardPath[0] &&
+            cache.lastCall >= XBOX_PSO_CALL_REPLAY_ROOT && cache.lastCall <= XBOX_PSO_CALL_REPLAY_CREATE) {
+        DeleteFileFromAppW(cache.guardPath);
+        cache.guardArmed = 0;
+    }
+    ReleaseSRWLockExclusive(&cache.guardLock);
+}
+
+/* Stops the thread and frees everything (XboxPipelineCacheClose). */
+static void ReplayReset(void) {
+    InterlockedExchange(&replay.stop, 1);
+    AcquireSRWLockExclusive(&replay.lock);
+    WakeAllConditionVariable(&replay.changed);
+    ReleaseSRWLockExclusive(&replay.lock);
+    if (replay.thread) {
+        /* The thread reads records in the file and the tables freed below.
+           It is in a driver creation or a wait of at most a second. */
+        WaitForSingleObject(replay.thread, INFINITE);
+        CloseHandle(replay.thread);
+    } else if (replay.device && !replay.done) {
+        Release(replay.device);
+    }
+    if (!replay.done && replay.device) ReplayRelease("close");
+    AcquireSRWLockExclusive(&replay.lock);
+    for (UINT32 i = 0; replay.entries && i < ENTRY_SLOTS; ++i)
+        if (replay.entries[i].flags & REPLAY_HEAP) HeapFree(GetProcessHeap(), 0, (void *)replay.entries[i].record);
+    for (UINT32 i = 0; replay.roots && i < replay.rootCount; ++i) HeapFree(GetProcessHeap(), 0, replay.roots[i].blob);
+    if (replay.entries) HeapFree(GetProcessHeap(), 0, replay.entries);
+    if (replay.roots) HeapFree(GetProcessHeap(), 0, replay.roots);
+    if (replay.queue) HeapFree(GetProcessHeap(), 0, replay.queue);
+    const ULONG recordMinUs = replay.recordMinUs, holdMs = replay.holdMs;
+    ZeroBytes(&replay.stats, sizeof(replay.stats));
+    replay.entries = NULL;
+    replay.roots = NULL;
+    replay.queue = NULL;
+    replay.used = replay.queued = replay.rootCount = 0;
+    replay.device = NULL;
+    replay.thread = NULL;
+    replay.done = replay.building = replay.inFlight = 0;
+    replay.rootsDistinct = 0;
+    replay.firstTick = replay.lastTick = 0;
+    replay.phase = replay.order = 0;
+    replay.recordMinUs = recordMinUs;
+    replay.holdMs = holdMs;
+    InterlockedExchange(&replay.stop, 0);
+    ReleaseSRWLockExclusive(&replay.lock);
+}
+
 static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
     /* After a removal nothing is serialized: the guard disables the cache. */
     if (cache.stopped) return S_FALSE;
@@ -1080,6 +2205,8 @@ static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
             } else if (!payload) {
                 result = E_UNEXPECTED;
             }
+        } else if (XboxPsoCacheIsReplay((uint32_t)mode)) {
+            result = ReplaySerialize(&buffer, &payload, &pipelines, bounded);
         } else {
             result = E_NOT_VALID_STATE;
         }
@@ -1091,7 +2218,8 @@ static HRESULT WriteCache(BOOL final, const char *reason, BOOL bounded) {
 
     if (result != S_FALSE) {
         if (SUCCEEDED(result)) {
-            XboxPsoCacheWriteHeader(buffer, (uint32_t)mode, cache.identity, payload, pipelines);
+            XboxPsoCacheWriteHeader(buffer, XboxPsoCacheIsReplay((uint32_t)mode) ? XBOX_PSO_CACHE_MODE_REPLAY :
+                (uint32_t)mode, cache.identity, payload, pipelines);
             result = WriteAtomically(cache.path, buffer, XBOX_PSO_CACHE_HEADER_SIZE + payload);
         }
         if (SUCCEEDED(result)) {
@@ -1429,6 +2557,7 @@ static void Store(int kind, void *device, const BYTE key[32], void *object, ULON
 
 static HRESULT CachedPipeline(int kind, void *device, const void *desc, REFIID iid, void **out,
         const char **outcome, DWORD *error) {
+    if (XboxPsoCacheIsReplay((uint32_t)cache.selected)) return ReplayPipeline(kind, device, desc, iid, out, outcome, error);
     BYTE key[32];
     SIZE_T cachedPso;
     if (!BuildKey(kind, desc, key, &cachedPso)) {
@@ -1606,7 +2735,11 @@ static HRESULT STDMETHODCALLTYPE HookRootSignature(void *device, UINT nodeMask, 
     const HRESULT result = originalRootSignature(device, nodeMask, blob, size, iid, out);
     const DWORD error = GetLastError();
     /* Timing-only runs do not hash root signatures. */
-    if (keyRootSignatures && SUCCEEDED(result) && out && *out && blob && size) RememberRoot(*out, nodeMask, blob, size);
+    if (keyRootSignatures && SUCCEEDED(result) && out && *out && blob && size) {
+        BYTE digest[32];
+        if (RememberRoot(*out, nodeMask, blob, size, digest) && XboxPsoCacheIsReplay((uint32_t)cache.selected))
+            ReplayNoteRoot(device, *out, nodeMask, blob, size, digest);
+    }
     SetLastError(error);
     return result;
 }
@@ -1713,8 +2846,10 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
         if (call && same) cache.guardCall = call;
         else if (call) DeleteFileFromAppW(cache.guardPath);
     }
-    const BOOL usable = (cache.selected == XBOX_PSO_CACHE_MODE_LIBRARY || cache.selected == XBOX_PSO_CACHE_MODE_BLOBS) &&
-        !cache.guardCall;
+    const BOOL replayMode = XboxPsoCacheIsReplay((uint32_t)cache.selected);
+    const BOOL usable = (cache.selected == XBOX_PSO_CACHE_MODE_LIBRARY || cache.selected == XBOX_PSO_CACHE_MODE_BLOBS ||
+        replayMode) && !cache.guardCall;
+    UINT32 replayed = 0, late = 0;
     ULONGLONG size = 0;
     DWORD error = ERROR_SUCCESS;
     cache.fileStatus = -1;
@@ -1728,6 +2863,12 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
         cache.file = ReadWholeFile(cache.path, &size, &error);
         if (cache.file) {
             cache.fileStatus = XboxPsoCacheValidate(cache.file, size, cache.identity, &cache.view);
+            /* A file another mode wrote is replaced. */
+            if (cache.fileStatus == XBOX_PSO_CACHE_OK && replayMode != (cache.view.mode == XBOX_PSO_CACHE_MODE_REPLAY))
+                cache.fileStatus = XBOX_PSO_CACHE_BAD_MODE;
+            if (cache.fileStatus == XBOX_PSO_CACHE_OK && replayMode &&
+                    !ReplayLoad(cache.view.payload, cache.view.payloadSize, &replayed, &late))
+                cache.fileStatus = XBOX_PSO_CACHE_BAD_RECORDS;
             if (cache.fileStatus != XBOX_PSO_CACHE_OK) {
                 HeapFree(GetProcessHeap(), 0, cache.file);
                 cache.file = NULL;
@@ -1742,6 +2883,7 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
             HANDLE thread = CreateThread(NULL, 0, WriteInBackground, NULL, 0, NULL);
             if (thread) CloseHandle(thread);
         }
+        if (replayMode) cache.mode = cache.selected;
         cache.configured = 1;
         cache.ready = 1;
     }
@@ -1762,6 +2904,14 @@ HRESULT XboxPipelineCacheOpen(const WCHAR *prefix) {
     if (SUCCEEDED(result)) out = Text(Text(out, " identity="), hex);
     out = Hex32(Text(out, " result="), (DWORD)result);
     Line(line, out);
+    if (replayMode && usable && SUCCEEDED(result)) {
+        out = Decimal(Text(line, "asset pso-replay load pipelines="), replayed);
+        out = Decimal(Text(out, " late="), late);
+        out = Decimal(Text(out, " roots="), replay.rootCount);
+        out = Decimal(Text(out, " record-min-us="), replay.recordMinUs);
+        out = Decimal(Text(out, " hold-ms="), replay.holdMs);
+        Line(line, out);
+    }
     return result;
 }
 
@@ -1770,6 +2920,8 @@ HRESULT XboxPipelineCacheWriteNow(void) {
 }
 
 void XboxPipelineCacheClose(BOOL removeFile) {
+    /* Records may point into the file: the replay goes first. */
+    ReplayReset();
     AcquireSRWLockExclusive(&cache.writeLock);
     AcquireSRWLockExclusive(&cache.lock);
     cache.ready = 0;
@@ -1810,7 +2962,8 @@ void XboxPipelineCacheClose(BOOL removeFile) {
 
 void XboxPipelineCacheSelectMode(LONG mode) {
     AcquireSRWLockExclusive(&cache.lock);
-    cache.selected = mode == XBOX_PSO_CACHE_MODE_LIBRARY || mode == XBOX_PSO_CACHE_MODE_BLOBS ? mode : 0;
+    cache.selected = mode == XBOX_PSO_CACHE_MODE_LIBRARY || mode == XBOX_PSO_CACHE_MODE_BLOBS ||
+        XboxPsoCacheIsReplay((uint32_t)mode) ? mode : 0;
     ReleaseSRWLockExclusive(&cache.lock);
 }
 
@@ -1834,6 +2987,55 @@ void XboxPipelineCacheGetCounters(XboxPipelineCacheCounters *counters) {
     ReleaseSRWLockShared(&cache.lock);
 }
 
+void XboxPipelineReplayConfigure(ULONG recordMinUs, ULONG holdMs) {
+    AcquireSRWLockExclusive(&replay.lock);
+    replay.recordMinUs = recordMinUs;
+    replay.holdMs = holdMs ? holdMs : XBOX_PSO_REPLAY_HOLD_MS;
+    ReleaseSRWLockExclusive(&replay.lock);
+}
+
+HRESULT XboxPipelineReplayAttach(void *device) {
+    if (!device) return E_POINTER;
+    if (!XboxPsoCacheIsReplay((uint32_t)cache.selected) || cache.passthrough) return E_NOT_VALID_STATE;
+    ReplayAttach(device);
+    return replay.device == device ? S_OK : S_FALSE;
+}
+
+BOOL XboxPipelineReplayWaitIdle(DWORD timeoutMs) {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        AcquireSRWLockShared(&replay.lock);
+        const BOOL busy = !replay.done && replay.device && (!cache.ready || ReplayBusyLocked());
+        ReleaseSRWLockShared(&replay.lock);
+        if (!busy) return TRUE;
+        if (GetTickCount64() - start >= timeoutMs) return FALSE;
+        Sleep(5);
+    }
+}
+
+void XboxPipelineReplayGetCounters(XboxPipelineReplayCounters *counters) {
+    counters->loaded = replay.stats.loaded;
+    counters->built = replay.stats.built;
+    counters->failed = replay.stats.failed;
+    counters->mismatched = replay.stats.mismatched;
+    counters->hits = replay.stats.hits;
+    counters->waitHits = replay.stats.waitHits;
+    counters->early = replay.stats.early;
+    counters->rootMismatch = replay.stats.rootMismatch;
+    counters->rootSame = replay.stats.rootSame;
+    counters->rootDistinct = replay.stats.rootDistinct;
+    counters->recorded = replay.stats.recorded;
+    counters->unrecorded = replay.stats.unrecorded;
+    counters->released = replay.stats.released;
+    counters->requeued = replay.stats.requeued;
+    counters->ownRoots = replay.stats.ownRoots;
+    counters->buildUs = replay.stats.buildUs;
+    counters->maxBuildUs = replay.stats.maxBuildUs;
+    counters->hitUs = replay.stats.hitUs;
+    counters->missUs = replay.stats.missUs;
+    counters->attached = replay.device != NULL;
+}
+
 void WINAPI XboxD3D12PipelineCacheFlush(void) {
     if (cache.passthrough && !cache.stopped && !InterlockedExchange(&cache.exited, 1)) {
         const DWORD error = GetLastError();
@@ -1843,6 +3045,7 @@ void WINAPI XboxD3D12PipelineCacheFlush(void) {
     }
     if (!cache.ready || InterlockedExchange(&cache.exited, 1)) return;
     const DWORD error = GetLastError();
+    if (XboxPsoCacheIsReplay((uint32_t)cache.selected)) ReplayExit();
     const HRESULT result = WriteCache(TRUE, "exit", TRUE);
     if (result == S_FALSE) TraceStats("exit");
     else if (result == HRESULT_FROM_WIN32(ERROR_BUSY)) {
@@ -1884,8 +3087,8 @@ static DWORD WINAPI StartHooks(LPVOID prefix) {
     return 0;
 }
 
-/* XBOX_WIN32_PSO_CACHE_MODE from the profile: library, blobs or (anything
-   else) passthrough. */
+/* XBOX_WIN32_PSO_CACHE_MODE from the profile: library, blobs, replay,
+   replay-idle or (anything else) passthrough. */
 static LONG SelectedMode(void) {
     WCHAR value[16];
     const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_PSO_CACHE_MODE", value, ARRAYSIZE(value));
@@ -1893,6 +3096,9 @@ static LONG SelectedMode(void) {
     if (CompareStringOrdinal(value, (int)length, L"library", -1, FALSE) == CSTR_EQUAL)
         return XBOX_PSO_CACHE_MODE_LIBRARY;
     if (CompareStringOrdinal(value, (int)length, L"blobs", -1, FALSE) == CSTR_EQUAL) return XBOX_PSO_CACHE_MODE_BLOBS;
+    if (CompareStringOrdinal(value, (int)length, L"replay", -1, FALSE) == CSTR_EQUAL) return XBOX_PSO_CACHE_MODE_REPLAY;
+    if (CompareStringOrdinal(value, (int)length, L"replay-idle", -1, FALSE) == CSTR_EQUAL)
+        return XBOX_PSO_CACHE_MODE_REPLAY_IDLE;
     return 0;
 }
 

@@ -8,8 +8,9 @@
 
 /* Background start, once per process. Honors XBOX_WIN32_PSO_TRACE=1 (timing
    only), XBOX_WIN32_PSO_CACHE=<LocalState prefix> and
-   XBOX_WIN32_PSO_CACHE_MODE=library|blobs (any other value or none:
-   passthrough, which times creation and makes no cache call on the device). */
+   XBOX_WIN32_PSO_CACHE_MODE=library|blobs|replay|replay-idle (any other value
+   or none: passthrough, which times creation and makes no cache call on the
+   device). */
 void XboxPipelineHooksStart(void);
 
 /* Patches the shared ID3D12Device method table through this device: slots 10,
@@ -29,8 +30,10 @@ HRESULT XboxPipelineCacheWriteNow(void);
    file. A guard file is kept. */
 void XboxPipelineCacheClose(BOOL removeFile);
 
-/* 1 selects the pipeline library and 2 cached blobs; anything else is
-   passthrough. Takes effect at the next Open and bind. */
+/* 1 selects the pipeline library, 2 cached blobs, 3 record and replay and
+   4 replay from the title's first idle period; anything else is passthrough.
+   Takes effect at the next Open and bind. Select before the title's first
+   root signature so the replay sees it. */
 void XboxPipelineCacheSelectMode(LONG mode);
 
 /* The XboxPsoCacheCall recorded in <prefix>.guard (15 when unreadable), or 0
@@ -56,6 +59,40 @@ typedef struct XboxPipelineCacheCounters {
 } XboxPipelineCacheCounters;
 
 void XboxPipelineCacheGetCounters(XboxPipelineCacheCounters *counters);
+
+/* Record and replay. Configure sets the shortest creation that is recorded
+   (XBOX_PSO_REPLAY_RECORD_US by default; the control records everything)
+   and how long unrequested pre-created pipelines are held (0: the default). */
+void XboxPipelineReplayConfigure(ULONG recordMinUs, ULONG holdMs);
+
+/* Starts the replay on this device before the title's first root signature
+   or pipeline would (the control). S_FALSE when another device was attached. */
+HRESULT XboxPipelineReplayAttach(void *device);
+
+/* TRUE once the replay has nothing it can build now (or never attached). */
+BOOL XboxPipelineReplayWaitIdle(DWORD timeoutMs);
+
+typedef struct XboxPipelineReplayCounters {
+    LONG loaded;       /* records read from the file */
+    LONG built;        /* pre-created */
+    LONG failed;       /* creation or root signature failed */
+    LONG mismatched;   /* a rebuilt desc did not reproduce its key */
+    LONG hits;         /* served ready */
+    LONG waitHits;     /* served after waiting for the replay's creation */
+    LONG early;        /* asked for before the replay reached it */
+    LONG rootMismatch; /* ready, but the title named another root object */
+    LONG rootSame;     /* the runtime returned the replay's root object to the title */
+    LONG rootDistinct; /* the runtime returned a new root object for the same blob */
+    LONG recorded;
+    LONG unrecorded;
+    LONG released;     /* pre-created and never asked for */
+    LONG requeued;
+    LONG ownRoots;
+    LONGLONG buildUs, maxBuildUs, hitUs, missUs;
+    LONG attached;
+} XboxPipelineReplayCounters;
+
+void XboxPipelineReplayGetCounters(XboxPipelineReplayCounters *counters);
 
 /* Exported for the process-exit adapters: writes unsaved pipelines once. */
 void WINAPI XboxD3D12PipelineCacheFlush(void);

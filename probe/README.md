@@ -16,6 +16,7 @@ Install the corresponding signed package before running a case. The JSON include
 | Loader, SDL, XInput, desktop windowing, and DXGI | The [graphics runtime control](graphics-runtime-control/build.sh) and its build options. |
 | Steam DLL loading and native Big Picture launcher | The [Steam Core Loader Probe](../docs/STEAM-CORE.md#run-the-on-console-sign-in) and [native launcher](../analysis/big-picture.md). |
 | Direct3D 12 pipeline persistence (library and cached PSOs) | The [pipeline-cache control](#direct3d-12-pipeline-cache-control) (`--d3d12-pipeline-cache`). |
+| Direct3D 12 pipeline record and replay (pre-creation with the title's own calls) | The [record-and-replay control](#record-and-replay-control) (`--d3d12-pipeline-replay`). |
 | WebView and window activation | The [primary XAML](big-picture-primary/), [WebView smoke](big-picture-webview/), [renderer integration](big-picture-integration-control/), and [windowed](big-picture-windowed/) controls. |
 
 When adding a single-package control, reuse the relevant runtime adapter and report the operation's outcome and a per-launch `run_id`. Register the package and its terminal checks in [`catalog.py`](catalog.py). The [runner](runner.py) handles fresh reports, deadlines, and verdicts. Use [normal Big Picture Play](../docs/GAME-LAUNCH.md#verification) to verify a title after the control passes.
@@ -59,7 +60,7 @@ The round installs the shared hooks and selects the path as a profile would. It 
 
 ### Build, deploy and run
 
-The `pipeline-cache-control` job of the [Build Xbox probe workflow](../.github/workflows/xbox-probe.yml) builds this control after the Windows SDK package job. It runs on pushes that touch `probe/`, `runtime/` or `build_tools/`, and on a manual dispatch, which can set the package version. The job runs `build.sh --d3d12-pipeline-cache` under Git Bash with the same LLVM, Windows SDK `WindowsApp.lib` and `xbox-steam-core-template` artifact as the rest of the workflow. It downloads three pinned inputs: Mesa UWP release `26.2.2`, the Mesa license at source revision `34732bb`, and the DirectX Shader Compiler `v1.8.2505.1` archive for `dxil.dll`. `python3 -m build_tools.stage_mesa_uwp --control-runtime` checks their digests before it writes `MESA_LAYOUT`. The control does not load Mesa. `build.sh` copies the same files into every graphics control.
+The `pipeline-cache-control` job of the [Build Xbox probe workflow](../.github/workflows/xbox-probe.yml) builds this control, and the [record-and-replay control](#record-and-replay-control) from the same sources, after the Windows SDK package job. It runs on pushes that touch `probe/`, `runtime/` or `build_tools/`, and on a manual dispatch, which can set the package version. The job runs `build.sh --d3d12-pipeline-cache` under Git Bash with the same LLVM, Windows SDK `WindowsApp.lib` and `xbox-steam-core-template` artifact as the rest of the workflow. It downloads three pinned inputs: Mesa UWP release `26.2.2`, the Mesa license at source revision `34732bb`, and the DirectX Shader Compiler `v1.8.2505.1` archive for `dxil.dll`. `python3 -m build_tools.stage_mesa_uwp --control-runtime` checks their digests before it writes `MESA_LAYOUT`. The control does not load Mesa. `build.sh` copies the same files into every graphics control.
 
 The `xbox-graphics-control-pipeline-cache` artifact contains:
 
@@ -116,3 +117,22 @@ If `CreatePipelineLibrary` removes the device here as it did in Slay the Spire 2
 
 A stage 07 failure in the setup process can mean the console's runtime rejects DXBC. The production cache keys whatever bytecode the title passes, such as Mesa's DXIL, so that result does not rule out the cache. It does mean the control needs a DXIL shader.
 
+## Record-and-replay control
+
+Build the same child with `--d3d12-pipeline-replay`. It checks, in two processes, the path that [`mode=replay`](../docs/GAME-LAUNCH.md#record-and-replay) uses, with the same `runtime/win32/d3d12-pipeline-cache.c`: record a pipeline desc by content in one process, then pre-create it from the file in another and serve it to that process's own creation. The replay makes no driver persistence call, so a profile does not need this result to select the mode. Run it before a title uses replay on a new console OS or runtime build. It shows whether the creation calls succeed from a background thread, whether serving is faster, and how the runtime treats root-signature identity.
+
+The top process makes no D3D12 call and starts one record process. The record process creates its device the way Mesa does and installs the hooks. It selects replay before its first root signature, as a profile does, and records the trivial compute shader twice, once with `CreateComputePipelineState` and once as a subobject stream through `ID3D12Device2::CreatePipelineState`. It times both creations and writes the file to TempState. The replay process reads the file and attaches the replay to its device before it creates any root signature. The replay therefore creates its own root signature from the recorded blob and pre-creates both pipelines on its background thread. The process then creates its root signature through the method table, which shows whether the runtime returned the replay's object for the same blob, and creates both pipelines. Both must be served from the replay. The control covers compute and stream descs. The graphics desc walk is checked on the console by the title run, where every rebuilt desc must reproduce its recorded key (`bad=0`).
+
+The `pipeline-cache-control` job builds it as the `xbox-graphics-control-pipeline-replay` artifact, with the same contents, identity and install steps as [above](#build-deploy-and-run) and `control=d3d12-pipeline-replay` in `control-build.txt`. To build locally, pass `--d3d12-pipeline-replay` instead of `--d3d12-pipeline-cache`. Read `child_exit_code` from the `graphics-control` case:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0x5AXODRMM` | `O` is the outcome. `D` is root-signature identity: 1 means the runtime returned the replay's object for the same blob, 2 means it returned a new object and the replay rebuilt with that one, and 0 means not observed. `R` is `floor(log2(record time / serve time))`. `MM` is the record process's creation time for both pipelines in 10 µs units, capped at `FF`. `X` is the cache call before the first device removal: 0 none, B `replay-root`, C `replay-create`, E the control's own creation. |
+| `O` = 1 | Both pipelines were recorded, pre-created in the second process and served faster than the record process created them. This is the result that proves the path. |
+| `O` = 2 / 3 / 4 | Both were served but not faster / one was served / neither was served. |
+| `O` = 5 / 6 | The replay process found no valid file / the replay built fewer than two pipelines (a rebuilt desc that did not reproduce its key counts here). |
+| `O` = 7 / 8 / 9 / A | The device was removed: `DEVICE_REMOVED`, `DEVICE_HUNG`, `DEVICE_RESET` or `DRIVER_INTERNAL_ERROR`. |
+| `O` = B / C | A process exited with another code (`X` from its guard) / the replay did not finish within 30 s. |
+| `0x5CSS3RRR` | The record process failed at stage `SS`, with the stages above. Stage 08 here is the recorded count (`recorded << 4 \| unrecorded`). |
+
+A `D` of 2 means that on this runtime, a title's root signature is a different object from the one the replay created. Replay then waits for the title's own root signatures, and startup pipelines whose root signature the title has not created yet are not pre-created.

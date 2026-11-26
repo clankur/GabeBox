@@ -298,20 +298,30 @@ jobs:
           name: xbox-probe-lifetime
           path: ${{ runner.temp }}/xbox-probe/lifetime-artifacts/
           if-no-files-found: error
-  # The D3D12 pipeline-cache control: probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache,
-  # run under Git Bash with the same LLVM, Windows SDK and Steam Core template as the job above.
+  # The D3D12 pipeline-cache controls: probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache
+  # (driver persistence paths) and --d3d12-pipeline-replay (record and replay with the title's own
+  # creation calls), run under Git Bash with the same LLVM, Windows SDK and Steam Core template as the job above.
   pipeline-cache-control:
     needs: windows-sdk-package
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - control: d3d12-pipeline-cache
+            artifact: xbox-graphics-control-pipeline-cache
+          - control: d3d12-pipeline-replay
+            artifact: xbox-graphics-control-pipeline-replay
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: xbox-steam-core-template
           path: ${{ runner.temp }}/steam-core-template
-      - name: Build, sign and record the pipeline-cache control
+      - name: Build, sign and record the ${{ matrix.control }} control
         shell: pwsh
         env:
+          CONTROL: ${{ matrix.control }}
           CONTROL_VERSION: ${{ inputs.graphics_control_version || format('1.1.{0}.0', github.run_number) }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -330,7 +340,7 @@ jobs:
           $bin = "$sdk\bin\$sdkVersion\x64"
           $lib = "$sdk\Lib\$sdkVersion\um\x64\WindowsApp.lib"
           $llvm = "$env:ProgramFiles\LLVM\bin"
-          $work = Join-Path $env:RUNNER_TEMP 'pipeline-cache-control'
+          $work = Join-Path $env:RUNNER_TEMP $env:CONTROL
           $downloads = Join-Path $work 'downloads'
           $shims = Join-Path $work 'shims'
           $out = Join-Path $work 'artifact'
@@ -370,7 +380,7 @@ jobs:
           $env:LLVM_DLLTOOL = ConvertTo-Mixed "$llvm\llvm-dlltool.exe"
           $env:WIN32_CC = ConvertTo-Mixed "$shims\win32-cc"
           $build = Join-Path $work 'build'
-          & "$env:ProgramFiles\Git\bin\bash.exe" probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache `
+          & "$env:ProgramFiles\Git\bin\bash.exe" probe/graphics-runtime-control/build.sh "--$env:CONTROL" `
             (ConvertTo-Mixed $lib) (ConvertTo-Mixed $mesa) (ConvertTo-Mixed "$template/PackagedProcessProbe-x64.appx") `
             $version (ConvertTo-Mixed $build)
           $layout = Join-Path $build 'package'
@@ -391,7 +401,7 @@ jobs:
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
           }
           $record = @(
-            'control=d3d12-pipeline-cache',
+            "control=$env:CONTROL",
             'package=XboxPortabilityProbe.ChildProcess.GraphicsControl',
             "version=$version",
             "source_commit=$env:GITHUB_SHA",
@@ -409,6 +419,6 @@ jobs:
           Get-Content "$out/control-build.txt", "$out/SHA256SUMS"
       - uses: actions/upload-artifact@v4
         with:
-          name: xbox-graphics-control-pipeline-cache
-          path: ${{ runner.temp }}/pipeline-cache-control/artifact/
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.control }}/artifact/
           if-no-files-found: error

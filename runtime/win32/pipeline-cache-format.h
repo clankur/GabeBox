@@ -9,7 +9,8 @@
      0   magic "XPSOCACH"
      8   u32 format version (1)
      12  u32 mode: 1 = ID3D12PipelineLibrary::Serialize output,
-                   2 = records of ID3D12PipelineState::GetCachedBlob output
+                   2 = records of ID3D12PipelineState::GetCachedBlob output,
+                   3 = recorded pipeline descs for replay (pipeline-replay-format.h)
      16  identity[32]: SHA-256 of the app, game build, driver and OS identity
      48  u64 payload size
      56  payload[32]: SHA-256 of the payload
@@ -27,6 +28,11 @@
 #define XBOX_PSO_CACHE_HEADER_SIZE 96u
 #define XBOX_PSO_CACHE_MODE_LIBRARY 1u
 #define XBOX_PSO_CACHE_MODE_BLOBS 2u
+/* Record and replay: the title's own creation calls, no driver persistence.
+   REPLAY_IDLE selects the same file and starts the replay at the title's
+   first idle period instead of at once. */
+#define XBOX_PSO_CACHE_MODE_REPLAY 3u
+#define XBOX_PSO_CACHE_MODE_REPLAY_IDLE 4u
 /* A bounded cache: a full one stops accepting new pipelines. Single records
    are not limited below the total, so a pathological multi-second pipeline
    with a large compiled blob is kept like any other. */
@@ -316,7 +322,8 @@ static inline XboxPsoCacheStatus XboxPsoCacheValidate(const uint8_t *file, uint6
     if (!XboxPsoCacheSameBytes(file, magic, 8)) return XBOX_PSO_CACHE_BAD_MAGIC;
     if (XboxPsoCacheGet32(file + 8) != XBOX_PSO_CACHE_VERSION) return XBOX_PSO_CACHE_BAD_VERSION;
     const uint32_t mode = XboxPsoCacheGet32(file + 12);
-    if ((mode != XBOX_PSO_CACHE_MODE_LIBRARY && mode != XBOX_PSO_CACHE_MODE_BLOBS) || XboxPsoCacheGet32(file + 92))
+    if ((mode != XBOX_PSO_CACHE_MODE_LIBRARY && mode != XBOX_PSO_CACHE_MODE_BLOBS &&
+            mode != XBOX_PSO_CACHE_MODE_REPLAY) || XboxPsoCacheGet32(file + 92))
         return XBOX_PSO_CACHE_BAD_MODE;
     if (!XboxPsoCacheSameBytes(file + 16, identity, 32)) return XBOX_PSO_CACHE_IDENTITY_MISMATCH;
     const uint64_t payloadSize = XboxPsoCacheGet64(file + 48);
@@ -369,7 +376,13 @@ static inline void XboxPsoCacheHexWide(const uint8_t *bytes, size_t size, uint16
 
    The control code must report outcome 1 (stored, reloaded in a second
    process and hit) for the selected path: L for the library, B for cached
-   blobs. Returns the mode (0, 1 or 2), or -1 for a malformed marker. */
+   blobs. Record and replay makes only the creation calls the title itself
+   makes, so it needs no control result; its guard still applies:
+
+     mode=replay
+     mode=replay-idle
+
+   Returns the mode (0 to 4), or -1 for a malformed marker. */
 #define XBOX_PSO_CACHE_MODE_PASSTHROUGH 0u
 
 static inline int XboxPsoCacheParseMarker(const char *text, size_t size, uint32_t *control) {
@@ -379,8 +392,16 @@ static inline int XboxPsoCacheParseMarker(const char *text, size_t size, uint32_
     else if (text[size - 1] == '\n') size -= 1;
     static const char library[] = "mode=library control=0x";
     static const char blobs[] = "mode=blobs control=0x";
+    static const char replay[] = "mode=replay";
+    static const char replayIdle[] = "mode=replay-idle";
     const char *prefix = NULL;
     int mode = -1;
+    if (size == sizeof(replay) - 1 || size == sizeof(replayIdle) - 1) {
+        prefix = size == sizeof(replay) - 1 ? replay : replayIdle;
+        for (size_t at = 0; prefix[at]; ++at)
+            if (text[at] != prefix[at]) return -1;
+        return (int)(prefix == replay ? XBOX_PSO_CACHE_MODE_REPLAY : XBOX_PSO_CACHE_MODE_REPLAY_IDLE);
+    }
     if (size == sizeof(library) - 1 + 8) {
         prefix = library;
         mode = (int)XBOX_PSO_CACHE_MODE_LIBRARY;
@@ -410,7 +431,12 @@ static inline int XboxPsoCacheParseMarker(const char *text, size_t size, uint32_
 
 static inline const char *XboxPsoCacheModeName(uint32_t mode) {
     return mode == XBOX_PSO_CACHE_MODE_LIBRARY ? "library" : mode == XBOX_PSO_CACHE_MODE_BLOBS ? "blobs" :
+        mode == XBOX_PSO_CACHE_MODE_REPLAY ? "replay" : mode == XBOX_PSO_CACHE_MODE_REPLAY_IDLE ? "replay-idle" :
         "passthrough";
+}
+
+static inline int XboxPsoCacheIsReplay(uint32_t mode) {
+    return mode == XBOX_PSO_CACHE_MODE_REPLAY || mode == XBOX_PSO_CACHE_MODE_REPLAY_IDLE;
 }
 
 /* Every call the cache makes into the D3D12 runtime on the title's device or
@@ -429,6 +455,8 @@ typedef enum XboxPsoCacheCall {
     XBOX_PSO_CALL_CACHED_BLOB = 8,      /* ID3D12PipelineState::GetCachedBlob */
     XBOX_PSO_CALL_CACHED_PSO = 9,       /* pipeline creation with a CachedPSO blob */
     XBOX_PSO_CALL_QUERY_LIBRARY1 = 10,  /* QueryInterface(ID3D12PipelineLibrary1) */
+    XBOX_PSO_CALL_REPLAY_ROOT = 11,     /* replay: CreateRootSignature from a recorded blob */
+    XBOX_PSO_CALL_REPLAY_CREATE = 12,   /* replay: creation from a recorded desc (the whole pass) */
     XBOX_PSO_CALL_GAME_CREATE = 14,     /* the title's own creation, unchanged */
     XBOX_PSO_CALL_UNKNOWN = 15,
 } XboxPsoCacheCall;
@@ -446,6 +474,8 @@ static inline const char *XboxPsoCacheCallName(uint32_t call) {
     case XBOX_PSO_CALL_CACHED_BLOB: return "get-cached-blob";
     case XBOX_PSO_CALL_CACHED_PSO: return "create-cached-pso";
     case XBOX_PSO_CALL_QUERY_LIBRARY1: return "query-library1";
+    case XBOX_PSO_CALL_REPLAY_ROOT: return "replay-root";
+    case XBOX_PSO_CALL_REPLAY_CREATE: return "replay-create";
     case XBOX_PSO_CALL_GAME_CREATE: return "game-create";
     }
     return "unknown";

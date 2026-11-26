@@ -24,6 +24,7 @@ known_folders=false
 player_prefs=false
 win32_opengl=false
 pipeline_cache=false
+pipeline_replay=false
 sdl_artifact=
 sdl_version=
 case ${1:-} in
@@ -69,6 +70,12 @@ case ${1:-} in
         pipeline_cache=true
         shift
         ;;
+    --d3d12-pipeline-replay)
+        # The same child and cache source, built for the record-and-replay rounds.
+        pipeline_cache=true
+        pipeline_replay=true
+        shift
+        ;;
     --dxgi-composition)
         dxgi_composition=true
         shift
@@ -95,7 +102,7 @@ case ${1:-} in
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --d3d12-pipeline-cache | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --d3d12-pipeline-cache | --d3d12-pipeline-replay | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
 src=$(native_path "$(cd "$(dirname "$0")" && pwd)")
@@ -374,6 +381,7 @@ if $win32_opengl || $hosted_xinput; then
 elif $display_config || $known_folders || $player_prefs || $pipeline_cache; then
     display_flags=()
     if $hosted_display; then display_flags=(-DPROBE_HOSTED_DISPLAY); fi
+    if $pipeline_replay; then display_flags=(-DXBOX_PSO_REPLAY_CONTROL); fi
     "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" \
         -std=c11 -O2 -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror \
         "${display_flags[@]+${display_flags[@]}}" \

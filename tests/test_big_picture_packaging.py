@@ -343,20 +343,41 @@ class BigPicturePackageTests(unittest.TestCase):
             (profile / marker).write_bytes(text)
             stage_trials(self.layout, [f"{app}={profile}"], current)
             self.assertEqual((self.layout / marker).read_bytes(), text)
+        # Record and replay needs no control result, but a runtime that knows the
+        # mode: an older one would read it as passthrough and never replay.
+        replay_loader = feature + "replay-idle\0".encode("utf-16le")
+        replay_native = feature + b"mode=replay-idle\0"
+        for text in (b"mode=replay", b"mode=replay-idle\r\n"):
+            (profile / marker).write_bytes(text)
+            for native, loader in ((feature, feature), (replay_native, feature), (feature, replay_loader)):
+                with self.assertRaisesRegex(ValueError, "record and replay"):
+                    stage_trials(self.layout, [f"{app}={profile}"], runtime(native, loader))
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(replay_native, replay_loader))
+            self.assertEqual((self.layout / marker).read_bytes(), text)
+        for text in ("mode=replay control=0x5CC01163", "mode=Replay", "mode=replay "):
+            (profile / marker).write_text(text)
+            with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime(replay_native, replay_loader))
 
     def test_pipeline_cache_marker_modes(self):
         from build_tools.stage_profiles import pipeline_cache_mode
         self.assertEqual(pipeline_cache_mode(b""), "passthrough")
         self.assertEqual(pipeline_cache_mode(b"mode=blobs control=0x5CC05163"), "blobs")
         self.assertEqual(pipeline_cache_mode(b"mode=library control=0x5CC01163\n"), "library")
+        self.assertEqual(pipeline_cache_mode(b"mode=replay"), "replay")
+        self.assertEqual(pipeline_cache_mode(b"mode=replay-idle\r\n"), "replay-idle")
         for bad in (b"\n", b"mode=library control=0x5CC47163", b"mode=blobs control=0x5cc01163",
-                    b"mode=blobs control=0x5C071163", b"mode=blobs control=0x5CC01163\n\n"):
+                    b"mode=blobs control=0x5C071163", b"mode=blobs control=0x5CC01163\n\n",
+                    b"mode=replay control=0x5CC01163", b"mode=replay\n\n", b"mode=Replay", b"mode=replay-"):
             self.assertIsNone(pipeline_cache_mode(bad))
 
     def test_slay_the_spire_2_opengl_profile_selects_the_pipeline_cache(self):
         root = ROOT / "profiles/2868840/26655341"
         self.assertTrue((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").is_file())
-        self.assertEqual((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").stat().st_size, 0)
+        # Record and replay: the driver persistence paths remove the device (control 0x5CC4AA63).
+        from build_tools.stage_profiles import pipeline_cache_mode
+        self.assertEqual(pipeline_cache_mode((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").read_bytes()),
+                         "replay")
         self.assertEqual((root / "steam-win32-shadow-2868840.txt").read_text().splitlines()[6], "loader-trace")
         self.assertIn("XboxWin32LoaderTrace.dll",
                       json.loads((root / "steam-win32-adapters-2868840.json").read_text())["required_adapters"])
