@@ -4,7 +4,7 @@ name: Build Mesa UWP runtime
 # UWP Meson fork and the Ninja backend. The upstream README uses the Visual
 # Studio backend; the build step explains why this workflow does not.
 #   baseline      patch 0001 only; checked against the pinned 26.2.2 release
-#   shader-cache  patches 0001-0003; published for the packager
+#   shader-cache  patches 0001-0004; published for the packager
 # The packager consumes an artifact by the SHA-256 of its SHA256SUMS file:
 #   python3 -m build_tools.prepare_big_picture_library ... --mesa-runtime DIR SUMS_SHA256
 
