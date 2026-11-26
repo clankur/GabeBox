@@ -6,3 +6,4 @@ ROOT = Path(__file__).resolve().parents[1]
 STEAM_PINS = ROOT / "runtime/steam/pins"
 SIGNIN = ROOT / "ui/signin"
 DOS_RUNTIME = ROOT / "runtime/dos"
+BRAND_ASSETS = ROOT / "ui/big-picture/Assets"

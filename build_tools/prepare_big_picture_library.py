@@ -12,7 +12,7 @@ from zipfile import ZipFile
 
 from build_tools.appx import APPX_FOOTPRINT
 from build_tools.bundle_big_picture import bundle
-from build_tools.paths import DOS_RUNTIME, SIGNIN
+from build_tools.paths import BRAND_ASSETS, DOS_RUNTIME, SIGNIN
 from build_tools.presenter import stage_native_presenter
 from build_tools.stage_pinned_client import stage_client
 from build_tools.stage_primary import stage_primary
@@ -27,7 +27,15 @@ VERIFIED_BASES = {
     BASE_SHA256: "1.0.230.0",
     # The verified recovery package preserves the 1.0.230.0 payload.
     "174a603ec8d3f5452f3474e564c53f739777359f65d240aed4a93fb56541d767": "1.0.231.0",
+    # Reassembled after the 1.0.230.0 APPX was lost: Steam Core template from Build Xbox probe run
+    # 45550462937 with the pinned Valve client, FHD presenter, js-dos and SDL 2.30.9, plus the
+    # pinned Mesa UWP 34732bb and DXIL runtime carried over from a signed 1.0.230.40 build.
+    "b048d049b0c07b0bba3c5b94d0801a50d972217cea512c2b6452a90f22617396": "1.0.232.60",
 }
+BRAND_NAME = "GabeBox"
+BRAND_DESCRIPTION = "Steam Big Picture on Xbox"
+BRAND_BACKGROUND = "#0B0B0B"
+BRAND_FILES = ("Logo.png", "SmallLogo.png", "Splash.png", "StoreLogo.png")
 
 
 def release_layout(base, destination, version, *, verified_bases=None):
@@ -84,6 +92,28 @@ def stage_storage_capability(layout):
     if capabilities.find(f"{name}[@Name='removableStorage']") is None:
         manifest.write_bytes(original.replace(b"</Capabilities>",
             b'<uap:Capability Name="removableStorage" /></Capabilities>', 1))
+
+
+def stage_branding(layout):
+    """Show the Steam Core package as GabeBox without changing its identity or LocalState."""
+    manifest = layout / "AppxManifest.xml"
+    raw = manifest.read_bytes()
+    replacements = (
+        (rb"<DisplayName>[^<]*</DisplayName>", f"<DisplayName>{BRAND_NAME}</DisplayName>"),
+        (rb'(<uap:VisualElements\b[^>]*?\s)DisplayName="[^"]*"', rf'\g<1>DisplayName="{BRAND_NAME}"'),
+        (rb'(<uap:VisualElements\b[^>]*?\s)Description="[^"]*"', rf'\g<1>Description="{BRAND_DESCRIPTION}"'),
+        (rb'(<uap:VisualElements\b[^>]*?\s)BackgroundColor="[^"]*"', rf'\g<1>BackgroundColor="{BRAND_BACKGROUND}"'),
+    )
+    for pattern, replacement in replacements:
+        raw, count = re.subn(pattern, replacement.encode(), raw)
+        if count != 1:
+            raise ValueError("Expected one package display name and one application tile in the Steam manifest.")
+    for name in BRAND_FILES:
+        target = layout / "Assets" / name
+        if not target.is_file():
+            raise ValueError(f"The Steam package is missing its {name} tile asset.")
+        shutil.copyfile(BRAND_ASSETS / name, target)
+    manifest.write_bytes(raw)
 
 
 def prepare_layout(base, host_artifact, layout, version, archive_cache, session_artifact, session_checksum,
@@ -151,6 +181,7 @@ def prepare_layout(base, host_artifact, layout, version, archive_cache, session_
         if library_inventory:
             (staged / "steam-library-inventory.txt").touch()
         stage_storage_capability(staged)
+        stage_branding(staged)
         if b"SteamLibraryCommand\x00" not in (staged / "XboxProbe.Native.winmd").read_bytes():
             raise ValueError("Use a Steam Core native component built with the Xbox storage interface.")
         if migrate_legacy_library:
