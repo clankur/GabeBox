@@ -3,6 +3,8 @@
    aggregates finished pairs by the submitting call site. Lines start with "asset gpuprof". Included by
    allocs.h; uses allocDevice and the device vtable hooks. */
 
+#include "listprof.h"
+
 #define GPUPROF_SETS 96u
 #define GPUPROF_PAIRS 4096u
 
@@ -46,20 +48,28 @@ static ID3D12Fence *gpuQFence[GPUQ_SLOTS];
 static volatile LONG64 gpuQNext[GPUQ_SLOTS];
 static volatile LONG64 gpuQSubmit[GPUQ_SLOTS][GPUQ_RING];
 static volatile ULONG_PTR gpuQCaller[GPUQ_SLOTS][GPUQ_RING];
+static BatchInfo gpuQBatch[GPUQ_SLOTS][GPUQ_RING];
 static ID3D12Fence *gpuCopyFence; /* non-null once fence timing is ready */
 static volatile LONG64 gpuCopyBusy, gpuCopyBatches, gpuCopyLists, gpuCopyLatency, gpuCopyMaxLatency;
-#define GPUFENCE_SITES 64
-static struct { volatile ULONG_PTR caller; volatile LONG kind; volatile LONG64 busy, count; } gpuFenceSites[GPUFENCE_SITES];
+#define GPUFENCE_SITES 256
+static struct { volatile ULONG_PTR caller; volatile LONG kind; volatile LONG64 busy, count, draws, dispatches, indirect; char name[40]; } gpuFenceSites[GPUFENCE_SITES];
 static volatile LONG gpuQKind[GPUQ_SLOTS];
-static void GpuFenceCredit(ULONG_PTR caller, LONG kind, LONG64 busy) {
+static int GpuNameEqual(const char *a, const char *b) { while (*a && *a == *b) { ++a; ++b; } return *a == *b; }
+static void GpuFenceCredit(ULONG_PTR caller, LONG kind, LONG64 busy, const BatchInfo *info) {
     for (unsigned i = 0; i < GPUFENCE_SITES; ++i) {
-        if (gpuFenceSites[i].caller == caller && gpuFenceSites[i].kind == kind) {
-            InterlockedAdd64(&gpuFenceSites[i].busy, busy); InterlockedIncrement64(&gpuFenceSites[i].count); return;
+        if (gpuFenceSites[i].caller == caller && gpuFenceSites[i].kind == kind && GpuNameEqual(gpuFenceSites[i].name, info->name)) {
+            InterlockedAdd64(&gpuFenceSites[i].busy, busy); InterlockedIncrement64(&gpuFenceSites[i].count);
+            InterlockedAdd64(&gpuFenceSites[i].draws, info->draws); InterlockedAdd64(&gpuFenceSites[i].dispatches, info->dispatches);
+            InterlockedAdd64(&gpuFenceSites[i].indirect, info->indirect); return;
         }
-        if (!gpuFenceSites[i].caller &&
-                !InterlockedCompareExchangePointer((PVOID volatile *)&gpuFenceSites[i].caller, (PVOID)caller, NULL)) {
+        if (!gpuFenceSites[i].caller) {
+            unsigned k = 0; while (info->name[k] && k + 1 < sizeof(gpuFenceSites[i].name)) { gpuFenceSites[i].name[k] = info->name[k]; ++k; }
+            gpuFenceSites[i].name[k] = 0;
             gpuFenceSites[i].kind = kind;
-            InterlockedAdd64(&gpuFenceSites[i].busy, busy); InterlockedIncrement64(&gpuFenceSites[i].count); return;
+            if (InterlockedCompareExchangePointer((PVOID volatile *)&gpuFenceSites[i].caller, (PVOID)caller, NULL)) { --i; continue; }
+            InterlockedAdd64(&gpuFenceSites[i].busy, busy); InterlockedIncrement64(&gpuFenceSites[i].count);
+            InterlockedAdd64(&gpuFenceSites[i].draws, info->draws); InterlockedAdd64(&gpuFenceSites[i].dispatches, info->dispatches);
+            InterlockedAdd64(&gpuFenceSites[i].indirect, info->indirect); return;
         }
     }
 }
@@ -81,7 +91,7 @@ static DWORD WINAPI GpuCopyWatch(void *unused) {
                 const LONG64 begin = submit > previousEnd[q] ? submit : previousEnd[q];
                 if (now.QuadPart > begin) {
                     InterlockedAdd64(&gpuCopyBusy, now.QuadPart - begin);
-                    GpuFenceCredit(gpuQCaller[q][v % GPUQ_RING], gpuQKind[q] * 16 + (LONG)q, now.QuadPart - begin);
+                    GpuFenceCredit(gpuQCaller[q][v % GPUQ_RING], gpuQKind[q] * 16 + (LONG)q, now.QuadPart - begin, &gpuQBatch[q][v % GPUQ_RING]);
                 }
                 InterlockedAdd64(&gpuCopyLatency, now.QuadPart - submit);
                 if (now.QuadPart - submit > gpuCopyMaxLatency) gpuCopyMaxLatency = now.QuadPart - submit;
@@ -139,7 +149,7 @@ static BOOL GpuSetup(ID3D12CommandQueue *queue) {
         gpuReady = SUCCEEDED(hr) ? 1 : -1;
         char line[96], *out = Hex(Text(line, "asset gpuprof-setup hr=0x"), (unsigned long)hr, 8);
         out = CensusDec(Text(out, " frequency="), gpuFrequency);
-        out = Text(out, gpuCopyHeap ? " copy-heap=ok build=8" : " copy-heap=none build=8");
+        out = Text(out, gpuCopyHeap ? " copy-heap=ok build=9" : " copy-heap=none build=9");
         CensusEmit(line, out);
     }
     ReleaseSRWLockExclusive(&gpuLock);
@@ -161,6 +171,7 @@ static void STDMETHODCALLTYPE GpuExecute(ID3D12CommandQueue *queue, UINT count, 
             QueryPerformanceCounter(&now);
             gpuQSubmit[q][value % GPUQ_RING] = now.QuadPart;
             gpuQCaller[q][value % GPUQ_RING] = caller;
+            ListBatch(count, lists, &gpuQBatch[q][value % GPUQ_RING]);
             InterlockedAdd64(&gpuCopyLists, count);
             ID3D12CommandQueue_Signal(queue, gpuQFence[q], value);
             ReleaseSRWLockExclusive(&gpuLock);
@@ -277,15 +288,27 @@ static void GpuReport(unsigned sample) {
             c = CensusDec(Text(c, " max-latency-us="), (unsigned long long)(gpuCopyMaxLatency * 1000000 / frequency.QuadPart));
             CensusEmit(copyLine, c);
             gpuCopyMaxLatency = 0;
-            for (unsigned i = 0; i < GPUFENCE_SITES && gpuFenceSites[i].caller; ++i) {
-                const LONG64 busy = InterlockedExchange64(&gpuFenceSites[i].busy, 0), n = InterlockedExchange64(&gpuFenceSites[i].count, 0);
-                if (!n) continue;
-                char site[200], *e = CensusDec(Text(site, "asset gpufence-site sample="), sample);
-                e = CensusDec(Text(e, " kind-queue="), (unsigned long long)gpuFenceSites[i].kind);
+            for (unsigned emitted = 0; emitted < 24; ++emitted) {
+                unsigned best = GPUFENCE_SITES; LONG64 bestBusy = 0;
+                for (unsigned i = 0; i < GPUFENCE_SITES && gpuFenceSites[i].caller; ++i)
+                    if (gpuFenceSites[i].busy > bestBusy) { bestBusy = gpuFenceSites[i].busy; best = i; }
+                if (best == GPUFENCE_SITES) break;
+                const LONG64 busy = InterlockedExchange64(&gpuFenceSites[best].busy, 0), n = InterlockedExchange64(&gpuFenceSites[best].count, 0);
+                const LONG64 draws = InterlockedExchange64(&gpuFenceSites[best].draws, 0), disp = InterlockedExchange64(&gpuFenceSites[best].dispatches, 0);
+                const LONG64 ind = InterlockedExchange64(&gpuFenceSites[best].indirect, 0);
+                char site[240], *e = CensusDec(Text(site, "asset listprof sample="), sample);
                 e = CensusDec(Text(e, " busy-ms="), (unsigned long long)(busy * 1000 / frequency.QuadPart));
                 e = CensusDec(Text(e, " batches="), (unsigned long long)n);
-                e = RecordImageAddress(e, (const void *)gpuFenceSites[i].caller);
+                e = CensusDec(Text(e, " draws="), (unsigned long long)draws);
+                e = CensusDec(Text(e, " dispatches="), (unsigned long long)disp);
+                e = CensusDec(Text(e, " indirect="), (unsigned long long)ind);
+                e = CensusDec(Text(e, " q="), (unsigned long long)gpuFenceSites[best].kind);
+                e = Text(Text(e, " name="), gpuFenceSites[best].name[0] ? gpuFenceSites[best].name : "-");
+                e = RecordImageAddress(e, (const void *)gpuFenceSites[best].caller);
                 CensusEmit(site, e);
+            }
+            for (unsigned i = 0; i < GPUFENCE_SITES && gpuFenceSites[i].caller; ++i) {
+                gpuFenceSites[i].busy = gpuFenceSites[i].count = gpuFenceSites[i].draws = gpuFenceSites[i].dispatches = gpuFenceSites[i].indirect = 0;
             }
         }
         lastQpc = now; lastBusy = busyNow; lastBatches = batchesNow; lastLists = listsNow; lastLatency = latencyNow;
