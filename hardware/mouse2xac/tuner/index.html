@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mouse2xac tuner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="page-header">
+  <h1>mouse2xac tuner</h1>
+  <nav class="page-nav" aria-label="Tuner pages">
+    <a href="./" aria-current="page">Device</a>
+    <a href="simulator.html">Simulator</a>
+  </nav>
+  <p>Read, change and save the settings on a Feather running mouse2xac, over WebHID in desktop Chrome or Edge. See the <a href="https://github.com/clankur/GabeBox/blob/main/hardware/mouse2xac/README.md#settings">settings and config protocol</a>.</p>
+</header>
+
+<main>
+  <section class="panel" aria-labelledby="device-title">
+    <h2 id="device-title">Device</h2>
+    <p id="device-support" class="note"></p>
+    <div class="row">
+      <button type="button" id="device-connect">Connect…</button>
+      <button type="button" id="device-disconnect" disabled>Disconnect</button>
+      <span id="device-info" class="note"></span>
+    </div>
+    <p id="device-status" class="note" role="status" aria-live="polite">No device connected.</p>
+
+    <div class="device-layout">
+      <form id="device-form" class="controls" novalidate>
+        <fieldset id="device-settings" disabled>
+          <legend>Settings on the board</legend>
+        </fieldset>
+        <div class="button-grid">
+          <button type="button" id="device-read" disabled>Read</button>
+          <button type="button" id="device-write" disabled>Write</button>
+          <button type="button" id="device-save" disabled>Save to flash</button>
+          <button type="button" id="device-defaults" disabled>Restore defaults</button>
+          <button type="button" id="device-reload" disabled>Reload saved</button>
+        </div>
+        <p id="device-errors" class="error" role="alert"></p>
+        <p class="note"><a id="open-sim" href="simulator.html">Try these settings in the simulator</a></p>
+      </form>
+
+      <div>
+        <h3>Live joystick reports</h3>
+        <div id="device-meters" class="meters"></div>
+        <h3>Counters</h3>
+        <dl id="device-counters" class="stats"></dl>
+        <button type="button" id="device-clear" disabled>Clear counters</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="note">
+  <p>Untested on hardware: only the encoder, protocol and simulator have automated tests. WebHID needs Chrome or Edge on a desktop.</p>
+</footer>
+
+<script src="protocol.js"></script>
+<script src="encoder.js"></script>
+<script src="device.js"></script>
+<script src="ui.js"></script>
+<script src="device-page.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+name: Publish mouse2xac tuner
+
+# Publishes hardware/mouse2xac/tuner to GitHub Pages at <pages URL>/mouse2xac/.
+# Pull requests only run the tests; deploys come from main or a manual run.
+# GitHub Pages must use "GitHub Actions" as its source, and the github-pages
+# environment's branch rules decide which branches a manual run may deploy.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hardware/mouse2xac/tuner/**'
+      - 'tests/mouse2xac-tuner.test.js'
+      - '.github/workflows/mouse2xac-tuner-pages.yml'
+  pull_request:
+    paths:
+      - 'hardware/mouse2xac/tuner/**'
+      - 'tests/mouse2xac-tuner.test.js'
+      - '.github/workflows/mouse2xac-tuner-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mouse2xac-tuner-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test the encoder, protocol and simulator
+        run: node --test tests/mouse2xac-tuner.test.js
+      - name: Stage the site
+        run: |
+          mkdir -p "$RUNNER_TEMP/site/mouse2xac"
+          cp hardware/mouse2xac/tuner/*.html hardware/mouse2xac/tuner/*.css \
+            hardware/mouse2xac/tuner/*.js "$RUNNER_TEMP/site/mouse2xac/"
+          ls -l "$RUNNER_TEMP/site/mouse2xac"
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}mouse2xac/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
