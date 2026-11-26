@@ -276,6 +276,8 @@ def main():
     parser.add_argument('--append-to', type=Path,
                         help='overlay archive named in --base-toc to extend instead of adding new archives')
     parser.add_argument('--recipe', action='append', default=[], help='restore archive name to include (repeatable)')
+    parser.add_argument('--reference-toc', choices=('asset-index.tsv', 'runtime-toc.tsv'), default='asset-index.tsv',
+                        help='reference route recipe to follow; base overlay routes it leaves original are reverted')
     parser.add_argument('--portal-env', type=Path, help='Device Portal settings for archives missing locally')
     parser.add_argument('--remote-archives', action='store_true',
                         help='read every source archive through the cache and Device Portal; use only the local toc')
@@ -297,8 +299,9 @@ def main():
               f'{overlay_routes:,} overlay routes in {base.archives[len(original.archives):]}.', flush=True)
 
         batch = load_batch_manifest(args.recipes / 'batch.tsv', TOC_SHA256)
-        added, routes = load_reference_routes(args.recipes / 'asset-index.tsv', TOC_SHA256, len(original.archives))
-        runtime_added, runtime = load_reference_routes(args.recipes / 'runtime-toc.tsv', TOC_SHA256, len(original.archives))
+        other = 'runtime-toc.tsv' if args.reference_toc == 'asset-index.tsv' else 'asset-index.tsv'
+        added, routes = load_reference_routes(args.recipes / args.reference_toc, TOC_SHA256, len(original.archives))
+        runtime_added, runtime = load_reference_routes(args.recipes / other, TOC_SHA256, len(original.archives))
         require(added == runtime_added, 'Reference TOC recipes list different archives.')
         names = args.recipe or list(RESTORE_RECIPES)
         require(set(names) <= set(RESTORE_RECIPES) and len(set(names)) == len(names), 'Unknown restore recipe.')
@@ -320,6 +323,14 @@ def main():
                 overridden[base.archives[target]] = overridden.get(base.archives[target], 0) + 1
         for name, count in sorted(overridden.items()):
             print(f'Restore routes replace {count:,} base routes into {name}.', flush=True)
+        # The reference's runtime-toc.tsv leaves some authored-LOD vehicle models on their original routes.
+        reverted = {}
+        for item in range(base.count):
+            if base.route(item)[0] >= len(original.archives) and item not in routes:
+                reverted[item] = original.route(item)
+        for item in sorted(reverted):
+            target = base.archives[base.route(item)[0]]
+            print(f'Asset {item}: {args.reference_toc} keeps it original, so its {target} route is reverted.', flush=True)
         for recipe, rows in plan:
             routed = sum(item is not None for _, item in rows)
             note = '' if routed else '; the reference routes none of its assets here, so it is verified only'
@@ -411,7 +422,8 @@ def main():
                             new_routes[item] = slot, row.output_offset, row.output_size
                     new_archives.append(recipe.name)
                     files.append(recipe.name)
-            toc_bytes = base.encode(new_archives, new_routes)
+            require(not reverted.keys() & new_routes.keys(), 'A reverted asset is also restored.')
+            toc_bytes = base.encode(new_archives, {**reverted, **new_routes})
             result = Toc(toc_bytes)
             result.require_derived_from(original)
             outputs = {}
@@ -428,6 +440,8 @@ def main():
                     archive = outputs[route[0]]
                     require(digest(archive.read(route[1], route[2])) == expected[item],
                             f'Generated archive returns a different texture for asset {item}.')
+                elif item in reverted:
+                    require(route == original.route(item), f'Generated TOC did not revert asset {item}.')
                 else:
                     require(route == base.route(item), f'Generated TOC changed unrelated asset {item}.')
             (staged / 'toc').write_bytes(toc_bytes)
