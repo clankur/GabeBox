@@ -61,9 +61,12 @@ inline std::string processChanges(std::vector<WebProcess> before, std::vector<We
 
 // Opt-in browser arguments from the package root: whitespace-separated, each one of the
 // switches below, at most once. Anything else rejects the whole file, and the browser
-// keeps its default arguments.
+// keeps its default arguments. The last two control Chromium's one-shot, non-sandboxed
+// GPU process that collects DX12 and Vulkan info 120 s after the browser starts: the
+// first removes it, the second runs it at browser start-up instead.
 inline bool browserArguments(std::wstring_view text, std::wstring& arguments) {
-    constexpr std::wstring_view allowed[]{L"--disable-component-update", L"--disable-background-networking"};
+    constexpr std::wstring_view allowed[]{L"--disable-component-update", L"--disable-background-networking",
+        L"--disable-gpu-process-for-dx12-info-collection", L"--no-delay-for-dx12-vulkan-info-collection"};
     arguments.clear();
     if (text.size() > 256) return false;
     bool seen[std::size(allowed)]{};
