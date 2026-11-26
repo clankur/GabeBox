@@ -71,6 +71,7 @@ Markers are empty files whose presence is the signal. The current families:
 | `steam-win32-steam-relay-delay-APPID.txt`, `steam-win32-steam-init-delay-APPID.txt` | diagnostic shift tests holding `delay_ms=N`: the relay worker's real start-up (1000–120000, needs the worker marker) or the first Steam API init call (1000–30000) waits N ms; each needs a source profile and a loader trace, neither can be combined with the relay stub, and no checked-in profile may carry them |
 | `steam-win32-release-renderer-APPID.txt` | releases the renderer to a matching hosted build |
 | `steam-win32-godot-shader-cache-APPID.txt` | `control` or `disabled` for a staged Godot OpenGL launcher |
+| `steam-win32-mesa-no-thread-APPID.txt`, `steam-win32-mesa-descriptors-APPID.txt` | OpenGL-route A/B arms: `GALLIUM_THREAD=0` with any Mesa (the marker must be empty); or, holding `stats` or `lock`, Mesa patch 0004's descriptor-pool counters, optionally with its lock. The second needs a `--mesa-runtime` built with that patch ([GAME-LAUNCH](../../../../docs/GAME-LAUNCH.md#turn-off-mesas-threaded-context-or-lock-its-descriptor-pools)) |
 | `steam-win32-steam-sdk-APPID.txt`, `steam-win32-steam-legacy-sdk-APPID.txt` | the staged publisher Steamworks SDK paths |
 
 `steam-win32-arguments-APPID.txt` is the non-empty one: a single printable line, up to

@@ -1,0 +1,386 @@
+Subject: d3d12: serialize offline descriptor frees with allocations, opt-in
+
+With a threaded context (GALLIUM_THREAD defaults on, and st/mesa asks
+for one), u_threaded_context calls create_sampler_view and
+create_sampler_state directly on the frontend thread, while sampler view
+releases, set_sampler_views and batch resets run on the driver thread.
+
+d3d12_create_sampler_view allocates from the screen's view pool under
+descriptor_pool_mutex, but d3d12_destroy_sampler_view frees from the same
+pool without it, and the per-context sampler pool is allocated in
+create_sampler_state and freed from the batch's zombie list with no lock
+at all. d3d12_descriptor_handle_free and d3d12_descriptor_heap_alloc_handle
+both modify the heap's `next` offset and free list, so a free racing an
+allocation can hand one CPU descriptor slot to two live views. The view
+created second then overwrites the first view's SRV, and every later draw
+that binds the first view samples the wrong texture. The surface pools
+already take the mutex on both sides (d3d12_surface.cpp). Upstream main
+has the same unlocked free.
+
+- D3D12_DESCRIPTOR_POOL_LOCK=1 takes descriptor_pool_mutex around the
+  view-pool free in d3d12_destroy_sampler_view, around the sampler-pool
+  allocations in d3d12_create_sampler_state, and around the zombie
+  sampler frees in d3d12_reset_batch. Without it the driver behaves as
+  before, so one build serves both arms of an A/B.
+- D3D12_DESCRIPTOR_STATS=<path> tracks the owning thread of every offline
+  descriptor slot and appends, at most once a second from
+  d3d12_end_batch, the allocation and free counts, allocations of a slot
+  that is still live (dup_allocs), frees of a free slot (double_frees),
+  calls that found another thread inside the same heap (overlaps), frees
+  on a thread other than the allocating one (cross_thread_frees), whether
+  the context is threaded, and the UTC FILETIME of the first duplicate,
+  double free and overlap.
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_batch.cpp b/src/gallium/drivers/d3d12/d3d12_batch.cpp
+--- a/src/gallium/drivers/d3d12/d3d12_batch.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_batch.cpp
+@@ -206,8 +206,14 @@
+       _mesa_set_clear(batch->sampler_views, delete_sampler_view);
+ 
+       _mesa_set_clear(batch->queries, delete_query);
++      const bool lock = d3d12_descriptor_pool_lock_frees();
++      struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
++      if (lock)
++         mtx_lock(&screen->descriptor_pool_mutex);
+       util_dynarray_foreach(&batch->zombie_samplers, d3d12_descriptor_handle, handle)
+          d3d12_descriptor_handle_free(handle);
++      if (lock)
++         mtx_unlock(&screen->descriptor_pool_mutex);
+       util_dynarray_clear(&batch->zombie_samplers);
+       d3d12_descriptor_heap_clear(batch->view_heap);
+       d3d12_descriptor_heap_clear(batch->sampler_heap);
+@@ -329,6 +335,7 @@
+       count_to_execute--;
+    }
+    screen->cmdqueue->ExecuteCommandLists(count_to_execute, to_execute);
++   d3d12_descriptor_pool_write_stats(ctx->threaded_context != NULL);
+ 
+    batch->fence = d3d12_create_fence(screen, true);
+ 
+diff --git a/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp b/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp
+--- a/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp
+@@ -660,15 +660,27 @@
+    memcpy(desc.BorderColor, state->border_color.f, sizeof(float) * 4);
+ 
+    // TODO Normalized Coordinates?
++   /* With a threaded context this runs on the frontend thread while the
++    * driver thread frees zombie samplers from the same pool.
++    */
++   const bool lock = d3d12_descriptor_pool_lock_frees();
++   if (lock)
++      mtx_lock(&screen->descriptor_pool_mutex);
+    d3d12_descriptor_pool_alloc_handle(ctx->sampler_pool, &ss->handle);
++   if (lock)
++      mtx_unlock(&screen->descriptor_pool_mutex);
+    screen->dev->CreateSampler(&desc, ss->handle.cpu_handle);
+ 
+    if (state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE) {
+       desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+       desc.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+ 
++      if (lock)
++         mtx_lock(&screen->descriptor_pool_mutex);
+       d3d12_descriptor_pool_alloc_handle(ctx->sampler_pool,
+                                          &ss->handle_without_shadow);
++      if (lock)
++         mtx_unlock(&screen->descriptor_pool_mutex);
+       screen->dev->CreateSampler(&desc,
+                                  ss->handle_without_shadow.cpu_handle);
+       ss->is_shadow_sampler = true;
+@@ -1037,7 +1049,18 @@
+                            struct pipe_sampler_view *pview)
+ {
+    struct d3d12_sampler_view *view = d3d12_sampler_view(pview);
+-   d3d12_descriptor_handle_free(&view->handle);
++   /* d3d12_create_sampler_view allocates from the screen's view pool under
++    * descriptor_pool_mutex, from the frontend thread when the context is
++    * threaded; this free runs on the driver thread.
++    */
++   if (d3d12_descriptor_pool_lock_frees()) {
++      struct d3d12_screen *screen = d3d12_screen(pctx->screen);
++      mtx_lock(&screen->descriptor_pool_mutex);
++      d3d12_descriptor_handle_free(&view->handle);
++      mtx_unlock(&screen->descriptor_pool_mutex);
++   } else {
++      d3d12_descriptor_handle_free(&view->handle);
++   }
+    pipe_resource_reference(&view->base.texture, NULL);
+    FREE(view);
+ }
+diff --git a/src/gallium/drivers/d3d12/d3d12_descriptor_pool.cpp b/src/gallium/drivers/d3d12/d3d12_descriptor_pool.cpp
+--- a/src/gallium/drivers/d3d12/d3d12_descriptor_pool.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_descriptor_pool.cpp
+@@ -29,11 +29,144 @@
+ #include "pipe/p_state.h"
+ 
+ #include "util/list.h"
++#include "util/os_misc.h"
++#include "util/os_time.h"
++#include "util/u_call_once.h"
+ #include "util/u_dynarray.h"
+ #include "util/u_memory.h"
+ 
+ #include <dxguids/dxguids.h>
+ 
++#include <atomic>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* Offline descriptor pool diagnostics.  Each tracked slot records the thread
++ * that allocated it, so an allocation of a live slot (two views sharing one
++ * CPU descriptor) and a free of a free slot are counted, as is any time two
++ * threads are inside the same pool heap at once.  The *_filetime fields are
++ * UTC FILETIMEs on Windows so they line up with other console traces.
++ */
++namespace {
++struct descriptor_pool_diag {
++   bool lock;
++   char *stats_path;
++   std::atomic<uint64_t> allocs;
++   std::atomic<uint64_t> frees;
++   std::atomic<uint64_t> dup_allocs;
++   std::atomic<uint64_t> double_frees;
++   std::atomic<uint64_t> overlaps;
++   std::atomic<uint64_t> cross_thread_frees;
++   std::atomic<uint64_t> first_dup_filetime;
++   std::atomic<uint64_t> first_double_free_filetime;
++   std::atomic<uint64_t> first_overlap_filetime;
++   std::atomic<int64_t> last_write_ns;
++   std::atomic<int> writing;
++};
++
++descriptor_pool_diag pool_diag;
++util_once_flag pool_diag_once = UTIL_ONCE_FLAG_INIT;
++
++uint64_t
++pool_diag_filetime(void)
++{
++#ifdef _WIN32
++   FILETIME now;
++   GetSystemTimeAsFileTime(&now);
++   return (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
++#else
++   return static_cast<uint64_t>(os_time_get_nano() / 100);
++#endif
++}
++
++uint32_t
++pool_diag_thread(void)
++{
++#ifdef _WIN32
++   return static_cast<uint32_t>(GetCurrentThreadId()) | 1u;
++#else
++   return 1u;
++#endif
++}
++
++void
++pool_diag_note(std::atomic<uint64_t> &counter, std::atomic<uint64_t> &first)
++{
++   counter.fetch_add(1);
++   uint64_t none = 0;
++   first.compare_exchange_strong(none, pool_diag_filetime());
++}
++
++void
++pool_diag_init(void)
++{
++   const char *lock = os_get_option("D3D12_DESCRIPTOR_POOL_LOCK");
++   pool_diag.lock = lock && !strcmp(lock, "1");
++   pool_diag.stats_path = os_get_option_dup("D3D12_DESCRIPTOR_STATS");
++   if (pool_diag.stats_path && !pool_diag.stats_path[0]) {
++      free(pool_diag.stats_path);
++      pool_diag.stats_path = NULL;
++   }
++   if (pool_diag.stats_path) {
++      FILE *file = fopen(pool_diag.stats_path, "w");
++      if (file) {
++         fprintf(file, "d3d12_descriptor_stats=1 lock=%d start_filetime=%" PRIu64 "\n",
++                 pool_diag.lock ? 1 : 0, pool_diag_filetime());
++         fclose(file);
++      }
++   }
++}
++
++void
++pool_diag_ensure_init(void)
++{
++   util_call_once(&pool_diag_once, pool_diag_init);
++}
++} // namespace
++
++bool
++d3d12_descriptor_pool_lock_frees(void)
++{
++   pool_diag_ensure_init();
++   return pool_diag.lock;
++}
++
++void
++d3d12_descriptor_pool_write_stats(bool threaded)
++{
++   pool_diag_ensure_init();
++   if (!pool_diag.stats_path)
++      return;
++
++   const int64_t now = os_time_get_nano();
++   if (now - pool_diag.last_write_ns.load() < 1000000000ll)
++      return;
++   int idle = 0;
++   if (!pool_diag.writing.compare_exchange_strong(idle, 1))
++      return;
++   pool_diag.last_write_ns.store(now);
++   FILE *file = fopen(pool_diag.stats_path, "a");
++   if (file) {
++      fprintf(file,
++              "filetime=%" PRIu64 " threaded=%d lock=%d allocs=%" PRIu64
++              " frees=%" PRIu64 " dup_allocs=%" PRIu64 " double_frees=%" PRIu64
++              " overlaps=%" PRIu64 " cross_thread_frees=%" PRIu64
++              " first_dup_filetime=%" PRIu64 " first_double_free_filetime=%" PRIu64
++              " first_overlap_filetime=%" PRIu64 "\n",
++              pool_diag_filetime(), threaded ? 1 : 0, pool_diag.lock ? 1 : 0,
++              pool_diag.allocs.load(), pool_diag.frees.load(),
++              pool_diag.dup_allocs.load(), pool_diag.double_frees.load(),
++              pool_diag.overlaps.load(), pool_diag.cross_thread_frees.load(),
++              pool_diag.first_dup_filetime.load(),
++              pool_diag.first_double_free_filetime.load(),
++              pool_diag.first_overlap_filetime.load());
++      fclose(file);
++   }
++   pool_diag.writing.store(0);
++}
++
+ struct d3d12_descriptor_pool {
+    ID3D12Device *dev;
+    D3D12_DESCRIPTOR_HEAP_TYPE type;
+@@ -54,8 +187,26 @@
+    uint32_t next;
+    util_dynarray free_list;
+    list_head link;
++   /* Offline heaps only, with D3D12_DESCRIPTOR_STATS: the allocating thread
++    * of each slot (0 when free), and how many threads are inside the heap.
++    */
++   std::atomic<uint32_t> *owners;
++   std::atomic<int> busy;
+ };
+ 
++static inline void
++pool_diag_enter(struct d3d12_descriptor_heap *heap)
++{
++   if (heap->busy.fetch_add(1) != 0)
++      pool_diag_note(pool_diag.overlaps, pool_diag.first_overlap_filetime);
++}
++
++static inline void
++pool_diag_leave(struct d3d12_descriptor_heap *heap)
++{
++   heap->busy.fetch_sub(1);
++}
++
+ struct d3d12_descriptor_heap*
+ d3d12_descriptor_heap_new(ID3D12Device *dev,
+                           D3D12_DESCRIPTOR_HEAP_TYPE type,
+@@ -81,6 +232,11 @@
+       heap->gpu_base = GetGPUDescriptorHandleForHeapStart(heap->heap).ptr;
+    heap->free_list = UTIL_DYNARRAY_INIT;
+ 
++   pool_diag_ensure_init();
++   if (pool_diag.stats_path && !(flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
++      heap->owners = static_cast<std::atomic<uint32_t> *>(
++         calloc(num_descriptors, sizeof(std::atomic<uint32_t>)));
++
+    return heap;
+ }
+ 
+@@ -89,6 +245,7 @@
+ {
+    heap->heap->Release();
+    util_dynarray_fini(&heap->free_list);
++   free(heap->owners);
+    FREE(heap);
+ }
+ 
+@@ -135,17 +292,29 @@
+ 
+    assert(handle != NULL);
+ 
++   if (heap->owners)
++      pool_diag_enter(heap);
++
+    if (heap->free_list.size > 0) {
+       offset = util_dynarray_pop(&heap->free_list, uint32_t);
+    } else if (heap->size >= heap->next + heap->desc_size) {
+       offset = heap->next;
+       heap->next += heap->desc_size;
+    } else {
++      if (heap->owners)
++         pool_diag_leave(heap);
+       /* Todo: we should add a new descriptor heap to get more handles */
+       assert(0 && "No handles available in descriptor heap");
+       return 0;
+    }
+ 
++   if (heap->owners) {
++      pool_diag.allocs.fetch_add(1);
++      if (heap->owners[offset / heap->desc_size].exchange(pool_diag_thread()) != 0)
++         pool_diag_note(pool_diag.dup_allocs, pool_diag.first_dup_filetime);
++      pool_diag_leave(heap);
++   }
++
+    handle->heap = heap;
+    handle->cpu_handle.ptr = heap->cpu_base + offset;
+    handle->gpu_handle.ptr = d3d12_descriptor_heap_is_online(heap) ?
+@@ -157,12 +326,24 @@
+ void
+ d3d12_descriptor_handle_free(struct d3d12_descriptor_handle *handle)
+ {
+-   const uint32_t index = static_cast<uint32_t>(handle->cpu_handle.ptr - handle->heap->cpu_base);
+-   if (index + handle->heap->desc_size == handle->heap->next) {
+-      handle->heap->next = index;
++   struct d3d12_descriptor_heap *heap = handle->heap;
++   const uint32_t index = static_cast<uint32_t>(handle->cpu_handle.ptr - heap->cpu_base);
++   if (heap->owners) {
++      pool_diag_enter(heap);
++      pool_diag.frees.fetch_add(1);
++      const uint32_t owner = heap->owners[index / heap->desc_size].exchange(0);
++      if (!owner)
++         pool_diag_note(pool_diag.double_frees, pool_diag.first_double_free_filetime);
++      else if (owner != pool_diag_thread())
++         pool_diag.cross_thread_frees.fetch_add(1);
++   }
++   if (index + heap->desc_size == heap->next) {
++      heap->next = index;
+    } else {
+-      util_dynarray_append(&handle->heap->free_list, index);
++      util_dynarray_append(&heap->free_list, index);
+    }
++   if (heap->owners)
++      pool_diag_leave(heap);
+ 
+    handle->heap = NULL;
+    handle->cpu_handle.ptr = 0;
+diff --git a/src/gallium/drivers/d3d12/d3d12_descriptor_pool.h b/src/gallium/drivers/d3d12/d3d12_descriptor_pool.h
+--- a/src/gallium/drivers/d3d12/d3d12_descriptor_pool.h
++++ b/src/gallium/drivers/d3d12/d3d12_descriptor_pool.h
+@@ -92,4 +92,18 @@
+ void
+ d3d12_descriptor_heap_clear(struct d3d12_descriptor_heap *heap);
+ 
++/* Offline descriptor pools are filled from the frontend thread
++ * (create_sampler_view, create_sampler_state) and freed from the threaded
++ * context's driver thread (sampler view and zombie sampler release).
++ * D3D12_DESCRIPTOR_POOL_LOCK=1 serializes those frees with
++ * d3d12_screen::descriptor_pool_mutex.  D3D12_DESCRIPTOR_STATS=<path>
++ * appends allocation counters, duplicate allocations, double frees and
++ * concurrent pool access to <path> at most once a second.
++ */
++bool
++d3d12_descriptor_pool_lock_frees(void);
++
++void
++d3d12_descriptor_pool_write_stats(bool threaded);
++
+ #endif

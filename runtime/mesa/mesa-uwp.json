@@ -34,6 +34,11 @@
       "file": "patches/0003-d3d12-persistent-shader-and-DXIL-variant-cache.patch",
       "sha256": "fe77911fc9599aa4af06566ee54461d8a63f47d01f180a431f666890d7ac70ba",
       "variants": ["shader-cache"]
+    },
+    {
+      "file": "patches/0004-d3d12-serialize-descriptor-pool-frees.patch",
+      "sha256": "c4abcdb2c709cdee368bfb0b322120b95a434473f61fff4f57919610fdc41553",
+      "variants": ["shader-cache"]
     }
   ],
   "variants": {

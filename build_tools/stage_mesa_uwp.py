@@ -39,9 +39,18 @@ RUNTIME_LIMIT = 128 * 1024 * 1024
 SHADER_CACHE_MARKER = b'D3D12_SHADER_CACHE_STATS'
 
 
+# D3D12_DESCRIPTOR_POOL_LOCK only exists in builds with runtime/mesa/patches/0004.
+DESCRIPTOR_POOL_MARKER = b'D3D12_DESCRIPTOR_POOL_LOCK'
+
+
 def has_shader_cache(driver):
     """Whether a libgallium_wgl.dll image carries the persistent d3d12 shader cache."""
     return SHADER_CACHE_MARKER in driver
+
+
+def has_descriptor_pool_lock(driver):
+    """Whether a libgallium_wgl.dll image carries the descriptor pool lock and counters."""
+    return DESCRIPTOR_POOL_MARKER in driver
 
 
 def load_mesa_runtime(directory, checksum):

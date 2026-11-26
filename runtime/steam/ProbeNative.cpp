@@ -2306,6 +2306,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     std::wstring shadowManagedWarmup;
     bool shadowGlTrace = false;
     bool shadowMesaShaderCache = false;
+    // Mesa threading and descriptor-pool arms for the Godot GLES3 white flicker (GabeBox #89).
+    bool shadowMesaNoThread = false;
+    std::wstring shadowMesaDescriptors;
     bool shadowDxgi = false;
     bool shadowDxgiOutput = false;
     bool shadowDxgiAdapterBudget = false;
@@ -2631,6 +2634,32 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     }
                     shadowMesaShaderCache = true;
                 }
+                // GALLIUM_THREAD=0: st/mesa drives the d3d12 context directly instead of through
+                // u_threaded_context, so no driver call runs on a second thread.
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-mesa-no-thread-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowMesaNoThread = true;
+                }
+                // runtime/mesa patch 0004: "stats" counts duplicate and concurrent use of Mesa's
+                // offline descriptor pools; "lock" also serializes their frees with allocations.
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-mesa-descriptors-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size() > 8) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowMesaDescriptors = co_await FileIO::ReadTextAsync(file);
+                    while (!shadowMesaDescriptors.empty() &&
+                            (shadowMesaDescriptors.back() == L'\n' || shadowMesaDescriptors.back() == L'\r'))
+                        shadowMesaDescriptors.pop_back();
+                    if (shadowMesaDescriptors != L"stats" && shadowMesaDescriptors != L"lock") {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                }
                 shadowWorkingDirectory = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-working-directory-" + std::to_wstring(app) + L".txt")));
                 shadowOriginalExecutable = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
@@ -2745,7 +2774,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (shadowPipelineCache && (!shadowRecipe || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         (shadowDynamicCompanions && (!shadowOriginalExecutable || !shadowFiles || !shadowTrace)) ||
-                        ((shadowGlTrace || shadowMesaShaderCache) && (!shadowRecipe || shadowRenderer != L"opengl3")) ||
+                        ((shadowGlTrace || shadowMesaShaderCache || shadowMesaNoThread || !shadowMesaDescriptors.empty()) &&
+                            (!shadowRecipe || shadowRenderer != L"opengl3")) ||
                         (shadowGlTrace && !shadowTrace) ||
                         (!accessibility.empty() && (!shadowAccessibilityDisabled || !shadowRecipe ||
                             !hostedSurfaceless || shadowRuntime != L"godot" || (shadowRenderer != L"opengl3" && !godotDxgi))) ||
@@ -3614,6 +3644,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 report += L"steam_shadow_mesa_shader_cache=profile\r\nsteam_shadow_mesa_cache_stats=" + name + L"\r\n";
             }
             if (shadowGlTrace) report += L"steam_shadow_gl_trace=loader-trace\r\n";
+            if (shadowMesaNoThread) report += L"steam_shadow_mesa_thread=off\r\n";
+            std::wstring descriptorStats;
+            if (!shadowMesaDescriptors.empty()) {
+                const auto stamp = (static_cast<std::uint64_t>(launchTime.dwHighDateTime) << 32) |
+                    launchTime.dwLowDateTime;
+                const auto name = L"mesa-descriptors-" + appId + L"-" + std::to_wstring(stamp) + L".txt";
+                descriptorStats = dataRoot + L"\\" + name;
+                report += L"steam_shadow_mesa_descriptors=" + shadowMesaDescriptors +
+                    L"\r\nsteam_shadow_mesa_descriptor_stats=" + name + L"\r\n";
+            }
             std::vector<std::pair<std::wstring, std::wstring>> variables = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
                 {L"XBOX_WIN32_DOCUMENTS", shadowDocumentsPath},
@@ -3646,6 +3686,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"MESA_SHADER_CACHE_DIR", shadowMesaCache},
                 {L"MESA_SHADER_CACHE_MAX_SIZE", shadowMesaCache.empty() ? L"" : L"512M"},
                 {L"D3D12_SHADER_CACHE_STATS", mesaStats},
+                // GabeBox #89 arms (runtime/mesa/patches/0004 for the descriptor variables).
+                {L"GALLIUM_THREAD", shadowMesaNoThread ? L"0" : L""},
+                {L"D3D12_DESCRIPTOR_STATS", descriptorStats},
+                {L"D3D12_DESCRIPTOR_POOL_LOCK", shadowMesaDescriptors == L"lock" ? L"1" : L""},
                 {L"DOTNET_EventPipeConfig", shadowJitTrace ? L"Microsoft-Windows-DotNETRuntime:0x10:5" : L""},
                 {L"DOTNET_EventPipeOutputPath", shadowJitTrace ? std::wstring(ApplicationData::Current().LocalFolder().Path()) +
                     L"\\managed-jit-" + appId + L".nettrace" : std::wstring{}},

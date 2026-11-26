@@ -6,7 +6,7 @@ import re
 import struct
 
 from build_tools.redirect_pe_imports import PeImage, validate_patch_recipe
-from build_tools.stage_mesa_uwp import has_shader_cache
+from build_tools.stage_mesa_uwp import has_descriptor_pool_lock, has_shader_cache
 from build_tools.stage_session import read_package_member
 from build_tools.verify_win32_source import read_profile, valid_win32_component
 from tools.artifacts import pe_summary
@@ -244,6 +244,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     hostfxr_warmup = False
     gl_trace = False
     mesa_shader_cache = False
+    mesa_no_thread = False
+    mesa_descriptors = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -560,6 +562,22 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The Mesa shader cache needs an empty marker and the OpenGL renderer for AppID {app}.")
             files[mesa_cache_marker] = b""
             mesa_shader_cache = True
+        # GabeBox #89 arms: run st/mesa without u_threaded_context, and count (stats) or also
+        # serialize (lock) Mesa's offline descriptor pool frees (runtime/mesa/patches/0004).
+        no_thread_marker = f"steam-win32-mesa-no-thread-{app}.txt"
+        if (root / no_thread_marker).is_file():
+            if (root / no_thread_marker).stat().st_size or fields[2:3] != ["opengl3"]:
+                raise ValueError(f"The Mesa no-thread arm needs an empty marker and the OpenGL renderer for AppID {app}.")
+            files[no_thread_marker] = b""
+            mesa_no_thread = True
+        descriptors_marker = f"steam-win32-mesa-descriptors-{app}.txt"
+        if (root / descriptors_marker).is_file():
+            with (root / descriptors_marker).open("rb") as source:
+                mode = source.read(9)
+            if len(mode) > 8 or mode.rstrip(b"\r\n") not in (b"stats", b"lock") or fields[2:3] != ["opengl3"]:
+                raise ValueError(f"The Mesa descriptor arm needs stats or lock and the OpenGL renderer for AppID {app}.")
+            files[descriptors_marker] = mode.rstrip(b"\r\n")
+            mesa_descriptors = True
         shader_cache = f"steam-win32-godot-shader-cache-{app}.txt"
         if (root / shader_cache).is_file():
             with (root / shader_cache).open("rb") as source:
@@ -808,6 +826,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         driver = layout / "libgallium_wgl.dll"
         if not driver.is_file() or not has_shader_cache(driver.read_bytes()):
             raise ValueError("The Mesa shader cache needs the shader-cache Mesa UWP runtime (--mesa-runtime).")
+    if mesa_no_thread and "GALLIUM_THREAD\0".encode("utf-16le") not in native:
+        raise ValueError("Use a Steam Core artifact that can turn off Mesa's threaded context.")
+    if mesa_descriptors:
+        if "D3D12_DESCRIPTOR_POOL_LOCK\0".encode("utf-16le") not in native:
+            raise ValueError("Use a Steam Core artifact that sets the Mesa descriptor pool variables.")
+        driver = layout / "libgallium_wgl.dll"
+        if not driver.is_file() or not has_descriptor_pool_lock(driver.read_bytes()):
+            raise ValueError("The Mesa descriptor arm needs a Mesa UWP runtime with patch 0004 (--mesa-runtime).")
 
     if managed_warmup:
         variable = "XBOX_WIN32_MANAGED_WARMUP_PLAN\0".encode("utf-16le")
