@@ -550,3 +550,31 @@ The console was returned to the play configuration as `1.0.276.235`, without aut
   - barrier or cache flushes between draws.
 
   Separating these needs per-draw GPU timing or a capture tool. The console now runs `1.0.278.237`, the play configuration without autoplay.
+
+**Per-list state counters.** Build `1.0.280.238` (lease #35) hooked 28 command-list slots: `Reset`, draws, dispatch, copies, `SetPipelineState`, `ResourceBarrier` (counted by barrier type), `ExecuteBundle`, `SetDescriptorHeaps`, both root-signature setters, all root descriptor-table and root-view setters, `OMSetRenderTargets`, the four clears, `BeginEvent` and `ExecuteIndirect`. Counters reset on `Reset` and are summed per `ExecuteCommandLists` call, then joined with the fence-timed busy time of that submission. The game reached the world, and the screenshot showed the city rendered.
+
+The table gives per-batch averages over two 30–32 s instrumented world windows (samples 66 and 69):
+
+| Per batch | `exe+0x018D8CBC` | `exe+0x018D8E15` |
+| --- | --- | --- |
+| Batches per window | 1,133–1,150 | 4,108–4,190 |
+| Draws (indexed + non-indexed) | about 365 (290 + 77) | about 950 (920 + 27) |
+| Dispatches | about 7 | about 5.4 |
+| `ExecuteIndirect` | 0 | about 2 |
+| Pipeline changes | about 266 | about 177 |
+| Root-signature changes | **about 57** | about 2.3 |
+| Root arguments | about 920 | about 1,230 |
+| Barrier calls / transitions / UAV | 12 / 16 / 6.4 | 19 / 31 / 7.6 |
+| Render-target sets / clears | 4.5 / 0.6 | 7.6 / 4.2 |
+| Fence-timed GPU time | **19.1–19.4 ms** | 1.5–1.7 ms |
+
+- **The slow lists are not the busy ones.** Submissions at `0x018D8CBC` run about 2.6 times fewer draws than those at `0x018D8E15` but take about 12 times longer: roughly 50 µs per draw against under 2 µs. Together they cover 28–29 s of fence-timed busy time per window.
+- **The slow lists switch root signatures constantly.** That is about 57 changes per batch against 2.3, together with interleaved dispatches and UAV barriers. This pattern alternates graphics and compute work on the direct queue. Each switch can drain the pipeline.
+- **No markers.** `BeginEvent` was never called, so the passes remain unnamed.
+- **Bundles and indirect work are negligible.** No bundles were executed, and the slow site issues no `ExecuteIndirect`. GPU-driven rendering does not hide work there.
+- **The two profilers disagree on draw counts.** These counts replace the 25–40 draws per batch recorded by `1.0.278.236`, which patched fewer slots. The difference is not yet explained.
+- **Pacing in this run is not representative.** The package did not write `fhd-present-times.bin`, and the presenter-copy site completed only 9–10 batches per window, so the instrumentation slowed presentation. 1,023 graphics pipelines were compiled during the run, most of them queued for about 10–11 s.
+
+Next step: put GPU timestamps around each pipeline (or root-signature) span inside `0x018D8CBC` lists and key them by pipeline. That will tell whether the cost lies in specific shaders or in the graphics-to-compute switches.
+
+The console was returned to the play configuration as `1.0.280.239`, without autoplay. The SteamCore package identity is shared with the STS2 session, whose `1.0.279.3` this version replaces.
