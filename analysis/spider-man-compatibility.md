@@ -705,3 +705,49 @@ Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--
 **Impact on measurements.** Automated drives must hold RT after Continue before sampling gameplay. The 25–31 frames per second recorded above were measured on the paused tutorial frame. They show how fast the render loop runs, but gameplay frame rate still has to be measured.
 
 **Rendering bugs are still present while moving.** After RT, the street surface shows the sky reflection and the hero is a white placeholder cube.
+
+### Hosted games ran on two of eight processors (November 26, evening)
+
+**Root cause of the ~30 FPS cap.**
+- **Who owns the processors.** The console reserves processors 2–7 (mask `0xFC`) for the title process, our host `SteamPrimary.exe`.
+- **The game inherits none of them.** The host starts `Spider-Man.exe` with `CreateProcessW`, and the scheduler kept the child on the system's processors 0–1.
+- **Probe on `1.0.317.1`.** Six spinning threads in the child got 498 ms of CPU in 250 ms of wall time, all on processors `0x3`.
+- **What changed nothing.** `SetProcessDefaultCpuSets` and `SetThreadSelectedCpuSets` with the host's CPU-set IDs succeeded and left the threads where they were.
+- **What worked.** A hard affinity mask of `0xFC` gave the six threads 250 ms each on processors 2–7.
+
+**The earlier pacing reading was wrong.** The console's QPC runs at 1,745,500,000 Hz, so the `dxgi stall` stages read earlier as 8–9 ms and 16–18 ms actually take 0.05–0.2 ms. The adapter's pacer and its native present were never the limit.
+
+**Fix (shared, no per-title values).**
+
+| File | Change |
+| --- | --- |
+| `runtime/win32/cpu-sets.h` (new) | Reads the owner process's reserved processors and sets them as the target's affinity mask. CPU-set functions are resolved at run time. Every failure leaves the target unchanged. |
+| `runtime/win32/loader-trace.c` | `XboxGetStartupInfoW` applies the mask once, before the game starts its workers, and traces `asset host-processors`. `XBOX_WIN32_HOST_PROCESSORS=0` turns it off. |
+| `runtime/steam/ProbeNative.cpp` | Applies the mask right after creating the shadow child, which would cover every hosted title. Not yet built by CI or run on the console. |
+
+**Measurements.**
+- **Method.** Each window is 30 s of gameplay after `hold:RT:3`, driven by a repeated swing, jump, run and turn script.
+- **Resolution and transport.** Internal and output resolution were both 1920×1080. Every frame was a shared GPU texture, with no CPU uploads.
+- **Command.** `python3 -m tools.measure <run>/fhd-present-times.bin --start-utc … --duration 30 --output-resolution 1920x1080 --require-gpu-60`.
+
+| Build | Processors | Avg FPS | Lowest 1 s | p50 / p95 | Worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1.0.317.1` | 0–1 | 24.1 | 9 | 33.4 / 66.7 ms | 634 ms | false |
+| `1.0.317.3` | 2–7 (probe) | 57.9 | 27 | 16.69 / 17.9 ms | 548 ms | false |
+| `1.0.317.4` | 2–7 (shipped header) | 56.5 | 10 | 16.68 / 18.5 ms | 818 ms | false |
+
+**Where the remaining frames go.**
+- **Screenshots (`1.0.317.3`).** The ~530 ms gaps matched Device Portal screenshots.
+- **Pipeline compiles (`1.0.317.4`).** The 818, 800, 715 and 200 ms stalls match `pso-slow` records with `wait-ms=0` and compile times of 523–786 ms.
+- **The game compiles pipelines synchronously on first use,** and no pipeline cache survives between runs.
+- **Seconds without a compile hold 59–60 frames.**
+- **The game's own counter** reads 54.5–60 in place of 25.6–36.
+
+**Open work.**
+- Remove first-use pipeline compiles, for example with a persistent pipeline cache or by compiling the 1,045-pipeline `xbox0.pso` set before world entry.
+- Build and test the host-side placement.
+- Run independent verification.
+
+**State left behind.**
+- **Saves.** The gameplay drives advanced the tutorial and autosaved. The changed save is backed up, and the earlier snapshot was restored with matching checksums.
+- **Console.** It holds `1.0.317.5`: the play configuration with the processor fix in the trace DLL.
