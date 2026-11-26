@@ -95,7 +95,7 @@ void* OriginalMemoryBudgetSlot(const void* self) {
 }
 
 const MemoryBudgetAdapter* RecordedMemoryBudgetAdapter(IDXGIAdapter3* self) {
-    DXGI_ADAPTER_DESC1 description{};
+    DXGI_ADAPTER_DESC1 description;
     if (FAILED(self->GetDesc1(&description)) || (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) return nullptr;
     const LONG count = InterlockedCompareExchange(&memoryBudgetAdapterCount, 0, 0);
     for (LONG index = 0; index < count; ++index) {
@@ -157,7 +157,7 @@ HRESULT STDMETHODCALLTYPE BudgetedVideoMemoryInfo(IDXGIAdapter3* self, UINT node
         return result;
     const DWORD previous = GetLastError();
     const MemoryBudgetAdapter* adapter = RecordedMemoryBudgetAdapter(self);
-    DXGI_QUERY_VIDEO_MEMORY_INFO other{};
+    DXGI_QUERY_VIDEO_MEMORY_INFO other;
     const bool local = group == DXGI_MEMORY_SEGMENT_GROUP_LOCAL;
     if (adapter && FAILED(original(self, node, local ? DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL :
                                                        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &other)))
@@ -246,7 +246,7 @@ HRESULT InstallMemoryBudget() {
     for (UINT index = 0; SUCCEEDED(result) && index < ARRAYSIZE(memoryBudgetAdapters); ++index) {
         ComPtr<IDXGIAdapter1> adapter;
         if (factory->EnumAdapters1(index, &adapter) == DXGI_ERROR_NOT_FOUND) break;
-        DXGI_ADAPTER_DESC1 description{};
+        DXGI_ADAPTER_DESC1 description;
         if (!adapter || FAILED(adapter->GetDesc1(&description)) || (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
             continue;
         const UINT64 capacity = gpu_memory_budget::Capacity(description.DedicatedVideoMemory,
