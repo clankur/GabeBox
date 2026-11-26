@@ -5,3 +5,4 @@ __pycache__/
 .ruff_cache/
 /big-picture-layout/
 /big-picture-signed/
+.claude/xbox-portal-pin.log
