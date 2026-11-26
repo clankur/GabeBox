@@ -60,6 +60,8 @@ LIVE_LOADER_EVENTS = {
     'graphics-pso-before': re.compile(r'asset graphics-pso-before(?: |$)'),
     'boot-wait': re.compile(r'asset boot-wait(?:[ =-]|$)'),
     'shell-request': re.compile(r'(?:asset|input) (?:boot-)?shell-request(?:[ =-]|$)'),
+    # The DXGI adapter's video memory budget install and its periodic usage samples.
+    'gpu-memory': re.compile(r'dxgi gpu-memory(?:[ -]|$)'),
 }
 PIPELINE_MARKER = re.compile(r'asset (graphics|compute)-pso-(before|after) bytes=0x[0-9a-fA-F]{16} '
                              r'flags=0x([0-9a-fA-F]{8}) available-commit-kib=0x([0-9a-fA-F]{8})(?: .+)?')

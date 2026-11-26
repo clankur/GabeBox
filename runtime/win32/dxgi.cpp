@@ -8,6 +8,7 @@
 #include <appmodel.h>
 #include <new>
 #include "dxgi-frame.h"
+#include "gpu-memory-budget.h"
 #include "../shared/sdl-swap-clock.h"
 #include "../shared/steam-handoff-control.h"
 
@@ -68,6 +69,8 @@ void Trace(const char* phase, HRESULT code) {
     *out++ = '\n';
     AppendTrace(line, static_cast<DWORD>(out - line));
 }
+
+#include "dxgi-memory-budget.h"
 
 template<size_t N>
 bool HasPackageMarker(const WCHAR (&suffix)[N]) {
@@ -1204,4 +1207,12 @@ extern "C" HRESULT WINAPI XboxDCompositionCreateDevice(IDXGIDevice* renderingDev
     device->Release();
     Trace("dcomp-device", code);
     return code;
+}
+
+// Caps the video memory budget that Mesa's d3d12 driver reads from the native adapter. See dxgi-memory-budget.h.
+extern "C" HRESULT WINAPI XboxInstallGpuMemoryBudget(void) {
+    const DWORD previous = GetLastError();
+    const HRESULT result = InstallMemoryBudget();
+    SetLastError(previous);
+    return result;
 }

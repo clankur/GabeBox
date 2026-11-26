@@ -591,9 +591,14 @@ class ObserverTests(unittest.TestCase):
     def test_live_loader_inspection_preserves_repeated_events_from_the_verified_copy(self):
         launch = EPOCH_MS + 1
         past = [stage(f'SteamWin32Trial ({number})', launch - 1 - number) for number in range(1, 38)]
+        sample = (b'dxgi gpu-memory local_used_mib=412 nonlocal_used_mib=0 budget_mib=672 native_budget_mib=4147 '
+                  b'peak_mib=430 queries=7200 t_s=60 utc=20261126T015013Z')
         traced = (b'asset graphics-pso-before flags=0x00000040\r\n' * 2
                   + b'asset boot-wait-single timeout=0xFFFFFFFF enter\r\n'
-                  + b'asset shell-request result=0x00000000\r\n')
+                  + b'asset shell-request result=0x00000000\r\n'
+                  + b'dxgi gpu-memory-budget install result=0x00000000 dedicated_mib=512 shared_mib=832 '
+                    b'capacity_mib=1344 cap_mib=672 source=default\r\n'
+                  + sample + b'\r\n')
         fixture = Fixture([{
             diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE),
             LIVE_TRACE: traced + b'load C:\\Users\\private\\sample.dll\r\nasset boot-wait-split',
@@ -604,11 +609,13 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(result['app_id'], APP_ID)
             self.assertEqual(result['run_id'], launch)
             self.assertEqual(result['loader_trace']['state'], 'observed')
-            self.assertEqual(result['loader_trace']['records'], 4)
+            self.assertEqual(result['loader_trace']['records'], 6)
             self.assertEqual(result['loader_trace']['events']['graphics-pso-before']['count'], 2)
             self.assertEqual(result['loader_trace']['events']['boot-wait']['count'], 1)
             self.assertEqual(result['loader_trace']['events']['shell-request']['latest'],
                              ['asset shell-request result=0x00000000'])
+            self.assertEqual(result['loader_trace']['events']['gpu-memory']['count'], 2)
+            self.assertEqual(result['loader_trace']['events']['gpu-memory']['latest'][-1], sample.decode())
             self.assertEqual((output / 'loader-trace.txt').read_bytes(), traced.replace(b'\r\n', b'\n'))
             self.assertEqual(json.loads((output / 'observation.json').read_text()), result)
             self.assertNotIn('private', json.dumps(result))

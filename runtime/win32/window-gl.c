@@ -108,9 +108,12 @@ static void InitializeSteamworks(void) {
     if (module) FreeLibrary(module);
 }
 
+static void InstallGpuMemoryBudget(void);
+
 static BOOL Initialize(void) {
     if (initialized) return TRUE;
     InitializeSteamworks();
+    InstallGpuMemoryBudget();
     HMODULE module = LoadLibraryExW(L"SDL2.dll", NULL, 0);
     if (!module) return FALSE;
 #define SDL_BIND(member, exportName) \
@@ -173,6 +176,24 @@ static void AppendLoaderTrace(const char *line) {
         }
     }
     SetLastError(error);
+}
+
+/* Mesa's d3d12 driver keeps allocations resident against the native adapter's video memory budget, which
+   Xbox sizes from the process memory limit rather than the GPU's memory. The DXGI adapter caps the budget
+   Mesa reads (dxgi-memory-budget.h), so Mesa trims idle allocations before the adapter runs out. The module
+   stays loaded because the patched method table points into it. */
+static void InstallGpuMemoryBudget(void) {
+    typedef HRESULT (WINAPI *Install)(void);
+    const DWORD previous = GetLastError();
+    HMODULE module = LoadPackagedLibrary(L"XboxWin32Dxgi.dll", 0);
+    Install install = module ? (Install)(void *)GetProcAddress(module, "XboxInstallGpuMemoryBudget") : NULL;
+    if (install) {
+        install();
+    } else {
+        AppendLoaderTrace("dxgi gpu-memory-budget install=unavailable\r\n");
+        if (module) FreeLibrary(module);
+    }
+    SetLastError(previous);
 }
 
 /* Record the first delivery of each host input kind in the run's loader trace. */
