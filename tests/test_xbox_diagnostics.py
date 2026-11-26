@@ -951,9 +951,17 @@ class ObserverTests(unittest.TestCase):
                     return 200, probe(run, extra=RENDER_FIELDS)
                 if name == 'fhd-panel-input.txt':
                     markers = (b'menu_chord=ignored reason=unpaired\r\nmenu_chord=held source=keys\r\n'
-                               b'menu_request=ready\r\npanel_focus=restored\r\npanel_input=resumed\r\n'
+                               b'menu_request=ready\r\npanel_window_focus=taken from=other\r\n'
+                               b'panel_focus=restored\r\npanel_input=resumed\r\npanel_window_focus=retaken from=none\r\n'
+                               b'panel_window_focus=declined from=none\r\n'
                                b'panel_keys=after-show\r\nmenu_request=rea') if self.now else b''
                     return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
+                if name == 'fhd-panel-stats.txt':
+                    hidden = 5 if self.now else 3
+                    return 200, (f'panel_hidden={hidden}\r\npanel_hidden_shell=2\r\npanel_hidden_panel=0\r\n'
+                                 f'panel_hidden_window={hidden - 2}\r\npanel_uncovered={hidden + 1}\r\n'
+                                 'panel_reordered=0\r\npanel_repeat_presents=7\r\n'
+                                 f'panel_presented={600 if self.now else 510}\r\nsecret=do-not-save\r\n').encode()
                 assert name == MAILBOX
                 step = round(self.now * 2)
                 serial, ack, confirmed = ((2, 2, 2), (4, 2, 4), (6, 6, 6), (8, 6, 9))[step]
@@ -980,13 +988,22 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
                          ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
         self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
-        recovered = {'input_resumed': 1, 'focus_restored': 1, 'focus_declined': 0, 'keys_after_show': 1}
+        recovered = {'input_resumed': 1, 'focus_restored': 1, 'focus_declined': 0, 'keys_after_show': 1,
+                     'window_focus_taken': 1, 'window_focus_retaken': 1, 'window_focus_declined': 1}
         self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'chord_from_keys': 1,
                                                           'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
                                                           **recovered})
         self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'chord_from_keys': 1,
                                                          'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
                                                          **recovered})
+        # Two hides while the view was inactive, two shows and 90 presents during the sample.
+        self.assertEqual(result['panel_menu']['composition'], {
+            'state': 'observed',
+            'totals': {'panel_hidden': 5, 'panel_hidden_shell': 2, 'panel_hidden_panel': 0, 'panel_hidden_window': 3,
+                       'panel_uncovered': 6, 'panel_reordered': 0, 'panel_repeat_presents': 7,
+                       'panel_presented': 600},
+            'added': {'panel_hidden': 2, 'panel_hidden_shell': 0, 'panel_hidden_panel': 0, 'panel_hidden_window': 2,
+                      'panel_uncovered': 2, 'panel_reordered': 0, 'panel_repeat_presents': 0, 'panel_presented': 90}})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertNotIn(MAILBOX, json.dumps(result))
         fake = Portal()

@@ -57,6 +57,7 @@
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
             const exited = data.appId === 0 ? activeApp : 0;
+            if (changed) trackXboxGameWindows(runtime?.(5757).oy?.WindowStore, data.appId, activeApp);
             activeApp = data.appId;
             controlsApp = data.overlay ? activeApp : 0;
             if (controlsApp && !focusStore) attachRunningGameFocus();

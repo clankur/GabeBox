@@ -96,3 +96,8 @@ void XboxPipelineReplayGetCounters(XboxPipelineReplayCounters *counters);
 
 /* Exported for the process-exit adapters: writes unsaved pipelines once. */
 void WINAPI XboxD3D12PipelineCacheFlush(void);
+
+/* From the loader-trace adapter's process-detach notification, which runs for an ExitProcess
+   made by any module. It reports the exit stats when no exit adapter flushed first, and takes
+   no lock and makes no Direct3D call. */
+void XboxD3D12PipelineCacheProcessExit(void);

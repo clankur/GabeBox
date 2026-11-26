@@ -151,6 +151,11 @@ void mergeRemotePad(SdlHostGamepadState &value) {
 }
 SdlHostGamepadState previousPad;
 bool sentPad;
+// The serial of the first controller sample published after the latest resume, or 0 until it
+// is published. The game acknowledging that serial shows that the shown game polls hosted
+// input again and reads its mailbox.
+LONG resumeSerial;
+bool awaitingResumeSample;
 
 bool alive() { return mail && !SdlHostLoad(&mail->quit); }
 bool foreground() { return alive() && focused && visible && inputEnabled && !overlay; }
@@ -163,9 +168,13 @@ void setPad(SdlHostGamepadState const &pad) {
         same = same && pad.axes[i] == previousPad.axes[i];
     if (same)
         return;
-    SdlHostPublishGamepad(&mail->gamepad, &pad);
+    const LONG serial = SdlHostPublishGamepad(&mail->gamepad, &pad);
     previousPad = pad;
     sentPad = true;
+    if (awaitingResumeSample) {
+        awaitingResumeSample = false;
+        resumeSerial = serial;
+    }
 }
 LONG pointer(LONG pos, LONG keys) {
     if (!alive() || (pos == mouse && keys == legacyKeys))
@@ -573,6 +582,10 @@ bool readPad(Reading *out) {
 extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
 extern "C" BOOL FhdHostedInputPaused() { return mail && overlay != Playing; }
 extern "C" UINT FhdHostedKeyEvents() { return keyEvents; }
+extern "C" void FhdReadHostedResumeSample(LONG *serial, LONG *ack) {
+    if (serial) *serial = mail ? resumeSerial : 0;
+    if (ack) *ack = mail ? SdlHostLoad(&mail->gamepad.ack) : 0;
+}
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
     if (!!nativePad != !!gamepad) {
         if (alive()) {
@@ -615,6 +628,8 @@ extern "C" void FhdResumeHostedInput() {
     chordPending = false;
     resetChord();
     sentPad = false;
+    resumeSerial = 0;
+    awaitingResumeSample = nativePad;
 }
 extern "C" void FhdPauseHostedInput() {
     if (mail && overlay != Reported) {
@@ -649,6 +664,8 @@ extern "C" void FhdEndHostedInput() {
     overlay = Playing;
     menuOnRelease = false;
     sentPad = false;
+    resumeSerial = 0;
+    awaitingResumeSample = false;
 }
 extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, void *coreWindow) {
     FhdEndHostedInput();

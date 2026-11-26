@@ -172,8 +172,20 @@ SDL_INPUT_PANEL_MARKERS = {
     'focus_restored': (b'panel_focus=restored',),
     'focus_declined': (b'panel_focus=declined',),
     'keys_after_show': (b'panel_keys=after-show',),
+    # Win32 keyboard focus given back to the view's window when the game was shown, or while it
+    # was shown and no window held focus, and attempts that did not take.
+    'window_focus_taken': (b'panel_window_focus=taken from=other', b'panel_window_focus=taken from=none'),
+    'window_focus_retaken': (b'panel_window_focus=retaken from=none',),
+    'window_focus_declined': (b'panel_window_focus=declined from=other', b'panel_window_focus=declined from=none'),
 }
 SDL_INPUT_PANEL_LINES = frozenset(line for lines in SDL_INPUT_PANEL_MARKERS.values() for line in lines)
+# fhd-panel-stats.txt: the game panel's composition totals, rewritten in place by the presenter.
+# Hides split by cause (the Steam shell over the game, the panel collapsed or without size, the
+# view hidden or inactive), shows, reorders among the page's layers, and presents of a producer
+# frame that was already presented. clankur/GabeBox#89 tracks a white flicker over a game.
+SDL_INPUT_PANEL_STATS = ('panel_hidden', 'panel_hidden_shell', 'panel_hidden_panel', 'panel_hidden_window',
+                         'panel_uncovered', 'panel_reordered', 'panel_repeat_presents', 'panel_presented')
+SDL_INPUT_PANEL_STATS_LIMIT = 1024
 
 
 def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sleep, progress=None):
@@ -216,7 +228,20 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         complete, _, _ = raw.rpartition(b'\n')
         return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_LINES)
 
+    def panel_stats():
+        raw = blob('fhd-panel-stats.txt', SDL_INPUT_PANEL_STATS_LIMIT)
+        if raw is None or len(raw) > SDL_INPUT_PANEL_STATS_LIMIT:
+            return None
+        values = {}
+        for line in raw.split(b'\r\n'):
+            name, _, value = line.partition(b'=')
+            if name.decode('ascii', 'replace') in SDL_INPUT_PANEL_STATS and re.fullmatch(rb'[0-9]{1,16}', value):
+                values[name.decode()] = int(value)
+        # A rewrite in progress can be read part way; only a complete set is reported.
+        return values if len(values) == len(SDL_INPUT_PANEL_STATS) else None
+
     panel_before = panel_trace() if args.panel_menu else None
+    stats_before = panel_stats() if args.panel_menu else None
     samples = []
     if args.seconds and progress:
         progress('sampling-host-input')
@@ -242,6 +267,7 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         pause(min(0.5, args.seconds - elapsed))
 
     panel_after = panel_trace() if args.panel_menu else None
+    stats_after = panel_stats() if args.panel_menu else None
     last = launch_report()
     if (not matching_probe(last, args.run_id, args.app_id)
             or any(first.get(key) != last.get(key) for key in ('run_id', 'steam_sdl_mailbox'))):
@@ -261,6 +287,14 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
             menu.update(state='observed', counts=count(panel_after))
             if panel_before is not None and args.seconds and panel_after[:len(panel_before)] == panel_before:
                 menu['added'] = count(panel_after[len(panel_before):])
+        if stats_after is not None:
+            menu['composition'] = {'state': 'observed', 'totals': stats_after}
+            if (stats_before is not None and args.seconds
+                    and all(stats_after[name] >= stats_before[name] for name in SDL_INPUT_PANEL_STATS)):
+                menu['composition']['added'] = {name: stats_after[name] - stats_before[name]
+                                                for name in SDL_INPUT_PANEL_STATS}
+        else:
+            menu['composition'] = {'state': 'unavailable'}
         result['panel_menu'] = menu
     if args.output:
         save_observation(args.output, result, {})

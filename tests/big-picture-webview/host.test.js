@@ -755,6 +755,58 @@ test("recovery that shows frames without input retries once and then records why
     assert.equal(app.owners.length, 1);
 });
 
+test("recovery records the live input state that confirmed it, and retries a window without key focus", async () => {
+    // Slay the Spire 2 on 1.0.250.3: game-restored was recorded while key events never
+    // reached the window again. The confirmation now also requires the view's window to hold
+    // Win32 keyboard focus, and the report keeps the fields read after the restore.
+    const appId = 2868840, {app, failure} = await playingPrimaryGame(appId);
+    const answers = [
+        {ok: false, reason: "window-unfocused", detail: "visible=1,paused=0,active=1,window_focus=2,keys=8"},
+        {ok: true, detail: "visible=1,paused=0,active=1,window_focus=1,keys=8"}
+    ];
+    let restores = 0;
+    const confirm = async () => answers.shift();
+    assert.equal(await app.shell.showForGame(appId, 3, async () => { restores++; return true; }, () => true, confirm), true);
+    await drain();
+    app.fire(10000);
+    for (let i = 0; i < 4; i++) await drain();
+    assert.equal(restores, 1);
+    app.fire(1000);
+    for (let i = 0; i < 4; i++) await drain();
+    assert.equal(restores, 2);
+    assert.equal(failure(), undefined);
+    assert.deepEqual(recoveryLines(app.reports.at(-1)), [
+        "webview_recovery_1=game-webview-lost appid=2868840 covered=1 cause=overlay-unresponsive",
+        "webview_recovery_2=game-restore-started appid=2868840",
+        "webview_recovery_3=game-restore-retry appid=2868840",
+        "webview_recovery_4=game-restored appid=2868840 input=visible=1,paused=0,active=1,window_focus=1,keys=8"
+    ]);
+});
+
+test("the game frame report keeps the panel's focus, resume sample and composition counters", async () => {
+    // clankur/GabeBox#89: a white flicker over a game's menus. The panel status counts hides by
+    // cause, shows, reorders and presents of an already presented frame.
+    const appId = 2868840, {app} = await playingPrimaryGame(appId);
+    app.shell.recordGameFrame(appId, "media", "primary_panel=1\r\nvisible=1\r\npanel_hidden=3\r\n" +
+        "panel_hidden_shell=2\r\npanel_hidden_panel=0\r\npanel_hidden_window=1\r\npanel_uncovered=4\r\n" +
+        "panel_reordered=0\r\nrepeat_presents=12\r\nnative_window_focus=1\r\nnative_window_focus_taken=2\r\n" +
+        "native_pad_resume_serial=22\r\nnative_pad_ack=22\r\npanel_flash=1\r\n");
+    await drain();
+    assert.match(app.reports.at(-1), new RegExp("game_frame_media=appid=2868840 primary_panel=1 visible=1 panel_hidden=3 " +
+        "panel_hidden_shell=2 panel_hidden_panel=0 panel_hidden_window=1 panel_uncovered=4 panel_reordered=0 " +
+        "repeat_presents=12 native_window_focus=1 native_window_focus_taken=2 native_pad_resume_serial=22 " +
+        "native_pad_ack=22\r\n"));
+});
+
+test("a confirmation detail outside the bounded field list is not written to the report", async () => {
+    const appId = 42, {app} = await playingPrimaryGame(appId);
+    const confirm = async () => ({ok: true, detail: "token=abc\r\nstatus=forged"});
+    assert.equal(await app.shell.showForGame(appId, 3, async () => true, () => true, confirm), true);
+    await app.advance("process-error:owner:2:unresponsive:259:none");
+    for (let i = 0; i < 4; i++) await drain();
+    assert.deepEqual(recoveryLines(app.reports.at(-1)).at(-1), "webview_recovery_3=game-restored appid=42");
+});
+
 test("a renderer failure while the game is in the foreground leaves it there", async () => {
     const appId = 42, {app, failure} = await playingPrimaryGame(appId);
     await app.advance("process-error:owner:1:crashed:1:none");
