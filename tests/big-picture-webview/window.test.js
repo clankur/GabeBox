@@ -125,3 +125,42 @@ test('opaque and hidden composition affect only the actual gamepad controller', 
     assert.throws(() => child.SetComposition(3, [769], 9999), /cannot composite/);
     assert.deepEqual(f.messages, ['xbox-window-show', 'xbox-window-hide']);
 });
+
+test('a running game gets one stable, empty window list that is dropped when it stops', () => {
+    // Valve's WindowStore returns a new empty array for an app without an entry, which kept the
+    // running-game controls re-rendering (86,089 window-title requests in 3 s offline).
+    const context = {};
+    vm.runInNewContext(source + '\nthis.track = trackXboxGameWindows;', context);
+    const entries = new Map(), calls = [];
+    const store = {
+        GetAppWindowIDs: appId => entries.get(appId)?.windowids ?? [],
+        SetRunningAppWindowIDs(appId, ids) {
+            calls.push(['set', appId, ids.length]);
+            if (!entries.has(appId)) entries.set(appId, {appid: appId, focusedWindowID: 0, windowids: ids});
+        },
+        RemoveRunningAppWindowIDs(appId) { calls.push(['remove', appId]); entries.delete(appId); }
+    };
+    assert.notEqual(store.GetAppWindowIDs(2868840), store.GetAppWindowIDs(2868840));
+    context.track(store, 2868840, 0);
+    assert.equal(store.GetAppWindowIDs(2868840), store.GetAppWindowIDs(2868840));
+    assert.equal(store.GetAppWindowIDs(2868840).length, 0);
+    context.track(store, 0, 2868840);
+    assert.equal(entries.size, 0);
+    assert.deepEqual(calls, [['set', 2868840, 0], ['remove', 2868840]]);
+    // A release without the store, or with a different one, is left alone.
+    context.track(undefined, 42, 0);
+    context.track({}, 42, 0);
+});
+
+test('the controller page loading a layout to edit receives a rejection it handles', async () => {
+    const input = fs.readFileSync(require.resolve('../../ui/big-picture-bridge/xbox-input.js'), 'utf8');
+    const client = {System: {}};
+    const install = vm.runInNewContext(input + '\ninstallXboxInput', {window: {addEventListener() {}},
+        getXboxGamepadWindow: () => undefined});
+    install(client, {read: () => []});
+    // Valve calls .then().catch() on the result inside a render. A missing method threw there
+    // (minified React error #520 on Slay the Spire 2).
+    const pending = client.Input.StartEditingControllerConfigurationForAppIDAndControllerIndex(2868840, 0);
+    assert.equal(typeof pending.then, 'function');
+    await assert.rejects(pending, /Steam Input configuration is unavailable/);
+});

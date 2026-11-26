@@ -905,7 +905,11 @@ struct View : implements<View, IFrameworkView> {
             if (closed) co_return;
             hstring script = LR"JS(if(window === window.top && ["https://steamloopback.host/index.html","https://steamloopback.host/index.html?IN_CLIENT=true"].includes(location.href.split("#")[0])){
                 window.addEventListener("error", function(event) {
-                    const message = String(event.message || "resource load error").slice(0,180);
+                    // React reports a render that threw and then recovered (minified error
+                    // #520) with the original exception as its cause. Name the cause first.
+                    const cause = event.error && event.error.cause;
+                    const message = String((cause && cause.message ? cause.message + " <- " : "") +
+                        (event.message || "resource load error")).slice(0,180);
                     window.chrome.webview.postMessage({method:"renderer-error", message});
                 });
                 window.addEventListener("unhandledrejection", function(event) {

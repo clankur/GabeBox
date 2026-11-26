@@ -7,6 +7,20 @@ function getXboxGamepadWindow() {
     return window;
 }
 
+// Valve's running-game controls list the game's windows (their "Switch windows" section)
+// from WindowStore. Steam fills it from focus events, which on Xbox advertise no game
+// windows: a hosted game draws in the shared view. For an app without an entry,
+// GetAppWindowIDs returns a new empty array on every read. The controls' window-title
+// effect then sees a changed dependency on each render, requests the titles again and
+// stores the answer, which renders again. On Xbox that loop held the renderer's main
+// thread and left the overlay white. Give the running game a stable, empty window list,
+// and drop it when the game stops.
+function trackXboxGameWindows(windowStore, appId, previous) {
+    if (typeof windowStore?.SetRunningAppWindowIDs !== 'function') return;
+    if (previous && previous !== appId) windowStore.RemoveRunningAppWindowIDs?.(previous);
+    if (appId) windowStore.SetRunningAppWindowIDs(appId, []);
+}
+
 function installXboxWindow(client, send, lookupPopup) {
     if (typeof xboxNativeWindow === 'undefined') return; // Only the WebView host can supply these bindings.
     const host = window.chrome.webview;
