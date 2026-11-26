@@ -142,10 +142,15 @@ static HRESULT STDMETHODCALLTYPE AllocRemovedCached(ID3D12Device *self) {
 #include "gpuprof.h"
 
 static void AllocInstall(ID3D12Device *device) {
-    static const unsigned slots[] = {27, 28, 29, 53, 54, 37, 8};
+#ifdef PLAY_BUILD
+    static const unsigned slots[] = {27, 28, 29, 53, 54, 37};
+#else
+    static const unsigned slots[] = {27, 28, 29, 53, 54, 37, 8, 12};
+#endif
     void *const replacements[] = {(void *)AllocCommitted, (void *)AllocHeap, (void *)AllocPlaced,
-        (void *)AllocCommitted1, (void *)AllocHeap1, (void *)AllocRemovedCached, (void *)GpuCreateQueue};
+        (void *)AllocCommitted1, (void *)AllocHeap1, (void *)AllocRemovedCached, (void *)GpuCreateQueue, (void *)ListCreate};
     gpuCreateQueueOriginal = (GpuCreateQueueFn)(*(void ***)device)[8];
+    listCreateOriginal = (DeviceCreateListFn)(*(void ***)device)[12];
     QueryPerformanceFrequency(&removedFrequency);
     void **const vtable = *(void ***)device;
     HRESULT status = S_OK;

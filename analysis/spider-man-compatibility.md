@@ -532,3 +532,21 @@ The trial profile's display settings were left at Windowed with a dynamic-resolu
 With the resolution result above, this puts the about 30 FPS bound in GPU work that does not scale with pixel count: geometry, compute, or fixed-resolution passes such as shadow maps. The next step is attributing GPU time to individual command lists, for example by counting draws and dispatches per list.
 
 The console was returned to the play configuration as `1.0.276.235`, without autoplay.
+
+**Per-command-list GPU cost.**
+
+- **What the build added.** Build `1.0.278.236` also hooked the game's graphics command lists: `CreateCommandList` and first submission patch slots 10, 12–14, 57 and 59. It counted draws, dispatches and `ExecuteIndirect` calls per list, and joined them with each submission's fence-timed GPU time.
+- **No pass names.** The game emits no `BeginEvent` markers, so passes are unnamed.
+- **World windows (30 s each, instrumented).**
+
+  | Submission site | Batches | Draws per batch | Dispatches per batch | Indirect per batch | GPU time per batch |
+  | --- | --- | --- | --- | --- | --- |
+  | `exe+0x018D8E15` | 409–930 | 25–40 | about 3 | about 0.6 | 5.5–7 ms |
+  | `exe+0x018D8CBC` | 620–1,390 | 55–65 | about 8 | about 0.8 | 3–5 ms |
+
+- **Per-draw cost.** That is roughly 50–150 µs of GPU time per draw or dispatch, independent of render resolution. Candidates:
+  - per-draw state or descriptor cost in the feature-level 11.0 D3D12 path on this console;
+  - heavy geometry per draw;
+  - barrier or cache flushes between draws.
+
+  Separating these needs per-draw GPU timing or a capture tool. The console now runs `1.0.278.237`, the play configuration without autoplay.
