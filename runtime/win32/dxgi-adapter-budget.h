@@ -63,7 +63,7 @@ SIZE_T BudgetedMemory(IDXGIAdapter* self, SIZE_T reported, bool software) {
     if (software) return reported;
     const DWORD previous = GetLastError();
     ComPtr<IDXGIAdapter3> adapter;
-    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    DXGI_QUERY_VIDEO_MEMORY_INFO info;
     const bool queried = SUCCEEDED(self->QueryInterface(IID_PPV_ARGS(&adapter))) &&
         SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info));
     SetLastError(previous);
@@ -83,7 +83,7 @@ HRESULT STDMETHODCALLTYPE BudgetedDescription(IDXGIAdapter* self, Description* o
     if constexpr (Slot == getDescSlot) {
         // DXGI_ADAPTER_DESC has no flags field.
         ComPtr<IDXGIAdapter1> adapter;
-        DXGI_ADAPTER_DESC1 flags{};
+        DXGI_ADAPTER_DESC1 flags;
         const DWORD previous = GetLastError();
         software = FAILED(self->QueryInterface(IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&flags)) ||
             (flags.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
@@ -111,7 +111,8 @@ HRESULT PatchBudgetTable(void** vtable, const unsigned* slots, unsigned slotCoun
         if (budgetTables[index].vtable == vtable) return S_FALSE;
     if (budgetTableCount == ARRAYSIZE(budgetTables)) return E_OUTOFMEMORY;
     BudgetTable& table = budgetTables[budgetTableCount];
-    table = {vtable, {}};
+    // Static storage starts zeroed; only the recorded slots are written. Avoid aggregate copies that need memset.
+    table.vtable = vtable;
     for (unsigned index = 0; index < slotCount; ++index) table.original[slots[index]] = vtable[slots[index]];
     // Publish the originals before any slot can route a call through the replacement.
     InterlockedIncrement(&budgetTableCount);
@@ -138,7 +139,7 @@ HRESULT PatchBudgetInterface(IUnknown* adapter, const unsigned* slots, unsigned 
 void InstallAdapterBudget(IDXGIAdapter1* adapter) {
     if (!adapter || !AdapterBudgetEnabled()) return;
     const DWORD previous = GetLastError();
-    DXGI_ADAPTER_DESC1 description{};
+    DXGI_ADAPTER_DESC1 description;
     if (FAILED(adapter->GetDesc1(&description)) || (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
         SetLastError(previous);
         return;
