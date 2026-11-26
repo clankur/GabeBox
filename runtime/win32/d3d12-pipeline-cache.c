@@ -1852,6 +1852,22 @@ void WINAPI XboxD3D12PipelineCacheFlush(void) {
     SetLastError(error);
 }
 
+/* The exit adapters reach XboxD3D12PipelineCacheFlush only when the title ends through the
+   ExitProcess or TerminateProcess imports its recipe binds. Slay the Spire 2 (2868840) exited
+   with code 0 without either wrapper recording a call, so its C runtime or managed runtime
+   ended the process through its own imports and passthrough wrote no exit stats. Process
+   detach runs for every ExitProcess. The loader has already ended the other threads and may
+   have detached Direct3D, so this only reports: passthrough as at=exit, and a cache whose
+   exit write never ran as at=exit-unsaved. */
+void XboxD3D12PipelineCacheProcessExit(void) {
+    const BOOL passthrough = cache.passthrough && !cache.stopped;
+    if (!passthrough && (cache.passthrough || !cache.ready)) return;
+    if (InterlockedExchange(&cache.exited, 1)) return;
+    const DWORD error = GetLastError();
+    TraceStats(passthrough ? "exit" : "exit-unsaved");
+    SetLastError(error);
+}
+
 static DWORD WINAPI StartHooks(LPVOID prefix) {
     typedef HRESULT (WINAPI *CreateDevice)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
     const BOOL keyed = prefix && cache.selected;

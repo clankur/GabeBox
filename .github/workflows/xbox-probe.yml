@@ -214,8 +214,10 @@ jobs:
                 & "$llvm\llvm-dlltool.exe" -m i386:x86-64 -d runtime/win32/ntdll-eh.def -l $exceptionLibrary
                 $libraries += $exceptionLibrary
               }
+              # The loader trace reports its pipeline cache from process detach, so it has an entry point.
+              $entry = if ($adapter.Module -eq 'loader-trace') { '/entry:XboxLoaderTraceEntry' } else { '/noentry' }
               & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
-                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll $entry `
                 "/def:runtime/win32/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects @libraries
             }
             & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
