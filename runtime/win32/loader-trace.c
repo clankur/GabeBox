@@ -1425,13 +1425,3 @@ void *__cdecl XboxTraceWfsopen(LPCWSTR path, LPCWSTR mode, int sharing) {
     ObserveAsset(path, "wfsopen-errno", file != NULL, file ? 0 : RuntimeError(runtime));
     return file;
 }
-
-/* The adapter's entry point. Process detach with a non-null reserved argument means the
-   process is ending through ExitProcess, whichever module called it, so a title whose C
-   runtime or managed runtime bypasses the bound exit imports still reports its pipeline
-   cache. The image links without a C runtime, so nothing else runs here. */
-BOOL WINAPI XboxLoaderTraceEntry(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-    (void)instance;
-    if (reason == DLL_PROCESS_DETACH && reserved) XboxD3D12PipelineCacheProcessExit();
-    return TRUE;
-}
