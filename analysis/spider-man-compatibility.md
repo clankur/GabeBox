@@ -486,3 +486,24 @@ Build `1.0.273.224` merged them into the `.315` shadow recipe as an `XWPEV3` ove
 - buffer cuts and restores, with routing that follows the reference index;
 - DynamicHeap 208, Physics 184 and SoundBankAlloc 224 MiB, committed on demand;
 - on-demand commit extended to pools whose size is not a multiple of 64 KiB.
+
+### Buffer-cut and placeholder bisect (November 26)
+
+Every run below continued from the main menu with the same trial save and was measured once the world was on screen.
+
+| Build | Configuration | Result |
+| --- | --- | --- |
+| `.225` | All six reference buffer cuts, pools raised to the reference caps, routing from the reference index | Stayed on the loading screen for over 14 minutes |
+| `.226` | Only the file-system, render-heap and skinning cuts | Stayed on the loading screen |
+| `.227` | `.223` plus the file-system, render-heap and skinning cuts | Stayed on the loading screen |
+| `.229` | `.223` plus the file-system 64 MiB and render-heap 32 MiB cuts | Stayed on the loading screen |
+| `.228` | Byte-identical to `.223` | Loaded; 23.2 FPS |
+| `.230` | `.228` with all 1,227 model-LOD routes reverted | Loaded; 24.6 FPS |
+| `.231` | Byte-identical to `.210` | Loaded; 27.5 FPS |
+
+- The File System Asset Data Buffer cut to 64 MiB, or the default dx12 render heap cut to 32 MiB, stops world loading on this recipe. The reference uses those values alongside runtime changes we do not have. Our earlier 112 MiB and 64 MiB values load.
+- The skinning, asset-loader-temp, scratch and TextureAlloc cuts have not been tested on their own.
+- In all three builds that loaded (`.228`, `.230` and `.231`), the hero appears as a grey placeholder cube, road surfaces mirror the sky, and small objects float. Reverting the model LODs (`.230`) and returning to the `.210` configuration (`.231`) did not change this, so the cause is in the shared base recipe or the trial save's state, not in the routing, restores or loader changes made since.
+- Reference issue #26 reports a white-cube character, so the reference port shows the same failure mode.
+
+The console now runs `1.0.273.232`: the play loader with the `.223` routing, without autoplay.
