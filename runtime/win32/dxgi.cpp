@@ -73,6 +73,7 @@ void Trace(const char* phase, HRESULT code) {
 
 #include "dxgi-memory-budget.h"
 #include "dxgi-hosted-output.h"
+#include "dxgi-adapter-budget.h"
 
 template<size_t N>
 bool HasPackageMarker(const WCHAR (&suffix)[N]) {
@@ -1188,6 +1189,12 @@ HRESULT CreateFactory(FactoryEntry entry, UINT flags, REFIID iid, void** out) {
         code = CreateDXGIFactory2(flags, IID_PPV_ARGS(&native));
     }
     if (FAILED(code)) return code;
+    if (AdapterBudgetEnabled()) {
+        ComPtr<IDXGIAdapter1> primary;
+        const DWORD previous = GetLastError();
+        if (SUCCEEDED(native->EnumAdapters1(0, &primary))) InstallAdapterBudget(primary.Get());
+        SetLastError(previous);
+    }
     ComPtr<Factory> adapter;
     code = WrapFactory(native, adapter);
     if (SUCCEEDED(code)) code = adapter->QueryInterface(iid, out);
@@ -1261,7 +1268,7 @@ extern "C" HRESULT WINAPI XboxCreateDXGIFactory2(UINT flags, REFIID iid, void** 
     return CreateFactory(FactoryEntry::Version2, flags, iid, out);
 }
 
-extern "C" HRESULT WINAPI XboxD3D11CreateDeviceAndSwapChain(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver,
+static HRESULT CreateDeviceAndSwapChain(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver,
         HMODULE software, UINT flags, const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk,
         const DXGI_SWAP_CHAIN_DESC* description, IDXGISwapChain** chainOut, ID3D11Device** deviceOut,
         D3D_FEATURE_LEVEL* levelOut, ID3D11DeviceContext** contextOut) {
@@ -1300,6 +1307,26 @@ extern "C" HRESULT WINAPI XboxD3D11CreateDeviceAndSwapChain(IDXGIAdapter* adapte
     const HRESULT code = CreateHostedD3D11Chain(create, adapter, driver, software, flags, levels, levelCount,
         sdk, *description, chainOut, deviceOut, levelOut, contextOut);
     SetLastError(previous);
+    return code;
+}
+
+extern "C" HRESULT WINAPI XboxD3D11CreateDeviceAndSwapChain(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver,
+        HMODULE software, UINT flags, const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk,
+        const DXGI_SWAP_CHAIN_DESC* description, IDXGISwapChain** chainOut, ID3D11Device** deviceOut,
+        D3D_FEATURE_LEVEL* levelOut, ID3D11DeviceContext** contextOut) {
+    const HRESULT code = CreateDeviceAndSwapChain(adapter, driver, software, flags, levels, levelCount, sdk,
+        description, chainOut, deviceOut, levelOut, contextOut);
+    // A device created without our factory still reports budgets through IDXGIDevice::GetAdapter.
+    if (SUCCEEDED(code) && deviceOut && *deviceOut && AdapterBudgetEnabled()) {
+        const DWORD previous = GetLastError();
+        ComPtr<IDXGIDevice> device;
+        ComPtr<IDXGIAdapter> native;
+        ComPtr<IDXGIAdapter1> native1;
+        if (SUCCEEDED((*deviceOut)->QueryInterface(IID_PPV_ARGS(&device))) &&
+                SUCCEEDED(device->GetAdapter(&native)) && SUCCEEDED(native.As(&native1)))
+            InstallAdapterBudget(native1.Get());
+        SetLastError(previous);
+    }
     return code;
 }
 

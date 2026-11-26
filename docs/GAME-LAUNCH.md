@@ -262,6 +262,12 @@ depth=4
 
 The warm-up compiles methods a session may never call. Memory and CPU are recorded but bounded only by the plan, so use `remaining=no` to restrict a title to its priorities. While the warm-up is compiling, tiered compilation's call-counting delay stays active. Tier-1 promotion of the game's hot code therefore waits until the warm-up finishes.
 
+### Report the GPU memory budget as dedicated video memory
+
+On the Series X, the Xbox driver reports 512 MB of dedicated video memory. On that console, Factorio `2.1.25` (`26700955`) logged a local video memory budget of 4147 MB, `Unified Memory Architecture: Yes`, and a 5120 MB process memory limit. Factorio then chose its `integrated-gpulow` preset and warned against higher texture settings. For a title with the hosted DXGI profile, add an empty `steam-win32-dxgi-adapter-budget-APPID.txt` and declare `XboxWin32Dxgi.dll`. The DXGI adapter then reports the larger of the driver's value and the console's live local-segment budget from `QueryVideoMemoryInfo` in `DedicatedVideoMemory` for `GetDesc` through `GetDesc3` on hardware adapters. The budget is read at call time, so each console model reports its own value. Other adapter fields and methods keep their native behavior.
+
+The adapter replaces the description entries in the native adapter's method table once per process. Because of this, the device's adapter from `IDXGIDevice::GetAdapter` reports the same value as the factory's adapters. The override is installed when the game creates a DXGI factory or a device through `D3D11CreateDeviceAndSwapChain`. The launcher reports `steam_shadow_dxgi_adapter_memory=local-budget`. With the loader trace, `dxgi adapter-budget-install` records the installation result, and `dxgi adapter-budget reported-mib=… budget-mib=…` records the first substituted value. The budget shares the process memory limit with the game's CPU allocations. A setting chosen from the reported value can still exceed that limit. [DXGI video memory budget](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiadapter3-queryvideomemoryinfo)
+
 ## Hosted titles
 
 Register an adapter only when a bundled runtime can execute the verified installed format. An adapter declares its AppID, backend, native authorization method, success marker, and start function. The dispatcher opens a hosted runtime only after that method verifies the selected install. A refused or failed authorization returns to the library with its diagnostic.

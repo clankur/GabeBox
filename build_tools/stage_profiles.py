@@ -217,6 +217,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     legacy_steam_sdk = False
     desktop_dxgi = False
     hosted_dxgi_output = False
+    dxgi_adapter_budget = False
     hosted_window_frame = False
     hosted_keyboard = False
     hosted_xinput = False
@@ -427,6 +428,14 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                                  f"and declared Window and DXGI adapters for AppID {app}.")
             files[dxgi_output_marker] = b""
             hosted_dxgi_output = True
+        budget_marker = f"steam-win32-dxgi-adapter-budget-{app}.txt"
+        if (root / budget_marker).is_file():
+            if ((root / budget_marker).stat().st_size or dxgi_marker not in files
+                    or "XboxWin32Dxgi.dll" not in profile_adapters):
+                raise ValueError(f"The DXGI adapter budget marker must be empty and needs the DXGI marker "
+                                 f"and a declared DXGI adapter for AppID {app}.")
+            files[budget_marker] = b""
+            dxgi_adapter_budget = True
         window_frame_marker = f"steam-win32-window-frame-{app}.txt"
         if (root / window_frame_marker).is_file():
             hosted = layout / f"steam-sdl-surfaceless-{app}.txt"
@@ -706,6 +715,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_HOSTED_DXGI_OUTPUT\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Dxgi.dll"]:
             raise ValueError("Use a Steam Core artifact with launch-scoped DXGI output support.")
+    if dxgi_adapter_budget:
+        variable = "XBOX_WIN32_DXGI_ADAPTER_BUDGET\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32Dxgi.dll"]:
+            raise ValueError("Use a Steam Core artifact with launch-scoped DXGI adapter budget support.")
     if hosted_keyboard:
         variable = "XBOX_WIN32_HOSTED_KEYBOARD\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32Window.dll"]:
