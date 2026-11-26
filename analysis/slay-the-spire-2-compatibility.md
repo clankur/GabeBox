@@ -67,6 +67,78 @@ Until one of these lands, the first combat of each launch has stalls up to 217 m
 - **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
 - **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
 - **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
+- **T97, a one-time stall about 97 s after the first frame.** Opt-in switches for the three leading candidates are in place. None has run on the console. See [T97](#t97-one-time-stall-about-97-s-after-the-first-frame).
+
+## T97: one-time stall about 97 s after the first frame
+
+On packages `1.0.244`–`1.0.272` (build 26655341), every session has a disturbance window of about 3 s. It starts **97.6 ± 0.4 s after the game's first present** (SD over 8 of 9 runs) and contains several frame gaps, one of them 0.05–5.1 s long. It happens whatever the game is doing: on the idle menu, in menu navigation and during combat. It is locked to the game process start, not to the main menu: replay builds reach the menu about 6 s earlier and the onset does not move. CPU stays low in every process. Run-3's loader trace shows one native `glDraw*` blocked for 119.7 ms inside the window. No `sts2.dll` timer, delay, telemetry, save, preload or `GC.Collect` fires 60–120 s after start. The cause is not identified. This is offline analysis of the `console-246` to `console-262` artifacts, not a console result.
+
+| Candidate | Evidence | Switch |
+| --- | --- | --- |
+| Steam Datagram Relay start-up on the game thread | `SteamInitializer.Initialize` calls `SteamNetworkingUtils.InitRelayNetworkAccess()` at boot, and `SteamAPI.RunCallbacks()` runs on the main thread every frame. A steamclient lock or IPC wait there would be a low-CPU stall that does not depend on game state. | `steam-win32-no-steam-relay-2868840.txt` makes the flat export a no-op. `steam-win32-steam-callback-trace-2868840.txt` times `SteamAPI_RunCallbacks` and records calls of 2 ms or more. [Steam title overrides](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title) |
+| First background gen2 GC (CoreCLR 9.0.7) | A window of several pauses fits a background GC. Private working set rose 8–17 MiB at onset, which fits a mark-array commit. Against: the timing does not move with activity. | `collect=after` in the warm-up plan forces one blocking, compacting gen2 collection once the warm-up completes, 22–34 s after the first frame. [Warm-up plan](../docs/GAME-LAUNCH.md#warm-a-coreclr-titles-managed-code-before-first-use) |
+| One-shot `msedgewebview2.exe` child of the Big Picture host | It lives 1–4 s and appears 120–125 s after the host's WebView2 starts, which is about 93–99 s after the game's first frame in the normal launch flow. Against: `console-246` run2 had the spawn and no stall, and the `1.0.232` runs had a small T97 with no spawn. | The host now logs every WebView2 `ProcessInfosChanged` change with kind, pid and UTC time. `xbox-webview2-arguments.txt` in the package root can add `--disable-component-update` or `--disable-background-networking`. [WebView2 child processes](../docs/XBOX-DIAGNOSTICS.md#webview2-child-processes) |
+
+Every switch is off by default. The pinned profile carries none of the markers, and its warm-up plan is unchanged.
+
+### Console test matrix
+
+Take the console through the `xbox-queue` skill. Build every arm from one Steam Core artifact (ProbeNative, LoaderTrace, `XboxManagedWarmup.dll` and the WebView2 host built from this branch). Add `steam-win32-steam-callback-trace-2868840.txt` to every arm, so that only the switch under test differs between arms. Run each arm at least three times. A single clean run proves nothing, because `console-246` run2 had no stall at all.
+
+| Arm | Profile change (beyond the callback trace) | Launch |
+| --- | --- | --- |
+| A, baseline | none | Restart Steam Core. Select **Play** as soon as Big Picture is ready, as in earlier runs. |
+| B, relay stub | `steam-win32-no-steam-relay-2868840.txt` | as A |
+| C, early GC | append `collect=after` to `steam-win32-managed-warmup-2868840.txt` | as A |
+| D, long-lived host | none (the A package) | Restart Steam Core, then wait until at least 180 s after the `webview2 environment` line before **Play**. Confirm that the host's short-lived child (`added=` then `removed=` within a few seconds) is logged before the game starts. |
+
+To stage an arm, copy the profile and add its markers:
+
+```sh
+profile=$(mktemp -d)
+cp profiles/2868840/26655341/steam-win32-* "$profile/"
+touch "$profile/steam-win32-steam-callback-trace-2868840.txt"
+touch "$profile/steam-win32-no-steam-relay-2868840.txt"                  # arm B only
+printf 'collect=after\n' >> "$profile/steam-win32-managed-warmup-2868840.txt"  # arm C only
+```
+
+Rebuild the recipe and package with `--win32-trial-profile "2868840=$profile"` as described in [Build-matched profile](#build-matched-profile). Give each arm its own package version.
+
+For each run:
+
+1. Start the observers before **Play**:
+   ```sh
+   python3 -m tools.xbox_deploy observe --version "$version" --app-id 2868840 --image-name SlayTheSpire2.exe \
+       --frame-seconds 130 --timeout 300 --output "t97-$arm-$n"
+   python3 -m tools.xbox_deploy sample-processes --version "$version" --seconds 300 \
+       --image-name SlayTheSpire2.exe --image-name msedgewebview2.exe --output "t97-$arm-$n-processes.jsonl"
+   ```
+2. Leave the game on the idle main menu, with no input and no screenshots, for at least 110 s after the first frame.
+3. Before the game exits, copy the raw trace. The observer's `loader-trace.txt` keeps only recent distinct general records. Find the trial folder with `list-files '\TempState' --since-utc "$launch_utc"`, then run `get-file '\TempState\SteamWin32Trial (N)' loader-trace.txt --output "t97-$arm-$n/loader-trace-raw.txt"`. Also copy `managed-warmup-2868840.log` from `\LocalState`.
+4. List the frame gaps around the window, and a control window from the same idle menu:
+   ```sh
+   python3 -m tools.measure "t97-$arm-$n/fhd-present-times.bin" --start-offset-s 95 --duration 7 --list-gaps 45
+   python3 -m tools.measure "t97-$arm-$n/fhd-present-times.bin" --start-offset-s 60 --duration 30 --list-gaps 45
+   ```
+
+Record for each run:
+- the package version and arm;
+- the UTC of the first present;
+- every gap of 45 ms or more from 95 s to 102 s, with its offset, length and total excess over 16.7 ms;
+- the same for the 60–90 s control window;
+- `steam_callbacks` from `loader_diagnostics` and any `asset steam-run-callbacks` line within ±3 s of the onset;
+- for B, `asset steam-relay=stubbed call=1`;
+- for C, the `managed_warmup_collect` line, including its `ms` and `pause_ms` (this is a new stall during menu loading), and `gen2` at `managed_warmup=complete`;
+- the `webview2 processes` lines from 60 s to 130 s after the first frame;
+- the STS2 private working set around the onset.
+
+Interpret the runs as follows:
+- An arm **removes T97** if none of its three runs has a gap of 45 ms or more in 95–102 s, while at least two baseline runs do.
+- If A records a `steam-run-callbacks` call of 100 ms or more that covers a T97 gap, the stall is in Steam's callback dispatch even if B does not remove it.
+- If D keeps T97 at +97 s after the game's first frame, the event is inside the game process. If T97 disappears in D, or moves to about 120–125 s after the host's WebView2 start, it comes from the host. Then try `xbox-webview2-arguments.txt` with `--disable-component-update` as arm E.
+- If C removes T97, keep `collect=after` only if its own pause during menu loading is shorter than the T97 stall it replaces. `System.GC.Concurrent=false` in a staged runtimeconfig is the alternative to test.
+
+Whichever switch wins stays in the build-matched profile and is documented there. A switch that does not help is left off.
 
 ## Gameplay run on `1.0.232.680`
 
