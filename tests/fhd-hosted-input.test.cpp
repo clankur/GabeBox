@@ -436,8 +436,16 @@ int main() {
     FhdResumeHostedInput();
     assert(!FhdHostedInputPaused() && FhdHostedInputForeground() && !FhdHostedMenuHeld());
     const LONG resumedSerial = box.gamepad.serial;
+    LONG resumeSample = -1, resumeAck = -1;
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == 0); // Nothing is published until the shown game is polled.
     assert(!poll(16) && box.gamepad.serial != resumedSerial && box.gamepad.buttons == SDL_HOST_PAD_CONNECTED);
     const LONG idleSerial = box.gamepad.serial;
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == idleSerial && resumeAck != idleSerial);
+    box.gamepad.ack = idleSerial; // The game reads the sample.
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == idleSerial && resumeAck == idleSerial);
     assert(!poll(16) && box.gamepad.serial == idleSerial);
     key(0xC3, true);
     assert(!poll(16) && (box.gamepad.buttons & 1) && FhdHostedKeyEvents() == keysBefore + 3);

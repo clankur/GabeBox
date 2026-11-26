@@ -160,6 +160,8 @@
                 return /^(width|height|visible|activation_mode|presented|gpu_presented|cpu_presented|primary_media|primary_panel|media_error|sample_us|sample_frames)=[0-9]{1,16}$/.test(line) ||
                     /^(native_input|native_input_hresult|native_menu_requests|native_menu_chords|native_menu_chords_ignored|native_menu_chords_expired)=[0-9]{1,16}$/.test(line) ||
                     /^(native_input_active|native_input_paused|native_key_events|native_focus_restores)=[0-9]{1,16}$/.test(line) ||
+                    /^(native_window_focus|native_window_focus_taken|native_pad_resume_serial|native_pad_ack)=[0-9]{1,16}$/.test(line) ||
+                    /^(panel_hidden|panel_hidden_shell|panel_hidden_panel|panel_hidden_window|panel_uncovered|panel_reordered|repeat_presents)=[0-9]{1,16}$/.test(line) ||
                     /^menu_switch=(requested|shown|declined|failed)$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
                     /^sample_(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=[0-9]{1,16}$/.test(line) ||
@@ -279,14 +281,19 @@
             record("game-overlay-ready");
         }
         // Normalizes a confirmInput result. A game without a confirmation hook counts as resumed.
+        // detail is the live input state that decided it, as name=value pairs (" input=..."),
+        // so the report shows the panel as it was after the restore, not before the overlay.
         function confirmResumedInput(confirm) {
-            if (typeof confirm !== "function") return Promise.resolve({ok: true});
+            if (typeof confirm !== "function") return Promise.resolve({ok: true, detail: ""});
             return Promise.resolve().then(confirm).then(function (result) {
-                if (result === true || (result && result.ok === true)) return {ok: true};
+                var detail = result && typeof result.detail === "string" &&
+                    /^[a-z_]{1,24}=[0-9]{1,16}(,[a-z_]{1,24}=[0-9]{1,16}){0,9}$/.test(result.detail) ?
+                    " input=" + result.detail : "";
+                if (result === true || (result && result.ok === true)) return {ok: true, detail: detail};
                 var reason = result && typeof result.reason === "string" && /^[a-z][a-z-]{0,31}$/.test(result.reason) ?
                     result.reason : "unconfirmed";
-                return {ok: false, reason: reason};
-            }, function () { return {ok: false, reason: "failed"}; });
+                return {ok: false, reason: reason, detail: detail};
+            }, function () { return {ok: false, reason: "failed", detail: ""}; });
         }
         function raiseGame(appId) {
             if (raising || !visible || !played(appId) || !returnToGame) return Promise.resolve("unavailable");
@@ -665,14 +672,15 @@
                         if (!gameStillLost(game)) return;
                         if (shown && input.ok) {
                             announceGameForeground(true);
-                            noteGame("game-restored appid=" + game.appId);
+                            noteGame("game-restored appid=" + game.appId + input.detail);
                             return;
                         }
                         if (shown && !remaining) {
                             // The game is on screen but its input did not come back. Keep it
                             // there and record why, rather than restarting over a visible game.
                             announceGameForeground(true);
-                            noteGame("game-input-resume-failed appid=" + game.appId + " reason=" + input.reason);
+                            noteGame("game-input-resume-failed appid=" + game.appId + " reason=" + input.reason +
+                                input.detail);
                             return;
                         }
                         if (remaining) {

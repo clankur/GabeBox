@@ -10,6 +10,7 @@
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.Profile.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
@@ -207,6 +208,14 @@ struct View : implements<View, IFrameworkView> {
         } catch (hresult_error const&) {
             // Chromium can decline suspension for an active browser operation.
         }
+    }
+
+    // WebView2 paints white until a document draws, and wherever it draws nothing. In the
+    // primary view the composed browsers sit over the hosted game, so a frame in which the
+    // browser is attached, resized or reloaded flashed white over the game (clankur/GabeBox#89).
+    // Black matches the game panel's letterbox and the XAML page behind it.
+    static void paintBlackBehind(CoreWebView2CompositionController const& browser) {
+        try { browser.DefaultBackgroundColor(Windows::UI::Colors::Black()); } catch (hresult_error const&) {}
     }
 
     void showPrimaryShell(bool show) {
@@ -756,6 +765,7 @@ struct View : implements<View, IFrameworkView> {
                     browser.Close();
                 } else {
                     popup = browser;
+                    paintBlackBehind(popup);
                     popupSurface = compositor.CreateContainerVisual();
                     root.Children().InsertAtTop(popupSurface);
                     resize();
@@ -828,6 +838,7 @@ struct View : implements<View, IFrameworkView> {
             auto browser = co_await environment.CreateCoreWebView2CompositionControllerAsync(parent);
             if (closed) { browser.Close(); co_return; }
             controller = browser;
+            paintBlackBehind(controller);
             try {
                 xboxDisplay = Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox";
             } catch (hresult_error const&) { xboxDisplay = false; }

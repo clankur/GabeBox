@@ -24,6 +24,11 @@ BOOL FhdHostedInputPaused(void);
    controller input, the keyboard and the remote Menu + View chord all arrive this way, so a
    count that stays put while keys are sent to a shown game means the window lost key focus. */
 UINT FhdHostedKeyEvents(void);
+/* With the native controller profile: the serial of the first controller sample published
+   after the latest FhdResumeHostedInput (0 until it is published, and 0 with the pointer
+   profile), and the serial the game last acknowledged. An acknowledgement at or past that
+   serial shows that the shown game polled hosted input after the resume. */
+void FhdReadHostedResumeSample(LONG *serial, LONG *ack);
 int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow); /* 1 requests library overlay */
 /* On the view thread following a switch back or a failed switch away. Clears held and
    suppressed chord state and republishes the next controller sample under a new serial. */

@@ -119,26 +119,54 @@
             }
         }).catch(fail);
         // After the game is shown again, wait until the panel presents new frames and its
-        // hosted input is live: unpaused, and the window focused, visible and accepting input.
+        // hosted input is live: unpaused, the CoreWindow focused, visible and accepting input,
+        // and its window holding Win32 keyboard focus, without which no key events (remote
+        // controller input, the keyboard or the remote chord) arrive. With the native
+        // controller profile, the game must also have acknowledged the first controller sample
+        // published after the resume, which shows the shown game polling hosted input again.
+        // Every field is read from a panel status published after the show (its presented count
+        // has moved on), and a hosted panel that omits a required input field does not pass.
+        // The result's detail records the live fields that decided it.
         function confirmInput(timeoutMs) {
             var deadline = performance.now() + timeoutMs, start;
+            function field(stats, name) {
+                var match = new RegExp("^" + name + "=([0-9]{1,16})\\r?$", "m").exec(stats);
+                return match ? +match[1] : undefined;
+            }
+            function detail(values) {
+                return Object.keys(values).filter(function (name) { return values[name] !== undefined; })
+                    .map(function (name) { return name + "=" + values[name]; }).join(",");
+            }
             return new Promise(function (resolve) {
                 function check() {
                     if (closed || owner !== activeSession) return resolve({ok: false, reason: "panel-closed"});
                     var stats;
                     try { stats = host.panelStatus(); } catch (_) { return resolve({ok: false, reason: "panel-status"}); }
-                    var count = /^presented=([0-9]+)\r?$/m.exec(stats);
-                    var frames = count ? +count[1] : 0;
+                    var frames = field(stats, "presented") || 0;
                     if (start === undefined) start = frames;
-                    var shown = !covered && /^visible=1\r?$/m.test(stats);
-                    var hosted = /^native_input=1\r?$/m.test(stats);
-                    var paused = hosted && /^native_input_paused=1\r?$/m.test(stats);
-                    var active = !hosted || !/^native_input_active=/m.test(stats) ||
-                        /^native_input_active=1\r?$/m.test(stats);
-                    if (shown && frames > start && !paused && active) return resolve({ok: true});
+                    var values = {visible: field(stats, "visible"), paused: field(stats, "native_input_paused"),
+                        active: field(stats, "native_input_active"), window_focus: field(stats, "native_window_focus"),
+                        keys: field(stats, "native_key_events"), pad_serial: field(stats, "native_pad_resume_serial"),
+                        pad_ack: field(stats, "native_pad_ack")};
+                    var shown = !covered && values.visible === 1;
+                    var hosted = field(stats, "native_input") === 1;
+                    // The presenter ships with this script, so a hosted panel without its input
+                    // state cannot confirm. Window focus is absent only where GetFocus is not
+                    // available, and then the remaining live fields decide.
+                    var unreported = hosted && (values.paused === undefined || values.active === undefined);
+                    var paused = hosted && values.paused === 1;
+                    var active = !hosted || values.active === 1;
+                    var focused = !hosted || values.window_focus === undefined || values.window_focus === 1;
+                    // The sample serial is reported once it is published. Serials only grow
+                    // during one session, so a later acknowledgement also counts.
+                    var acknowledged = !hosted || values.pad_serial === undefined ||
+                        (values.pad_ack !== undefined && values.pad_ack >= values.pad_serial);
+                    if (shown && frames > start && !unreported && !paused && active && focused && acknowledged)
+                        return resolve({ok: true, detail: detail(values)});
                     if (performance.now() >= deadline) {
-                        return resolve({ok: false, reason: !shown ? "panel-hidden" : frames <= start ? "no-frames" :
-                            paused ? "input-paused" : "input-background"});
+                        return resolve({ok: false, detail: detail(values), reason: !shown ? "panel-hidden" :
+                            frames <= start ? "no-frames" : unreported ? "input-unreported" : paused ? "input-paused" :
+                            !active ? "input-background" : !focused ? "window-unfocused" : "pad-unacknowledged"});
                     }
                     setTimeout(check, 100);
                 }
