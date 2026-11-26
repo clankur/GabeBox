@@ -782,3 +782,44 @@ Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--
 - About 1.5–2 s after the first RT or A input, a cluster of six 33–37 ms frames recurs in every run, with no compile, heap or other traced event.
 - It fails windows that include the swing start; windows after it pass.
 - The cause is not identified. Per-frame timing of the main and render threads is the next instrument.
+
+### The hero, roads and props come back with room for geometry (November 26, evening)
+
+**Root cause.** The `.315` recipe caps the ManagedBuffer geometry heap at 128 MiB by overlaying both `GetPoolSize("ManagedBuffer")` calls with `mov eax,0x08000000` (RVAs 0x1863b74 and 0x18643ea).
+
+- **First failure.** A hook after `ManagedBuffer::Allocate` (`exe+0x01863ABC`) saw the first failure at about 151 MB used: size 0x1850, caller `exe+0x0176200A`.
+- **Volume.** Over the whole run: 726 allocation failures and 725 ModelManager load failures, covering building kits, props, sidewalks, bridges and collision models.
+- **How it becomes the white cubes.** The loader calls mark-error (`exe+0x01625A10`), which sets asset state 5 and copies the engine's "Asset Error Model Cube" into the model.
+- **How it becomes the mirrored-sky roads.** Zone geometry that fails at `exe+0x01A1F08D` is not drawn, so the sky shows through where the ground should be.
+- **Not the cause.** The 81 invalid-ID failures at boot are unrelated: missing configs, UI logos and test assets.
+
+**Raising the cap alone exhausts other pools.**
+
+| Build | Change | Result |
+| --- | --- | --- |
+| `1.0.315.1` | ManagedBuffer 256 MiB | Crashed on a null `ModelLook` allocation; DynamicHeap at its 144 MiB cap |
+| `1.0.315.2` | ManagedBuffer 320 MiB | A 73 MiB render-target heap returned `E_OUTOFMEMORY` |
+| `1.0.330.1` | DynamicHeap 400 MiB | Commit ran out at the menu |
+
+**What fixed it.**
+
+1. **Distant-light overlay.** It halves the five 812 × 1472 distant-light texture arrays and matches the reference `local_distant_xyhalf` recipe byte for byte. It cut peak commit by about 313 MiB. Generator: `prepare-distant-overlay.py`.
+2. **On-demand commit for pools that are not multiples of 64 KiB.** This is in the loader's `lazy.h`. DynamicHeap goes to 208 MiB.
+3. **ManagedBuffer at 512 MiB** (`managed-buffer-512mib-overlay.json`).
+4. **Four buffer cuts** from the reference (`memory-cuts-loader-overlay.json`): SkinningBuffer_CPU 96→32 MiB, Asset Loader Temp 90→64 MiB in two places, and Scratch 66→16 MiB. The file-system and render-heap cuts, which hung loading, are excluded.
+
+`prepare_spider_world_recovery.py` applies overlays with `--recipe-overlay`. `redirect_pe_imports.merge_recipe_overlays` replaces entries at the same offset and length.
+
+**Result on `1.0.477.1`** (run d12):
+
+- **No failures.** ManagedBuffer used about 432 MiB with 0 allocation failures and 0 model-load failures.
+- **Memory.** Peak commit was 4,543 MiB against the 5,120 MiB limit, leaving about 577 MiB of headroom.
+- **Picture.** After holding RT, the textured hero stood on an asphalt street with crosswalks, sidewalks, cars and pedestrians, and the floating white cubes were gone.
+- **Native 1080p kept.**
+
+**Remaining issues.**
+
+- **Magenta ground patches.** Small patches remain. Adding the 242 texture restores makes the close-up road heavily magenta, so the final configuration leaves them out. The cause is not identified; no asset or D3D12 error is logged.
+- **Wavy facades on some buildings.** These look like impostor rendering. Reverting the 670 resampled impostor-zone routes ran out of commit.
+- **Missing audio banks.** Banks are rejected at the 128 MiB SoundBankAlloc cap: `veh_vehicles`, `amb_i20_city_global_bed`, `veh_helicopters`, `spid`, `yuri`, `otto`, `mtg1`, `mpd1/2` and others.
+- **Loader fixes split across builds.** The installed `1.0.499.1` uses this loader without the processor fix or pipeline replay, so the loader changes still have to be combined into one build and measured.

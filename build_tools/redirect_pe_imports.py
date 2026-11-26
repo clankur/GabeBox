@@ -509,6 +509,43 @@ def validate_patch_recipe(recipe):
         raise ValueError("Unexpected trailing compatibility overlay bytes.")
 
 
+def merge_recipe_overlays(recipe, source, overlays):
+    """Add verified overlays to an existing XWPEV3 recipe for the same source image.
+
+    An overlay at an existing entry's offset with the same length replaces that entry, so a profile can
+    retune a value the recipe already overrides. Any other overlap is refused."""
+    validate_patch_recipe(recipe)
+    if recipe[:8] != OVERLAY_PATCH_MAGIC:
+        raise ValueError("Only overlay compatibility recipes can take additional overlays.")
+    magic, source_size, retained_prefix, header_size, tail_size, count, digest = OVERLAY_PATCH_HEADER.unpack_from(recipe)
+    if source_size != len(source) or hashlib.sha256(source).digest() != digest:
+        raise ValueError("The overlay source image does not match the compatibility recipe.")
+    cursor = OVERLAY_PATCH_HEADER.size + header_size + tail_size
+    body = recipe[OVERLAY_PATCH_HEADER.size:cursor]
+    entries = {}
+    for _ in range(count):
+        offset, length = OVERLAY_ENTRY.unpack_from(recipe, cursor)
+        cursor += OVERLAY_ENTRY.size
+        entries[offset] = recipe[cursor:cursor + length]
+        cursor += length
+    for offset, replacement in overlays:
+        existing = entries.get(offset)
+        if existing is not None and len(existing) != len(replacement):
+            raise ValueError(f"Compatibility overlay at offset {offset} changes an existing entry's length.")
+        for other, data in entries.items():
+            if other != offset and offset < other + len(data) and other < offset + len(replacement):
+                raise ValueError(f"Compatibility overlay at offset {offset} overlaps an existing entry.")
+        entries[offset] = bytes(replacement)
+    merged = bytearray(OVERLAY_PATCH_HEADER.pack(
+        magic, source_size, retained_prefix, header_size, tail_size, len(entries), digest))
+    merged += body
+    for offset in sorted(entries):
+        merged += OVERLAY_ENTRY.pack(offset, len(entries[offset])) + entries[offset]
+    merged = bytes(merged)
+    validate_patch_recipe(merged)
+    return merged
+
+
 def read_overlays(manifest, source):
     entries = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(entries, list) or not entries:
