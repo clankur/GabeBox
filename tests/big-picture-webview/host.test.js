@@ -798,6 +798,19 @@ test("the game frame report keeps the panel's focus, resume sample and compositi
         "native_pad_ack=22\r\n"));
 });
 
+test("the game frame report keeps the shared-texture exchange counters", async () => {
+    // clankur/GabeBox#89: the panel status shows whether the ready fence held back a frame
+    // whose copy was still running, and the last drawn fence values.
+    const appId = 2868840, {app} = await playingPrimaryGame(appId);
+    app.shell.recordGameFrame(appId, "media", "primary_panel=1\r\nvisible=1\r\ngpu_wait_producer=5\r\n" +
+        "gpu_held=2\r\ngpu_released_unshown=1\r\ngpu_drawn=1800\r\ngpu_ready_fence=1803\r\n" +
+        "gpu_done_fence=1803\r\ngpu_fence_handle=7\r\n");
+    await drain();
+    assert.match(app.reports.at(-1), new RegExp("game_frame_media=appid=2868840 primary_panel=1 visible=1 " +
+        "gpu_wait_producer=5 gpu_held=2 gpu_released_unshown=1 gpu_drawn=1800 gpu_ready_fence=1803 " +
+        "gpu_done_fence=1803\r\n"));
+});
+
 test("a confirmation detail outside the bounded field list is not written to the report", async () => {
     const appId = 42, {app} = await playingPrimaryGame(appId);
     const confirm = async () => ({ok: true, detail: "token=abc\r\nstatus=forged"});

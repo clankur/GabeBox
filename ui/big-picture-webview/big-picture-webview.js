@@ -162,6 +162,7 @@
                     /^(native_input_active|native_input_paused|native_key_events|native_focus_restores)=[0-9]{1,16}$/.test(line) ||
                     /^(native_window_focus|native_window_focus_taken|native_pad_resume_serial|native_pad_ack)=[0-9]{1,16}$/.test(line) ||
                     /^(panel_hidden|panel_hidden_shell|panel_hidden_panel|panel_hidden_window|panel_uncovered|panel_reordered|repeat_presents)=[0-9]{1,16}$/.test(line) ||
+                    /^gpu_(wait_producer|held|released_unshown|drawn|ready_fence|done_fence)=[0-9]{1,16}$/.test(line) ||
                     /^menu_switch=(requested|shown|declined|failed)$/.test(line) ||
                     /^(submitted|processed|requests|pending|outstanding|slots_busy|source_sequence|cpu_submitted|gpu_submitted|pool_waits|source_waits|spill_allocations|texture_peak|gpu_sequence|cpu_sequence)=[0-9]{1,16}$/.test(line) ||
                     /^sample_(render_callbacks|source_empty_callbacks|present_busy_callbacks|gpu_sequence)=[0-9]{1,16}$/.test(line) ||
