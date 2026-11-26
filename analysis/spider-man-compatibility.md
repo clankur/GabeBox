@@ -338,3 +338,45 @@ Local build `1.0.261.202` used the same recipe with `AssetHeap` at 368 MiB. Its 
 - **Startup pipeline compilation is slow and serialized.** The 600 slowest startup pipeline creations came from seven threads. Their compile times had a median of 42 ms, a 90th percentile of 753 ms and a maximum of 3,138 ms. The loader's pipeline serialization lock added waits of up to 22,505 ms. These timings match the long black startup screens and the menu hitches observed at the console. The log cap was reached before the world loaded, so in-world compile times still need a run.
 - **The 368 MiB black frame is not a D3D12 failure.** In the world the device had created 2,309 heaps (1,820 MiB in total), 13,824 placed resources and 13 committed resources with zero failures. `GetDeviceRemovedReason` returned `S_OK`. Private commit was 4,820,104 KiB with 203,704 KiB available. The game's own log reported 42–47 FPS and rising texture use, and presents continued, but Device Portal screenshots stayed black and the pause menu did not appear after Menu was pressed.
 - **The larger arena did not load the missing zones.** Both the 336 MiB and 368 MiB runs recorded 12 zone load callbacks with detail 2.
+
+### Demand-committed engine pools restore the world (November 26)
+
+These runs use the same world-entry recipe and the diagnostic loader. They also substitute the presenter (`Fhd.Native.dll` and `.winmd`) from the STS2 branch's presenter CI run `45769234415` (commit `833dd583d`). The .323 presenter drops Device Portal remote controller input: `runtime/presenter/hosted-input.cpp` on `main` discards VK_GAMEPAD key events, and the fix that merges them into the hosted pad, `d682122`/`430f3a4`, exists only on the STS2 and UltraKill branches. With the substituted presenter, `tools.xbox_remote_input` drives **Continue** and gameplay without anyone at the console. The two presenters' metadata names are identical.
+
+**Memory owners.** Local build `1.0.271.208`, run `1795677675517`, attributed every VirtualAlloc commit from the game and every D3D12 heap to its calling code. In the world, private commit was 4,743,592 KiB:
+
+- **D3D12 heaps, ~1.7 GB.** Entering the world added about 480 MiB of GPU heaps, mostly render-target and depth heaps (heap flags `0x44`) and 64 MiB of upload heaps.
+- **The engine's general heap, 811 MiB committed in a 2 GB reservation.** It holds one-time buffers whose names sit next to the call sites in the verified executable:
+
+  | Size | Buffer |
+  | --- | --- |
+  | 96 MiB | `SkinningBuffer_CPU` |
+  | 96 MiB | Scaleform |
+  | 90 + 26 MiB | Asset Loader Temp Allocator |
+  | 66 MiB | Scratch Allocator |
+  | 64 MiB | TextureStream |
+  | 32 MiB | ModelSkinCache |
+
+- **The fixed pools.**
+- **About 1 GB that neither hook sees.**
+
+Frame rate without the ground was 54.3 FPS over 30 seconds: median 16.69 ms, worst 284 ms, 59 intervals over 33 ms, all shared-texture presents. No pipeline was compiled in the world.
+
+**On-demand commit for the asset pool.** The PC engine commits each fixed pool in full when it creates it. Local build `1.0.273.209` kept the engine's `AssetHeap` reservation at its original 828 MiB but committed only the first and last 64 KiB. A vectored exception handler commits each further 64 KiB chunk on first touch, and `ReadFile` destinations inside the range are committed before the kernel writes them. The engine still sees a successful commit of the whole pool. The pool grew linearly to 448 MiB during world entry. A 73 MiB render-target heap requested from the zone-loading path (`exe+0x01625E2C`) then failed with `E_OUTOFMEMORY` and 75,320 KiB available, and the game faulted on the null heap at `exe+0x01CBDD53`.
+
+**On-demand commit for every large fixed pool.** Local build `1.0.273.210` applied the same rule to every commit of 16 MiB or more made by the engine's pool constructor (`exe+0x01C64D22`).
+
+- Pools whose size is not a multiple of 64 KiB fell back to the engine's full commit.
+- In the world:
+  - `AssetHeap` used 472 MiB.
+  - One 64 MiB pool used 4.4 MiB and another 26.8 MiB.
+  - The 128 MiB sound-bank pool was fully used.
+- **No world zone reported detail 2.** The ground, buildings, street, traffic, pedestrians and Spider-Man all rendered.
+- Controller RT and the left stick swung and moved the hero through remote input.
+- Private commit was 4,846,536 KiB with 176,040 KiB available.
+
+Remaining problems on this build:
+
+- **Frame rate is capped at 30 FPS by a busy CPU thread.** Two 30-second in-world windows measured 27.9 and 27.7 FPS, with a 33.38 ms median and 604–610 intervals over 33 ms. All frames were shared-texture presents with no CPU uploads. One job-worker thread (start `exe+0x01BBF8B0`) used 94% of a core and the main thread 70%. Device Portal reported 11% on GPU engine 0.
+- **The street surface shows a sky reflection instead of road material.** The reference also prepares `local_ground29_1024`, which restores 29 ground textures to 1024 pixels. It is not part of this recipe yet.
+- **Headroom is about 170 MB.** Longer traversal still needs a soak.
