@@ -753,6 +753,43 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "matching hosted build"):
             stage_trials(self.layout, trial, runtime)
 
+    def test_dxgi_adapter_budget_requires_dxgi_profile_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "427520", "42"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        dxgi = "XboxWin32Dxgi.dll"
+        (profile / f"steam-win32-adapters-{app}.json").write_text(json.dumps({
+            "build_id": build, "required_adapters": [dxgi]}))
+        marker = f"steam-win32-dxgi-adapter-budget-{app}.txt"
+        (profile / marker).touch()
+        runtime = self.work / "dxgi-runtime.appx"
+        variable = "XBOX_WIN32_DXGI_ADAPTER_BUDGET\0".encode("utf-16le")
+        trial = [f"{app}={profile}"]
+        for adapter in (b"older dxgi", variable):
+            with ZipFile(runtime, "w") as package:
+                for name in ("XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll",
+                             "XboxWin32Window.dll"):
+                    package.writestr(name, b"runtime fixture")
+                package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                package.writestr(dxgi, adapter)
+            if adapter != variable:
+                with self.assertRaisesRegex(ValueError, "needs the DXGI marker"):
+                    stage_trials(self.layout, trial, runtime)
+                (profile / f"steam-win32-dxgi-{app}.txt").touch()
+                with self.assertRaisesRegex(ValueError, "DXGI adapter budget support"):
+                    stage_trials(self.layout, trial, runtime)
+                self.assertFalse((self.layout / marker).exists())
+            else:
+                stage_trials(self.layout, trial, runtime)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        (profile / marker).write_text("1")
+        with self.assertRaisesRegex(ValueError, "must be empty"):
+            stage_trials(self.layout, trial, runtime)
+
     def test_hosted_window_frame_requires_launch_support_and_window_exports(self):
         self.layout.mkdir()
         profile = self.work / "profile"

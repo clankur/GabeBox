@@ -2270,6 +2270,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowLocalCrashReports = false;
     bool shadowDxgi = false;
     bool shadowDxgiOutput = false;
+    bool shadowDxgiAdapterBudget = false;
     bool shadowWindowFrame = false;
     bool shadowHostedKeyboard = false;
     bool shadowWgl = false;
@@ -2352,6 +2353,14 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowDxgiOutput = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-dxgi-adapter-budget-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDxgiAdapterBudget = true;
                 }
                 if (auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-window-frame-" + std::to_wstring(app) + L".txt")) {
@@ -2491,6 +2500,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32CrashReport.dll"))) ||
                         (shadowDxgi && (!shadowRecipe || !shadowRuntime.empty() || !shadowRenderer.empty() ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
+                        (shadowDxgiAdapterBudget && !shadowDxgi) ||
                         (shadowDxgiOutput && (!shadowDxgi || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) ||
                         (shadowWindowFrame && ((!shadowDxgi && !shadowWgl) || !sourceProfile || !shadowTrace ||
@@ -3332,6 +3342,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_STREAMLINE_UNAVAILABLE", shadowStreamlineUnavailable ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_DXGI_ADAPTER_BUDGET", shadowDxgiAdapterBudget ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_WINDOW_FRAME", shadowWindowFrame && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_KEYBOARD", shadowHostedKeyboard && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_WGL", shadowWgl ? L"1" : L""},
@@ -3372,6 +3383,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
             if (shadowWgl) report += L"steam_shadow_wgl=hosted\r\n";
             if (shadowDxgiOutput) report += L"steam_shadow_dxgi_output=hosted-fallback\r\n";
+            if (shadowDxgiAdapterBudget) report += L"steam_shadow_dxgi_adapter_memory=local-budget\r\n";
             if (shadowWindowFrame) report += L"steam_shadow_window_frame=hosted\r\n";
             if (shadowHostedKeyboard) report += L"steam_shadow_keyboard=hosted\r\n";
             if (shadowDocuments) report += L"steam_shadow_documents=profile\r\n";
