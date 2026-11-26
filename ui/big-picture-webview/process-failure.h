@@ -92,4 +92,30 @@ inline bool browserArguments(std::wstring_view text, std::wstring& arguments) {
     }
     return !arguments.empty();
 }
+
+// Chromium starts a non-sandboxed GPU process 120 s after the browser, which creates its own
+// D3D12 device to collect DX12 and Vulkan info. On the console that device creation stalls a
+// running game's GPU work for 100-220 ms (T97 in analysis/slay-the-spire-2-compatibility.md),
+// so the host skips the process unless the package file asks to run it at start-up instead.
+constexpr std::wstring_view kDisableGpuInfoProcess = L"--disable-gpu-process-for-dx12-info-collection";
+constexpr std::wstring_view kNoDelayGpuInfoProcess = L"--no-delay-for-dx12-vulkan-info-collection";
+
+// The browser's arguments: the validated package-file arguments, plus the default switch
+// above unless the file already holds it or asks for the start-up collection.
+inline std::wstring effectiveBrowserArguments(std::wstring_view fileArguments) {
+    const auto holds = [&](std::wstring_view token) {
+        for (size_t index = 0; index < fileArguments.size();) {
+            const auto end = std::min(fileArguments.find(L' ', index), fileArguments.size());
+            if (fileArguments.substr(index, end - index) == token) return true;
+            index = end + 1;
+        }
+        return false;
+    };
+    std::wstring arguments(fileArguments);
+    if (!holds(kDisableGpuInfoProcess) && !holds(kNoDelayGpuInfoProcess)) {
+        if (!arguments.empty()) arguments += L' ';
+        arguments += kDisableGpuInfoProcess;
+    }
+    return arguments;
+}
 }

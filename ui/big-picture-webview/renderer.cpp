@@ -888,8 +888,8 @@ struct View : implements<View, IFrameworkView> {
                 auto profiles = co_await cache.CreateFolderAsync(L"SteamWebProfiles", Windows::Storage::CreationCollisionOption::OpenIfExists);
                 profile = profiles.Path() + L"\\" + account;
             }
-            // Opt-in browser switches from xbox-webview2-arguments.txt in the package root;
-            // without the file the browser keeps its default arguments.
+            // Opt-in browser switches from xbox-webview2-arguments.txt in the package root, plus the
+            // host's default that skips Chromium's delayed GPU-info process (effectiveBrowserArguments).
             std::wstring browserArguments;
             std::string argumentState = "default";
             try {
@@ -904,11 +904,9 @@ struct View : implements<View, IFrameworkView> {
                 browserArguments.clear();
                 argumentState = "unreadable";
             }
-            CoreWebView2EnvironmentOptions options{nullptr};
-            if (!browserArguments.empty()) {
-                options = CoreWebView2EnvironmentOptions();
-                options.AdditionalBrowserArguments(browserArguments);
-            }
+            browserArguments = steam_webview::effectiveBrowserArguments(browserArguments);
+            auto options = CoreWebView2EnvironmentOptions();
+            options.AdditionalBrowserArguments(browserArguments);
             const auto environmentId = ++webEnvironments;
             {
                 std::string switches;

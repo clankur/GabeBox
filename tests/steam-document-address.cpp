@@ -34,6 +34,15 @@ int main() {
                arguments));
     assert(!steam_webview::browserArguments(L"--disable-gpu-process-for-dx12-info-collection=1", arguments));
     assert(!steam_webview::browserArguments(L"", arguments) && arguments.empty());
+    assert(steam_webview::effectiveBrowserArguments(L"") == L"--disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-component-update") ==
+           L"--disable-component-update --disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-gpu-process-for-dx12-info-collection") ==
+           L"--disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--no-delay-for-dx12-vulkan-info-collection") ==
+           L"--no-delay-for-dx12-vulkan-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-component-update --no-delay-for-dx12-vulkan-info-collection") ==
+           L"--disable-component-update --no-delay-for-dx12-vulkan-info-collection");
     assert(!steam_webview::browserArguments(L"--disable-component-update --disable-component-update", arguments));
     assert(!steam_webview::browserArguments(L"--disable-component-update --remote-debugging-port=9222", arguments) &&
            arguments.empty());
