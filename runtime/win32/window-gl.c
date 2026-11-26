@@ -1,6 +1,8 @@
 #include "window.h"
 #include "../shared/steam-handoff-control.h"
 #include <appmodel.h>
+#include "shell-lookup.h"
+#include "managed-warmup.h"
 
 #define CONTEXT_COUNT 16
 #define SDL_INIT_VIDEO 0x20u
@@ -8,12 +10,28 @@
 #define SDL_WINDOW_HIDDEN 8u
 #define SDL_WINDOWEVENT 0x200u
 #define SDL_WINDOWEVENT_CLOSE 14u
+#define SDL_KEYDOWN 0x300u
+#define SDL_KEYUP 0x301u
+#define SDL_TEXTINPUT 0x303u
+#define SDL_MOUSEMOTION 0x400u
+#define SDL_MOUSEBUTTONDOWN 0x401u
+#define SDL_MOUSEBUTTONUP 0x402u
+#define SDL_MOUSEWHEEL 0x403u
+#define SDL_MOUSEWHEEL_FLIPPED 1u
 #define SDL_GETEVENT 2
 
+/* SDL 2.x x64 event ABI. */
 typedef union SdlWindowEvent {
+    UINT type;
     struct { UINT type, timestamp, windowId; BYTE event; } window;
-    ULONG64 padding[7];  /* SDL 2.x x64 event ABI */
+    struct { UINT type, timestamp, windowId; BYTE state, repeat, padding2, padding3; int scancode, sym; } key;
+    struct { UINT type, timestamp, windowId; char text[32]; } text;
+    struct { UINT type, timestamp, windowId, which, state; int x, y, xrel, yrel; } motion;
+    struct { UINT type, timestamp, windowId, which; BYTE button, state, clicks, padding; int x, y; } button;
+    struct { UINT type, timestamp, windowId, which; int x, y; UINT direction; } wheel;
+    ULONG64 padding[7];
 } SdlWindowEvent;
+_Static_assert(sizeof(SdlWindowEvent) == 56, "SDL_Event size");
 
 typedef struct SdlGl {
     void (*ready)(void);
@@ -94,9 +112,12 @@ static void InitializeSteamworks(void) {
     if (module) FreeLibrary(module);
 }
 
+static void InstallGpuMemoryBudget(void);
+
 static BOOL Initialize(void) {
     if (initialized) return TRUE;
     InitializeSteamworks();
+    InstallGpuMemoryBudget();
     WCHAR hosted[2];
     const BOOL packaged = GetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_WGL", hosted, ARRAYSIZE(hosted)) == 1 &&
         hosted[0] == L'1';
@@ -146,6 +167,269 @@ fail:
     return FALSE;
 }
 
+DECLSPEC_IMPORT HANDLE WINAPI CreateFile2FromAppW(LPCWSTR, DWORD, DWORD, DWORD,
+    LPCREATEFILE2_EXTENDED_PARAMETERS);
+
+static void AppendLoaderTrace(const char *line) {
+    const DWORD error = GetLastError();
+    WCHAR path[1024];
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOADER_TRACE", path, ARRAYSIZE(path));
+    if (length && length < ARRAYSIZE(path)) {
+        const HANDLE file = CreateFile2FromAppW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            DWORD count = 0, written;
+            while (line[count]) ++count;
+            WriteFile(file, line, count, &written, NULL);
+            CloseHandle(file);
+        }
+    }
+    SetLastError(error);
+}
+
+/* Mesa's d3d12 driver keeps allocations resident against the native adapter's video memory budget, which
+   Xbox sizes from the process memory limit rather than the GPU's memory. The DXGI adapter caps the budget
+   Mesa reads (dxgi-memory-budget.h), so Mesa trims idle allocations before the adapter runs out. The module
+   stays loaded because the patched method table points into it. */
+static void InstallGpuMemoryBudget(void) {
+    typedef HRESULT (WINAPI *Install)(void);
+    const DWORD previous = GetLastError();
+    HMODULE module = LoadPackagedLibrary(L"XboxWin32Dxgi.dll", 0);
+    Install install = module ? (Install)(void *)GetProcAddress(module, "XboxInstallGpuMemoryBudget") : NULL;
+    if (install) {
+        install();
+    } else {
+        AppendLoaderTrace("dxgi gpu-memory-budget install=unavailable\r\n");
+        if (module) FreeLibrary(module);
+    }
+    SetLastError(previous);
+}
+
+/* Record the first delivery of each host input kind in the run's loader trace. */
+static void TraceFirstInput(volatile LONG *seen, const char *line) {
+    if (InterlockedExchange(seen, 1)) return;
+    AppendLoaderTrace(line);
+}
+
+/* GL first-use timing (diagnostic, XBOX_WIN32_GL_TRACE=1).
+
+   Every GL entry point the game resolves passes through wglGetProcAddress or
+   GetProcAddress(opengl32) here, so the adapter can wrap the calls where Mesa
+   does first-use work: glCompileShader and glLinkProgram (GLSL -> NIR, or a
+   program cache hit), glProgramBinary, and draws (the d3d12 driver compiles
+   NIR -> DXIL variants and creates pipelines at the first draw that needs
+   them). Each call of 2 ms or longer is recorded in the loader trace with its
+   UTC time beside the `pso` lines, and every line carries the running count
+   and total time of its kind, including shorter calls, so a window's Mesa
+   share is the difference of two totals minus the pipeline time inside it. */
+enum { GlCompile, GlLink, GlBinary, GlDraw, GlKinds };
+static const char *const glKindNames[GlKinds] = {"compile", "link", "binary", "draw"};
+static volatile LONG64 glCounts[GlKinds], glMicros[GlKinds];
+static volatile LONG glEvents;
+static volatile LONG glTraceState; /* 0 unknown, 1 off, 2 on */
+
+typedef void (APIENTRY *GlUintProc)(unsigned int);
+typedef void (APIENTRY *GlProgramBinaryProc)(unsigned int, unsigned int, const void *, int);
+typedef void (APIENTRY *GlDrawArraysProc)(unsigned int, int, int);
+typedef void (APIENTRY *GlDrawElementsProc)(unsigned int, int, unsigned int, const void *);
+typedef void (APIENTRY *GlDrawArraysInstancedProc)(unsigned int, int, int, int);
+typedef void (APIENTRY *GlDrawElementsInstancedProc)(unsigned int, int, unsigned int, const void *, int);
+static void *volatile glOriginals[7];
+
+static BOOL GlTraceEnabled(void) {
+    LONG state = glTraceState;
+    if (!state) {
+        WCHAR enabled[2];
+        state = GetEnvironmentVariableW(L"XBOX_WIN32_GL_TRACE", enabled, ARRAYSIZE(enabled)) == 1 &&
+            enabled[0] == L'1' ? 2 : 1;
+        glTraceState = state;
+    }
+    return state == 2;
+}
+
+static char *GlText(char *out, const char *text) {
+    while (*text) *out++ = *text++;
+    return out;
+}
+
+static char *GlNumber(char *out, ULONG64 value, int width) {
+    char digits[20];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value && count < 20);
+    while (count < width) digits[count++] = '0';
+    while (count) *out++ = digits[--count];
+    return out;
+}
+
+static LONG64 GlStart(void) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+static void GlFinish(int kind, LONG64 start) {
+    const DWORD error = GetLastError();
+    LARGE_INTEGER end, frequency;
+    QueryPerformanceCounter(&end);
+    QueryPerformanceFrequency(&frequency);
+    const ULONG64 micros = (ULONG64)(end.QuadPart - start) * 1000000 / (ULONG64)frequency.QuadPart;
+    const LONG64 count = InterlockedIncrement64(&glCounts[kind]);
+    const LONG64 total = InterlockedExchangeAdd64(&glMicros[kind], (LONG64)micros) + (LONG64)micros;
+    if (micros >= 2000 && InterlockedIncrement(&glEvents) <= 4000) {
+        SYSTEMTIME now;
+        GetSystemTime(&now);
+        char line[160];
+        char *text = GlText(GlText(line, "gl kind="), glKindNames[kind]);
+        text = GlNumber(GlText(text, " utc="), now.wHour, 2);
+        text = GlNumber(GlText(text, ":"), now.wMinute, 2);
+        text = GlNumber(GlText(text, ":"), now.wSecond, 2);
+        text = GlNumber(GlText(text, "."), now.wMilliseconds, 3);
+        text = GlNumber(GlText(text, " us="), micros, 1);
+        text = GlNumber(GlText(text, " count="), (ULONG64)count, 1);
+        text = GlNumber(GlText(text, " total_us="), (ULONG64)total, 1);
+        text = GlText(text, "\r\n");
+        *text = 0;
+        AppendLoaderTrace(line);
+    }
+    SetLastError(error);
+}
+
+static void APIENTRY TimedCompileShader(unsigned int shader) {
+    const LONG64 start = GlStart();
+    ((GlUintProc)glOriginals[0])(shader);
+    GlFinish(GlCompile, start);
+}
+
+static void APIENTRY TimedLinkProgram(unsigned int program) {
+    const LONG64 start = GlStart();
+    ((GlUintProc)glOriginals[1])(program);
+    GlFinish(GlLink, start);
+}
+
+static void APIENTRY TimedProgramBinary(unsigned int program, unsigned int format, const void *binary, int length) {
+    const LONG64 start = GlStart();
+    ((GlProgramBinaryProc)glOriginals[2])(program, format, binary, length);
+    GlFinish(GlBinary, start);
+}
+
+static void APIENTRY TimedDrawArrays(unsigned int mode, int first, int count) {
+    const LONG64 start = GlStart();
+    ((GlDrawArraysProc)glOriginals[3])(mode, first, count);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawElements(unsigned int mode, int count, unsigned int type, const void *indices) {
+    const LONG64 start = GlStart();
+    ((GlDrawElementsProc)glOriginals[4])(mode, count, type, indices);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawArraysInstanced(unsigned int mode, int first, int count, int instances) {
+    const LONG64 start = GlStart();
+    ((GlDrawArraysInstancedProc)glOriginals[5])(mode, first, count, instances);
+    GlFinish(GlDraw, start);
+}
+
+static void APIENTRY TimedDrawElementsInstanced(unsigned int mode, int count, unsigned int type, const void *indices,
+                                                int instances) {
+    const LONG64 start = GlStart();
+    ((GlDrawElementsInstancedProc)glOriginals[6])(mode, count, type, indices, instances);
+    GlFinish(GlDraw, start);
+}
+
+/* Return a timed wrapper for the entry points above when the trace is on. A
+   name that resolves to a different address than the first one wrapped is
+   returned unwrapped rather than misrouted. */
+static PROC TimedGlProcedure(LPCSTR name, PROC procedure) {
+    static const char *const names[] = {"glCompileShader", "glLinkProgram", "glProgramBinary", "glDrawArrays",
+        "glDrawElements", "glDrawArraysInstanced", "glDrawElementsInstanced"};
+    void *const timed[] = {(void *)TimedCompileShader, (void *)TimedLinkProgram, (void *)TimedProgramBinary,
+        (void *)TimedDrawArrays, (void *)TimedDrawElements, (void *)TimedDrawArraysInstanced,
+        (void *)TimedDrawElementsInstanced};
+    if (!procedure || (ULONG_PTR)name <= 0xffffu || name[0] != 'g' || name[1] != 'l' || !GlTraceEnabled())
+        return procedure;
+    for (int i = 0; i < (int)ARRAYSIZE(names); ++i) {
+        if (!Equals(name, names[i])) continue;
+        InterlockedCompareExchangePointer((void *volatile *)&glOriginals[i], (void *)procedure, NULL);
+        return glOriginals[i] == (void *)procedure ? (PROC)timed[i] : procedure;
+    }
+    return procedure;
+}
+
+static HWND EventWindow(UINT windowId, BOOL exact) {
+    for (UINT i = 0; i < CONTEXT_COUNT; ++i) {
+        const Context *context = &contexts[i];
+        if (context->handle && sdl.windowId(context->sdlWindow) == windowId) return context->window->handle;
+    }
+    /* The host binds one SDL window. Input without that window goes to the first GL window. */
+    for (UINT i = 0; !exact && i < CONTEXT_COUNT; ++i) {
+        if (contexts[i].handle) return contexts[i].window->handle;
+    }
+    return NULL;
+}
+
+/* The hosted SDL backend turns the host mailbox into SDL events. Deliver them in
+   queue order as the window close, keyboard, text and pointer messages of the GL window. */
+static void DeliverHostEvent(const SdlWindowEvent *event) {
+    static const UINT down[] = {WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN};
+    static const UINT up[] = {WM_LBUTTONUP, WM_MBUTTONUP, WM_RBUTTONUP};
+    static LONG pointerX, pointerY; /* SDL reports a wheel without a position */
+    HWND window;
+    switch (event->type) {
+    case SDL_WINDOWEVENT:
+        window = event->window.event == SDL_WINDOWEVENT_CLOSE ? EventWindow(event->window.windowId, TRUE) : NULL;
+        if (window) XboxPostMessageW(window, WM_CLOSE, 0, 0);
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        window = EventWindow(event->key.windowId, FALSE);
+        if (window && event->key.scancode > 0) {
+            static volatile LONG keySeen;
+            TraceFirstInput(&keySeen, "input wgl-key=delivered\r\n");
+            XboxPostHostedKey(window, (UINT)event->key.scancode, event->type == SDL_KEYDOWN, event->key.repeat != 0);
+        }
+        break;
+    case SDL_TEXTINPUT: {
+        char text[sizeof(event->text.text) + 1];
+        for (UINT i = 0; i < sizeof(event->text.text); ++i) text[i] = event->text.text[i];
+        text[sizeof(event->text.text)] = 0;
+        window = EventWindow(event->text.windowId, FALSE);
+        if (window) XboxPostHostedText(window, text);
+        break;
+    }
+    case SDL_MOUSEMOTION:
+        window = EventWindow(event->motion.windowId, FALSE);
+        pointerX = event->motion.x;
+        pointerY = event->motion.y;
+        if (window) XboxPostHostedPointer(window, WM_MOUSEMOVE, pointerX, pointerY, 0);
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        window = EventWindow(event->button.windowId, FALSE);
+        pointerX = event->button.x;
+        pointerY = event->button.y;
+        if (window && event->button.button >= 1 && event->button.button <= 3) {
+            static volatile LONG buttonSeen;
+            TraceFirstInput(&buttonSeen, "input wgl-pointer-button=delivered\r\n");
+        }
+        if (window && event->button.button >= 1 && event->button.button <= 3)
+            XboxPostHostedPointer(window, (event->type == SDL_MOUSEBUTTONDOWN ? down : up)[event->button.button - 1],
+                event->button.x, event->button.y, 0);
+        break;
+    case SDL_MOUSEWHEEL: {
+        const int sign = event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+        window = EventWindow(event->wheel.windowId, FALSE);
+        if (window && event->wheel.y) XboxPostHostedPointer(window, WM_MOUSEWHEEL, pointerX, pointerY, sign * event->wheel.y);
+        if (window && event->wheel.x) XboxPostHostedPointer(window, WM_MOUSEHWHEEL, pointerX, pointerY, sign * event->wheel.x);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 void XboxPollWglHostEvents(void) {
     if (!hostEvents) return;
     const BOOL trace = startupHostPoll == HostPollPending;
@@ -155,18 +439,16 @@ void XboxPollWglHostEvents(void) {
     }
     sdl.pumpEvents();
     SdlWindowEvent events[32];
-    const int count = sdl.peepEvents(events, ARRAYSIZE(events), SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT);
-    for (int index = 0; index < count; ++index) {
-        if (events[index].window.event != SDL_WINDOWEVENT_CLOSE) continue;
-        for (UINT i = 0; i < CONTEXT_COUNT; ++i) {
-            const Context *context = &contexts[i];
-            if (context->handle && sdl.windowId(context->sdlWindow) == events[index].window.windowId) {
-                XboxPostMessageW(context->window->handle, WM_CLOSE, 0, 0);
-                break;
-            }
-        }
-    }
+    int count;
+    do {
+        count = sdl.peepEvents(events, ARRAYSIZE(events), SDL_GETEVENT, SDL_WINDOWEVENT, SDL_MOUSEWHEEL);
+        for (int index = 0; index < count; ++index) DeliverHostEvent(&events[index]);
+    } while (count == ARRAYSIZE(events));
     if (trace) XboxWindowTrace("win32_wgl_post_swap_events=returned\n");
+}
+
+BOOL XboxWglHostEventsActive(void) {
+    return hostEvents;
 }
 
 static Context *FindContext(HGLRC handle) {
@@ -433,10 +715,12 @@ PROC WINAPI XboxWglGetProcAddress(LPCSTR name) {
     if (Equals(name, "wglSwapIntervalEXT")) return (PROC)(void *)SwapInterval;
     if (Equals(name, "wglGetSwapIntervalEXT")) return (PROC)(void *)GetSwapInterval;
     if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l') return NULL;
-    return (PROC)sdl.procedure(name);
+    return TimedGlProcedure(name, (PROC)sdl.procedure(name));
 }
 
 FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
+    const FARPROC adapted = ScopedShellExport(module, name);
+    if (adapted) return adapted;
     if ((ULONG_PTR)name > 0xffffu && module && module == GetModuleHandleW(L"opengl32.dll")) {
         if (Equals(name, "wglCreateContext")) return (FARPROC)(void *)XboxWglCreateContext;
         if (Equals(name, "wglMakeCurrent")) return (FARPROC)(void *)XboxWglMakeCurrent;
@@ -444,6 +728,8 @@ FARPROC WINAPI XboxWindowGetProcAddress(HMODULE module, LPCSTR name) {
         if (Equals(name, "wglGetProcAddress")) return (FARPROC)(void *)XboxWglGetProcAddress;
         if (Equals(name, "wglGetCurrentContext")) return (FARPROC)(void *)XboxWglGetCurrentContext;
         if (Equals(name, "wglGetCurrentDC")) return (FARPROC)(void *)XboxWglGetCurrentDC;
+        return (FARPROC)TimedGlProcedure(name, (PROC)GetProcAddress(module, name));
     }
-    return GetProcAddress(module, name);
+    const FARPROC resolved = GetProcAddress(module, name);
+    return ManagedWarmupExport(module, name, resolved);
 }

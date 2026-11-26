@@ -57,6 +57,7 @@
             if ((data.appId !== 0 && !validId(data.appId)) || typeof data.overlay !== 'boolean') return;
             const changed = activeApp !== data.appId;
             const exited = data.appId === 0 ? activeApp : 0;
+            if (changed) trackXboxGameWindows(runtime?.(5757).oy?.WindowStore, data.appId, activeApp);
             activeApp = data.appId;
             controlsApp = data.overlay ? activeApp : 0;
             if (controlsApp && !focusStore) attachRunningGameFocus();
@@ -72,6 +73,12 @@
                     if (!alreadyOpen) showGameOverlay(requested);
                 }
                 if (exited && !activeApp) returnToLibrary(exited);
+                // The host waits for this before it trusts the overlay with the game: two
+                // animation frames after the controls were requested show that this renderer
+                // runs script and draws. A renderer that does neither gets the game back.
+                if (requested) requestAnimationFrame(() => requestAnimationFrame(() => {
+                    if (controlsApp === requested) host.postMessage({method: 'overlay-ready', appId: requested});
+                }));
             }
             if (changed) refresh().then(updateControls, error => console.error('Steam library unavailable', error.message));
             else updateControls();

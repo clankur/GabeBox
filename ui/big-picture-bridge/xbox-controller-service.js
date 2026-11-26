@@ -7,8 +7,19 @@ function installXboxControllerService(runtime, gamepads) {
     if (defaults.GetDefaultTransport()) return;
     const methods = new Set(['SteamInputManager.GetControllerList#1', 'SteamInputManager.GetControllerAccessibilityStrings#1',
         'SteamInputManager.WaitInitialControllerStateEnumerated#1', 'SteamInputManager.ShouldTritonPairInOobe#1']);
+    // Optional feature probes that Valve's stores send once at startup without a rejection
+    // handler. The audio store asks which optional audio features the client supports and
+    // checks BSuccess() before reading any. Xbox supplies none of them, so answer as a
+    // client whose service is unavailable: the store keeps its defaults and no unhandled
+    // rejection reaches (and hides later failures in) the renderer error report.
+    const unavailable = new Set(['Audio.GetSupportedFeatures#1']);
     defaults.SetDefaultTransport({
         async SendMsg(method, request, response, options) {
+            if (unavailable.has(method)) {
+                const reply = runtime(98237).w.InitFromObject(response, {});
+                reply.Hdr().set_eresult(20); // k_EResultServiceUnavailable
+                return reply;
+            }
             if (options?.eClientExecutionSite !== 2 || !methods.has(method))
                 throw new Error('Steam client service unavailable: ' + method);
             if (method === 'SteamInputManager.ShouldTritonPairInOobe#1') {

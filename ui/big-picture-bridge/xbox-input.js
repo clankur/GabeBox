@@ -211,6 +211,12 @@ function installXboxInput(client, gamepads, storeBrowser) {
             // unavailable. A physical pad alone does not establish its layout.
             throw new Error('Steam Input configuration is unavailable on this Xbox runtime');
         },
+        async StartEditingControllerConfigurationForAppIDAndControllerIndex() {
+            // The running game's controller page loads the layout to edit while it renders.
+            // Valve handles a rejection (the layout is marked as failed to load). A missing
+            // method threw inside React's render instead (minified React error #520).
+            throw new Error('Steam Input configuration is unavailable on this Xbox runtime');
+        },
         EnableControllerAnalogInputMessages(enabled) { analogEnabled = !!enabled; },
         RegisterForKeyboardDeviceChanges(callback) {
             if (typeof callback !== 'function') throw new TypeError('Expected a keyboard listener');

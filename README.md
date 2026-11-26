@@ -81,7 +81,7 @@ The GitHub Actions workflows compile the x64 native components with the Windows 
 | `xbox-big-picture-primary-x64` and `xbox-fhd-present-x64` | Primary XAML window and native game presenter for the single-window build. [Primary host workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-big-picture-primary.yml) · [Presenter workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-fhd-present.yml) |
 | Title-specific runtimes and profiles | Match the game’s installed Steam build. The [SDL workflow](https://github.com/clankur/GabeBox/actions/workflows/xbox-sdl.yml) publishes versioned SDL builds. The [game launch guide](docs/GAME-LAUNCH.md) lists per-title inputs. |
 
-Use workflow artifacts from the same source revision where possible and verify their `SHA256SUMS`. The base APPX is a separate input from the release source archive and the Steam Core CI template. If you’re starting without the pinned base, you can build the [packaged process probe](probe/DEVELOPMENT.md) or assemble the [Steam Core prototype](docs/STEAM-CORE.md#run-the-on-console-sign-in) using the CI template.
+Use workflow artifacts from the same source revision where possible and verify their `SHA256SUMS` with `python3 -m tools.artifacts verify DIR`. It also accepts the CRLF line endings of artifacts from older workflow runs, which `shasum -a 256 -c` rejects. The base APPX is a separate input from the release source archive and the Steam Core CI template. If you’re starting without the pinned base, you can build the [packaged process probe](probe/DEVELOPMENT.md) or assemble the [Steam Core prototype](docs/STEAM-CORE.md#run-the-on-console-sign-in) using the CI template.
 
 ### 2. Assemble and sign
 

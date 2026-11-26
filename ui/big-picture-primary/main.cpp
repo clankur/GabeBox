@@ -13,9 +13,11 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.h>
+#include <winrt/Windows.UI.Xaml.Media.h>
 #include "../big-picture-webview/shell-cursor.h"
 
 using namespace winrt;
@@ -262,7 +264,13 @@ struct SteamApplication : ApplicationT<SteamApplication>
                         traceWindowLifecycle(coreWindow);
                     } catch (...) { checkpoint("window-lifecycle-trace-error", to_hresult()); }
                 }
+                // Everything behind a hosted game panel is black: this page, the account host's
+                // default background and the Steam composition host. A gap in the panel's
+                // composition (a hide, a reorder or a frame without content) then shows the
+                // letterbox colour instead of a white flash (clankur/GabeBox#89).
+                const Media::SolidColorBrush black{Windows::UI::Colors::Black()};
                 Grid root;
+                root.Background(black);
                 window.Content(root);
                 configureXboxBackNavigation();
                 window.Activate();
@@ -270,6 +278,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
                 WebView account{WebViewExecutionMode::SameThread};
                 checkpoint("edge-created");
                 account.Name(L"SteamAccountHost");
+                account.DefaultBackgroundColor(Windows::UI::Colors::Black());
                 configureXboxInput(window, account);
                 // Windows accepts either an empty authority or the current package identity.
                 Uri local{accountPage};
@@ -312,6 +321,7 @@ struct SteamApplication : ApplicationT<SteamApplication>
 
                 Canvas steam;
                 steam.Name(L"SteamCompositionHost");
+                steam.Background(black);
                 steam.Visibility(Visibility::Collapsed);
                 steam.IsHitTestVisible(false);
                 root.Children().Append(steam);

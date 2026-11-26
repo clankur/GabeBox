@@ -23,3 +23,4 @@ EXPORTS
     VirtualAlloc=XboxTraceVirtualAlloc @21
     GetFileType=XboxGetFileType @22
     CoCreateInstance=XboxCoCreateInstance @23
+    XboxD3D12PipelineCacheFlush @24

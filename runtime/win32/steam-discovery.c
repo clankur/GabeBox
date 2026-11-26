@@ -84,8 +84,13 @@ static DWORD InitSteamSdk(DWORD *report, void *context) {
 
 typedef DWORD (*DiscoveryAction)(DWORD *report, void *context);
 
+/* keepMapped leaves the private hive mapped over HKCU once the action reports a
+   matched account. A retained modern SDK polls SteamAPI_IsSteamRunning through
+   HKCU\Software\Valve\Steam\ActiveProcess for the life of the game, and
+   titles that call the SDK through a managed runtime cannot be wrapped per call
+   the way the legacy imports are. */
 static DWORD WithSteamDiscovery(HMODULE client, LPCWSTR privateHive, DWORD *report,
-        DiscoveryAction action, void *context, DWORD *cleanupStatus) {
+        DiscoveryAction action, void *context, DWORD *cleanupStatus, BOOL keepMapped) {
     typedef LSTATUS (WINAPI *LoadHive)(LPCWSTR, PHKEY, REGSAM, DWORD, DWORD);
     typedef LSTATUS (WINAPI *CreateKey)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
                                        const SECURITY_ATTRIBUTES *, PHKEY, LPDWORD);
@@ -124,6 +129,12 @@ static DWORD WithSteamDiscovery(HMODULE client, LPCWSTR privateHive, DWORD *repo
                     *report |= STEAM_HANDOFF_SDK_DISCOVERY;
                     status = action(report, context);
                 }
+                if (keepMapped && status == ERROR_SUCCESS && (*report & STEAM_HANDOFF_SDK_MATCHED)) {
+                    /* The mapping refers to root, so it stays open until the process exits. */
+                    *report |= STEAM_HANDOFF_SDK_MAPPED;
+                    FreeLibrary(registry);
+                    return status;
+                }
                 const DWORD restored = overrideKey(HKEY_CURRENT_USER, NULL);
                 if (cleanupStatus) *cleanupStatus = restored;
             }
@@ -140,8 +151,17 @@ DWORD WINAPI XboxSteamInitialize(BOOL retain) {
         return STEAM_HANDOFF_SDK_REPORT | ERROR_INVALID_DATA;
     DWORD report = STEAM_HANDOFF_SDK_REPORT;
     HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-    DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL);
+    DWORD result = WithSteamDiscovery(client, hivePath, &report, InitSteamSdk, retain ? &report : NULL, NULL, retain);
     if (client) FreeLibrary(client);
+    /* Steam publishes the controllers it virtualizes for SDL titles to ignore when the SDK
+       starts. A hosted game has no Steam virtual gamepad, and the hosted XInput pad would
+       match those entries, so the lists are withdrawn for titles that use it. */
+    WCHAR hosted[2];
+    if (GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", hosted, ARRAYSIZE(hosted)) == 1 && hosted[0] == L'1') {
+        SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", NULL);
+        SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", NULL);
+        SetEnvironmentVariableW(L"SteamVirtualGamepadInfo", NULL);
+    }
     return report | (result & 0xffffu);
 }
 
@@ -275,7 +295,7 @@ static int InvokeGameSdk(GameSdkCall *call, const char *symbol, const char *trac
             call->lastError = call->entry ? before : GetLastError();
             if (call->entry) {
                 HMODULE client = LoadPackagedLibrary(L"steamclient64.dll", 0);
-                discovery = WithSteamDiscovery(client, hivePath, &report, CallGameSdk, call, &cleanup);
+                discovery = WithSteamDiscovery(client, hivePath, &report, CallGameSdk, call, &cleanup, FALSE);
                 // If discovery is unavailable, preserve the original SDK's decision.
                 if (!(report & STEAM_HANDOFF_SDK_DISCOVERY)) CallGameSdk(&report, call);
                 if (client) FreeLibrary(client);

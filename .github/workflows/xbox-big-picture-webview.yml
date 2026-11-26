@@ -65,9 +65,10 @@ jobs:
             -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           try {
             & "$tools/signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out/BigPictureView.Native.dll"
-            Get-ChildItem $out -File | Get-FileHash | ForEach-Object {
+            $sums = Get-ChildItem $out -File | Get-FileHash | ForEach-Object {
               "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
-            } | Set-Content -Encoding ascii "$out/SHA256SUMS"
+            }
+            [IO.File]::WriteAllText("$out/SHA256SUMS", ($sums -join "`n") + "`n")
           } finally { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" }
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'

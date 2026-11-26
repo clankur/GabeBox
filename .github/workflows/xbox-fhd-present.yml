@@ -4,9 +4,9 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp', 'tests/fhd-flash-probe.test.cpp']
   pull_request:
-    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp']
+    paths: ['.github/workflows/xbox-fhd-present.yml', 'runtime/presenter/**', 'probe/probe.c', 'probe/mouse-source/native-panel.h', 'runtime/shared/**', 'tests/fhd-hosted-input.test.cpp', 'tests/fhd-media-frame-count.test.cpp', 'tests/fhd-flash-probe.test.cpp']
 
 permissions:
   contents: read
@@ -40,6 +40,8 @@ jobs:
           & "$work\input-test.exe"
           & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\media-test.obj" "/Fe$work\media-test.exe" tests/fhd-media-frame-count.test.cpp
           & "$work\media-test.exe"
+          & cl.exe /nologo /std:c++17 /O2 /EHsc "/Fo$work\flash-test.obj" "/Fe$work\flash-test.exe" tests/fhd-flash-probe.test.cpp
+          & "$work\flash-test.exe"
 
           & "$tool\midl.exe" /nologo /winrt /nomidl /h NUL /metadata_dir (Split-Path $metadata) /reference $metadata /out $work /winmd "$out\Fhd.Native.winmd" runtime/presenter/Fhd.Native.idl
           & "$tool\cppwinrt.exe" -input "$out\Fhd.Native.winmd" -reference $metadata -output "$work\projection" -include Fhd.Native -overwrite
@@ -55,7 +57,8 @@ jobs:
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' -CertStoreLocation Cert:\CurrentUser\My
           & "$tool\signtool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out\Fhd.Native.dll"
           Export-Certificate -Cert $cert -FilePath "$out\Fhd.Native.cer" | Out-Null
-          Get-FileHash "$out\Fhd.Native.dll","$out\Fhd.Native.winmd" | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" } | Set-Content -Encoding ascii "$out\SHA256SUMS"
+          $sums = Get-FileHash "$out\Fhd.Native.dll","$out\Fhd.Native.winmd" | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)" }
+          [IO.File]::WriteAllText("$out\SHA256SUMS", ($sums -join "`n") + "`n")
       - uses: actions/upload-artifact@v4
         with:
           name: xbox-fhd-present-x64

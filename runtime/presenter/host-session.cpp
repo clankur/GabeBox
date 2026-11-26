@@ -24,11 +24,13 @@ alignas(HostedGpuReceiver) BYTE receiverStorage[sizeof(HostedGpuReceiver)];
 HostedGpuReceiver *receiver;
 volatile LONG generation, starting, stop, running, overlay, submitted, sharedCount, cpuCount, width, height, visible, activation, gpuError, hardError;
 const char * volatile gpuStage="idle";
+// The receiver's exchange counters as of its latest Draw, readable without the receiver.
+HostedGpuCounters gpuCounters;
 volatile LONG64 sampleUs, sampleFrames;
 UINT beginCount;
 FhdFrameTrace trace;
 struct Text {
-    WCHAR bytes[768]{}; UINT length=0;
+    WCHAR bytes[2048]{}; UINT length=0;
     void add(const WCHAR *s) {while (*s && length+1<ARRAYSIZE(bytes)) bytes[length++]=*s++;bytes[length]=0;}
     void ascii(const char *s) {while (*s && length+1<ARRAYSIZE(bytes)) bytes[length++]=(WCHAR)*s++;bytes[length]=0;}
     void num(UINT64 n) {if(n>=10)num(n/10);WCHAR s[]={(WCHAR)(L'0'+n%10),0};add(s);}
@@ -57,6 +59,23 @@ void report(Text &t) {
     t.field(L"sample_frames=",InterlockedCompareExchange64(&sampleFrames,0,0));
     t.add(L"gpu_stage=");t.ascii(gpuStage);t.add(L"\r\n");
     t.field(L"gpu_hresult=",static_cast<UINT>(gpuError));
+    const HostedGpuCounters gpuSeen=gpuCounters;
+    t.field(L"gpu_wait_producer=",gpuSeen.notReady);t.field(L"gpu_held=",gpuSeen.held);
+    t.field(L"gpu_released_unshown=",gpuSeen.released);t.field(L"gpu_drawn=",gpuSeen.drawn);
+    t.field(L"gpu_ready_fence=",gpuSeen.readyValue);t.field(L"gpu_done_fence=",gpuSeen.doneValue);
+    const HostedFlashCounters &flash=gpuSeen.flash;
+    if (flash.enabled) {
+        t.field(L"flash_probe=",1);t.field(L"flash_producer=",flash.producer);
+        t.field(L"flash_frames=",flash.frames);t.field(L"flash_output_frames=",flash.outputFrames);
+        t.field(L"flash_game_frames=",flash.gameFrames);t.field(L"white_frames=",flash.white);
+        t.field(L"white_runs=",flash.runs);t.field(L"white_output_frames=",flash.whiteOutput);
+        t.field(L"white_game_frames=",flash.whiteGame);t.field(L"flash_matched=",flash.matched);
+        t.field(L"flash_mismatched=",flash.mismatched);t.field(L"flash_skipped=",flash.skipped);
+        t.field(L"flash_game_skipped=",flash.gameSkipped);t.field(L"flash_game_lost=",flash.gameLost);
+        t.field(L"flash_captures=",flash.captures);
+        WCHAR first[32];FhdUtcText(flash.firstUtc,first);
+        if (first[0]) {t.add(L"white_first_utc=");t.add(first);t.add(L"\r\n");}
+    }
     const LONG point=pointerSample;
     if (point >= 0) {
         t.field(L"pointer_x_4095=",point & 4095);t.field(L"pointer_y_4095=",(point >> 12) & 4095);
@@ -95,7 +114,7 @@ HRESULT attach(const WCHAR *path,bool create) {
     if (!create) rumbleBox=OpenSdlRumbleMailbox(path);
     stop=overlay=submitted=sharedCount=cpuCount=width=height=visible=activation=gpuError=hardError=sharedMode=0;
     pointerSample=-1;
-    gpuStage="waiting-for-producer";sampleUs=sampleFrames=0;
+    gpuStage="waiting-for-producer";sampleUs=sampleFrames=0;gpuCounters={};
     return S_OK;
 }
 LONG mediaToken;
@@ -105,6 +124,7 @@ HRESULT drawMailbox(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11Render
     const LONG pointer = !nativeGamepad || (point & SDL_HOST_POINTER_VISIBLE) ? point : -1;
     HRESULT hr = receiver->Draw(device, ctx, target, 1920, 1080, sequence, pointer);
     gpuStage = receiver->Stage();
+    gpuCounters = receiver->Counters();
     gpu = hr == S_OK;
     if (gpu) return S_OK;
     if (FAILED(hr)) gpuError = hr;
@@ -162,6 +182,11 @@ extern "C" void FhdMediaSequences(LONG token, UINT64& cpu, UINT64& gpu) {
         cpu = static_cast<UINT32>(SdlHostLoad(&box->frame_sequence));
         gpu = receiver->ProducerSequence();
     }
+    ReleaseSRWLockShared(&stateLock);
+}
+extern "C" void FhdMediaGpuCounters(LONG token, HostedGpuCounters& out) {
+    AcquireSRWLockShared(&stateLock);
+    out = token && mediaToken == token && receiver ? gpuCounters : HostedGpuCounters{};
     ReleaseSRWLockShared(&stateLock);
 }
 extern "C" HRESULT FhdDrawMedia(LONG token, ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target,

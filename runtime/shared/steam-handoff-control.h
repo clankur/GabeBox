@@ -18,6 +18,7 @@ enum {
     STEAM_HANDOFF_SDK_LOGGED_ON = 1u << 20,
     STEAM_HANDOFF_SDK_MATCHED = 1u << 21,
     STEAM_HANDOFF_SDK_INIT_CALLED = 1u << 22,
+    STEAM_HANDOFF_SDK_MAPPED = 1u << 23,
 };
 
 #ifdef __cplusplus

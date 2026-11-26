@@ -453,9 +453,24 @@ async function checkRunningControls(page, popup) {
             if (action === 'PUSH' && location.pathname === route) fixtureOverlayPushes++;
         });
     });
+    await page.evaluate(() => {
+        // Count window-title requests and script failures while the controls are shown.
+        // Without a stable window list for the running game, Valve's controls requested the
+        // titles on every render (86,000 times in 3 s) and never went idle.
+        const ui = SteamClient.System.UI, titles = ui.GetGameWindowsInfo;
+        window.fixtureWindowTitleRequests = 0;
+        window.fixtureOverlayErrors = [];
+        ui.GetGameWindowsInfo = (...args) => { fixtureWindowTitleRequests++; return titles(...args); };
+        window.addEventListener('error', event => fixtureOverlayErrors.push(
+            String(event.error?.cause?.message || '') + ' <- ' + String(event.message).slice(0, 80)));
+    });
     await page.evaluate(() => hostEvent({event: 'xbox-game', appId: 42, overlay: true}));
     let resume = popup.getByText('Resume game', {exact: true});
     await resume.waitFor({state: 'visible'});
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const overlay = await page.evaluate(() => ({titles: fixtureWindowTitleRequests, errors: fixtureOverlayErrors}));
+    assert(overlay.titles <= 2, 'The running-game controls settle: ' + overlay.titles + ' window-title requests');
+    assert.deepEqual(overlay.errors, [], 'The running-game controls render without a script failure');
     assert(await popup.getByText('Exit game', {exact: true}).isVisible());
     if (accounts) {
         const menu = popup.frameLocator('iframe[name="MainMenu_uid2"]');

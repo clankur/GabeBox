@@ -1,6 +1,7 @@
 #include "gpu-receiver.h"
 #include "sdl-blit-shaders.h"
 #include "pointer-cursor.h"
+#include "flash-probe.h"
 #include <d3d12.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -13,6 +14,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 struct Vertex { float x,y,u,v; UINT color; };
 struct SharedSlot {
+    ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> srv;
     ComPtr<ID3D11Fence> ready, done;
     UINT64 retired = 0;
@@ -40,6 +42,7 @@ HRESULT openSlot(ID3D12Device *lookup, ID3D11Device5 *device, SharedSlot &slot,
             if (desc.Width!=width || desc.Height!=height || desc.Format!=format || desc.MipLevels!=1 ||
                     desc.ArraySize!=1 || desc.SampleDesc.Count!=1) return E_INVALIDARG;
             hr=device->CreateShaderResourceView(texture.Get(),nullptr,&slot.srv);
+            slot.texture=texture;
         } else {
             auto &fence = i==1 ? slot.ready : slot.done;
             hr=device->OpenSharedFence(handle.value,IID_PPV_ARGS(&fence));
@@ -181,9 +184,34 @@ struct HostedGpuReceiver::Resources {
         source=nullptr; context->PSSetShaderResources(0,1,&source);
         context->OMSetRenderTargets(0,nullptr,nullptr);
     }
+    // Stretches source over a whole render target, for the flash probe's thumbnails.
+    void blit(ID3D11RenderTargetView *target, UINT w, UINT h, ID3D11ShaderResourceView *source) {
+        const D3D11_VIEWPORT viewport{0.f,0.f,float(w),float(h),0.f,1.f};
+        context->OMSetRenderTargets(1,&target,nullptr);
+        context->OMSetBlendState(nullptr,nullptr,~0u);
+        context->RSSetState(nullptr);
+        context->RSSetViewports(1,&viewport);
+        context->IASetInputLayout(layout.Get());
+        UINT stride=sizeof(Vertex), offset=0;
+        context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context->VSSetShader(vertex.Get(),nullptr,0);
+        context->VSSetConstantBuffers(0,1,matrices.GetAddressOf());
+        context->PSSetShader(pixel.Get(),nullptr,0);
+        context->PSSetSamplers(0,1,sampler.GetAddressOf());
+        context->PSSetShaderResources(0,1,&source);
+        context->Draw(4,0);
+        source=nullptr; context->PSSetShaderResources(0,1,&source);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+    }
 };
 
 HostedGpuReceiver::~HostedGpuReceiver() { Close(); }
+HostedGpuCounters HostedGpuReceiver::Counters() const {
+    HostedGpuCounters counters=counters_;
+    if (probe_) counters.flash=probe_->counters();
+    return counters;
+}
 UINT64 HostedGpuReceiver::ProducerSequence() const {
     if (!mailbox_) return 0;
     const auto first = load64(&mailbox_->sequence[0]);
@@ -215,8 +243,11 @@ HRESULT HostedGpuReceiver::Open(const wchar_t *mailboxPath) {
     if (mapping.value) mailbox_=static_cast<SdlGpuMailbox*>(MapViewOfFileFromApp(mapping.value,FILE_MAP_WRITE,0,sizeof(SdlGpuMailbox)));
     if (!mailbox_) { auto hr=HRESULT_FROM_WIN32(GetLastError()); Close(); return hr; }
     if (!created && load(&mailbox_->magic)!=SDL_GPU_MAGIC) {Close();return E_INVALIDARG;}
+    // Before the magic below, so a producer that finds the exchange also finds the probe sidecar.
+    probe_=FhdFlashProbe::create(mailboxPath);
     InterlockedExchange(&mailbox_->supports_cursor,1);
     InterlockedExchange(&mailbox_->magic,SDL_GPU_MAGIC);
+    counters_={};
     stage_="waiting-for-producer";
     return S_OK;
 }
@@ -226,10 +257,14 @@ bool HostedGpuReceiver::Active() const {
 void HostedGpuReceiver::Disconnect() {
     if (mailbox_ && accepted_) InterlockedCompareExchange(&mailbox_->accepted_generation,0,accepted_);
     accepted_=0;
-    if (resources_) {resources_->~Resources();HeapFree(GetProcessHeap(),0,resources_);resources_=nullptr;}
+    if (resources_) {
+        if (probe_) probe_->reset();
+        resources_->~Resources();HeapFree(GetProcessHeap(),0,resources_);resources_=nullptr;
+    }
 }
 void HostedGpuReceiver::Close() {
     Disconnect();
+    FhdFlashProbe::destroy(probe_); probe_=nullptr;
     if (mailbox_) { UnmapViewOfFile(mailbox_); mailbox_=nullptr; }
     if (file_!=INVALID_HANDLE_VALUE) { CloseHandle(file_); file_=INVALID_HANDLE_VALUE; }
     if (cpu_) {cpu_->~Resources();HeapFree(GetProcessHeap(),0,cpu_);cpu_=nullptr;}
@@ -287,6 +322,7 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
                                 UINT width, UINT height, UINT64 &sequence, LONG hostPointer) {
     sequence=0;
     if (!mailbox_ || !device || !context || !target || !width || !height) return S_FALSE;
+    if (probe_) probe_->poll(context);
     const LONG generation=load(&mailbox_->generation);
     if (generation!=accepted_) Disconnect();
     if (generation<=0 || (generation&1) || generation==failedGeneration_) return S_FALSE;
@@ -296,8 +332,13 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
     }
     InterlockedExchange(&mailbox_->heartbeat_ms,static_cast<LONG>(GetTickCount64()));
     auto &r=*resources_;
-    UINT64 seq[SDL_GPU_SLOTS]{};
-    int newest=-1;
+    UINT64 seq[SDL_GPU_SLOTS]{}, completed[SDL_GPU_SLOTS]{};
+    // Draw the oldest completed frame newer than the last one shown and keep a
+    // newer one for the next refresh. When producer and display clocks drift,
+    // two frames can complete within one refresh; showing the newest would drop
+    // the other and repeat a frame on the following refresh. The producer skips
+    // a slot until it is released, so at most one frame waits here.
+    int next=-1;
     for (int i=0;i<SDL_GPU_SLOTS;i++) {
         const UINT64 value=load64(&mailbox_->sequence[i]);
         if (!value || value<=r.slots[i].retired) continue;
@@ -306,32 +347,45 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
         if (ready==UINT64_MAX) {
             stage_="producer-device-removed"; failedGeneration_=generation; Disconnect(); return DXGI_ERROR_DEVICE_REMOVED;
         }
-        if (ready<value) continue;
-        seq[i]=value;
-        if (value>r.latest && (newest<0 || value>seq[newest])) newest=i;
+        // Mesa submits asynchronously: the sequence is published as soon as the copy is
+        // queued, so a frame can be visible here before the GPU has written it.
+        if (ready<value) { ++counters_.notReady; continue; }
+        seq[i]=value; completed[i]=ready;
+        if (value>r.latest && (next<0 || value<seq[next])) next=i;
     }
     if (load(&mailbox_->generation)!=generation) { Disconnect(); return S_FALSE; }
-    if (!load(&mailbox_->gpu_active)) newest=-1;
+    const bool active=load(&mailbox_->gpu_active)!=0;
+    if (!active) next=-1;
     for (int i=0;i<SDL_GPU_SLOTS;i++) {
         if (!seq[i]) continue;
+        // Hold a newer completed frame for the next refresh.
+        if (active && i!=next && seq[i]>r.latest) { ++counters_.held; continue; }
         auto &slot=r.slots[i];
-        if (i==newest) {
+        if (i==next) {
             HRESULT wait=r.fences->Wait(slot.ready.Get(),seq[i]);
             if (FAILED(wait)) { stage_="consumer-fence-wait"; failedGeneration_=generation; Disconnect(); return wait; }
             const auto &cursor=mailbox_->cursor[i];
             HRESULT cursorResult=r.prepareCursor(device,hostPointer,cursor);
             if (FAILED(cursorResult)) { stage_="cursor-upload"; failedGeneration_=generation; Disconnect(); return cursorResult; }
             r.draw(target,width,height,slot.srv.Get(),cursor,hostPointer);
+            // Still before the done signal below, so the producer cannot reuse the slot under these copies.
+            if (probe_) {
+                probe_->sample(device,context,slot.texture.Get(),static_cast<UINT>(i),seq[i],target);
+                if (auto *thumb=probe_->thumbnail(device,seq[i]))
+                    r.blit(thumb,FhdFlashProbe::ThumbWidth,FhdFlashProbe::ThumbHeight,slot.srv.Get());
+            }
         }
         HRESULT hr=r.fences->Signal(slot.done.Get(),seq[i]);
         if (FAILED(hr)) { stage_="consumer-fence-signal"; failedGeneration_=generation; Disconnect(); return hr; }
         slot.retired=seq[i];
+        if (i==next) { ++counters_.drawn; counters_.readyValue=completed[i]; counters_.doneValue=seq[i]; }
+        else ++counters_.released;
     }
     if (!seq[0] && !seq[1]) return S_FALSE;
     context->Flush();
-    if (newest<0) return S_FALSE;
+    if (next<0) return S_FALSE;
     lastWidth_=r.width; lastHeight_=r.height;
-    sequence=r.latest=seq[newest]; stage_="gpu-drew-frame";
+    sequence=r.latest=seq[next]; stage_="gpu-drew-frame";
     return S_OK;
 }
 

@@ -1,4 +1,13 @@
-/* Bridge XInput callers to the controller already owned by the Xbox host. */
+/* Bridge XInput callers to the controller already owned by the Xbox host.
+
+   User index 0 follows the host pad's connection. When the profile makes the
+   hosted pad the title's only controller (XBOX_WIN32_HOST_XINPUT=1), index 0
+   instead stays attached for the whole session, with neutral state until the
+   host publishes a connected pad. A console session always has a controller,
+   and callers such as SDL query XInputGetCapabilities once at startup and
+   re-scan only on device-change notifications, which such a title never
+   receives. Build-matched profiles can raise those notifications instead
+   (XboxWin32ControllerNotify). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <xinput.h>
@@ -20,6 +29,7 @@ static SetState nativeSetState;
 static XINPUT_STATE latest;
 static LONG acknowledged;
 static BOOL connected;
+static BOOL sessionSlot;
 static volatile LONG slotObserved;
 static BOOL connectionObserved, activityObserved;
 
@@ -41,6 +51,9 @@ static BOOL CALLBACK OpenController(PINIT_ONCE once, PVOID parameter, PVOID *con
         return TRUE;
     }
     if (length && length < ARRAYSIZE(path)) {
+        WCHAR padOnly[2];
+        sessionSlot = GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", padOnly, ARRAYSIZE(padOnly)) == 1 &&
+            padOnly[0] == L'1';
         mailbox = MapHostedGamepad(path);
         if (mailbox && AppendSdlRumbleSuffix(path, length, ARRAYSIZE(path))) rumble = MapSdlRumbleMailbox(path);
         SdlRumbleRecord(rumble, SDL_RUMBLE_BRIDGE_ATTACHED);
@@ -106,10 +119,13 @@ DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
         InterlockedExchange(&mailbox->gamepad.ack, serial);
         acknowledged = serial;
     }
-    const DWORD result = connected ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    const DWORD result = connected || sessionSlot ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    if (result == ERROR_SUCCESS) {
+        *state = latest;
+        if (!connected) state->Gamepad = (XINPUT_GAMEPAD){0};
+    }
     BOOL firstConnection = FALSE, firstActivity = FALSE;
     if (connected) {
-        *state = latest;
         firstConnection = !connectionObserved;
         connectionObserved = TRUE;
         const XINPUT_GAMEPAD pad = latest.Gamepad;
@@ -124,11 +140,39 @@ DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
     return result;
 }
 
+/* Record the first capability queries with their slot and result, and whether
+   the launcher's SDL backend overrides reached this process. */
+static void TraceCapabilities(DWORD index, DWORD result) {
+    static volatile LONG count;
+    const LONG call = InterlockedIncrement(&count);
+    if (call > 16) return;
+    const DWORD error = GetLastError();
+    char line[128] = "input xinput-capabilities slot=0 result=0x00000000";
+    line[31] = (char)('0' + (index & 7));
+    for (int digit = 0; digit < 8; ++digit) line[42 + digit] = "0123456789ABCDEF"[(result >> (28 - 4 * digit)) & 15];
+    unsigned length = 50;
+    if (call == 1) {
+        WCHAR value[4];
+        const DWORD size = GetEnvironmentVariableW(L"SDL_JOYSTICK_WGI", value, ARRAYSIZE(value));
+        const char *suffix = size == 1 && value[0] == L'0' ? " sdl-backends=hosted-only" : " sdl-backends=default";
+        while (*suffix) line[length++] = *suffix++;
+        if (GetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", NULL, 0) > 1) {
+            for (suffix = " sdl-ignore-list=set"; *suffix;) line[length++] = *suffix++;
+        }
+    }
+    line[length++] = '\r';
+    line[length++] = '\n';
+    AppendTrace(line, length);
+    SetLastError(error);
+}
+
+/* Slot 0 is available while the host publishes a connected pad, or for the whole
+   session when the profile makes the hosted pad the title's only controller. */
 static BOOL HostedControllerConnected(DWORD index) {
     if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return FALSE;
     AcquireSRWLockExclusive(&stateLock);
     UpdateController(&mailbox->gamepad);
-    const BOOL available = connected;
+    const BOOL available = connected || sessionSlot;
     ReleaseSRWLockExclusive(&stateLock);
     return available;
 }
@@ -138,7 +182,9 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
         return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeGetCapabilities) return nativeGetCapabilities(index, flags, capabilities);
-    if (!HostedControllerConnected(index)) return ERROR_DEVICE_NOT_CONNECTED;
+    const DWORD result = HostedControllerConnected(index) ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    TraceCapabilities(index, result);
+    if (result != ERROR_SUCCESS) return result;
 
     const WORD motor = SdlRumbleGeneration(rumble) ? 65535 : 0;
     *capabilities = (XINPUT_CAPABILITIES){

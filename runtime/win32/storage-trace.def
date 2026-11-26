@@ -7,3 +7,4 @@ EXPORTS
     TerminateProcess=XboxTraceTerminateProcess @5
     CreateFileW=XboxTraceStorageCreateFileW @6
     GetFinalPathNameByHandleW=XboxTraceFinalPathName @7
+    GetCurrentDirectoryW=XboxTraceGetCurrentDirectoryW @8

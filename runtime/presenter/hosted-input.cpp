@@ -70,6 +70,7 @@ LONG blockedMenuButtons;
 UINT gameW = 1920, gameH = 1080;
 DWORD lastTime;
 UINT highSurrogate;
+UINT keyEvents;
 LONG mouse, legacyKeys;
 constexpr UINT pointerEdgeCount = 32;
 struct PointerUpdate { LONG position, wheel; };
@@ -80,8 +81,86 @@ double cursorX, cursorY;
 LONG physicalButtons;
 bool padClick, freshPointer, physicalPointer, routedPointer;
 LONG heldVirtual[256];
+// Device Portal's /ext/remoteinput delivers gamepad presses as VK_GAMEPAD_* key
+// events (0xC3-0xDA) on the host window rather than through Windows.Gaming.Input.
+// They are merged into the hosted pad so a remote operator drives hosted games
+// the same way a controller does. A physical pad also raises these key events
+// for its own presses. Buttons merge with OR, and a key-derived stick or trigger
+// only replaces an axis that the physical reading leaves at rest, so a partly
+// deflected physical stick keeps its analog value.
+constexpr UINT remotePadFirst = 0xC3, remotePadLast = 0xDA;
+bool remotePad[remotePadLast - remotePadFirst + 1];
+DWORD remotePressedAt[remotePadLast - remotePadFirst + 1];
+bool remotePadSeen;
+// Menu + View opens Big Picture over the game. A chord counts only when one source,
+// the live Windows.Gaming.Input reading or the VK_GAMEPAD key state, holds both
+// buttons after pressing them together and keeps them held through a short settle.
+// A button left held (a lost key-up, a game's hold-View action) never pairs with a
+// later press, and a pending chord whose last button outlives the release window is
+// dropped instead of opening Big Picture whenever that button finally comes up.
+constexpr LONG chordButtons = (1 << 4) | (1 << 6);
+constexpr unsigned remoteMenu = 0xCF - remotePadFirst, remoteView = 0xD0 - remotePadFirst;
+constexpr DWORD chordPairMs = 400, chordSettleMs = 50, chordReleaseMs = 1000;
+enum ChordSource { NoChord, PadChord, KeyChord };
+LONG padChordHeld;
+DWORD padPressedAt[2]; // View, Menu
+DWORD chordSince, chordBrokenAt;
+bool chordSettling, chordBroken, chordIgnored;
+FhdHostedChordCounts chordCounts;
+bool together(DWORD a, DWORD b) { return a - b <= chordPairMs || b - a <= chordPairMs; }
+ChordSource pairedChord() {
+    if (padChordHeld == chordButtons && together(padPressedAt[0], padPressedAt[1])) return PadChord;
+    if (remotePad[remoteMenu] && remotePad[remoteView] &&
+        together(remotePressedAt[remoteMenu], remotePressedAt[remoteView]))
+        return KeyChord;
+    return NoChord;
+}
+void trackPadChord(LONG held, DWORD now) {
+    if ((held & (1 << 4)) && !(padChordHeld & (1 << 4))) padPressedAt[0] = now;
+    if ((held & (1 << 6)) && !(padChordHeld & (1 << 6))) padPressedAt[1] = now;
+    padChordHeld = held;
+}
+void resetChord() { chordSettling = chordBroken = chordIgnored = false; }
+bool remotePadActive() {
+    for (bool held : remotePad)
+        if (held) return true;
+    return false;
+}
+void mergeRemotePad(SdlHostGamepadState &value) {
+    if (remotePadActive()) remotePadSeen = true;
+    if (!remotePadSeen) return;
+    value.buttons |= SDL_HOST_PAD_CONNECTED;
+    // VK_GAMEPAD_* order: A B X Y RB LB LT RT Up Down Left Right Menu View LS RS (SDL_GameController indices).
+    static const int buttons[] = {0, 1, 2, 3, 10, 9, -1, -1, 11, 12, 13, 14, 6, 4, 7, 8};
+    for (unsigned i = 0; i < ARRAYSIZE(buttons); ++i)
+        if (remotePad[i] && buttons[i] >= 0) value.buttons |= 1 << buttons[i];
+    // A physical pad raises the same key events, and its key-up can arrive after its stick or
+    // trigger has returned to rest. Key-derived axes therefore apply only to an axis the
+    // physical reading has left at rest for a settle period.
+    static DWORD physicalMoved[SDL_HOST_PAD_AXES];
+    const DWORD now = GetTickCount();
+    bool settled[SDL_HOST_PAD_AXES];
+    for (unsigned a = 0; a < SDL_HOST_PAD_AXES; ++a) {
+        const bool rest = a >= 4 ? value.axes[a] <= -32768 + 8192 : value.axes[a] > -8192 && value.axes[a] < 8192;
+        if (!rest) physicalMoved[a] = now;
+        settled[a] = rest && now - physicalMoved[a] >= 150;
+    }
+    // Triggers rest at -32768. A trigger key reports a full pull.
+    for (unsigned i = 0; i < 2; ++i)
+        if (remotePad[6 + i] && settled[4 + i]) value.axes[4 + i] = 32767;
+    // Left stick up/down/right/left, then the right stick. Host axes point down and right.
+    static const int axes[] = {1, 1, 0, 0, 3, 3, 2, 2};
+    static const int signs[] = {-1, 1, 1, -1, -1, 1, 1, -1};
+    for (unsigned i = 0; i < ARRAYSIZE(axes); ++i)
+        if (remotePad[16 + i] && settled[axes[i]]) value.axes[axes[i]] = signs[i] < 0 ? -32768 : 32767;
+}
 SdlHostGamepadState previousPad;
 bool sentPad;
+// The serial of the first controller sample published after the latest resume, or 0 until it
+// is published. The game acknowledging that serial shows that the shown game polls hosted
+// input again and reads its mailbox.
+LONG resumeSerial;
+bool awaitingResumeSample;
 
 bool alive() { return mail && !SdlHostLoad(&mail->quit); }
 bool foreground() { return alive() && focused && visible && inputEnabled && !overlay; }
@@ -94,9 +173,13 @@ void setPad(SdlHostGamepadState const &pad) {
         same = same && pad.axes[i] == previousPad.axes[i];
     if (same)
         return;
-    SdlHostPublishGamepad(&mail->gamepad, &pad);
+    const LONG serial = SdlHostPublishGamepad(&mail->gamepad, &pad);
     previousPad = pad;
     sentPad = true;
+    if (awaitingResumeSample) {
+        awaitingResumeSample = false;
+        resumeSerial = serial;
+    }
 }
 LONG pointer(LONG pos, LONG keys, LONG wheel = 0) {
     if (!alive() || (!wheel && pos == mouse && keys == legacyKeys))
@@ -142,12 +225,16 @@ void neutral() {
     blockedMenuButtons = 3;
     for (auto &key : heldVirtual)
         key = 0;
+    // Key releases are not delivered while the game is in the background.
+    for (auto &held : remotePad)
+        held = false;
     highSurrogate = 0;
     padClick = false;
     physicalButtons = 0;
     physicalPointer = false;
     blockChord = true;
     chordPending = false;
+    resetChord();
 }
 void queueKey(UINT scan, bool down, const char *utf8 = nullptr) {
     if (!keyboard())
@@ -204,7 +291,13 @@ UINT scanFor(UINT vk, KeyStatus s) {
                              13,  14, 15,  51, 52, 53, 225, 49, 29, 27, 6,  25,  5,  17, 16,  54, 55, 56,
                              229, 85, 226, 44, 57, 58, 59,  60, 61, 62, 63, 64,  65, 66, 67,  83, 71, 95,
                              96,  97, 86,  92, 93, 94, 87,  89, 90, 91, 98, 99,  0,  0,  100, 68, 69};
-    if (!s.extended && s.scan && s.scan < sizeof(mainKeys) && mainKeys[s.scan]) {
+    // A navigation key without the extended flag shares its scancode with the keypad.
+    // Injected input (SendInput by virtual key, Device Portal key codes) arrives this
+    // way, so the navigation key wins over the keypad position.
+    const bool keypadNavigation = vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
+                                  vk == VK_HOME || vk == VK_END || vk == VK_PRIOR || vk == VK_NEXT ||
+                                  vk == VK_INSERT || vk == VK_DELETE;
+    if (!s.extended && s.scan && s.scan < sizeof(mainKeys) && mainKeys[s.scan] && !keypadNavigation) {
         if (vk == VK_PAUSE)
             return 72;
         return mainKeys[s.scan];
@@ -349,6 +442,8 @@ void requestOverlay() {
 void event(unsigned type, IUnknown *args) {
     if (!alive() || !args)
         return;
+    if (type == KeyDown || type == KeyUp)
+        ++keyEvents;
     if (type == Activated) {
         UINT state = 1;
         if (SUCCEEDED(method(args, 6, &state))) {
@@ -373,8 +468,14 @@ void event(unsigned type, IUnknown *args) {
         }
         return;
     }
-    if (!foreground())
+    if (!foreground()) {
+        // A release is always safe. Applying it here keeps a remote session that ends
+        // while the game is covered from leaving its button held for the next poll.
+        UINT key = 0;
+        if (type == KeyUp && SUCCEEDED(method(args, 6, &key)) && key >= remotePadFirst && key <= remotePadLast)
+            remotePad[key - remotePadFirst] = false;
         return;
+    }
     if (type == CaptureLost || type == PointerExited) {
         if (!routedPointer) FhdHostedPointerRelease(type == PointerExited);
         return;
@@ -393,7 +494,13 @@ void event(unsigned type, IUnknown *args) {
             character(key);
         return;
     }
-    if (key >= 256 || (key >= 136 && key <= 143) || (key >= 195 && key <= 218))
+    if (key >= remotePadFirst && key <= remotePadLast) {
+        bool &held = remotePad[key - remotePadFirst];
+        if (type == KeyDown && !held) remotePressedAt[key - remotePadFirst] = GetTickCount();
+        held = type == KeyDown;
+        return;
+    }
+    if (key >= 256 || (key >= 136 && key <= 143))
         return;
     KeyStatus status = {};
     if (FAILED(method(args, 7, &status)))
@@ -494,6 +601,12 @@ IUnknown *readPad(Reading *out) {
 }
 } // namespace
 extern "C" BOOL FhdHostedInputForeground() { return foreground(); }
+extern "C" BOOL FhdHostedInputPaused() { return mail && overlay != Playing; }
+extern "C" UINT FhdHostedKeyEvents() { return keyEvents; }
+extern "C" void FhdReadHostedResumeSample(LONG *serial, LONG *ack) {
+    if (serial) *serial = mail ? resumeSerial : 0;
+    if (ack) *ack = mail ? SdlHostLoad(&mail->gamepad.ack) : 0;
+}
 extern "C" void FhdSetHostedInputProfile(BOOL gamepad, UINT width, UINT height) {
     if (!!nativePad != !!gamepad) {
         if (alive()) {
@@ -529,6 +642,15 @@ extern "C" void FhdResumeHostedInput() {
     neutral();
     overlay = Playing;
     lastTime = GetTickCount();
+    // A chord that opened the overlay leaves no held or pending state behind, and the first
+    // sample after resuming is published even when it matches the idle state, so the game
+    // acknowledges a fresh serial once input flows again.
+    padChordHeld = 0;
+    chordPending = false;
+    resetChord();
+    sentPad = false;
+    resumeSerial = 0;
+    awaitingResumeSample = nativePad;
 }
 extern "C" void FhdPauseHostedInput() {
     if (mail && overlay != Reported) {
@@ -561,6 +683,9 @@ extern "C" void FhdHostedMenuOnRelease(BOOL enabled) {
     menuOnRelease = enabled != FALSE;
 }
 extern "C" BOOL FhdHostedMenuHeld() { return chordPending; }
+extern "C" void FhdReadHostedChordCounts(FhdHostedChordCounts *out) {
+    if (out) *out = chordCounts;
+}
 extern "C" void FhdEndHostedInput() {
     rumble.Attach(nullptr);
     if (window) {
@@ -578,10 +703,13 @@ extern "C" void FhdEndHostedInput() {
         pads = nullptr;
     }
     mail = nullptr;
+    remotePadSeen = false;
     overlay = Playing;
     menuOnRelease = false;
     routedPointer = false;
     sentPad = false;
+    resumeSerial = 0;
+    awaitingResumeSample = false;
 }
 extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, SdlRumbleMailbox *vibration, void *coreWindow) {
     FhdEndHostedInput();
@@ -592,6 +720,9 @@ extern "C" HRESULT FhdBeginHostedInput(SdlHostMailbox *box, SdlRumbleMailbox *vi
     if (FAILED(hr))
         return hr;
     mail = box;
+    chordCounts = {};
+    keyEvents = 0;
+    padChordHeld = 0;
     rumble.Attach(vibration);
     focused = TRUE;
     BYTE shown = 1;
@@ -664,27 +795,68 @@ extern "C" int FhdPollHostedInput(SdlHostMailbox *box, void *coreWindow) {
         value.axes[4] = axis(2 * reading.lt - 1);
         value.axes[5] = axis(2 * reading.rt - 1);
     }
+    trackPadChord(connected ? value.buttons & chordButtons : 0, now);
+    mergeRemotePad(value);
+    const bool padPresent = (value.buttons & SDL_HOST_PAD_CONNECTED) != 0;
     blockedMenuButtons &= value.buttons;
     value.buttons &= ~blockedMenuButtons;
-    const LONG chord = (1 << 4) | (1 << 6);
-    if ((value.buttons & chord) == chord) {
-        if (!blockChord && menuOnRelease) chordPending = true;
-        else if (!blockChord) {
-            requestOverlay();
-            overlay = Reported;
-            return 1;
+    const LONG held = value.buttons & chordButtons;
+    if (held == chordButtons) {
+        chordBroken = false;
+        if (blockChord || chordPending) {
+            value.buttons &= ~chordButtons;
+        } else if (const ChordSource source = pairedChord()) {
+            value.buttons &= ~chordButtons;
+            if (!chordSettling) {
+                chordSettling = true;
+                chordSince = now;
+            }
+            if (now - chordSince >= chordSettleMs) {
+                chordSettling = false;
+                ++(source == PadChord ? chordCounts.pad : chordCounts.keys);
+                if (menuOnRelease) chordPending = true;
+                else {
+                    requestOverlay();
+                    overlay = Reported;
+                    return 1;
+                }
+            }
+        } else {
+            // Both buttons are down without being pressed together on one source. They
+            // remain ordinary game input.
+            chordSettling = false;
+            if (!chordIgnored) {
+                chordIgnored = true;
+                ++chordCounts.ignored;
+            }
         }
-        value.buttons &= ~chord;
     } else {
-        if (!connected) chordPending = false;
-        if (!(value.buttons & chord)) {
+        chordSettling = false;
+        if (!padPresent) chordPending = false;
+        if (!held) {
+            chordIgnored = false;
             if (chordPending) {
                 requestOverlay();
                 overlay = Reported;
                 return 1;
             }
             blockChord = false;
-        } else if (chordPending) value.buttons &= ~chord;
+        } else if (chordPending) {
+            if (!chordBroken) {
+                chordBroken = true;
+                chordBrokenAt = now;
+            }
+            if (now - chordBrokenAt >= chordReleaseMs) {
+                // The remaining button stays down: a held or stale button rather than a
+                // chord release. Drop the chord and keep that button from the game until it
+                // is released.
+                chordPending = chordBroken = false;
+                ++chordCounts.expired;
+                blockChord = true;
+                blockedMenuButtons |= held;
+            }
+            value.buttons &= ~chordButtons;
+        }
     }
     double dx = 0, dy = 0;
     if (!keyboard()) {

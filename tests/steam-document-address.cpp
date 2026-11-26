@@ -11,6 +11,42 @@ int main() {
     assert(steam_webview::processDescription(L"Audio Service") == L"audio");
     assert(steam_webview::processDescription(L"private account or path") == L"other");
     assert(steam_webview::processDescription(L"") == L"none");
+    assert(steam_webview::processKind(0) == "browser");
+    assert(steam_webview::processKind(2) == "utility");
+    assert(steam_webview::processKind(7) == "unknown");
+    assert(steam_webview::processChanges({}, {{40, 0}, {41, 1}}) == " count=2 added=browser:40,renderer:41 removed=-");
+    assert(steam_webview::processChanges({{41, 1}, {40, 0}}, {{40, 0}, {41, 1}}) == " count=2 added=- removed=-");
+    assert(steam_webview::processChanges({{40, 0}, {41, 1}}, {{40, 0}, {52, 2}, {52, 2}}) ==
+           " count=2 added=utility:52 removed=renderer:41");
+    std::wstring arguments;
+    assert(steam_webview::browserArguments(L"--disable-component-update\r\n", arguments) &&
+           arguments == L"--disable-component-update");
+    assert(steam_webview::browserArguments(L" --disable-background-networking\n--disable-component-update ", arguments) &&
+           arguments == L"--disable-background-networking --disable-component-update");
+    assert(steam_webview::browserArguments(L"--disable-gpu-process-for-dx12-info-collection", arguments) &&
+           arguments == L"--disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::browserArguments(
+               L"--no-delay-for-dx12-vulkan-info-collection --disable-component-update", arguments) &&
+           arguments == L"--no-delay-for-dx12-vulkan-info-collection --disable-component-update");
+    assert(steam_webview::browserArguments(
+               L"--disable-component-update --disable-background-networking "
+               L"--disable-gpu-process-for-dx12-info-collection --no-delay-for-dx12-vulkan-info-collection",
+               arguments));
+    assert(!steam_webview::browserArguments(L"--disable-gpu-process-for-dx12-info-collection=1", arguments));
+    assert(!steam_webview::browserArguments(L"", arguments) && arguments.empty());
+    assert(steam_webview::effectiveBrowserArguments(L"") == L"--disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-component-update") ==
+           L"--disable-component-update --disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-gpu-process-for-dx12-info-collection") ==
+           L"--disable-gpu-process-for-dx12-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--no-delay-for-dx12-vulkan-info-collection") ==
+           L"--no-delay-for-dx12-vulkan-info-collection");
+    assert(steam_webview::effectiveBrowserArguments(L"--disable-component-update --no-delay-for-dx12-vulkan-info-collection") ==
+           L"--disable-component-update --no-delay-for-dx12-vulkan-info-collection");
+    assert(!steam_webview::browserArguments(L"--disable-component-update --disable-component-update", arguments));
+    assert(!steam_webview::browserArguments(L"--disable-component-update --remote-debugging-port=9222", arguments) &&
+           arguments.empty());
+    assert(!steam_webview::browserArguments(std::wstring(300, L' '), arguments));
     // 1280x720 logical Xbox view at 150% fills 1920x1080. Input and
     // visual placement agree at the centre, including safe-area insets.
     const steam_display::Bounds screen{10, 5, 1280, 720}, safe{50, 25, 1200, 680};

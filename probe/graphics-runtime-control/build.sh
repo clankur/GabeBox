@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Build an isolated Xbox control using the same Mesa DLLs as the game runtime.
 set -euo pipefail
+# Under Git Bash on Windows (CI), hand native tools drive-letter paths and run with
+# MSYS_NO_PATHCONV=1 so options such as /out: and /def: reach lld-link unchanged.
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+}
 load_only=false
 loader_order=false
 sdl_video=false
@@ -23,11 +28,17 @@ dxgi_composition=false
 dxgi_window=false
 dxgi_exchange=false
 dxgi_d3d12=false
+display_config=false
+hosted_display=false
+known_folders=false
+player_prefs=false
+win32_opengl=false
+pipeline_cache=false
+pipeline_replay=false
 dxgi_d3d11_resize=false
 dxgi_present_commit=false
 dxgi_output=false
 dxgi_output_hosted=false
-win32_opengl=false
 wgl_loader=false
 window_control=false
 window_geometry=false
@@ -41,6 +52,7 @@ wasapi_desktop=false
 wasapi_async=false
 wasapi_hosted=false
 steam_sdk_versioned=false
+hosted_xinput_session=false
 sdl_artifact=
 sdl_version=
 case ${1:-} in
@@ -52,8 +64,9 @@ case ${1:-} in
         win32_imports=true
         shift
         ;;
-    --hosted-xinput|--hosted-xinput-loader|--hosted-xinput-rumble)
+    --hosted-xinput|--hosted-xinput-session|--hosted-xinput-loader|--hosted-xinput-rumble)
         hosted_xinput=true
+        if [[ $1 == --hosted-xinput-session ]]; then hosted_xinput_session=true; fi
         if [[ $1 == --hosted-xinput-loader ]]; then hosted_xinput_loader=true; fi
         if [[ $1 == --hosted-xinput-rumble ]]; then hosted_xinput_rumble=true; fi
         shift
@@ -109,6 +122,29 @@ case ${1:-} in
         desktop_documents=true
         shift
         ;;
+    --display-config|--hosted-display)
+        display_config=true
+        if [[ $1 == --hosted-display ]]; then hosted_display=true; fi
+        shift
+        ;;
+    --known-folders)
+        known_folders=true
+        shift
+        ;;
+    --player-prefs)
+        player_prefs=true
+        shift
+        ;;
+    --d3d12-pipeline-cache)
+        pipeline_cache=true
+        shift
+        ;;
+    --d3d12-pipeline-replay)
+        # The same child and cache source, built for the record-and-replay rounds.
+        pipeline_cache=true
+        pipeline_replay=true
+        shift
+        ;;
     --window-properties|--window-geometry|--window-frame|--window-keyboard)
         window_control=true
         if [[ $1 == --window-geometry ]]; then window_geometry=true; fi
@@ -151,24 +187,24 @@ case ${1:-} in
         if [[ $1 == --sdl-video ]]; then sdl_video=true; fi
         if [[ $1 == --win32-opengl ]]; then win32_opengl=true; fi
         if [[ $1 == --wgl-loader ]]; then win32_opengl=true; wgl_loader=true; fi
-        sdl_artifact=$(realpath "${2:?Supply an SDL2 artifact directory}")
+        sdl_artifact=$(native_path "$(realpath "${2:?Supply an SDL2 artifact directory}")")
         sdl_version=${3:?Supply the SDL2 version}
         shift 3
         ;;
 esac
 if (( $# != 5 )); then
-    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --hosted-xinput-loader | --hosted-xinput-rumble | --controller-notification | --hosted-controller-notification | --wasapi-desktop | --wasapi-async | --wasapi-hosted | --steam-sdk-versioned | --raw-input | --ime-filename | --wic-stream | --gdi-plus | --ani-cursor | --ani-cursor-adapter | --desktop-window | --desktop-endpoints | --desktop-documents | --window-properties | --window-geometry | --window-frame | --window-keyboard | --d3d11-combined | --d3d11-hosted | --d3d11-hosted-output | --d3d11-nonblocking-present | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | --dxgi-present-commit | --dxgi-d3d11-resize | --dxgi-output-native | --dxgi-output-hosted | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
+    echo 'Usage: build.sh [--load-only | --win32-imports | --hosted-xinput | --hosted-xinput-session | --hosted-xinput-loader | --hosted-xinput-rumble | --controller-notification | --hosted-controller-notification | --wasapi-desktop | --wasapi-async | --wasapi-hosted | --steam-sdk-versioned | --raw-input | --ime-filename | --wic-stream | --gdi-plus | --ani-cursor | --ani-cursor-adapter | --desktop-window | --desktop-endpoints | --desktop-documents | --display-config | --hosted-display | --known-folders | --player-prefs | --d3d12-pipeline-cache | --d3d12-pipeline-replay | --window-properties | --window-geometry | --window-frame | --window-keyboard | --d3d11-combined | --d3d11-hosted | --d3d11-hosted-output | --d3d11-nonblocking-present | --dxgi-composition | --dxgi-window | --dxgi-exchange | --dxgi-d3d12 | --dxgi-present-commit | --dxgi-d3d11-resize | --dxgi-output-native | --dxgi-output-hosted | {--sdl-runtime|--sdl-video|--loader-order|--win32-opengl|--wgl-loader} SDL_ARTIFACT SDL_VERSION] WindowsApp.lib MESA_LAYOUT SDK_TEMPLATE.appx PACKAGE_VERSION NEW_BUILD_DIR' >&2
     exit 2
 fi
-src=$(cd "$(dirname "$0")" && pwd)
+src=$(native_path "$(cd "$(dirname "$0")" && pwd)")
 probe=$(dirname "$src")
 repo=$(dirname "$probe")
 window_bindings="$repo/runtime/win32/window-bindings.json"
-windows_app=$(realpath "$1")
-mesa=$(realpath "$2")
-template=$(realpath "$3")
+windows_app=$(native_path "$(realpath "$1")")
+mesa=$(native_path "$(realpath "$2")")
+template=$(native_path "$(realpath "$3")")
 mkdir "$5"
-build=$(cd "$5" && pwd)
+build=$(native_path "$(cd "$5" && pwd)")
 layout="$build/package"
 mkdir "$layout"
 
@@ -265,18 +301,24 @@ linker=("${LLD_LINK:-lld-link}" /nologo /machine:x64 "/subsystem:$subsystem" /ap
 graphics_libs=()
 child="$src/child.c"
 child_output="$layout/child.exe"
-if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined ||
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined || $hosted_display ||
         $win32_imports || $desktop_window || $hosted_xinput || $controller_notification ||
         $raw_input || $ime_filename || $ani_adapter || $steam_sdk_versioned; then
     win32_compiler=("${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2
         -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror)
 fi
-if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined; then
-    for source in window window-gl window-monitor; do
+if $dxgi_window || $dxgi_output_hosted || $win32_opengl || $window_control || $d3d11_combined || $hosted_display; then
+    for source in window window-gl window-monitor window-gdi; do
         "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
     done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/window.def" "/out:$layout/XboxWin32Window.dll" \
-        "/implib:$build/XboxWin32Window.lib" "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" "$windows_app"
+        "/implib:$build/XboxWin32Window.lib" "$build/window.obj" "$build/window-gl.obj" "$build/window-monitor.obj" \
+        "$build/window-gdi.obj" "$windows_app"
+fi
+if $hosted_display; then
+    "${win32_compiler[@]}" -c "$repo/runtime/win32/hosted-display.c" -o "$build/hosted-display.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/hosted-display.def" "/out:$layout/XboxWin32HostedDisplay.dll" \
+        "$build/hosted-display.obj" "$windows_app"
 fi
 if $dxgi_window || $dxgi_output_hosted || $d3d11_hosted; then
     for source in dxgi dxgi-frame; do
@@ -292,9 +334,15 @@ if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_l
         "/def:$repo/runtime/win32/ntdll-eh.def" "/out:$build/ntdll-eh.lib"
     "${win32_compiler[@]}" -fms-extensions -funwind-tables -fasynchronous-unwind-tables \
         -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
+    # The same sources as the packaged adapter (.github/workflows/xbox-probe.yml).
+    for source in d3d12-pipeline-cache d3d12-residency d3d12-fence-trace; do
+        "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
+    done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/loader-trace.def" \
         "/out:$layout/XboxWin32LoaderTrace.dll" "/implib:$build/XboxWin32LoaderTrace.lib" \
-        "$build/loader-trace.obj" "$windows_app" "$build/ntdll-eh.lib"
+        "$build/loader-trace.obj" "$build/d3d12-pipeline-cache.obj" "$build/d3d12-residency.obj" \
+        "$build/d3d12-fence-trace.obj" \
+        "$windows_app" "$build/ntdll-eh.lib"
 fi
 if $hosted_controller_notify; then
     "${win32_compiler[@]}" -c "$repo/runtime/win32/controller-notify.c" -o "$build/controller-notify.obj"
@@ -391,6 +439,22 @@ EOF
     graphics_libs=("$build/xinput1_4.lib")
     child="$src/xinput-child.c"
     child_output="$build/standard-xinput.exe"
+elif $display_config; then
+    child="$src/display-config-child.c"
+elif $pipeline_cache; then
+    # The same cache source as XboxWin32LoaderTrace.dll, linked into the child.
+    child="$src/pipeline-cache-child.c"
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" -std=c11 -O2 -ffreestanding \
+        -Wall -Wextra -Werror -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 \
+        -c "$repo/runtime/win32/d3d12-pipeline-cache.c" -o "$build/d3d12-pipeline-cache.obj"
+    "${LLVM_DLLTOOL:-llvm-dlltool}" -m i386:x86-64 -d "$repo/runtime/win32/ntdll-eh.def" -l "$build/ntdll-eh.lib"
+    graphics_libs=("$build/d3d12-pipeline-cache.obj" "$build/ntdll-eh.lib")
+elif $player_prefs; then
+    child="$src/player-prefs-child.c"
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver}" -std=c11 -O2 -ffreestanding -Wall -Wextra -Werror \
+        -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -c "$repo/runtime/win32/player-prefs.c" -o "$build/player-prefs.obj"
+    "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/player-prefs.def" "/out:$layout/XboxWin32PlayerPrefs.dll" \
+        "$build/player-prefs.obj" "$windows_app"
 elif $controller_notification; then
     child="$src/controller-notification-child.c"
     if $hosted_controller_notify; then child_output="$build/standard-controller-notification.exe"; fi
@@ -405,9 +469,13 @@ import sys
 build, bindings = map(Path, sys.argv[1:3])
 libraries = json.loads(bindings.read_text())
 if sys.argv[3] == "true":
-    libraries["opengl32.dll"] = ["glClearColor", "glClear", "glReadPixels", "glGetError"]
+    gl = ["glClearColor", "glClear", "glReadPixels", "glGetError"]
     if sys.argv[4] == "true":
+        libraries["opengl32.dll"] = gl
         libraries["kernel32.dll"] = ["GetProcAddress", "LoadLibraryW"]
+    else:
+        # The window control compares the WGL functions it resolves with its own imports.
+        libraries["opengl32.dll"] = [*libraries["opengl32.dll"], *gl]
 else:
     libraries = {"user32.dll": libraries["user32.dll"]}
 if sys.argv[5] == "true":
@@ -436,7 +504,7 @@ PY
         child="$src/window-child.c"
     fi
     child_output="$build/standard-window.exe"
-elif $desktop_window || $desktop_documents; then
+elif $desktop_window || $desktop_documents || $known_folders; then
     if $desktop_documents; then
         child="$src/documents-child.c"
         child_output="$build/standard-documents.exe"
@@ -447,6 +515,8 @@ EXPORTS
 EOF
         "${LLD_LINK:-lld-link}" /lib /nologo /machine:x64 "/def:$build/documents-shell32.def" "/out:$build/documents-shell32.lib"
         graphics_libs+=("$build/documents-shell32.lib")
+    elif $known_folders; then
+        child="$src/known-folders-child.c"
     else
         child="$src/desktop-control.c"
         if $desktop_endpoints; then compiler+=(-DPROBE_DESKTOP_ENDPOINTS); fi
@@ -534,9 +604,18 @@ if $win32_opengl || $window_control || $hosted_xinput || $controller_notificatio
         $raw_input || $ime_filename || $steam_sdk_versioned; then
     if $hosted_xinput_loader; then win32_compiler+=(-DPROBE_XINPUT_LOADER); fi
     if $hosted_xinput_rumble; then win32_compiler+=(-DPROBE_XINPUT_RUMBLE); fi
+    if $hosted_xinput_session; then win32_compiler+=(-DPROBE_XINPUT_SESSION); fi
     if $hosted_controller_notify; then win32_compiler+=(-DPROBE_HOSTED_CONTROLLER_NOTIFY); fi
     if $wgl_loader; then win32_compiler+=(-DPROBE_WGL_LOADER); fi
     "${win32_compiler[@]}" -c "$child" -o "$build/graphics-child.obj"
+elif $display_config || $known_folders || $player_prefs || $pipeline_cache; then
+    display_flags=()
+    if $hosted_display; then display_flags=(-DPROBE_HOSTED_DISPLAY); fi
+    if $pipeline_replay; then display_flags=(-DXBOX_PSO_REPLAY_CONTROL); fi
+    "${WIN32_CC:?Set WIN32_CC to a Windows x64 Clang driver with Windows SDK headers}" \
+        -std=c11 -O2 -D_WIN32_WINNT=0x0a00 -DWINVER=0x0a00 -ffreestanding -Wall -Wextra -Werror \
+        "${display_flags[@]+${display_flags[@]}}" \
+        -c "$child" -o "$build/graphics-child.obj"
 elif $dxgi_composition || $dxgi_output || $wic_stream || $gdi_plus || $ani_cursor || $d3d11_combined || $wasapi_desktop || $wasapi_async || $wasapi_hosted; then
     if $dxgi_exchange; then
         child_flags=(-DPROBE_DXGI_WINDOW -DPROBE_DXGI_EXCHANGE)

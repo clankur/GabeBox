@@ -12,6 +12,11 @@ on:
       - '.github/workflows/xbox-probe.yml'
       - '.github/workflows/xbox-fhd-present.yml'
   workflow_dispatch:
+    inputs:
+      graphics_control_version:
+        description: 'Four-part version for the pipeline-cache control (default 1.1.RUN_NUMBER.0)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -31,6 +36,17 @@ jobs:
           name: xbox-hosted-monogame
           path: ${{ runner.temp }}/hosted-monogame/StardewStartupDiagnostic.dll
           if-no-files-found: error
+      - name: Build and check the managed first-use warm-up
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet build runtime/managed-warmup/XboxManagedWarmup.csproj --configuration Release --output "$env:RUNNER_TEMP/managed-warmup"
+          # The shipped netstandard2.1 assembly, against an IL-only fixture on the desktop runtime:
+          # no first-use JIT after the warm-up and no type initializer run early.
+          dotnet build runtime/managed-warmup/check/fixture/WarmupFixture.csproj --configuration Release --output "$env:RUNNER_TEMP/warmup-fixture"
+          dotnet build runtime/managed-warmup/check/WarmupCheck.csproj --configuration Release --output "$env:RUNNER_TEMP/warmup-check"
+          dotnet "$env:RUNNER_TEMP/warmup-check/WarmupCheck.dll" "$env:RUNNER_TEMP/managed-warmup/XboxManagedWarmup.dll" "$env:RUNNER_TEMP/warmup-fixture/WarmupFixture.dll"
       - uses: actions/download-artifact@v4
         with:
           name: xbox-fhd-present-x64
@@ -175,16 +191,18 @@ jobs:
             }
             foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'input-raw', 'input-cursor', 'xinput') },
                                     @{ Module = 'desktop'; Name = 'XboxWin32Desktop'; Sources = @('desktop') },
-                                    @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace') },
+                                    @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace', 'd3d12-pipeline-cache', 'd3d12-residency', 'd3d12-fence-trace') },
                                     @{ Module = 'controller-notify'; Name = 'XboxWin32ControllerNotify'; Sources = @('controller-notify') },
                                     @{ Module = 'unity'; Name = 'XboxWin32Unity'; Sources = @('unity') },
                                     @{ Module = 'display-config'; Name = 'XboxWin32DisplayConfig'; Sources = @('display-config') },
+                                    @{ Module = 'hosted-display'; Name = 'XboxWin32HostedDisplay'; Sources = @('hosted-display') },
+                                    @{ Module = 'player-prefs'; Name = 'XboxWin32PlayerPrefs'; Sources = @('player-prefs') },
                                     @{ Module = 'timer'; Name = 'XboxWin32Timer'; Sources = @('timer') },
                                     @{ Module = 'storage-trace'; Name = 'XboxWin32StorageTrace'; Sources = @('storage-trace') },
                                     @{ Module = 'crash-report'; Name = 'XboxWin32CrashReport'; Sources = @('crash-report') },
                                     @{ Module = 'transactions'; Name = 'ktmw32'; Sources = @('transactions') },
                                     @{ Module = 'steam-discovery'; Name = 'XboxWin32SteamDiscovery'; Sources = @('steam-discovery') },
-                                    @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor') })) {
+                                    @{ Module = 'window'; Name = 'XboxWin32Window'; Sources = @('window', 'window-gl', 'window-monitor', 'window-gdi') })) {
               $objects = @(foreach ($source in $adapter.Sources) {
                 $object = "$work/win32-$source.obj"
                 $unwindFlags = @()
@@ -199,8 +217,11 @@ jobs:
                 & "$llvm\llvm-dlltool.exe" -m i386:x86-64 -d runtime/win32/ntdll-eh.def -l $exceptionLibrary
                 $libraries += $exceptionLibrary
               }
+              # Every adapter links without an entry point. A custom entry on the loader trace
+              # (89e7708) made Slay the Spire 2 exit 0xC000007B before its first frame on Xbox.
+              $entry = '/noentry'
               & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
-                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll /noentry `
+                /dynamicbase /nxcompat /highentropyva /nodefaultlib /Brepro /dll $entry `
                 "/def:runtime/win32/$($adapter.Module).def" "/out:$steamLayout/$($adapter.Name).dll" @objects @libraries
             }
             & "$llvm\lld-link.exe" /nologo /machine:x64 /subsystem:windows,10.00 /appcontainer `
@@ -229,6 +250,7 @@ jobs:
             }
             Copy-Item ui/signin/* $steamLayout
             Copy-Item "$env:RUNNER_TEMP/hosted-monogame/StardewStartupDiagnostic.dll" $steamLayout
+            Copy-Item "$env:RUNNER_TEMP/managed-warmup/XboxManagedWarmup.dll" $steamLayout
             Copy-Item runtime/dos/* $steamLayout
             $qrArchive = Join-Path $work 'qrcode-generator-1.4.4.tgz'
             Invoke-WebRequest 'https://registry.npmjs.org/qrcode-generator/-/qrcode-generator-1.4.4.tgz' -OutFile $qrArchive
@@ -292,4 +314,128 @@ jobs:
         with:
           name: xbox-probe-lifetime
           path: ${{ runner.temp }}/xbox-probe/lifetime-artifacts/
+          if-no-files-found: error
+  # The D3D12 pipeline-cache controls: probe/graphics-runtime-control/build.sh --d3d12-pipeline-cache
+  # (driver persistence paths) and --d3d12-pipeline-replay (record and replay with the title's own
+  # creation calls), run under Git Bash with the same LLVM, Windows SDK and Steam Core template as the job above.
+  pipeline-cache-control:
+    needs: windows-sdk-package
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - control: d3d12-pipeline-cache
+            artifact: xbox-graphics-control-pipeline-cache
+          - control: d3d12-pipeline-replay
+            artifact: xbox-graphics-control-pipeline-replay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: xbox-steam-core-template
+          path: ${{ runner.temp }}/steam-core-template
+      - name: Build, sign and record the ${{ matrix.control }} control
+        shell: pwsh
+        env:
+          CONTROL: ${{ matrix.control }}
+          CONTROL_VERSION: ${{ inputs.graphics_control_version || format('1.1.{0}.0', github.run_number) }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:CONTROL_VERSION
+          if ($version -notmatch '^\d{1,5}(\.\d{1,5}){3}$' -or ($version.Split('.') | Where-Object { [int]$_ -gt 65535 })) {
+            throw "Expected a four-part APPX version, not '$version'."
+          }
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $sdkVersion = (Get-ChildItem "$sdk\bin" -Directory |
+            Where-Object { $_.Name -match '^10\.' -and
+              (Test-Path "$($_.FullName)\x64\MakeAppx.exe") -and
+              (Test-Path "$sdk\Lib\$($_.Name)\um\x64\WindowsApp.lib") } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
+          if (!$sdkVersion) { throw 'No Windows SDK with MakeAppx and WindowsApp.lib was found.' }
+          $bin = "$sdk\bin\$sdkVersion\x64"
+          $lib = "$sdk\Lib\$sdkVersion\um\x64\WindowsApp.lib"
+          $llvm = "$env:ProgramFiles\LLVM\bin"
+          $work = Join-Path $env:RUNNER_TEMP $env:CONTROL
+          $downloads = Join-Path $work 'downloads'
+          $shims = Join-Path $work 'shims'
+          $out = Join-Path $work 'artifact'
+          New-Item -ItemType Directory -Path $downloads, $shims, $out | Out-Null
+
+          # The Steam Core template from this run, checked against its own SHA256SUMS.
+          $template = Join-Path $env:RUNNER_TEMP 'steam-core-template'
+          & python -m tools.artifacts verify $template
+          $templatePin = (Get-FileHash "$template/SHA256SUMS").Hash.ToLowerInvariant()
+
+          # The pinned Mesa UWP release, its source-revision license and the DXIL validator.
+          # build_tools/stage_mesa_uwp.py checks each digest before writing MESA_LAYOUT.
+          $sources = @(
+            @{ Url = 'https://github.com/XboxEmulationHub/mesa-uwp/releases/download/26.2.2/26.2.2.zip'; File = 'mesa-uwp-26.2.2.zip' },
+            @{ Url = 'https://raw.githubusercontent.com/XboxEmulationHub/mesa-uwp/34732bbc207daea10bdf2fb969a4a0f7769ea1de/docs/license.rst'; File = 'mesa-uwp-license.rst' },
+            @{ Url = 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip'; File = 'dxc_2025_07_14.zip' }
+          )
+          foreach ($source in $sources) { Invoke-WebRequest $source.Url -OutFile (Join-Path $downloads $source.File) }
+          $mesa = Join-Path $work 'mesa-layout'
+          & python -m build_tools.stage_mesa_uwp --control-runtime $mesa --archive "$downloads/mesa-uwp-26.2.2.zip" `
+            --license "$downloads/mesa-uwp-license.rst" --dxil-archive "$downloads/dxc_2025_07_14.zip"
+
+          # Windows SDK headers and libraries for clang come from the developer shell's INCLUDE and LIB.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          function ConvertTo-Mixed($path) { $path.Replace('\', '/') }
+          $clang = ConvertTo-Mixed "$llvm\clang.exe"
+          [IO.File]::WriteAllText("$shims/win32-cc", "#!/bin/sh`nexec `"$clang`" --target=x86_64-pc-windows-msvc `"`$@`"`n")
+          [IO.File]::WriteAllText("$shims/python3", "#!/bin/sh`nexec python `"`$@`"`n")
+          $env:PATH = "$shims;$llvm;$env:PATH"
+          $env:MSYS_NO_PATHCONV = '1'
+          $env:CLANG = $clang
+          $env:LLD_LINK = ConvertTo-Mixed "$llvm\lld-link.exe"
+          $env:LLVM_DLLTOOL = ConvertTo-Mixed "$llvm\llvm-dlltool.exe"
+          $env:WIN32_CC = ConvertTo-Mixed "$shims\win32-cc"
+          $build = Join-Path $work 'build'
+          & "$env:ProgramFiles\Git\bin\bash.exe" probe/graphics-runtime-control/build.sh "--$env:CONTROL" `
+            (ConvertTo-Mixed $lib) (ConvertTo-Mixed $mesa) (ConvertTo-Mixed "$template/PackagedProcessProbe-x64.appx") `
+            $version (ConvertTo-Mixed $build)
+          $layout = Join-Path $build 'package'
+
+          # Unsigned layout for local signing with build_tools/package.sh --layout --sign-child.
+          & python -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2])" `
+            (Join-Path $out 'GraphicsControl-layout') $layout
+
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Xbox Portability Probe' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          try {
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$layout/child.exe"
+            # The template's resources.pri is kept, as package.sh does.
+            & "$bin\MakeAppx.exe" pack /d $layout /p "$out/PackagedProcessProbe-x64.appx"
+            & "$bin\SignTool.exe" sign /sha1 $cert.Thumbprint /fd SHA256 "$out/PackagedProcessProbe-x64.appx"
+            Export-Certificate -Cert $cert -FilePath "$out/PackagedProcessProbe.cer" | Out-Null
+          } finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)"
+          }
+          $record = @(
+            "control=$env:CONTROL",
+            'package=XboxPortabilityProbe.ChildProcess.GraphicsControl',
+            "version=$version",
+            "source_commit=$env:GITHUB_SHA",
+            "run=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "steam_core_template_sha256sums=$templatePin",
+            "mesa_uwp=$(Get-Content -Raw "$mesa/mesa-uwp-source.txt")".Trim(),
+            "windows_sdk=$sdkVersion",
+            "clang=$((& "$llvm\clang.exe" --version | Select-Object -First 1))"
+          )
+          [IO.File]::WriteAllText("$out/control-build.txt", ($record -join "`n") + "`n")
+          $sums = Get-ChildItem $out -File | Get-FileHash | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $(Split-Path $_.Path -Leaf)"
+          }
+          [IO.File]::WriteAllText("$out/SHA256SUMS", ($sums -join "`n") + "`n")
+          Get-Content "$out/control-build.txt", "$out/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.control }}/artifact/
           if-no-files-found: error

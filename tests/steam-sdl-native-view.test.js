@@ -91,6 +91,77 @@ test("the XAML game panel measures visible swaps and waits for foreground before
     const closed = next.close(); await drain(); finishClose(); await closed;
 });
 
+test("a game shown again counts as resumed only once frames advance and hosted input is live", async () => {
+    let now = 0, swaps = 10, visible = true, active = 0, paused = 1, legacy = false, advancing = true, focus = 2;
+    let padSerial, padAck = 0;
+    const drain = () => new Promise(resolve => setImmediate(resolve));
+    const host = {
+        async openPanel() {}, async setPanelVisible(value) { visible = value; }, async closePanel() {},
+        status() { return ""; },
+        panelStatus() {
+            return "primary_panel=1\r\nvisible=" + Number(visible) + "\r\npresented=" + swaps + "\r\nnative_input=1\r\n" +
+                (legacy ? "" : "native_input_active=" + active + "\r\nnative_input_paused=" + paused + "\r\n" +
+                    "native_key_events=8\r\n" + (focus === undefined ? "" : "native_window_focus=" + focus + "\r\n") +
+                    (padSerial === undefined ? "" : "native_pad_resume_serial=" + padSerial + "\r\nnative_pad_ack=" + padAck + "\r\n"));
+        }
+    };
+    const window = {Fhd: {Native: {RenderHost: host}}, addEventListener() {}, removeEventListener() {},
+        steamBigPictureHost: {switchView: async () => {}}};
+    const document = {hidden: false, documentElement: {getAttribute: () => "true"}, addEventListener() {}, removeEventListener() {}};
+    const Windows = {UI: {ViewManagement: {ApplicationView: {getForCurrentView: () => ({id: 1})}}},
+        Storage: {ApplicationData: {current: {localFolder: {path: "local"}}}}};
+    // Each 100 ms confirmation poll advances the clock; the game keeps presenting.
+    vm.runInNewContext(source, {window, document, Windows, performance: {now: () => now},
+        setInterval: () => 1, clearInterval() {},
+        setTimeout: (callback, delay) => { now += delay; if (advancing) swaps++; setImmediate(callback); return 1; }});
+    const events = {running: () => true, foreground: () => true, fallback: () => assert.fail("Panel failed"),
+        menu() {}, presented() {}};
+    const game = window.steamSdlNativeView.open("steam_sdl_mailbox=sdl-host-7-2.bin\n", events, true, {hidden: false});
+    // Results come from the script realm; copy them for strict comparison.
+    const confirm = async ms => ({...await game.confirmInput(ms)});
+    await drain();
+    const live = (focused, active = 1, paused = 0) =>
+        "visible=1,paused=" + paused + ",active=" + active + (focused === undefined ? "" : ",window_focus=" + focused) + ",keys=8";
+    // Paused input (as after the chord) never counts, however long frames advance.
+    assert.deepEqual(await confirm(500), {ok: false, reason: "input-paused", detail: live(2, 0, 1)});
+    paused = 0;
+    assert.deepEqual(await confirm(500), {ok: false, reason: "input-background", detail: live(2, 0)});
+    active = 1;
+    // Slay the Spire 2 on 1.0.250.3: unpaused and active, but no window held keyboard focus
+    // after the Big Picture WebView closed, and no key event arrived again.
+    assert.deepEqual(await confirm(500), {ok: false, reason: "window-unfocused", detail: live(2)});
+    focus = 0;
+    assert.deepEqual(await confirm(500), {ok: false, reason: "window-unfocused", detail: live(0)});
+    focus = 1;
+    assert.deepEqual(await confirm(500), {ok: true, detail: live(1)});
+    // Without GetFocus the remaining live fields decide.
+    focus = undefined;
+    assert.deepEqual(await confirm(500), {ok: true, detail: live(undefined)});
+    focus = 1;
+    // With the native controller profile, the game must acknowledge the first sample published
+    // after the resume: a live counter that shows the shown game polling hosted input again.
+    padSerial = 22; padAck = 20;
+    const pad = (serial, ack) => live(1) + ",pad_serial=" + serial + ",pad_ack=" + ack;
+    assert.deepEqual(await confirm(300), {ok: false, reason: "pad-unacknowledged", detail: pad(22, 20)});
+    padAck = 22;
+    assert.deepEqual(await confirm(300), {ok: true, detail: pad(22, 22)});
+    padAck = 30; // Later samples acknowledged by the game also count.
+    assert.deepEqual(await confirm(300), {ok: true, detail: pad(22, 30)});
+    padSerial = undefined;
+    // Frames that stop also fail, even with live input.
+    advancing = false;
+    assert.deepEqual(await confirm(300), {ok: false, reason: "no-frames", detail: live(1)});
+    advancing = true;
+    await game.cover();
+    assert.deepEqual(await confirm(300), {ok: false, reason: "panel-hidden", detail: "visible=0,paused=0,active=1,window_focus=1,keys=8"});
+    assert.equal(await game.resume(), true);
+    // A hosted panel that reports no input state cannot confirm that input came back.
+    legacy = true;
+    assert.deepEqual(await confirm(300), {ok: false, reason: "input-unreported", detail: "visible=1"});
+    await game.close();
+    assert.deepEqual(await confirm(300), {ok: false, reason: "panel-closed"});
+});
+
 async function checkPrimaryMedia(sameWindow) {
     let tick, now = 0, total = 0, running = true, finished = 0, firstFrames = 0;
     const measurements = [], switches = [], released = [], captures = [], listeners = new Map();

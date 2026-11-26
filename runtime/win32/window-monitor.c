@@ -1,35 +1,16 @@
 #include "window.h"
+#include "hosted-display.h"
 
 #define XBOX_MONITOR ((HMONITOR)(ULONG_PTR)0x58424D000001ULL)
-#define XBOX_DISPLAY_DC ((HDC)(ULONG_PTR)0x584244000002ULL)
 
-static const WCHAR displayName[] = L"\\\\.\\DISPLAY1";
 static const char displayNameA[] = "\\\\.\\DISPLAY1";
 
 static BOOL SameDisplayName(LPCWSTR name) {
-    return name && CompareStringOrdinal(name, -1, displayName, -1, TRUE) == CSTR_EQUAL;
-}
-
-static void CopyDisplayText(WCHAR *to, UINT length, const WCHAR *text) {
-    UINT i = 0;
-    for (; i + 1 < length && text[i]; ++i) to[i] = text[i];
-    for (; i < length; ++i) to[i] = 0;
-}
-
-static LONG ReadDimension(LPCWSTR name, LONG fallback) {
-    WCHAR text[8];
-    DWORD length = GetEnvironmentVariableW(name, text, ARRAYSIZE(text));
-    if (!length || length >= ARRAYSIZE(text)) return fallback;
-    LONG result = 0;
-    for (DWORD i = 0; i < length; ++i) {
-        if (text[i] < L'0' || text[i] > L'9' || result > 4096) return fallback;
-        result = result * 10 + (text[i] - L'0');
-    }
-    return result >= 64 && result <= 4096 ? result : fallback;
+    return name && CompareStringOrdinal(name, -1, hostedDisplayName, -1, TRUE) == CSTR_EQUAL;
 }
 
 RECT XboxDesktopBounds(void) {
-    return (RECT){0, 0, ReadDimension(L"XBOX_SDL_RENDER_WIDTH", 1920), ReadDimension(L"XBOX_SDL_RENDER_HEIGHT", 1080)};
+    return HostedDesktopBounds();
 }
 
 HMONITOR WINAPI XboxMonitorFromWindow(HWND handle, DWORD flags) {
@@ -43,14 +24,27 @@ HMONITOR WINAPI XboxMonitorFromPoint(POINT point, DWORD flags) {
     return within || (flags & (MONITOR_DEFAULTTOPRIMARY | MONITOR_DEFAULTTONEAREST)) ? XBOX_MONITOR : NULL;
 }
 
+HMONITOR WINAPI XboxMonitorFromRect(const RECT *area, DWORD flags) {
+    if (!area || (flags != MONITOR_DEFAULTTONULL && flags != MONITOR_DEFAULTTOPRIMARY &&
+            flags != MONITOR_DEFAULTTONEAREST)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    if (flags != MONITOR_DEFAULTTONULL) return XBOX_MONITOR;
+    const RECT bounds = XboxDesktopBounds();
+    return area->left < area->right && area->top < area->bottom &&
+        area->right > bounds.left && area->bottom > bounds.top &&
+        area->left < bounds.right && area->top < bounds.bottom ? XBOX_MONITOR : NULL;
+}
+
 BOOL WINAPI XboxEnumDisplayDevicesW(LPCWSTR adapter, DWORD index, DISPLAY_DEVICEW *device, DWORD flags) {
     if (!device || device->cb != sizeof(*device)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
     if (index || flags || (adapter && !SameDisplayName(adapter))) return FALSE;
-    CopyDisplayText(device->DeviceName, ARRAYSIZE(device->DeviceName), adapter ? L"\\\\.\\DISPLAY1\\Monitor0" : displayName);
-    CopyDisplayText(device->DeviceString, ARRAYSIZE(device->DeviceString), adapter ? L"Xbox monitor" : L"Xbox display adapter");
+    CopyDisplayText(device->DeviceName, ARRAYSIZE(device->DeviceName), adapter ? L"\\\\.\\DISPLAY1\\Monitor0" : hostedDisplayName);
+    CopyDisplayText(device->DeviceString, ARRAYSIZE(device->DeviceString), adapter ? hostedMonitorName : L"Xbox display adapter");
     CopyDisplayText(device->DeviceID, ARRAYSIZE(device->DeviceID), L"");
     CopyDisplayText(device->DeviceKey, ARRAYSIZE(device->DeviceKey), L"");
     device->StateFlags = adapter ? DISPLAY_DEVICE_ACTIVE | DISPLAY_DEVICE_ATTACHED :
@@ -91,7 +85,7 @@ int WINAPI XboxGetDeviceCaps(HDC dc, int index) {
     case LOGPIXELSX: case LOGPIXELSY: return XBOX_WINDOW_DPI;
     case BITSPIXEL: return 32;
     case PLANES: return 1;
-    case VREFRESH: return 60;
+    case VREFRESH: return hostedRefreshRate;
     default: return 0;
     }
 }
@@ -139,7 +133,7 @@ BOOL WINAPI XboxGetMonitorInfoW(HMONITOR monitor, MONITORINFO *info) {
     if (!MonitorInfo(monitor, info)) return FALSE;
     if (info->cbSize >= sizeof(MONITORINFOEXW)) {
         MONITORINFOEXW *extended = (MONITORINFOEXW *)info;
-        CopyDisplayText(extended->szDevice, ARRAYSIZE(extended->szDevice), displayName);
+        CopyDisplayText(extended->szDevice, ARRAYSIZE(extended->szDevice), hostedDisplayName);
     }
     return TRUE;
 }
@@ -161,7 +155,7 @@ BOOL WINAPI XboxEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW *setti
     }
     if (mode != 0 && mode != ENUM_CURRENT_SETTINGS && mode != ENUM_REGISTRY_SETTINGS) return FALSE;
     const RECT bounds = XboxDesktopBounds();
-    CopyDisplayText(settings->dmDeviceName, ARRAYSIZE(settings->dmDeviceName), displayName);
+    CopyDisplayText(settings->dmDeviceName, ARRAYSIZE(settings->dmDeviceName), hostedDisplayName);
     settings->dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY;
     settings->dmPosition.x = 0;
     settings->dmPosition.y = 0;
@@ -169,7 +163,7 @@ BOOL WINAPI XboxEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW *setti
     settings->dmPelsWidth = bounds.right;
     settings->dmPelsHeight = bounds.bottom;
     settings->dmDisplayFlags = 0;
-    settings->dmDisplayFrequency = 60;
+    settings->dmDisplayFrequency = hostedRefreshRate;
     return TRUE;
 }
 

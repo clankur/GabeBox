@@ -23,11 +23,18 @@
 #define CSIDL_FLAG_CREATE 0x8000
 #define SHGFP_TYPE_CURRENT 0u
 #define SHGFP_TYPE_DEFAULT 1u
+#define KF_FLAG_DONT_VERIFY 0x4000u
+#define MAX_ENVIRONMENT_VALUE 32768u
 
 typedef unsigned short WCHAR;
 typedef unsigned long DWORD;
 typedef void *Module;
 typedef void (WINAPI *Procedure)(void);
+typedef struct {
+    DWORD data1;
+    unsigned short data2, data3;
+    unsigned char data4[8];
+} FolderId;
 
 IMPORT Module WINAPI LoadLibraryExW(const WCHAR *name, void *file, DWORD flags);
 IMPORT Module WINAPI GetModuleHandleW(const WCHAR *name);
@@ -42,6 +49,8 @@ IMPORT DWORD WINAPI GetLastError(void);
 IMPORT DWORD WINAPI GetEnvironmentVariableW(const WCHAR *name, WCHAR *value, DWORD capacity);
 IMPORT DWORD WINAPI GetFileAttributesW(const WCHAR *path);
 IMPORT int WINAPI CreateDirectoryW(const WCHAR *path, void *security);
+IMPORT void *WINAPI CoTaskMemAlloc(unsigned long long size);
+IMPORT void WINAPI CoTaskMemFree(void *memory);
 
 static Procedure SystemExport(const WCHAR *dll, const char *name) {
     Module module = GetModuleHandleW(dll);
@@ -110,6 +119,53 @@ long WINAPI XboxSHGetFolderPathW(void *window, int folder, void *token, DWORD mo
     const GetFolderPath getFolderPath = (GetFolderPath)SystemExport(L"shell32.dll", "SHGetFolderPathW");
     SetLastError(previousError);
     return getFolderPath ? getFolderPath(window, folder, token, mode, output) : (long)0x80004001u;
+}
+
+static int IsLocalLow(const FolderId *id) {
+    static const FolderId localLow = {0xa520a1a4u, 0x1780, 0x4ff6, {0xbd, 0x18, 0x16, 0x73, 0x43, 0xc5, 0xaf, 0x16}};
+    if (!id || id->data1 != localLow.data1 || id->data2 != localLow.data2 || id->data3 != localLow.data3) return 0;
+    for (unsigned i = 0; i < sizeof(localLow.data4); ++i) {
+        if (id->data4[i] != localLow.data4[i]) return 0;
+    }
+    return 1;
+}
+
+static long CopyLocalLow(DWORD flags, DWORD capacity, WCHAR **output) {
+    if (capacity > MAX_ENVIRONMENT_VALUE) return PathError(ERROR_INSUFFICIENT_BUFFER);
+    WCHAR *path = CoTaskMemAlloc((unsigned long long)capacity * sizeof(WCHAR));
+    if (!path) return PathError(ERROR_OUTOFMEMORY);
+    const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_LOCAL_LOW", path, capacity);
+    long result = 0;
+    if (!length) result = PathError(GetLastError());
+    else if (length >= capacity) result = PathError(ERROR_INSUFFICIENT_BUFFER);
+    else if (!(flags & KF_FLAG_DONT_VERIFY)) {
+        const DWORD attributes = GetFileAttributesW(path);
+        if (attributes == INVALID_FILE_ATTRIBUTES) result = PathError(GetLastError());
+        else if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) result = PathError(ERROR_ACCESS_DENIED);
+        else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) result = PathError(ERROR_DIRECTORY);
+    }
+    if (result) CoTaskMemFree(path);
+    else *output = path;
+    return result;
+}
+
+// Unity resolves FOLDERID_LocalAppDataLow for its persistent data path. A profile can scope it per title.
+long WINAPI XboxSHGetKnownFolderPath(const FolderId *id, DWORD flags, void *token, WCHAR **output) {
+    typedef long (WINAPI *KnownFolder)(const FolderId *, DWORD, void *, WCHAR **);
+    if (!output) return PathError(ERROR_INVALID_PARAMETER);
+    *output = 0;
+    const DWORD previousError = GetLastError();
+    if (!token && !(flags & ~KF_FLAG_DONT_VERIFY) && IsLocalLow(id)) {
+        const DWORD capacity = GetEnvironmentVariableW(L"XBOX_WIN32_LOCAL_LOW", 0, 0);
+        if (capacity > 1) {
+            const long result = CopyLocalLow(flags, capacity, output);
+            SetLastError(previousError);
+            return result;
+        }
+    }
+    const KnownFolder native = (KnownFolder)SystemExport(L"shell32.dll", "SHGetKnownFolderPath");
+    SetLastError(previousError);
+    return native ? native(id, flags, token, output) : (long)0x80004001u;
 }
 
 static WCHAR *WideCopy(const char *text) {

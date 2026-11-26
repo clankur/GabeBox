@@ -1,9 +1,16 @@
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
+#include <dcomp.h>
+
+#ifndef DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED
+#define DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED static_cast<HRESULT>(0x88980800L)
+#endif
 #include <appmodel.h>
 #include <new>
 #include "dxgi-frame.h"
+#include "gpu-memory-budget.h"
 #include "../shared/sdl-swap-clock.h"
+#include "../shared/steam-handoff-control.h"
 
 extern "C" __declspec(dllimport) HANDLE WINAPI CreateFile2FromAppW(
     LPCWSTR, DWORD, DWORD, DWORD, LPCREATEFILE2_EXTENDED_PARAMETERS);
@@ -18,6 +25,12 @@ bool SameInterface(REFIID first, REFIID second) {
         if (first.Data4[i] != second.Data4[i]) return false;
     return true;
 }
+
+// Private identity of a hosted swap chain, used by the hosted composition
+// device to bind a chain to the virtual window it is shown in.
+constexpr GUID hostedSwapChainId = {0x4c3b6e8a, 0x5b5f, 0x4e33, {0x9d, 0x2a, 0x7e, 0x0b, 0x1d, 0x3c, 0x9a, 0x41}};
+
+bool VirtualWindowsActive() { return GetModuleHandleW(L"XboxWin32Window.dll") != nullptr; }
 
 bool VirtualClientRect(HWND window, RECT& area) {
     using Query = BOOL (WINAPI *)(HWND, RECT*);
@@ -58,6 +71,7 @@ void Trace(const char* phase, HRESULT code) {
     AppendTrace(line, static_cast<DWORD>(out - line));
 }
 
+#include "dxgi-memory-budget.h"
 #include "dxgi-hosted-output.h"
 #include "dxgi-adapter-budget.h"
 
@@ -186,6 +200,142 @@ public:
     }
 };
 
+// Diagnostic for measured packages: record when a hosted D3D12 device is
+// removed relative to the frames presented and published, so a removal can be
+// attributed to the game's own GPU work or to the hosted frame copy.
+volatile LONG hostedPresents = 0, hostedPublishes = 0;
+
+struct RemovalWatch {
+    ID3D12Device* device;
+    UINT64 start;
+};
+
+char* TraceText(char* out, const char* end, const char* text) {
+    while (text && *text && out < end) *out++ = *text++;
+    return out;
+}
+
+char* TraceName(char* out, const char* end, const char* narrow, const wchar_t* wide) {
+    if (narrow && *narrow) return TraceText(out, end, narrow);
+    if (!wide || !*wide) return TraceText(out, end, "-");
+    for (; *wide && out < end; ++wide) *out++ = *wide < 0x80 && *wide > 0x20 ? static_cast<char>(*wide) : '_';
+    return out;
+}
+
+char* TraceHex(char* out, const char* end, UINT64 value, int digits) {
+    for (int shift = (digits - 1) * 4; shift >= 0 && out < end; shift -= 4) *out++ = "0123456789ABCDEF"[(value >> shift) & 15];
+    return out;
+}
+
+// Reports D3D12 device-removed extended data (enabled by loader trace before the
+// device was created): every command list whose breadcrumbs did not all
+// complete, with the last completed and the first incomplete operations, and
+// the allocations that match a GPU page fault.
+void TraceRemovedData(ID3D12Device* device) {
+    ComPtr<ID3D12DeviceRemovedExtendedData> data;
+    HRESULT result = device->QueryInterface(IID_PPV_ARGS(data.GetAddressOf()));
+    Trace("dred-query", result);
+    if (FAILED(result)) return;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
+    result = data->GetAutoBreadcrumbsOutput(&crumbs);
+    Trace("dred-breadcrumbs", result);
+    int reported = 0;
+    for (auto* node = SUCCEEDED(result) ? crumbs.pHeadAutoBreadcrumbNode : nullptr; node && reported < 12; node = node->pNext) {
+        const UINT32 done = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+        if (!node->pCommandHistory || done >= node->BreadcrumbCount) continue;
+        ++reported;
+        char line[400], *out = line;
+        const char* end = line + sizeof(line) - 4;
+        out = TraceText(out, end, "dxgi dred-node queue=");
+        out = TraceName(out, end, node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW);
+        out = TraceText(out, end, " list=");
+        out = TraceName(out, end, node->pCommandListDebugNameA, node->pCommandListDebugNameW);
+        out = TraceText(out, end, " completed=0x");
+        out = TraceHex(out, end, done, 4);
+        out = TraceText(out, end, "/0x");
+        out = TraceHex(out, end, node->BreadcrumbCount, 4);
+        out = TraceText(out, end, " ops=");
+        const UINT32 first = done > 6 ? done - 6 : 0;
+        const UINT32 last = done + 4 < node->BreadcrumbCount ? done + 4 : node->BreadcrumbCount;
+        for (UINT32 i = first; i < last; ++i) {
+            if (i == done) out = TraceText(out, end, "[");
+            out = TraceHex(out, end, node->pCommandHistory[i], 2);
+            out = TraceText(out, end, i == done ? "] " : " ");
+        }
+        *out++ = '\r';
+        *out++ = '\n';
+        AppendTrace(line, static_cast<DWORD>(out - line));
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+    result = data->GetPageFaultAllocationOutput(&fault);
+    Trace("dred-page-fault", result);
+    if (FAILED(result)) return;
+    char line[400], *out = line;
+    const char* end = line + sizeof(line) - 4;
+    out = TraceText(out, end, "dxgi dred-fault va=0x");
+    out = TraceHex(out, end, fault.PageFaultVA, 16);
+    int listed = 0;
+    for (auto* node = fault.pHeadExistingAllocationNode; node && listed < 4; node = node->pNext, ++listed) {
+        out = TraceText(out, end, " existing=");
+        out = TraceName(out, end, node->ObjectNameA, node->ObjectNameW);
+        out = TraceText(out, end, ":0x");
+        out = TraceHex(out, end, static_cast<UINT64>(node->AllocationType), 2);
+    }
+    listed = 0;
+    for (auto* node = fault.pHeadRecentFreedAllocationNode; node && listed < 4; node = node->pNext, ++listed) {
+        out = TraceText(out, end, " freed=");
+        out = TraceName(out, end, node->ObjectNameA, node->ObjectNameW);
+        out = TraceText(out, end, ":0x");
+        out = TraceHex(out, end, static_cast<UINT64>(node->AllocationType), 2);
+    }
+    *out++ = '\r';
+    *out++ = '\n';
+    AppendTrace(line, static_cast<DWORD>(out - line));
+}
+
+DWORD WINAPI WatchDeviceRemoval(void* parameter) {
+    auto* watch = static_cast<RemovalWatch*>(parameter);
+    LARGE_INTEGER frequency{}, now{};
+    QueryPerformanceFrequency(&frequency);
+    for (int i = 0; i < 180 * 50; ++i) {
+        const HRESULT reason = watch->device->GetDeviceRemovedReason();
+        if (reason != S_OK) {
+            QueryPerformanceCounter(&now);
+            Trace("device-removed-ms", static_cast<HRESULT>((now.QuadPart - watch->start) * 1000 / frequency.QuadPart));
+            Trace("device-removed-reason", reason);
+            Trace("device-removed-presents", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPresents, 0, 0)));
+            Trace("device-removed-publishes", static_cast<HRESULT>(InterlockedCompareExchange(&hostedPublishes, 0, 0)));
+            TraceRemovedData(watch->device);
+            break;
+        }
+        Sleep(20);
+    }
+    watch->device->Release();
+    HeapFree(GetProcessHeap(), 0, watch);
+    return 0;
+}
+
+void StartRemovalWatch(ID3D12CommandQueue* queue) {
+    static volatile LONG started = 0;
+    if (!queue || InterlockedExchange(&started, 1)) return;
+    auto* watch = static_cast<RemovalWatch*>(HeapAlloc(GetProcessHeap(), 0, sizeof(RemovalWatch)));
+    if (!watch) return;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    watch->start = static_cast<UINT64>(now.QuadPart);
+    watch->device = nullptr;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&watch->device)))) {
+        HeapFree(GetProcessHeap(), 0, watch);
+        return;
+    }
+    const HANDLE thread = CreateThread(nullptr, 0, WatchDeviceRemoval, watch, 0, nullptr);
+    if (thread) CloseHandle(thread);
+    else {
+        watch->device->Release();
+        HeapFree(GetProcessHeap(), 0, watch);
+    }
+}
+
 class HostedSwapChain final : public IDXGISwapChain4 {
     IDXGISwapChain1* native_;
     ComPtr<IDXGISwapChain2> native2_;
@@ -193,14 +343,14 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     ComPtr<IDXGISwapChain4> native4_;
     ComPtr<ID3D12CommandQueue> queue_;
     IDXGIFactory2* factory_;
-    HWND window_;
+    HWND volatile window_;
     volatile LONG references_ = 1;
     SRWLOCK lock_ = SRWLOCK_INIT;
     DxgiFramePublisher publisher_;
     ProducerCadenceTrace cadence_;
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
-    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
+    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false, skipPublish_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedRejection_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
@@ -239,13 +389,17 @@ class HostedSwapChain final : public IDXGISwapChain4 {
 
     HRESULT Capture(UINT flags, unsigned& index) {
         if (flags & DXGI_PRESENT_TEST) return S_FALSE;
+        if (cadence_.Enabled()) StartRemovalWatch(queue_.Get());
+        if (skipPublish_) return S_FALSE;
+        InterlockedIncrement(&hostedPublishes);
         const HRESULT code = publisher_.Prepare(native_, queue_ ? native3_->GetCurrentBackBufferIndex() : 0, index);
         if (code == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
             using RequestClose = void (WINAPI *)(HWND);
             auto windows = GetModuleHandleW(L"XboxWin32Window.dll");
             auto close = windows ? reinterpret_cast<RequestClose>(
                 reinterpret_cast<void*>(GetProcAddress(windows, "XboxRequestWindowClose"))) : nullptr;
-            if (close) close(window_);
+            const HWND window = window_;
+            if (close && window) close(window);
         } else if (FAILED(code) && !tracedError_) {
             tracedError_ = true;
             if (const char* stage = publisher_.FailureStage()) Trace(stage, code);
@@ -324,6 +478,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         }
         if (!(flags & DXGI_PRESENT_TEST)) cadence_.Record(capture, result, publisher_.IsActive(), interval, flags);
         TracePresent(interval, nativeInterval, flags, result);
+        if (!(flags & DXGI_PRESENT_TEST) && InterlockedIncrement(&hostedPresents) <= 10 && cadence_.Enabled())
+            Trace("present-result", result);
         if (measure) cadence_.RecordPresent(timing, publisher_.IsActive());
         ReleaseSRWLockExclusive(&lock_);
         return result;
@@ -354,6 +510,10 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     }
 
 public:
+    // A composition chain starts without a window. DirectComposition binds it
+    // when a committed target shows it; the latest committed window wins.
+    void BindWindow(HWND window) { InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&window_), window); }
+
     HostedSwapChain(IDXGISwapChain1* native, IDXGISwapChain3* native3, ID3D12CommandQueue* queue,
             IDXGIFactory2* factory, HWND window)
         : native_(native), native3_(native3), queue_(queue), factory_(factory), window_(window) {
@@ -364,6 +524,9 @@ public:
         if (HasPackageMarker(L"\\fhd-measure.txt")) {
             paceBeforePublish_ = HasPackageMarker(L"\\fhd-paced-publish.txt");
             use5994_ = HasPackageMarker(L"\\fhd-refresh-5994.txt");
+            // Diagnostic only: present without copying frames to the host.
+            skipPublish_ = HasPackageMarker(L"\\fhd-skip-publish.txt");
+            if (skipPublish_) Trace("publish-skipped", S_OK);
             cadence_.Enable();
         }
         SetLastError(error);
@@ -373,6 +536,11 @@ public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
+        if (SameInterface(iid, hostedSwapChainId)) {
+            *out = this;
+            AddRef();
+            return S_OK;
+        }
         if (!SameInterface(iid, __uuidof(IUnknown)) && !SameInterface(iid, __uuidof(IDXGIObject)) &&
                 !SameInterface(iid, __uuidof(IDXGIDeviceSubObject)) && !SameInterface(iid, __uuidof(IDXGISwapChain)) &&
                 !SameInterface(iid, __uuidof(IDXGISwapChain1)) &&
@@ -529,10 +697,15 @@ class Factory final : public IDXGIFactory6 {
     HRESULT CreateVirtualChain(IUnknown* device, HWND window, RECT area, DXGI_SWAP_CHAIN_DESC1 desc, IDXGISwapChain1** out) {
         if (!out) return E_POINTER;
         *out = nullptr;
-        if (!device || desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0 ||
-                area.right <= area.left || area.bottom <= area.top) return DXGI_ERROR_INVALID_CALL;
+        if (area.right <= area.left || area.bottom <= area.top) return DXGI_ERROR_INVALID_CALL;
         if (!desc.Width) desc.Width = area.right - area.left;
         if (!desc.Height) desc.Height = area.bottom - area.top;
+        return CreateHostedChain(device, window, desc, out);
+    }
+
+    HRESULT CreateHostedChain(IUnknown* device, HWND window, DXGI_SWAP_CHAIN_DESC1 desc, IDXGISwapChain1** out) {
+        if (!device || !desc.Width || !desc.Height || desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0)
+            return DXGI_ERROR_INVALID_CALL;
         ComPtr<ID3D12CommandQueue> queue;
         device->QueryInterface(IID_PPV_ARGS(&queue));
         if (queue && (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT || desc.BufferCount < 2))
@@ -690,7 +863,16 @@ public:
     void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD cookie) override { native_->UnregisterOcclusionStatus(cookie); }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* device, const DXGI_SWAP_CHAIN_DESC1* desc,
             IDXGIOutput* restrictTo, IDXGISwapChain1** out) override {
-        return native_->CreateSwapChainForComposition(device, desc, restrictTo, out);
+        // Hosted games draw into virtual windows that the console never shows,
+        // so a composition chain is only visible through the hosted presenter.
+        if (!VirtualWindowsActive()) return native_->CreateSwapChainForComposition(device, desc, restrictTo, out);
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!desc) return E_INVALIDARG;
+        if (restrictTo || desc->Stereo) return DXGI_ERROR_UNSUPPORTED;
+        const HRESULT code = CreateHostedChain(device, nullptr, *desc, out);
+        Trace("hosted-composition-chain", code);
+        return code;
     }
     UINT STDMETHODCALLTYPE GetCreationFlags() override {
         ComPtr<IDXGIFactory3> native3;
@@ -713,6 +895,269 @@ public:
     }
 };
 
+
+// DirectComposition for virtual windows. A hosted game's windows exist only
+// inside XboxWin32Window.dll, so the system compositor cannot target them.
+// This device supports the subset that presents one swap chain per window:
+// CreateTargetForHwnd, CreateVisual, IDCompositionVisual::SetContent,
+// IDCompositionTarget::SetRoot and Commit. Commit binds each hosted chain to
+// its window. Calls outside that subset return E_NOTIMPL, and real HWNDs are
+// rejected with E_INVALIDARG instead of being silently ignored.
+template<class Derived, class Interface>
+class CompositionObject : public Interface {
+    volatile LONG references_ = 1;
+
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!SameInterface(iid, __uuidof(IUnknown)) && !SameInterface(iid, __uuidof(Interface))) return E_NOINTERFACE;
+        *out = static_cast<Interface*>(this);
+        this->AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&references_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG count = InterlockedDecrement(&references_);
+        if (!count) {
+            auto* object = static_cast<Derived*>(this);
+            object->~Derived();
+            HeapFree(GetProcessHeap(), 0, object);
+        }
+        return count;
+    }
+};
+
+template<class Object, class... Arguments>
+Object* NewCompositionObject(Arguments... arguments) {
+    void* storage = HeapAlloc(GetProcessHeap(), 0, sizeof(Object));
+    return storage ? new (storage) Object(arguments...) : nullptr;
+}
+
+// Private identity of visuals created by the hosted composition device.
+constexpr GUID compositionVisualId = {0x9a7c0b52, 0x3e1d, 0x4f6a, {0x8b, 0x44, 0x2d, 0x91, 0x6e, 0x5f, 0x07, 0xc3}};
+
+class CompositionVisual final : public CompositionObject<CompositionVisual, IDCompositionVisual> {
+    SRWLOCK lock_ = SRWLOCK_INIT;
+    IUnknown* content_ = nullptr;
+
+public:
+    ~CompositionVisual() {
+        if (content_) content_->Release();
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (out && SameInterface(iid, compositionVisualId)) {
+            *out = this;
+            AddRef();
+            return S_OK;
+        }
+        return CompositionObject::QueryInterface(iid, out);
+    }
+
+    // Returns the hosted chain shown by this visual with a reference, or null.
+    HostedSwapChain* HostedContent() {
+        AcquireSRWLockShared(&lock_);
+        void* chain = nullptr;
+        if (content_ && FAILED(content_->QueryInterface(hostedSwapChainId, &chain))) chain = nullptr;
+        ReleaseSRWLockShared(&lock_);
+        return static_cast<HostedSwapChain*>(chain);
+    }
+
+    HRESULT STDMETHODCALLTYPE SetContent(IUnknown* content) override {
+        if (content) content->AddRef();
+        AcquireSRWLockExclusive(&lock_);
+        IUnknown* previous = content_;
+        content_ = content;
+        ReleaseSRWLockExclusive(&lock_);
+        if (previous) previous->Release();
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetOffsetX(float) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetOffsetX(IDCompositionAnimation*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetOffsetY(float) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetOffsetY(IDCompositionAnimation*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetTransform(const D2D_MATRIX_3X2_F&) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetTransform(IDCompositionTransform*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetTransformParent(IDCompositionVisual*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetEffect(IDCompositionEffect*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetBorderMode(DCOMPOSITION_BORDER_MODE) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetClip(const D2D_RECT_F&) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetClip(IDCompositionClip*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE AddVisual(IDCompositionVisual*, BOOL, IDCompositionVisual*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE RemoveVisual(IDCompositionVisual*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE RemoveAllVisuals() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetCompositeMode(DCOMPOSITION_COMPOSITE_MODE) override { return E_NOTIMPL; }
+};
+
+class CompositionTarget final : public CompositionObject<CompositionTarget, IDCompositionTarget> {
+    SRWLOCK lock_ = SRWLOCK_INIT;
+    CompositionVisual* root_ = nullptr;
+
+public:
+    ~CompositionTarget() {
+        if (root_) root_->Release();
+    }
+
+    const HWND window;
+    CompositionTarget* next = nullptr;  // Owning device's list; guarded by the device lock.
+
+    explicit CompositionTarget(HWND target) : window(target) {}
+
+    // Returns the hosted chain shown at this target's root with a reference, or null.
+    HostedSwapChain* HostedContent() {
+        AcquireSRWLockShared(&lock_);
+        HostedSwapChain* chain = root_ ? root_->HostedContent() : nullptr;
+        ReleaseSRWLockShared(&lock_);
+        return chain;
+    }
+
+    HRESULT STDMETHODCALLTYPE SetRoot(IDCompositionVisual* visual) override {
+        // Only visuals from this adapter can be shown on a virtual window.
+        void* root = nullptr;
+        if (visual && FAILED(visual->QueryInterface(compositionVisualId, &root))) return E_INVALIDARG;
+        AcquireSRWLockExclusive(&lock_);
+        CompositionVisual* previous = root_;
+        root_ = static_cast<CompositionVisual*>(root);
+        ReleaseSRWLockExclusive(&lock_);
+        if (previous) previous->Release();
+        return S_OK;
+    }
+};
+
+class CompositionDevice final : public CompositionObject<CompositionDevice, IDCompositionDevice> {
+    SRWLOCK lock_ = SRWLOCK_INIT;
+    CompositionTarget* targets_ = nullptr;  // One reference each.
+
+public:
+    ~CompositionDevice() {
+        for (auto* target = targets_; target;) {
+            auto* next = target->next;
+            target->Release();
+            target = next;
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE Commit() override {
+        // Collect bindings under the lock and apply them after releasing it.
+        HostedSwapChain* chains[16]{};
+        HWND windows[16]{};
+        UINT count = 0;
+        AcquireSRWLockShared(&lock_);
+        for (auto* target = targets_; target && count < ARRAYSIZE(chains); target = target->next) {
+            if (auto* chain = target->HostedContent()) {
+                chains[count] = chain;
+                windows[count++] = target->window;
+            }
+        }
+        ReleaseSRWLockShared(&lock_);
+        for (UINT i = 0; i < count; ++i) {
+            chains[i]->BindWindow(windows[i]);
+            chains[i]->Release();
+        }
+        static volatile LONG traced = 0;
+        if (count && InterlockedExchange(&traced, 1) == 0) Trace("dcomp-commit-bound", static_cast<HRESULT>(count));
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE WaitForCommitCompletion() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetFrameStatistics(DCOMPOSITION_FRAME_STATISTICS*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE CreateTargetForHwnd(HWND window, BOOL, IDCompositionTarget** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        RECT area{};
+        if (!VirtualClientRect(window, area)) return E_INVALIDARG;
+        AcquireSRWLockExclusive(&lock_);
+        for (auto* target = targets_; target; target = target->next) {
+            if (target->window == window) {
+                ReleaseSRWLockExclusive(&lock_);
+                return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
+            }
+        }
+        auto* target = NewCompositionObject<CompositionTarget>(window);
+        if (!target) {
+            ReleaseSRWLockExclusive(&lock_);
+            return E_OUTOFMEMORY;
+        }
+        target->next = targets_;
+        targets_ = target;
+        target->AddRef();
+        ReleaseSRWLockExclusive(&lock_);
+        *out = target;
+        Trace("dcomp-target", S_OK);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE CreateVisual(IDCompositionVisual** out) override {
+        if (!out) return E_POINTER;
+        *out = NewCompositionObject<CompositionVisual>();
+        return *out ? S_OK : E_OUTOFMEMORY;
+    }
+    HRESULT STDMETHODCALLTYPE CreateSurface(UINT, UINT, DXGI_FORMAT, DXGI_ALPHA_MODE, IDCompositionSurface** out) override {
+        return Unsupported(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateVirtualSurface(UINT, UINT, DXGI_FORMAT, DXGI_ALPHA_MODE,
+            IDCompositionVirtualSurface** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateSurfaceFromHandle(HANDLE, IUnknown** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateSurfaceFromHwnd(HWND, IUnknown** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateTranslateTransform(IDCompositionTranslateTransform** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateScaleTransform(IDCompositionScaleTransform** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateRotateTransform(IDCompositionRotateTransform** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateSkewTransform(IDCompositionSkewTransform** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateMatrixTransform(IDCompositionMatrixTransform** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateTransformGroup(IDCompositionTransform**, UINT, IDCompositionTransform** out) override {
+        return Unsupported(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateTranslateTransform3D(IDCompositionTranslateTransform3D** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateScaleTransform3D(IDCompositionScaleTransform3D** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateRotateTransform3D(IDCompositionRotateTransform3D** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateMatrixTransform3D(IDCompositionMatrixTransform3D** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateTransform3DGroup(IDCompositionTransform3D**, UINT, IDCompositionTransform3D** out) override {
+        return Unsupported(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateEffectGroup(IDCompositionEffectGroup** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateRectangleClip(IDCompositionRectangleClip** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CreateAnimation(IDCompositionAnimation** out) override { return Unsupported(out); }
+    HRESULT STDMETHODCALLTYPE CheckDeviceState(BOOL* valid) override {
+        if (!valid) return E_POINTER;
+        *valid = TRUE;
+        return S_OK;
+    }
+
+private:
+    template<class Out>
+    static HRESULT Unsupported(Out** out) {
+        if (out) *out = nullptr;
+        return E_NOTIMPL;
+    }
+};
+
+// A hosted Direct3D game initializes the publisher's Steamworks SDK against
+// the running Steam client before its own SteamAPI_Init, as the WGL adapter
+// does for OpenGL titles. Titles using the legacy import adapter are excluded.
+void InitializeSteamHandoff() {
+    static volatile LONG checked = 0;
+    if (InterlockedExchange(&checked, 1)) return;
+    const DWORD previous = GetLastError();
+    WCHAR legacy[2];
+    if (GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_SDK", nullptr, 0) <= 1 ||
+            (GetEnvironmentVariableW(L"XBOX_STEAM_HANDOFF_LEGACY", legacy, ARRAYSIZE(legacy)) == 1 && legacy[0] == L'1')) {
+        SetLastError(previous);
+        return;
+    }
+    using Initialize = DWORD (WINAPI *)(BOOL);
+    const HMODULE module = LoadPackagedLibrary(L"XboxWin32SteamDiscovery.dll", 0);
+    const auto initialize = module ? reinterpret_cast<Initialize>(GetProcAddress(module, "XboxSteamInitialize")) : nullptr;
+    if (!initialize) {
+        Trace("steam-handoff-unavailable", HRESULT_FROM_WIN32(GetLastError()));
+    } else {
+        constexpr DWORD required = STEAM_HANDOFF_SDK_INITIALIZED | STEAM_HANDOFF_SDK_MATCHED;
+        const DWORD result = initialize(TRUE);
+        Trace((result & required) == required ? "steam-handoff-ready" : "steam-handoff-error", static_cast<HRESULT>(result));
+    }
+    if (module) FreeLibrary(module);
+    SetLastError(previous);
+}
+
 enum class FactoryEntry { Legacy, Version1, Version2 };
 
 HRESULT WrapFactory(ComPtr<IDXGIFactory2>& native, ComPtr<Factory>& wrapped) {
@@ -726,6 +1171,7 @@ HRESULT WrapFactory(ComPtr<IDXGIFactory2>& native, ComPtr<Factory>& wrapped) {
 HRESULT CreateFactory(FactoryEntry entry, UINT flags, REFIID iid, void** out) {
     if (!out) return E_POINTER;
     *out = nullptr;
+    InitializeSteamHandoff();
     ComPtr<IDXGIFactory2> native;
     HRESULT code;
     if (entry == FactoryEntry::Legacy) {
@@ -915,4 +1361,26 @@ extern "C" HRESULT WINAPI XboxD3DGetInputSignatureBlob(LPCVOID bytecode, SIZE_T 
     static volatile LONG events = 0;
     if (InterlockedIncrement(&events) <= 8) Trace(bytecode && size ? "shader-input-signature" : "shader-input-signature-empty", code);
     return code;
+}
+
+extern "C" HRESULT WINAPI XboxDCompositionCreateDevice(IDXGIDevice* renderingDevice, REFIID iid, void** out) {
+    // The hosted device never renders, so the optional DXGI device is unused.
+    (void)renderingDevice;
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (!VirtualWindowsActive()) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    auto* device = NewCompositionObject<CompositionDevice>();
+    if (!device) return E_OUTOFMEMORY;
+    const HRESULT code = device->QueryInterface(iid, out);
+    device->Release();
+    Trace("dcomp-device", code);
+    return code;
+}
+
+// Caps the video memory budget that Mesa's d3d12 driver reads from the native adapter. See dxgi-memory-budget.h.
+extern "C" HRESULT WINAPI XboxInstallGpuMemoryBudget(void) {
+    const DWORD previous = GetLastError();
+    const HRESULT result = InstallMemoryBudget();
+    SetLastError(previous);
+    return result;
 }

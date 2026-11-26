@@ -13,6 +13,14 @@
 #define CHECKPOINT(name) AppendTrace("input hosted-xinput-control=" name "\r\n", \
     sizeof("input hosted-xinput-control=" name "\r\n") - 1)
 
+/* Slot 0 without a connected host pad: detached by default, or attached and neutral
+   for the whole session when the profile makes the hosted pad the only controller. */
+#ifdef PROBE_XINPUT_SESSION
+#define DETACHED ERROR_SUCCESS
+#else
+#define DETACHED ERROR_DEVICE_NOT_CONNECTED
+#endif
+
 #ifdef PROBE_XINPUT_LOADER
 static DWORD (WINAPI *GetPadState)(DWORD, XINPUT_STATE *);
 static DWORD (WINAPI *GetPadCapabilities)(DWORD, DWORD, XINPUT_CAPABILITIES *);
@@ -82,15 +90,20 @@ static unsigned CheckInput(SdlHostGamepad *pad) {
     XINPUT_STATE state;
     XINPUT_CAPABILITIES caps;
     XINPUT_VIBRATION stop = {0};
-    if (GetPadState(0, &state) != ERROR_DEVICE_NOT_CONNECTED ||
-            GetPadCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != ERROR_DEVICE_NOT_CONNECTED ||
+    if (GetPadState(0, &state) != DETACHED || (DETACHED == ERROR_SUCCESS && !IsNeutral(&state.Gamepad)) ||
+            GetPadCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != DETACHED || SdlHostLoad(&pad->ack) ||
             GetPadState(XUSER_MAX_COUNT, &state) != ERROR_BAD_ARGUMENTS) return 0x6f02;
+#ifdef PROBE_XINPUT_SESSION
+    // The hosted slot is attached for the whole session and neutral until the host publishes.
+    CHECKPOINT("initial-attached");
+#else
     CHECKPOINT("initial-disconnected");
+#endif
 
     BeginInput(pad, SDL_HOST_PAD_CONNECTED, neutral);
-    if (GetPadCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != ERROR_DEVICE_NOT_CONNECTED ||
-            SetPadState(0, &stop) != ERROR_DEVICE_NOT_CONNECTED ||
-            GetPadState(0, &state) != ERROR_DEVICE_NOT_CONNECTED || SdlHostLoad(&pad->ack)) return 0x6f08;
+    if (GetPadCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != DETACHED ||
+            SetPadState(0, &stop) != DETACHED ||
+            GetPadState(0, &state) != DETACHED || SdlHostLoad(&pad->ack)) return 0x6f08;
     CHECKPOINT("partial-connect-ignored");
     const LONG initial = InterlockedIncrement(&pad->serial);
     if (GetPadCapabilities(0, XINPUT_FLAG_GAMEPAD, &caps) != ERROR_SUCCESS ||
@@ -128,11 +141,11 @@ static unsigned CheckInput(SdlHostGamepad *pad) {
             GetPadState(0, &state) != ERROR_SUCCESS || SdlHostLoad(&pad->ack) != motion) return 0x6f09;
     CHECKPOINT("partial-disconnect-ignored");
     const LONG disconnected = InterlockedIncrement(&pad->serial);
-    if (GetPadCapabilities(0, 0, &caps) != ERROR_DEVICE_NOT_CONNECTED ||
-            SetPadState(0, &stop) != ERROR_DEVICE_NOT_CONNECTED || SdlHostLoad(&pad->ack) != motion ||
-            GetPadState(0, &state) != ERROR_DEVICE_NOT_CONNECTED ||
+    if (GetPadCapabilities(0, 0, &caps) != DETACHED ||
+            SetPadState(0, &stop) != DETACHED || SdlHostLoad(&pad->ack) != motion ||
+            GetPadState(0, &state) != DETACHED || (DETACHED == ERROR_SUCCESS && !IsNeutral(&state.Gamepad)) ||
             SdlHostLoad(&pad->ack) != disconnected) return 0x6f07;
-    CHECKPOINT("disconnect-ack");
+    CHECKPOINT("host-idle-neutral");
     return PROBE_EXPECTED_CHILD_EXIT;
 }
 
@@ -222,6 +235,9 @@ static unsigned RunControl(void) {
         SetEnvironmentVariableW(L"XBOX_WIN32_HOSTED_XINPUT", NULL);
 #elif defined(PROBE_XINPUT_RUMBLE)
         result = RunRumbleControl(&mailbox->gamepad, path, &options);
+#elif defined(PROBE_XINPUT_SESSION)
+        result = SetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", L"1") ? CheckInput(&mailbox->gamepad) : 0x6f01;
+        SetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", NULL);
 #else
         result = CheckInput(&mailbox->gamepad);
 #endif

@@ -1,4 +1,5 @@
 from contextlib import redirect_stderr, redirect_stdout
+import errno
 import hashlib
 import io
 import json
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from tools import xbox_deploy as cli, xbox_diagnostics as diagnostics
+from tools.device_portal import CertificateChanged
 
 
 APP = {'PackageFullName': 'XboxPortabilityProbe.ChildProcess.SteamCore_1.2.3.4_x64__example'}
@@ -45,6 +47,12 @@ def browser(run, status='gamepad-ready'):
 def frame(launch, magic=0x31444846):
     return (diagnostics.HEADER.pack(magic, 2, 10_000_000, diagnostics.FILETIME_EPOCH + launch * 10_000, 12)
             + diagnostics.PRESENT.pack(120, 42, 1, 2))
+
+
+def flash_probe(launch):
+    from tools import flash_probe as probe
+    return (probe.HEADER.pack(probe.MAGIC, 1, 10_000_000, diagnostics.FILETIME_EPOCH + launch * 10_000, 12, 16, 32, 235, 0)
+            + probe.RECORD.pack(120, 42, 2, 0, 0, 40 * 256, 0, 512, 30, 50, 7))
 
 
 def stage(name, created_ms):
@@ -126,6 +134,34 @@ class ObserverTests(unittest.TestCase):
             report['steam_source_file'] = path
             self.assertNotIn('steam_source_file', diagnostics.game_snapshot(report, {}, {}, APP_ID)['probe'])
 
+    def test_game_snapshot_keeps_webview_recovery_and_chord_counters(self):
+        browser = {
+            'status': 'game-restored',
+            'game_frame_latest_sample': f'appid={APP_ID} visible=1 native_menu_chords=1 native_menu_chords_ignored=2 '
+                                        'native_menu_chords_expired=0 native_menu_requests=1 native_input_active=1 '
+                                        'native_input_paused=0 native_key_events=14 native_focus_restores=1',
+            'webview_recovery_2': f'game-restored appid={APP_ID}',
+            'webview_recovery_11': f'game-input-resume-failed appid={APP_ID} reason=input-background',
+            'webview_recovery_12': f'game-input-resume-failed appid={APP_ID} reason=Input_Background',
+            'webview_recovery_10': f'game-overlay-unavailable appid={APP_ID}',
+            'webview_recovery_13': f'game-exited-before-adopt appid={APP_ID}',
+            'webview_recovery_1': f'game-webview-lost appid={APP_ID} covered=1 '
+                                  'cause=process-error:owner:2:unresponsive:259:none',
+            'webview_recovery_3': 'game-restored appid=1 account=76561198000000001',
+            'webview_recovery_x': f'game-restored appid={APP_ID}',
+        }
+        web = diagnostics.game_snapshot({}, browser, {}, APP_ID)['webview']
+        self.assertEqual(web['webview_recovery'], [
+            f'game-webview-lost appid={APP_ID} covered=1 cause=process-error:owner:2:unresponsive:259:none',
+            f'game-restored appid={APP_ID}', f'game-overlay-unavailable appid={APP_ID}',
+            f'game-input-resume-failed appid={APP_ID} reason=input-background',
+            f'game-exited-before-adopt appid={APP_ID}'])
+        self.assertEqual(web['game_frame_latest_sample'], {
+            'visible': '1', 'native_menu_chords': '1', 'native_menu_chords_ignored': '2',
+            'native_menu_chords_expired': '0', 'native_menu_requests': '1', 'native_input_active': '1',
+            'native_input_paused': '0', 'native_key_events': '14', 'native_focus_restores': '1'})
+        self.assertNotIn('webview_recovery', diagnostics.game_snapshot({}, {}, {}, APP_ID)['webview'])
+
     def test_startup_requires_fresh_native_and_browser_runs_and_filters_fields(self):
         fixture = Fixture([
             {diagnostics.PROBE_REPORT: probe(), diagnostics.WEBVIEW_REPORT: browser(OLD_BROWSER)},
@@ -148,9 +184,10 @@ class ObserverTests(unittest.TestCase):
     def test_game_matches_appid_retries_transient_report_and_collects_new_run_artifacts(self):
         launch = EPOCH_MS + 2
         exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        unity_file = f'steam-unity-{APP_ID}-2274.log'
         temp_folder = diagnostics.TEMP + '\\SteamWin32Trial (2)'
         stable = ('steam_shadow_stage=verified-local-copy\r\nsteam_launch_sdl_run=2274\r\n'
-                  f'steam_shadow_exit_report={exit_file}\r\n')
+                  f'steam_shadow_exit_report={exit_file}\r\nsteam_shadow_unity_log={unity_file}\r\n')
         fixture = Fixture([
             {diagnostics.PROBE_REPORT: probe(EPOCH_MS), 'fhd-present-times.bin': frame(EPOCH_MS)},
             {diagnostics.PROBE_REPORT: probe(EPOCH_MS + 1, APP_ID + 1)},
@@ -163,7 +200,21 @@ class ObserverTests(unittest.TestCase):
                         b'steam_shadow_loader=dxgi native-present-interval result=0x00000000\r\n',
              'sdl-startup-2274.txt': b'sdl_gpu_interop=published\r\npath=C:\\private-secret\r\n',
              'sdl-startup-2274.bmp': bmp(),
-             'fhd-present-times.bin': frame(launch)},
+             unity_file: b'Forcing GfxDevice: Direct3D 11\r\n'
+                         b'    Version:  Direct3D 11.0 [level 11.0]\r\n'
+                         b'path=C:\\private-secret\r\n'
+                         b'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\r\n',
+             diagnostics.WEBVIEW_PROCESS_LOG:
+                 b'webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=package-file '
+                 b'switches=--disable-component-update,--disable-gpu-process-for-dx12-info-collection\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:00:02.000Z tick_ms=1650 count=2 '
+                 b'added=browser:40,renderer:41 removed=-\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:01:44.461Z tick_ms=104111 count=3 '
+                 b'added=utility:52 removed=-\r\n'
+                 b'webview2 processes env=1 path=C:\\private-secret\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:01:47.000Z tick_ms=106650 error=0x80004005\r\n',
+             'fhd-present-times.bin': frame(launch),
+             'fhd-flash-probe.bin': flash_probe(launch) + b'partial'},
         ], stages=[
             [{'Name': 'SteamWin32Trial', 'DateCreated': 1}],
             [],
@@ -179,8 +230,20 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual((output / 'sdl-startup.txt').read_text(), 'sdl_gpu_interop=published\n')
             self.assertEqual((output / 'loader-trace.txt').read_text(), 'load example.dll ok source=package\n'
                              'dxgi native-present-interval result=0x00000000\n')
+            self.assertEqual((output / 'unity-startup.txt').read_text(), 'Forcing GfxDevice: Direct3D 11\n'
+                             'Version:  Direct3D 11.0 [level 11.0]\n'
+                             'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\n')
             self.assertEqual((output / 'fhd-present-times.bin').read_bytes(), frame(launch))
+            self.assertEqual((output / 'fhd-flash-probe.bin').read_bytes(), flash_probe(launch))
             self.assertEqual((output / 'bootstrap.bmp').read_bytes(), bmp())
+            self.assertEqual((output / 'webview2-processes.txt').read_text(), (
+                'webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=package-file '
+                'switches=--disable-component-update,--disable-gpu-process-for-dx12-info-collection\n'
+                'webview2 processes env=1 utc=2026-11-26T04:00:02.000Z tick_ms=1650 count=2 '
+                'added=browser:40,renderer:41 removed=-\n'
+                'webview2 processes env=1 utc=2026-11-26T04:01:44.461Z tick_ms=104111 count=3 '
+                'added=utility:52 removed=-\n'
+                'webview2 processes env=1 utc=2026-11-26T04:01:47.000Z tick_ms=106650 error=0x80004005\n'))
             self.assertEqual(json.loads((output / 'observation.json').read_text()), result)
             self.assertNotIn('do-not-save', json.dumps(result))
 
@@ -403,7 +466,8 @@ class ObserverTests(unittest.TestCase):
             with self.subTest(bad_trace=bad_trace):
                 fixture = Fixture([
                     {diagnostics.PROBE_REPORT: probe(launch, extra='steam_launch_phase=child-created\r\n'
-                                                      'steam_shadow_exit_report=..\\unrelated.txt\r\n'),
+                                                      'steam_shadow_exit_report=..\\unrelated.txt\r\n'
+                                                      'steam_shadow_unity_log=..\\unrelated.log\r\n'),
                      'fhd-present-times.bin': bad_trace},
                     {diagnostics.PROBE_REPORT: PortalError(409), 'fhd-present-times.bin': bad_trace},
                 ])
@@ -552,9 +616,21 @@ class ObserverTests(unittest.TestCase):
     def test_live_loader_inspection_preserves_repeated_events_from_the_verified_copy(self):
         launch = EPOCH_MS + 1
         past = [stage(f'SteamWin32Trial ({number})', launch - 1 - number) for number in range(1, 38)]
+        sample = (b'dxgi gpu-memory local_used_mib=412 nonlocal_used_mib=0 budget_mib=672 native_budget_mib=4147 '
+                  b'peak_mib=430 queries=7200 t_s=60 utc=20261126T015013Z')
+        residency = (b'asset residency evict=1 makeresident=0 enqueue=2 evict_obj=128 evict_kib=65536 res_obj=130 '
+                     b'res_kib=66560 restored=128 utc=20261126T015014Z')
         traced = (b'asset graphics-pso-before flags=0x00000040\r\n' * 2
                   + b'asset boot-wait-single timeout=0xFFFFFFFF enter\r\n'
-                  + b'asset shell-request result=0x00000000\r\n')
+                  + b'asset shell-request result=0x00000000\r\n'
+                  + b'dxgi gpu-memory-budget install result=0x00000000 dedicated_mib=512 shared_mib=832 '
+                    b'capacity_mib=1344 cap_mib=672 source=default\r\n'
+                  + sample + b'\r\n'
+                  + b'asset residency mode=pin source=package-file hooks=pending\r\n'
+                  + residency + b'\r\n'
+                  + b'asset steam-relay-override=InitRelayNetworkAccess\r\n'
+                  + b'asset steam-relay=stubbed call=1 utc=20261126T015010.112Z\r\n'
+                  + b'asset steam-run-callbacks us=118220 utc=20261126T015148.031Z\r\n')
         fixture = Fixture([{
             diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE),
             LIVE_TRACE: traced + b'load C:\\Users\\private\\sample.dll\r\nasset boot-wait-split',
@@ -565,11 +641,23 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(result['app_id'], APP_ID)
             self.assertEqual(result['run_id'], launch)
             self.assertEqual(result['loader_trace']['state'], 'observed')
-            self.assertEqual(result['loader_trace']['records'], 4)
+            self.assertEqual(result['loader_trace']['records'], 11)
+            self.assertEqual(result['loader_trace']['events']['steam']['count'], 3)
+            self.assertEqual(result['loader_trace']['events']['steam']['latest'][-1],
+                             'asset steam-run-callbacks us=118220 utc=20261126T015148.031Z')
+            self.assertEqual(result['loader_trace']['diagnostics']['steam_callbacks'], {
+                'calls_over_2ms': 1, 'total_ms': 118.22, 'max_ms': 118.22, 'event_limit_reached': False,
+                'slowest': ['asset steam-run-callbacks us=118220 utc=20261126T015148.031Z']})
+            self.assertNotIn('asset steam-run-callbacks us=118220 utc=20261126T015148.031Z',
+                             result['loader_trace']['recent'])
             self.assertEqual(result['loader_trace']['events']['graphics-pso-before']['count'], 2)
             self.assertEqual(result['loader_trace']['events']['boot-wait']['count'], 1)
             self.assertEqual(result['loader_trace']['events']['shell-request']['latest'],
                              ['asset shell-request result=0x00000000'])
+            self.assertEqual(result['loader_trace']['events']['gpu-memory']['count'], 2)
+            self.assertEqual(result['loader_trace']['events']['gpu-memory']['latest'][-1], sample.decode())
+            self.assertEqual(result['loader_trace']['events']['residency']['count'], 2)
+            self.assertEqual(result['loader_trace']['events']['residency']['latest'][-1], residency.decode())
             self.assertEqual((output / 'loader-trace.txt').read_bytes(), traced.replace(b'\r\n', b'\n'))
             self.assertEqual(json.loads((output / 'observation.json').read_text()), result)
             self.assertNotIn('private', json.dumps(result))
@@ -947,8 +1035,18 @@ class ObserverTests(unittest.TestCase):
                     run = launch + 1 if self.changes_launch and self.now else launch
                     return 200, probe(run, extra=RENDER_FIELDS)
                 if name == 'fhd-panel-input.txt':
-                    markers = b'menu_chord=held\r\nmenu_request=ready\r\nmenu_request=rea' if self.now else b''
+                    markers = (b'menu_chord=ignored reason=unpaired\r\nmenu_chord=held source=keys\r\n'
+                               b'menu_request=ready\r\npanel_window_focus=taken from=other\r\n'
+                               b'panel_focus=restored\r\npanel_input=resumed\r\npanel_window_focus=retaken from=none\r\n'
+                               b'panel_window_focus=declined from=none\r\n'
+                               b'panel_keys=after-show\r\nmenu_request=rea') if self.now else b''
                     return 200, b'panel_input=ready\r\naccount_token=do-not-save\r\n' + markers
+                if name == 'fhd-panel-stats.txt':
+                    hidden = 5 if self.now else 3
+                    return 200, (f'panel_hidden={hidden}\r\npanel_hidden_shell=2\r\npanel_hidden_panel=0\r\n'
+                                 f'panel_hidden_window={hidden - 2}\r\npanel_uncovered={hidden + 1}\r\n'
+                                 'panel_reordered=0\r\npanel_repeat_presents=7\r\n'
+                                 f'panel_presented={600 if self.now else 510}\r\nsecret=do-not-save\r\n').encode()
                 if name == MAILBOX + '.rumble':
                     assert kwargs['read_limit'] == 25
                     if self.rumble is None:
@@ -981,8 +1079,22 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
                          ['acknowledged', 'unacknowledged', 'acknowledged', 'updating'])
         self.assertNotIn('buttons', result['samples'][-1]['gamepad'])
-        self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'menu_request': 1})
-        self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'menu_request': 1})
+        recovered = {'input_resumed': 1, 'focus_restored': 1, 'focus_declined': 0, 'keys_after_show': 1,
+                     'window_focus_taken': 1, 'window_focus_retaken': 1, 'window_focus_declined': 1}
+        self.assertEqual(result['panel_menu']['counts'], {'panel_ready': 1, 'chord_held': 1, 'chord_from_keys': 1,
+                                                          'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
+                                                          **recovered})
+        self.assertEqual(result['panel_menu']['added'], {'panel_ready': 0, 'chord_held': 1, 'chord_from_keys': 1,
+                                                         'chord_ignored': 1, 'chord_expired': 0, 'menu_request': 1,
+                                                         **recovered})
+        # Two hides while the view was inactive, two shows and 90 presents during the sample.
+        self.assertEqual(result['panel_menu']['composition'], {
+            'state': 'observed',
+            'totals': {'panel_hidden': 5, 'panel_hidden_shell': 2, 'panel_hidden_panel': 0, 'panel_hidden_window': 3,
+                       'panel_uncovered': 6, 'panel_reordered': 0, 'panel_repeat_presents': 7,
+                       'panel_presented': 600},
+            'added': {'panel_hidden': 2, 'panel_hidden_shell': 0, 'panel_hidden_panel': 0, 'panel_hidden_window': 2,
+                      'panel_uncovered': 2, 'panel_reordered': 0, 'panel_repeat_presents': 0, 'panel_presented': 90}})
         self.assertEqual(result['rumble'], {'state': 'armed', 'presenter_attached': True, 'bridge_attached': True,
                                            'nonzero_requested': True, 'nonzero_published': True,
                                            'nonzero_applied': True, 'stop_applied': True, 'device_error': False})
@@ -1020,3 +1132,316 @@ class ObserverTests(unittest.TestCase):
         self.assertTrue(changing['nonzero_applied'])
         self.assertTrue(changing['device_error'])
         self.assertFalse(changing['stop_applied'])
+
+
+MEASURED = (b'audio meter=ready\r\n'
+            b'audio window=1 peak-milli=29 audible=15/100\r\n'
+            b'pso timing result=0x00000000\r\n'
+            b'pso kind=G utc=19:14:13.851 us=48210 result=0x00000000\r\n'
+            b'audio window=2 peak-milli=0 audible=0/100\r\n'
+            b'pso kind=C utc=19:14:13.910 us=2210 result=0x80070057\r\n'
+            b'dxgi dred-query result=0x00000000\r\n'
+            b'dxgi dred-node queue=Mesa list=Frame completed=0x0003/0x0008 ops=01 02 03 [04] 05 \r\n'
+            b'dxgi dred-fault va=0x0000000012340000 existing=Texture:0x0D freed=-:0x0C\r\n'
+            b'audio window=3 peak-milli=36 audible=100/100\r\n')
+
+
+class ObserveArgumentTests(unittest.TestCase):
+    def test_observe_accepts_an_hour_long_session(self):
+        class Reached(Exception):
+            pass
+
+        base = ['xbox_deploy.py', 'observe', '--version', '1.2.3.4', '--app-id', str(APP_ID)]
+        # Validation passes and the command goes on to read the portal settings.
+        with (patch.object(cli, 'load_settings', side_effect=Reached),
+              patch('sys.argv', base + ['--timeout', '3600', '--frame-seconds', '3600']), self.assertRaises(Reached)):
+            cli.main()
+        for extra in (['--timeout', '3601'], ['--frame-seconds', '3601'], ['--timeout', '0']):
+            with (self.subTest(extra=extra), patch('sys.argv', base + extra), redirect_stderr(io.StringIO()) as errors,
+                  self.assertRaises(SystemExit)):
+                cli.main()
+            self.assertIn('1–3600 second timeout', errors.getvalue())
+
+
+class LoaderDiagnosticTests(unittest.TestCase):
+    def test_measurement_records_are_kept_in_order_and_summarized(self):
+        lines = diagnostics.complete_loader_lines(b'load game.dll ok source=package\r\n' + MEASURED
+                                                  + b'audio window=4 peak-milli=1 audible=1/100 C:\\private\r\n'
+                                                  + b'pso kind=X utc=19:14:13.851 us=1 result=0x00000000\r\n'
+                                                  + b'dxgi dred-fault va=0x0000000012340000 existing=C:\\private:0x0D\r\n')
+        self.assertEqual(len(lines), 11)
+        measured = diagnostics.diagnostic_lines(lines)
+        self.assertEqual(measured, MEASURED.decode().splitlines())
+        self.assertEqual(diagnostics.unique_loader_lines(lines),
+                         ['load game.dll ok source=package', 'dxgi dred-query result=0x00000000'])
+        summary = diagnostics.diagnostic_summary(measured)
+        windows = ['audio window=1 peak-milli=29 audible=15/100', 'audio window=2 peak-milli=0 audible=0/100',
+                   'audio window=3 peak-milli=36 audible=100/100']
+        self.assertEqual(summary['audio'], {
+            'meter': 'ready', 'windows': 3, 'window_seconds': 10, 'first_window': 1, 'last_window': 3,
+            'audible_windows': 1, 'silent_windows': 1, 'unread_windows': 0, 'peak_milli_max': 36,
+            'first': windows, 'latest': windows,
+        })
+        self.assertEqual(summary['pipelines']['timing'], 'ready')
+        self.assertEqual(summary['pipelines']['kinds'], {'graphics': 1, 'compute': 1})
+        self.assertEqual(summary['pipelines']['total_ms'], 50.42)
+        self.assertEqual(summary['pipelines']['max_ms'], 48.21)
+        self.assertEqual(summary['pipelines']['failures'], 1)
+        self.assertEqual(summary['device_removed']['incomplete_command_lists'], 1)
+        self.assertTrue(summary['device_removed']['page_fault'])
+        self.assertEqual(len(summary['device_removed']['records']), 3)
+        unavailable = diagnostics.diagnostic_summary(['audio meter=unavailable stage=endpoint result=0x80070490'])
+        self.assertEqual(unavailable['audio']['meter'], 'unavailable: stage=endpoint result=0x80070490')
+        self.assertEqual(unavailable['audio']['windows'], 0)
+
+    def test_steam_relay_worker_and_status_records_are_listed_and_summarized(self):
+        general = ['asset steam-relay-override=InitRelayNetworkAccess mode=worker-status',
+                   'asset steam-relay=worker call=1 utc=20261126T015010.112Z',
+                   'asset steam-relay=worker-done call=1 us=830 utc=20261126T015010.113Z',
+                   'asset steam-relay-status=polling interval_ms=250 slow_us=2000',
+                   'asset steam-relay=shutdown wait_us=12']
+        status = ['asset steam-relay-status avail=3 config=3 relay=1 ping=0 init_ms=1 utc=20261126T015010.114Z '
+                  'msg=Fetching_network_config',
+                  'asset steam-relay-status avail=3 config=100 relay=3 ping=1 init_ms=1840 utc=20261126T015011.953Z msg=',
+                  'asset steam-relay-status avail=100 config=100 relay=100 ping=0 init_ms=4102 '
+                  'utc=20261126T015014.215Z msg=OK',
+                  'asset steam-relay-status avail=-10 config=100 relay=-101 ping=0 init_ms=101550 '
+                  'utc=20261126T015151.663Z msg=Retrying']
+        slow = ['asset steam-relay-status-slow us=2400 utc=20261126T015011.000Z',
+                'asset steam-relay-status-slow us=120500 utc=20261126T015151.600Z']
+        lines = general + status + slow
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in general))
+        self.assertTrue(all(diagnostics.diagnostic_record(line) for line in status + slow))
+        self.assertFalse(diagnostics.diagnostic_record('asset steam-relay-status avail=100 config=100 relay=100 ping=0 '
+                                                       'init_ms=1 utc=20261126T015014.215Z msg=a b'))
+        summary = diagnostics.loader_summary(lines, 1024)
+        self.assertEqual(summary['events']['steam']['count'], len(lines))
+        self.assertEqual(summary['recent'], general)
+        self.assertEqual(summary['diagnostics']['steam_relay'], {
+            'changes': 4, 'reached_current': True, 'current_init_ms': 4102, 'current_utc': '20261126T015014.215Z',
+            'latest_avail': -10, 'records': status, 'slow_polls': 2, 'slow_max_ms': 120.5,
+            'slowest': [slow[1], slow[0]], 'event_limit_reached': False})
+        never = diagnostics.diagnostic_summary(status[:2])['steam_relay']
+        self.assertFalse(never['reached_current'])
+        self.assertIsNone(never['current_init_ms'])
+        self.assertEqual(never['slow_polls'], 0)
+
+    def test_steam_delay_shift_tests_are_listed_and_summarized(self):
+        lines = ['asset steam-relay-override=InitRelayNetworkAccess mode=worker',
+                 'asset steam-init-override=SteamInternal_SteamAPI_Init delay_ms=10000',
+                 'asset steam-init=delayed export=SteamInternal_SteamAPI_Init call=1 delay_ms=10000 '
+                 'utc=20261126T015000.100Z',
+                 'asset steam-init=called export=SteamInternal_SteamAPI_Init call=1 slept_ms=10002 us=41800 result=0 '
+                 'utc=20261126T015010.144Z',
+                 'asset steam-relay=worker call=1 utc=20261126T015010.200Z',
+                 'asset steam-relay=worker-delay call=1 delay_ms=30000 utc=20261126T015010.200Z',
+                 'asset steam-relay=worker-start call=1 waited_ms=30008 utc=20261126T015040.208Z',
+                 'asset steam-relay=worker-done call=1 us=830 utc=20261126T015040.209Z']
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in lines))
+        summary = diagnostics.loader_summary(lines, 1024)
+        self.assertEqual(summary['events']['steam']['count'], len(lines))
+        self.assertEqual(summary['steam_shift'], {
+            'relay': {'delay_ms': 30000, 'scheduled_utc': '20261126T015010.200Z', 'waited_ms': 30008,
+                      'started_utc': '20261126T015040.208Z', 'outcome': 'worker-done', 'call_us': 830},
+            'init': {'export': 'SteamInternal_SteamAPI_Init', 'delay_ms': 10000,
+                     'delayed_utc': '20261126T015000.100Z', 'slept_ms': 10002, 'call_us': 41800, 'result': 0,
+                     'called_utc': '20261126T015010.144Z'}})
+        # Shutdown during the delay: the worker skips the real call.
+        skipped = diagnostics.loader_summary(lines[4:7] + ['asset steam-relay=worker-skipped call=1 '
+                                                           'utc=20261126T015012.000Z'], 512)['steam_shift']
+        self.assertEqual(skipped['relay']['outcome'], 'worker-skipped')
+        self.assertIsNone(skipped['relay']['call_us'])
+        self.assertNotIn('init', skipped)
+        self.assertNotIn('steam_shift', diagnostics.loader_summary(lines[:1], 64))
+
+    def test_fence_wait_trace_is_listed_and_summarized(self):
+        # The lines runtime/win32/d3d12-fence-trace.c writes (formats in tests/steam-d3d12-fence-trace.test.cpp).
+        lines = ['asset d3d12-fence mode=trace source=package-file hooks=pending',
+                 'asset d3d12-fence install result=0x00000000 tables=3 mode=trace utc=20261126T133820.004Z',
+                 'asset d3d12-fence selftest result=0x00000000 wait_us=211 utc=20261126T133820.005Z',
+                 'asset d3d12-fence null_waits=470 early=0 max_wait_us=9100 exec=478 utc=20261126T133858.000Z',
+                 'asset d3d12-fence first-early mode=trace value=91234 completed=91233 wait_us=12 '
+                 'utc=20261126T133859.960Z',
+                 'asset d3d12-fence null_waits=476 early=3 max_wait_us=16210 exec=480 event_waits=2 '
+                 'utc=20261126T133900.000Z',
+                 'asset d3d12-fence-total mode=trace t_s=60 null_waits=946 early=3 max_wait_us=16210 exec=958 '
+                 'event_waits=2 settled=0 timeouts=0 failed=0 utc=20261126T133920.000Z']
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in lines))
+        summary = diagnostics.loader_summary(lines, 2048)
+        self.assertEqual(summary['events']['d3d12-fence']['count'], len(lines))
+        self.assertEqual(summary['events']['d3d12-fence']['latest'][-1], lines[-1])
+        self.assertEqual(summary['d3d12_fence'], {
+            'mode': 'trace', 'source': 'package-file', 'hooks': 'pending', 'install_result': '0x00000000',
+            'tables': 3, 'selftest_result': '0x00000000', 'selftest_wait_us': 211, 'seconds': 2,
+            'null_waits': 946, 'early': 3, 'exec': 958, 'event_waits': 2, 'settled': 0, 'timeouts': 0, 'failed': 0,
+            'max_wait_us': 16210, 'max_settle_us': 0, 'max_exec_per_second': 480, 'verdict': 'early-returns',
+            'first_early': lines[4], 'early_seconds': ['20261126T133900.000Z'], 'timeouts_logged': []})
+
+        # Wait mode: early returns that then settle, and one that timed out after 2 s.
+        waited = ['asset d3d12-fence mode=wait source=package-file override=invalid hooks=pending',
+                  'asset d3d12-fence null_waits=10 early=2 max_wait_us=40 exec=12 settled=1 max_settle_us=820 '
+                  'timeouts=1 utc=20261126T133900.000Z',
+                  'asset d3d12-fence timeout mode=wait value=7 completed=6 wait_us=3 settle_us=2000104 '
+                  'settle_completed=6 utc=20261126T133900.500Z']
+        fence = diagnostics.loader_summary(waited, 512)['d3d12_fence']
+        self.assertEqual((fence['mode'], fence['source'], fence['settled'], fence['timeouts']),
+                         ('wait', 'package-file override=invalid', 1, 1))
+        self.assertEqual(fence['max_settle_us'], 820)
+        self.assertEqual(fence['timeouts_logged'], [waited[2]])
+        self.assertIsNone(fence['install_result'])
+
+        # No early return in the waits the hooks saw refutes the hypothesis for them; batches without any
+        # NULL-event wait mean the hooks did not reach the fence Mesa waits on.
+        quiet = diagnostics.loader_summary(lines[:4], 512)['d3d12_fence']
+        self.assertEqual((quiet['verdict'], quiet['early'], quiet['first_early']), ('no-early-returns', 0, None))
+        unreached = diagnostics.loader_summary(
+            ['asset d3d12-fence null_waits=0 early=0 max_wait_us=0 exec=480 utc=20261126T133858.000Z'], 128)
+        self.assertEqual(unreached['d3d12_fence']['verdict'], 'no-null-waits')
+        self.assertNotIn('d3d12_fence', diagnostics.loader_summary(['asset residency mode=native source=default '
+                                                                     'hooks=none'], 64))
+
+    def test_pipeline_events_from_a_replay_mode_are_summarized_by_outcome(self):
+        lines = ['pso timing result=0x00000000',
+                 'pso kind=S utc=10:00:00.000 us=5800000 result=0x00000000 cache=miss',
+                 'pso kind=S utc=10:00:30.000 us=2100 result=0x00000000 cache=wait-hit',
+                 'pso kind=S utc=10:01:00.000 us=105000 result=0x00000000 cache=early',
+                 'pso kind=G utc=10:01:01.000 us=38000 result=0x00000000 cache=root-mismatch',
+                 'pso kind=G utc=10:01:02.000 us=3000 result=0x00000000']
+        self.assertTrue(all(diagnostics.diagnostic_record(line) for line in lines))
+        pipelines = diagnostics.diagnostic_summary(lines)['pipelines']
+        self.assertEqual(pipelines['events_over_2ms'], 5)
+        self.assertEqual(pipelines['kinds'], {'stream': 3, 'graphics': 2})
+        self.assertEqual(pipelines['outcomes'], {'miss': 1, 'wait-hit': 1, 'early': 1, 'root-mismatch': 1})
+        self.assertEqual(pipelines['max_ms'], 5800.0)
+        # Passthrough events carry no outcome, and the summary keeps its shape.
+        self.assertNotIn('outcomes', diagnostics.diagnostic_summary(lines[-1:])['pipelines'])
+        self.assertFalse(diagnostics.diagnostic_record('pso kind=G utc=10:01:02.000 us=3000 result=0x00000000 cache=C:\\x'))
+
+    def test_loader_inspection_keeps_measurement_lines_and_summarizes_them(self):
+        launch = EPOCH_MS + 1
+        fixture = Fixture([{
+            diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE),
+            LIVE_TRACE: b'asset shell-request result=0x00000000\r\n' + MEASURED,
+        }], stages=[[stage(LIVE_STAGE, launch + 5)]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'loader'
+            result = fixture.inspect_loader(options(run_id=launch, output=output))
+            trace = result['loader_trace']
+            self.assertEqual(trace['records'], 11)
+            self.assertEqual(trace['recent'], ['asset shell-request result=0x00000000',
+                                               'dxgi dred-query result=0x00000000'])
+            self.assertEqual(trace['diagnostics']['audio']['windows'], 3)
+            self.assertEqual(trace['diagnostics']['pipelines']['events_over_2ms'], 2)
+            saved = (output / 'loader-trace.txt').read_bytes()
+            self.assertEqual(saved, (b'asset shell-request result=0x00000000\r\n' + MEASURED).replace(b'\r\n', b'\n'))
+
+
+class ResilientObserverTests(unittest.TestCase):
+    launch = EPOCH_MS + 1
+
+    def outage(self, start, end, error):
+        class Flaky(Fixture):
+            def read(self, portal, app, folder, name, limit):
+                if start <= self.now < end:
+                    raise error
+                return super().read(portal, app, folder, name, limit)
+
+            def request(self, method, path, **kwargs):
+                if start <= self.now < end:
+                    raise error
+                if path == '/api/resourcemanager/processes':
+                    return 200, json.dumps({'Processes': [{'ImageName': 'Game.exe'}]}).encode()
+                return super().request(method, path, **kwargs)
+
+        running = {diagnostics.PROBE_REPORT: probe(self.launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+                   LIVE_TRACE: MEASURED}
+        return Flaky([{diagnostics.PROBE_REPORT: probe()}, running], stages=[[], [stage(LIVE_STAGE, self.launch)]])
+
+    def test_short_timeouts_are_retried_with_backoff_and_recorded_as_a_gap(self):
+        fixture = self.outage(3, 6, TimeoutError(errno.ETIMEDOUT, 'Operation timed out'))
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = diagnostics.observe(options(output=output, image_name='game.exe', frame_seconds=8, timeout=40),
+                                         fixture, APP, fixture.read, lambda raw: raw.decode(), PortalError,
+                                         clock=lambda: fixture.now, wall_clock=lambda: EPOCH_MS / 1000 + fixture.now,
+                                         pause=fixture.pause, progress=progress.append)
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertEqual(result['portal']['retries'], 3)
+            self.assertEqual(result['portal']['skipped_reads'], 0)
+            gap, = result['portal']['gaps']
+            self.assertEqual(gap['error'], f'TimeoutError errno={errno.ETIMEDOUT}')
+            self.assertEqual((gap['failed_attempts'], gap['seconds'], gap['skipped_reads']), (3, 3.5, 0))
+            self.assertIn(f'portal-unreachable TimeoutError errno={errno.ETIMEDOUT}; retrying', progress)
+            self.assertIn('portal-recovered after 3.5s', progress)
+            self.assertEqual(json.loads((output / 'observation.json').read_text())['portal'], result['portal'])
+
+    def test_long_outage_skips_reads_keeps_polling_and_does_not_report_the_game_gone(self):
+        fixture = self.outage(3, 15, ConnectionResetError(errno.ECONNRESET, 'Connection reset by peer'))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(output=output, image_name='game.exe', frame_seconds=20, timeout=40))
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertTrue(result['game_process_listed'])
+            gap, = result['portal']['gaps']
+            self.assertEqual(gap['error'], f'ConnectionResetError errno={errno.ECONNRESET}')
+            self.assertGreater(gap['skipped_reads'], 1)
+            self.assertEqual(result['portal']['skipped_reads'], gap['skipped_reads'])
+            # The live loader copy taken before the outage survives it.
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+
+    def test_certificate_change_is_fatal_but_saves_what_was_already_copied(self):
+        fixture = self.outage(3, 99, CertificateChanged('a' * 64, 'b' * 64))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            with self.assertRaises(CertificateChanged) as raised:
+                fixture.observe(options(output=output, frame_seconds=20, timeout=40))
+            self.assertIn('a' * 64, str(raised.exception))
+            self.assertIn('Nothing was trusted automatically', str(raised.exception))
+            self.assertEqual(fixture.now, 3)
+            saved = json.loads((output / 'observation.json').read_text())
+            self.assertEqual(saved['outcome'], 'portal-certificate-changed')
+            self.assertNotIn('portal', saved)
+            self.assertEqual(saved['loader_diagnostics']['audio']['windows'], 3)
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+            self.assertFalse((output / 'fhd-present-times.bin').exists())
+
+    def test_measurement_lines_survive_cleanup_of_the_staging_folder_at_exit(self):
+        exit_file = f'steam-win32-shadow-{APP_ID}-exit-2274.txt'
+        running = probe(self.launch, extra=VERIFIED_STAGE + f'steam_shadow_exit_report={exit_file}\r\n')
+        exited = (b'steam_shadow_child_status=exited\r\nsteam_shadow_child_exit_u32=0\r\n'
+                  b'steam_shadow_loader=load game.dll ok source=package\r\nsteam_shadow_loader_trace=collected\r\n')
+        old = stage('SteamWin32Trial (37)', 1)
+        live = stage(LIVE_STAGE, self.launch)
+        fixture = Fixture([
+            {diagnostics.PROBE_REPORT: probe()},
+            {diagnostics.PROBE_REPORT: running, LIVE_TRACE: b'load game.dll ok source=package\r\n' + MEASURED[:60]},
+            {diagnostics.PROBE_REPORT: running, LIVE_TRACE: b'load game.dll ok source=package\r\n' + MEASURED},
+            {diagnostics.PROBE_REPORT: running, exit_file: exited},
+        ], stages=[[old], [old, live], [old, live], [old]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(output=output, timeout=20))
+            self.assertEqual(result['outcome'], 'game-exited')
+            self.assertEqual(result['live_loader']['stage'], LIVE_STAGE)
+            self.assertEqual(result['live_loader']['reads'], 2)
+            self.assertEqual(result['loader_diagnostics']['audio']['windows'], 3)
+            self.assertEqual((output / 'loader-diagnostics.txt').read_bytes(), MEASURED.replace(b'\r\n', b'\n'))
+            # The ordinary trace keeps its merged form; the exit report repeats the load record last.
+            self.assertEqual((output / 'loader-trace.txt').read_text(),
+                             'dxgi dred-query result=0x00000000\nload game.dll ok source=package\n')
+
+    def test_attached_observer_copies_the_live_trace_from_the_launch_staging_folder(self):
+        fixture = Fixture([{diagnostics.PROBE_REPORT: probe(self.launch, extra=VERIFIED_STAGE + RENDER_FIELDS),
+                            LIVE_TRACE: MEASURED}],
+                          stages=[[stage('SteamWin32Trial (37)', self.launch - 60_000), stage(LIVE_STAGE, self.launch + 900)]])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'observation'
+            result = fixture.observe(options(run_id=self.launch, output=output))
+            self.assertEqual(result['outcome'], 'frame-observed')
+            self.assertEqual(result['live_loader']['stage'], LIVE_STAGE)
+            self.assertTrue((output / 'loader-diagnostics.txt').exists())
+            self.assertNotIn(diagnostics.TEMP + '\\SteamWin32Trial (37)', [folder for folder, _, _ in fixture.reads])

@@ -401,6 +401,100 @@ class BigPicturePackageTests(unittest.TestCase):
         stage_trials(self.layout, [f"{app}={profile}"], package_adapter(forwarded))
         self.assertEqual((self.layout / adapter).read_bytes(), forwarded)
 
+    def test_win32_d3d12_pipeline_cache_needs_loader_trace_and_a_matching_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "pipeline-cache-profile"
+        profile.mkdir()
+        app = "2868840"
+        build = "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\n\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
+        marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
+        (profile / marker).touch()
+
+        def runtime(native, loader):
+            template = self.work / f"pipeline-cache-{len(list(self.work.glob('pipeline-cache-*.appx')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", native)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        feature = "XBOX_WIN32_PSO_CACHE\0XBOX_WIN32_PSO_CACHE_MODE\0".encode("utf-16le")
+        current = runtime(feature, feature)
+        with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
+            stage_trials(self.layout, [f"{app}={profile}"], current)
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        # A cache mode needs the control result that proved that path.
+        for text in ("on", "mode=library", "mode=auto control=0x5CC01163",
+                     # 1.0.246.1: CreatePipelineLibrary removed the device (library outcome 7).
+                     "mode=library control=0x5CC47163", "mode=blobs control=0x5CC01663"):
+            (profile / marker).write_text(text)
+            with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
+                stage_trials(self.layout, [f"{app}={profile}"], current)
+        (profile / marker).write_bytes(b"")
+        # A runtime without the profile-selected mode probed the title's device.
+        cache_only = "XBOX_WIN32_PSO_CACHE\0".encode("utf-16le")
+        for native, loader in ((b"old", feature), (feature, b"old"), (cache_only, feature), (feature, cache_only)):
+            with self.assertRaisesRegex(ValueError, "persistent Direct3D 12 pipeline cache"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime(native, loader))
+        stage_trials(self.layout, [f"{app}={profile}"], current)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+        self.assertEqual((self.layout / "XboxWin32LoaderTrace.dll").read_bytes(), feature)
+        for text in (b"mode=blobs control=0x5CC47163\n", b"mode=library control=0x5CC01163\r\n"):
+            (profile / marker).write_bytes(text)
+            stage_trials(self.layout, [f"{app}={profile}"], current)
+            self.assertEqual((self.layout / marker).read_bytes(), text)
+        # Record and replay needs no control result, but a runtime that knows the
+        # mode: an older one would read it as passthrough and never replay.
+        replay_loader = feature + "replay-idle\0".encode("utf-16le")
+        replay_native = feature + b"mode=replay-idle\0"
+        for text in (b"mode=replay", b"mode=replay-idle\r\n"):
+            (profile / marker).write_bytes(text)
+            for native, loader in ((feature, feature), (replay_native, feature), (feature, replay_loader)):
+                with self.assertRaisesRegex(ValueError, "record and replay"):
+                    stage_trials(self.layout, [f"{app}={profile}"], runtime(native, loader))
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(replay_native, replay_loader))
+            self.assertEqual((self.layout / marker).read_bytes(), text)
+        for text in ("mode=replay control=0x5CC01163", "mode=Replay", "mode=replay "):
+            (profile / marker).write_text(text)
+            with self.assertRaisesRegex(ValueError, "the loader trace and an empty marker"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime(replay_native, replay_loader))
+
+    def test_pipeline_cache_marker_modes(self):
+        from build_tools.stage_profiles import pipeline_cache_mode
+        self.assertEqual(pipeline_cache_mode(b""), "passthrough")
+        self.assertEqual(pipeline_cache_mode(b"mode=blobs control=0x5CC05163"), "blobs")
+        self.assertEqual(pipeline_cache_mode(b"mode=library control=0x5CC01163\n"), "library")
+        self.assertEqual(pipeline_cache_mode(b"mode=replay"), "replay")
+        self.assertEqual(pipeline_cache_mode(b"mode=replay-idle\r\n"), "replay-idle")
+        for bad in (b"\n", b"mode=library control=0x5CC47163", b"mode=blobs control=0x5cc01163",
+                    b"mode=blobs control=0x5C071163", b"mode=blobs control=0x5CC01163\n\n",
+                    b"mode=replay control=0x5CC01163", b"mode=replay\n\n", b"mode=Replay", b"mode=replay-"):
+            self.assertIsNone(pipeline_cache_mode(bad))
+
+    def test_slay_the_spire_2_opengl_profile_selects_the_pipeline_cache(self):
+        root = ROOT / "profiles/2868840/26655341"
+        self.assertTrue((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").is_file())
+        # Record and replay: the driver persistence paths remove the device (control 0x5CC4AA63).
+        from build_tools.stage_profiles import pipeline_cache_mode
+        self.assertEqual(pipeline_cache_mode((root / "steam-win32-d3d12-pipeline-cache-2868840.txt").read_bytes()),
+                         "replay")
+        self.assertEqual((root / "steam-win32-shadow-2868840.txt").read_text().splitlines()[6], "loader-trace")
+        self.assertIn("XboxWin32LoaderTrace.dll",
+                      json.loads((root / "steam-win32-adapters-2868840.json").read_text())["required_adapters"])
+
+    def test_no_checked_in_profile_stubs_steam_relay_start_up(self):
+        # The relay stub defers multiplayer start-up and is for A/B trials only (docs/GAME-LAUNCH.md).
+        # The relay and Steam init delays are diagnostic shift tests that defer Steam networking too.
+        for option in ("no-steam-relay", "steam-relay-delay", "steam-init-delay"):
+            self.assertEqual(sorted((ROOT / "profiles").rglob(f"steam-win32-{option}-*.txt")), [], option)
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
@@ -464,7 +558,7 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / "XboxWin32Window.dll").read_bytes(), b"runtime fixture")
         adapted = "10929685\nGame.exe\nopengl3\ngodot\n\n\n\naccessibility=disabled\n"
         (profile / marker).write_text(adapted)
-        with self.assertRaisesRegex(ValueError, "matching hosted OpenGL profile"):
+        with self.assertRaisesRegex(ValueError, "matching hosted Godot profile"):
             stage_trials(self.layout, [f"1145360={profile}"], template)
         (self.layout / "steam-sdl-surfaceless-1145360.txt").write_text("10929685")
         stage_trials(self.layout, [f"1145360={profile}"], template)
@@ -556,6 +650,198 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual((self.layout / dynamic_companions).read_bytes(), b"")
         self.assertEqual((self.layout / nested_recipe).read_bytes(), (profile / nested_recipe).read_bytes())
         self.assertFalse((self.layout / nested_runtime).exists())
+
+    def test_configured_play_uses_the_one_shot_big_picture_marker(self):
+        self.layout.mkdir()
+        library_builder.stage_configured_play(self.layout, None)
+        for app_id in (0, 0x1000000, "1229490"):
+            with self.subTest(app_id=app_id), self.assertRaisesRegex(ValueError, "Steam AppID"):
+                library_builder.stage_configured_play(self.layout, app_id)
+        self.assertEqual(list(self.layout.iterdir()), [])
+        library_builder.stage_configured_play(self.layout, 1229490)
+        self.assertEqual({path.name: path.read_bytes() for path in self.layout.iterdir()},
+                         {"steam-launch-via-big-picture.txt": b"1229490\n"})
+
+    def test_win32_unity_direct3d_profile_stages_scoped_storage_and_input(self):
+        self.layout.mkdir()
+        app, build = "1229490", "22957324"
+        profile = self.work / "unity-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\nunity\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-files-{app}.txt").write_text("UnityPlayer.dll\n")
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+        names = ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Window.dll", "XboxWin32Dxgi.dll",
+                 "XboxWin32Unity.dll", "XboxWin32PlayerPrefs.dll", "XboxWin32HostedDisplay.dll")
+        hints = "".join(f"{name}\0" for name in ("XBOX_WIN32_LOCAL_LOW", "XBOX_WIN32_HOST_XINPUT",
+                                                   "XBOX_WIN32_PREFS_KEY", "XBOX_WIN32_PREFS_HIVE"))
+
+        def runtime(native, desktop, loader):
+            template = self.work / f"unity-runtime-{len(list(self.work.glob('unity-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", native)
+                archive.writestr("XboxWin32Desktop.dll", desktop)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                archive.writestr("XboxWin32XInput910.dll", b"runtime fixture")
+                for name in names:
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        complete = runtime((" -force-d3d11" + hints).encode("utf-16le"), "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"),
+                           "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 requires the DXGI marker"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        (profile / f"steam-win32-dxgi-{app}.txt").touch()
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\ngodot\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "Invalid Win32 trial profile"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        shadow.write_text(f"{build}\nULTRAKILL.exe\nd3d11\nunity\n\n\nloader-trace\n")
+        for marker in ("local-low", "host-xinput"):
+            (profile / f"steam-win32-{marker}-{app}.txt").touch()
+        prefs = profile / f"steam-win32-player-prefs-{app}.txt"
+        prefs.write_text("Software\\Hakita\\ULTRAKILL\\Extra\n")
+        with self.assertRaisesRegex(ValueError, "preference key"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        prefs.write_text("Software\\Hakita\\ULTRAKILL\r\n")
+        old_runtime = runtime(b"old", b"old", b"old")
+        with self.assertRaisesRegex(ValueError, "Unity Direct3D 11 launch path"):
+            stage_trials(self.layout, [f"{app}={profile}"], old_runtime)
+        stage_trials(self.layout, [f"{app}={profile}"], complete)
+        self.assertEqual((self.layout / f"steam-win32-player-prefs-{app}.txt").read_bytes(), b"Software\\Hakita\\ULTRAKILL")
+        for marker in ("local-low", "host-xinput", "dxgi"):
+            self.assertEqual((self.layout / f"steam-win32-{marker}-{app}.txt").read_bytes(), b"")
+        for name in ("XboxWin32PlayerPrefs.dll", "XboxWin32HostedDisplay.dll", "XboxWin32XInput910.dll",
+                     "XboxWin32Dxgi.dll", "XboxWin32Unity.dll"):
+            self.assertTrue((self.layout / name).is_file(), name)
+        without_local_low = runtime((" -force-d3d11" + hints).encode("utf-16le"), b"old",
+                                    "XBOX_WIN32_HOST_XINPUT\0".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "scoped LocalLow support"):
+            stage_trials(self.layout, [f"{app}={profile}"], without_local_low)
+        without_xinput = runtime((" -force-d3d11" + hints).encode("utf-16le"),
+                                 "XBOX_WIN32_LOCAL_LOW\0".encode("utf-16le"), b"old")
+        with self.assertRaisesRegex(ValueError, "hosted XInput support"):
+            stage_trials(self.layout, [f"{app}={profile}"], without_xinput)
+
+    def test_win32_godot_direct3d12_profile_requires_hosted_composition(self):
+        self.layout.mkdir()
+        app, build = "2868840", "26655341"
+        profile = self.work / "godot-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nd3d12\ngodot\n\n\n\naccessibility=disabled\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-files-{app}.txt").write_text("data_sts2_windows_x86_64/steam_api64.dll\n")
+        (profile / f"steam-win32-steam-sdk-{app}.txt").write_text("data_sts2_windows_x86_64/steam_api64.dll\n")
+        (self.layout / f"steam-sdl-surfaceless-{app}.txt").write_text(build)
+
+        def runtime(dxgi, loader):
+            template = self.work / f"godot-runtime-{len(list(self.work.glob('godot-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", b"native fixture")
+                archive.writestr("XboxWin32Dxgi.dll", dxgi)
+                archive.writestr("XboxWin32LoaderTrace.dll", loader)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Window.dll",
+                             "XboxWin32Desktop.dll", "XboxWin32SteamDiscovery.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        complete = runtime(b"DCompositionCreateDevice", "dcomp.dll".encode("utf-16le"))
+        with self.assertRaisesRegex(ValueError, "accessibility option needs a matching hosted Godot profile"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        (profile / f"steam-win32-dxgi-{app}.txt").touch()
+        with self.assertRaisesRegex(ValueError, "loader trace for its dynamic graphics imports"):
+            stage_trials(self.layout, [f"{app}={profile}"], complete)
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nd3d12\ngodot\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "hosted DirectComposition"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(b"old", b"old"))
+        stage_trials(self.layout, [f"{app}={profile}"], complete)
+        self.assertEqual((self.layout / f"steam-win32-dxgi-{app}.txt").read_bytes(), b"")
+        self.assertEqual((self.layout / f"steam-win32-steam-sdk-{app}.txt").read_bytes(),
+                         b"data_sts2_windows_x86_64/steam_api64.dll")
+        for name in ("XboxWin32Dxgi.dll", "XboxWin32Window.dll", "XboxWin32LoaderTrace.dll", "XboxWin32SteamDiscovery.dll"):
+            self.assertTrue((self.layout / name).is_file(), name)
+
+    def test_win32_managed_warmup_stages_the_plan_and_component(self):
+        self.layout.mkdir()
+        app, build = "2868840", "26655341"
+        profile = self.work / "warmup-profile"
+        profile.mkdir()
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nSlayTheSpire2.exe\nopengl3\ngodot\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        marker = f"steam-win32-managed-warmup-{app}.txt"
+        pinned = (ROOT / "profiles" / app / build / marker).read_text(encoding="ascii")
+        (profile / marker).write_text(pinned, encoding="ascii")
+
+        managed = bytearray(0x400)
+        managed[:2] = b"MZ"
+        struct.pack_into("<I", managed, 0x3c, 128)
+        managed[128:132] = b"PE\0\0"
+        struct.pack_into("<HH", managed, 132, 0x8664, 1)
+        struct.pack_into("<H", managed, 148, 240)
+        struct.pack_into("<H", managed, 152, 0x20B)
+        struct.pack_into("<I", managed, 152 + 108, 16)
+        struct.pack_into("<II", managed, 152 + 112 + 14 * 8, 0x2000, 72)
+        struct.pack_into("<IIII", managed, 392 + 8, 0x200, 0x2000, 0x200, 0x200)
+        struct.pack_into("<I", managed, 0x200, 72)
+        struct.pack_into("<I", managed, 0x200 + 16, 1)
+        supported_probe = b"native fixture" + "XBOX_WIN32_MANAGED_WARMUP_PLAN\0".encode("utf-16le")
+
+        def runtime(probe=supported_probe, window=b"hostfxr_get_runtime_delegate", component=bytes(managed)):
+            template = self.work / f"warmup-runtime-{len(list(self.work.glob('warmup-runtime-*')))}.appx"
+            with ZipFile(template, "w") as archive:
+                archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                    b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+                archive.writestr("ProbeNative.dll", probe)
+                archive.writestr("XboxWin32Window.dll", window)
+                if component is not None:
+                    archive.writestr("XboxManagedWarmup.dll", component)
+                for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(name, b"runtime fixture")
+            return template
+
+        with self.assertRaisesRegex(ValueError, "managed warm-up component"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(component=None))
+        with self.assertRaisesRegex(ValueError, "managed warm-up component"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(probe=b"older native fixture"))
+        with self.assertRaisesRegex(ValueError, "loads in the x64 game"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(component=b"not a managed image"))
+        with self.assertRaisesRegex(ValueError, "Win32 adapters start the managed warm-up"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime(window=b"older window adapter"))
+        stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        staged = (self.layout / marker).read_text(encoding="ascii")
+        self.assertEqual(staged.splitlines(), [line for line in pinned.splitlines() if not line.startswith("#")])
+        self.assertTrue(staged.startswith("assembly=sts2 mvid=a5742661-f95f-4ba1-8b21-18dedf86422b\n"))
+        self.assertEqual((self.layout / "XboxManagedWarmup.dll").read_bytes(), bytes(managed))
+        self.assertNotIn("collect=", staged)
+
+        # collect=after needs a component that knows the option; an older one rejects the plan.
+        (profile / marker).write_text(pinned + "collect=after\n", encoding="ascii")
+        with self.assertRaisesRegex(ValueError, "supports collect=after"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        collecting = bytes(managed) + "managed_warmup_collect=after generation=2".encode("utf-16le")
+        stage_trials(self.layout, [f"{app}={profile}"], runtime(component=collecting))
+        self.assertEqual((self.layout / marker).read_text(encoding="ascii").splitlines()[-1], "collect=after")
+
+        for invalid in ("assembly=sts2\nassembly=STS2\n", "priority=MegaCrit\n", "assembly=sts2\nmode=all\n",
+                        "assembly=sts2 mvid=A5742661-F95F-4BA1-8B21-18DEDF86422B\n", "assembly=sts2\ndepth=9\n",
+                        "assembly=sts2\nremaining=yes\nremaining=no\n", "assembly=sts2;priority=MegaCrit\n",
+                        "assembly=sts2\ncollect=before\n", "assembly=sts2\ncollect=after\ncollect=after\n"):
+            (profile / marker).write_text(invalid, encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "Invalid managed warm-up plan"):
+                stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        (profile / marker).write_text("assembly=sts2\n", encoding="ascii")
+        shadow.write_text(f"{build}\nGame.exe\nopengl3\nunity\n\n\nloader-trace\n")
+        with self.assertRaisesRegex(ValueError, "needs a CoreCLR title"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime())
 
     def test_win32_source_profile_requires_verifier_and_stages_only_fingerprints(self):
         self.layout.mkdir()
@@ -748,6 +1034,145 @@ class BigPicturePackageTests(unittest.TestCase):
         (profile / marker).write_text("1")
         with self.assertRaisesRegex(ValueError, "an empty marker"):
             stage_trials(self.layout, trial, runtime)
+
+    def test_steam_title_overrides_require_loader_trace_and_supporting_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        runtime = self.work / "steam-override-runtime.appx"
+        trial = [f"{app}={profile}"]
+        for option, name in (("no-steam-relay", "XBOX_WIN32_STEAM_RELAY_STUB"),
+                             ("steam-callback-trace", "XBOX_WIN32_STEAM_CALLBACK_TRACE"),
+                             ("steam-relay-worker", "XBOX_WIN32_STEAM_RELAY_WORKER"),
+                             ("steam-relay-status", "XBOX_WIN32_STEAM_RELAY_STATUS")):
+            marker = f"steam-win32-{option}-{app}.txt"
+            (profile / marker).touch()
+            variable = (name + "\0").encode("utf-16le")
+            for loader in (b"older loader", variable):
+                with ZipFile(runtime, "w") as package:
+                    for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                        package.writestr(member, b"runtime fixture")
+                    package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                    package.writestr("XboxWin32LoaderTrace.dll", loader)
+                if loader != variable:
+                    with self.assertRaisesRegex(ValueError, f"launch-scoped {option} option"):
+                        stage_trials(self.layout, trial, runtime)
+                    self.assertFalse((self.layout / marker).exists())
+                else:
+                    stage_trials(self.layout, trial, runtime)
+            self.assertEqual((self.layout / marker).read_bytes(), b"")
+            (profile / marker).write_text("1")
+            with self.assertRaisesRegex(ValueError, f"The {option} option needs an empty marker"):
+                stage_trials(self.layout, trial, runtime)
+            (profile / marker).touch()
+            shadow.write_text(f"{build}\nGame.exe\n")
+            with self.assertRaisesRegex(ValueError, f"The {option} option needs an empty marker, source profile and loader trace"):
+                stage_trials(self.layout, trial, runtime)
+            shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+            (profile / marker).unlink()
+
+    def test_steam_relay_stub_cannot_be_combined_with_relay_worker_or_status(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        variables = b"".join((name + "\0").encode("utf-16le") for name in (
+            "XBOX_WIN32_STEAM_RELAY_STUB", "XBOX_WIN32_STEAM_RELAY_WORKER", "XBOX_WIN32_STEAM_RELAY_STATUS"))
+        runtime = self.work / "steam-relay-runtime.appx"
+        with ZipFile(runtime, "w") as package:
+            for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                package.writestr(member, b"runtime fixture")
+            package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variables)
+            package.writestr("XboxWin32LoaderTrace.dll", variables)
+        trial = [f"{app}={profile}"]
+        (profile / f"steam-win32-no-steam-relay-{app}.txt").touch()
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            (profile / f"steam-win32-{option}-{app}.txt").touch()
+            with self.assertRaisesRegex(ValueError, f"no-steam-relay option cannot be combined with {option}"):
+                stage_trials(self.layout, trial, runtime)
+            (profile / f"steam-win32-{option}-{app}.txt").unlink()
+        # The worker and the status trace stage together, which is arm B2 of the T97 matrix.
+        (profile / f"steam-win32-no-steam-relay-{app}.txt").unlink()
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            (profile / f"steam-win32-{option}-{app}.txt").touch()
+        stage_trials(self.layout, trial, runtime)
+        for option in ("steam-relay-worker", "steam-relay-status"):
+            self.assertEqual((self.layout / f"steam-win32-{option}-{app}.txt").read_bytes(), b"")
+
+    def test_steam_delay_shift_tests_are_bounded_and_need_the_worker_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        runtime = self.work / "steam-delay-runtime.appx"
+        trial = [f"{app}={profile}"]
+
+        def package(*names):
+            variables = b"".join((name + "\0").encode("utf-16le") for name in names)
+            with ZipFile(runtime, "w") as archive:
+                for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(member, b"runtime fixture")
+                archive.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variables)
+                archive.writestr("XboxWin32LoaderTrace.dll", variables)
+
+        everything = ("XBOX_WIN32_STEAM_RELAY_STUB", "XBOX_WIN32_STEAM_RELAY_WORKER",
+                      "XBOX_WIN32_STEAM_RELAY_DELAY_MS", "XBOX_WIN32_STEAM_INIT_DELAY_MS")
+        worker = profile / f"steam-win32-steam-relay-worker-{app}.txt"
+        for option, variable, low, high in (("steam-relay-delay", "XBOX_WIN32_STEAM_RELAY_DELAY_MS", 1000, 120000),
+                                            ("steam-init-delay", "XBOX_WIN32_STEAM_INIT_DELAY_MS", 1000, 30000)):
+            marker = profile / f"steam-win32-{option}-{app}.txt"
+            if option == "steam-relay-delay":
+                marker.write_text("delay_ms=30000\n")
+                package(*everything)
+                with self.assertRaisesRegex(ValueError, "steam-relay-delay option needs the steam-relay-worker"):
+                    stage_trials(self.layout, trial, runtime)
+                worker.touch()
+            for content in ("", "1", f"delay_ms={low - 1}", f"delay_ms={high + 1}", "delay_ms=01000",
+                            "delay_ms=5000 ", "delay=5000", "delay_ms=5000\nextra"):
+                marker.write_text(content)
+                with self.assertRaisesRegex(ValueError, f"The {option} option needs 'delay_ms=N' with N from "
+                                                        f"{low} to {high}"):
+                    stage_trials(self.layout, trial, runtime)
+            for content, staged in ((f"delay_ms={low}", f"delay_ms={low}"), (f"delay_ms={high}\r\n", f"delay_ms={high}")):
+                marker.write_bytes(content.encode())
+                package(*everything)
+                stage_trials(self.layout, trial, runtime)
+                self.assertEqual((self.layout / marker.name).read_bytes(), staged.encode())
+            # An artifact without the variable would ignore the marker.
+            package(*(name for name in everything if name != variable))
+            with self.assertRaisesRegex(ValueError, f"launch-scoped {option} option"):
+                stage_trials(self.layout, trial, runtime)
+            package(*everything)
+            shadow.write_text(f"{build}\nGame.exe\n")
+            with self.assertRaisesRegex(ValueError, "source profile and (?:a )?loader trace"):
+                stage_trials(self.layout, trial, runtime)
+            shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+            # The relay stub defers the start-up that the shift tests time, so the two are refused together.
+            stub = profile / f"steam-win32-no-steam-relay-{app}.txt"
+            stub.touch()
+            with self.assertRaisesRegex(ValueError, f"no-steam-relay option cannot be combined with .*{option}"):
+                stage_trials(self.layout, trial, runtime)
+            stub.unlink()
+            marker.unlink()
+            worker.unlink(missing_ok=True)
 
     def test_hosted_dxgi_output_requires_matching_profile_and_runtime(self):
         self.layout.mkdir()

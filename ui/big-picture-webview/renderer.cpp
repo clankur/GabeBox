@@ -9,7 +9,9 @@
 #include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.System.Profile.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
@@ -18,8 +20,11 @@
 #include <winrt/Windows.UI.Xaml.Hosting.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdio>
 #include <deque>
 #include <string>
+#include <vector>
 #include "cloud-cache.h"
 #include "display-layout.h"
 #include "library-capture.h"
@@ -73,6 +78,41 @@ void checkpoint(std::wstring_view stage) {
     if (!std::wstring_view(status).starts_with(L"process-error:")) status = hstring(stage);
 }
 
+// LocalState\big-picture-webview-processes.txt: the WebView2 environment's arguments and
+// every ProcessInfosChanged event with the process kinds and pids that appeared or left,
+// stamped with the UTC time the handler ran. The first line of a host process replaces
+// the previous host's log; the file stops growing at 256 KiB.
+slim_mutex processLogGate;
+bool processLogStarted = false;
+std::atomic<unsigned> webEnvironments{0};
+
+std::string processLogStamp() {
+    SYSTEMTIME now;
+    GetSystemTime(&now);
+    char text[64];
+    const int count = std::snprintf(text, sizeof(text), "utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ tick_ms=%llu",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()));
+    return count > 0 && count < static_cast<int>(sizeof(text)) ? std::string(text, count) : std::string("utc=unknown");
+}
+
+void processLog(std::string line) noexcept {
+    try {
+        line += "\r\n";
+        const auto path = std::wstring(Windows::Storage::ApplicationData::Current().LocalFolder().Path()) +
+            L"\\big-picture-webview-processes.txt";
+        slim_lock_guard lock(processLogGate);
+        file_handle file{CreateFile2(path.c_str(), processLogStarted ? FILE_APPEND_DATA : GENERIC_WRITE,
+            FILE_SHARE_READ, processLogStarted ? OPEN_ALWAYS : CREATE_ALWAYS, nullptr)};
+        if (!file) return;
+        processLogStarted = true;
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file.get(), &size) || size.QuadPart + static_cast<LONGLONG>(line.size()) > 256 * 1024) return;
+        DWORD written = 0;
+        WriteFile(file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    } catch (...) {}
+}
+
 struct View : implements<View, IFrameworkView> {
     CoreWindow window{nullptr};
     Compositor compositor{nullptr};
@@ -117,6 +157,8 @@ struct View : implements<View, IFrameworkView> {
     CoreWindow::VisibilityChanged_revoker visibility;
     CoreWindow::Closed_revoker closing;
     CoreWindow::Activated_revoker activated;
+    CoreWebView2Environment::ProcessInfosChanged_revoker processInfos;
+    std::vector<steam_webview::WebProcess> webProcesses;
     steam_display::Placement placement{{}, 1.f};
 
     void Initialize(CoreApplicationView const&) {}
@@ -207,6 +249,14 @@ struct View : implements<View, IFrameworkView> {
         } catch (hresult_error const&) {
             // Chromium can decline suspension for an active browser operation.
         }
+    }
+
+    // WebView2 paints white until a document draws, and wherever it draws nothing. In the
+    // primary view the composed browsers sit over the hosted game, so a frame in which the
+    // browser is attached, resized or reloaded flashed white over the game (clankur/GabeBox#89).
+    // Black matches the game panel's letterbox and the XAML page behind it.
+    static void paintBlackBehind(CoreWebView2CompositionController const& browser) {
+        try { browser.DefaultBackgroundColor(Windows::UI::Colors::Black()); } catch (hresult_error const&) {}
     }
 
     void showPrimaryShell(bool show) {
@@ -469,6 +519,24 @@ struct View : implements<View, IFrameworkView> {
             publishWindow();
         } else return false;
         return true;
+    }
+
+    // Names each WebView2 child as it appears or exits, so a short-lived host process
+    // seen in the console's process list can be matched to its kind.
+    void recordProcesses(CoreWebView2Environment const& sender, unsigned environmentId) {
+        std::string line = "webview2 processes env=" + std::to_string(environmentId) + " " + processLogStamp();
+        try {
+            std::vector<steam_webview::WebProcess> current;
+            for (auto const& info : sender.GetProcessInfos())
+                current.push_back({static_cast<uint32_t>(info.ProcessId()), static_cast<int>(info.Kind())});
+            line += steam_webview::processChanges(webProcesses, current);
+            webProcesses = std::move(current);
+        } catch (hresult_error const& error) {
+            char code[24];
+            std::snprintf(code, sizeof(code), " error=0x%08x", static_cast<uint32_t>(error.code().value));
+            line += code;
+        }
+        processLog(std::move(line));
     }
 
     void configure(CoreWebView2 const& browser, bool allowMessages) {
@@ -756,6 +824,7 @@ struct View : implements<View, IFrameworkView> {
                     browser.Close();
                 } else {
                     popup = browser;
+                    paintBlackBehind(popup);
                     popupSurface = compositor.CreateContainerVisual();
                     root.Children().InsertAtTop(popupSurface);
                     resize();
@@ -819,8 +888,38 @@ struct View : implements<View, IFrameworkView> {
                 auto profiles = co_await cache.CreateFolderAsync(L"SteamWebProfiles", Windows::Storage::CreationCollisionOption::OpenIfExists);
                 profile = profiles.Path() + L"\\" + account;
             }
-            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", profile, nullptr);
+            // Opt-in browser switches from xbox-webview2-arguments.txt in the package root, plus the
+            // host's default that skips Chromium's delayed GPU-info process (effectiveBrowserArguments).
+            std::wstring browserArguments;
+            std::string argumentState = "default";
+            try {
+                auto item = co_await Package::Current().InstalledLocation().TryGetItemAsync(L"xbox-webview2-arguments.txt");
+                if (auto file = item.try_as<Windows::Storage::StorageFile>()) {
+                    argumentState = "invalid";
+                    if ((co_await file.GetBasicPropertiesAsync()).Size() <= 256 &&
+                        steam_webview::browserArguments(co_await Windows::Storage::FileIO::ReadTextAsync(file), browserArguments))
+                        argumentState = "package-file";
+                }
+            } catch (...) {
+                browserArguments.clear();
+                argumentState = "unreadable";
+            }
+            browserArguments = steam_webview::effectiveBrowserArguments(browserArguments);
+            auto options = CoreWebView2EnvironmentOptions();
+            options.AdditionalBrowserArguments(browserArguments);
+            const auto environmentId = ++webEnvironments;
+            {
+                std::string switches;
+                for (auto c : browserArguments) switches += c == L' ' ? ',' : static_cast<char>(c);
+                processLog("webview2 environment env=" + std::to_string(environmentId) + " " + processLogStamp() +
+                    " arguments=" + argumentState + (switches.empty() ? std::string() : " switches=" + switches));
+            }
+            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", profile, options);
             if (closed) co_return;
+            processInfos = environment.ProcessInfosChanged(auto_revoke, [this, environmentId](auto const& sender, auto const&) {
+                recordProcesses(sender, environmentId);
+            });
+            recordProcesses(environment, environmentId);
 
             step = L"controller";
             checkpoint(step);
@@ -828,6 +927,7 @@ struct View : implements<View, IFrameworkView> {
             auto browser = co_await environment.CreateCoreWebView2CompositionControllerAsync(parent);
             if (closed) { browser.Close(); co_return; }
             controller = browser;
+            paintBlackBehind(controller);
             try {
                 xboxDisplay = Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox";
             } catch (hresult_error const&) { xboxDisplay = false; }
@@ -905,7 +1005,11 @@ struct View : implements<View, IFrameworkView> {
             if (closed) co_return;
             hstring script = LR"JS(if(window === window.top && ["https://steamloopback.host/index.html","https://steamloopback.host/index.html?IN_CLIENT=true"].includes(location.href.split("#")[0])){
                 window.addEventListener("error", function(event) {
-                    const message = String(event.message || "resource load error").slice(0,180);
+                    // React reports a render that threw and then recovered (minified error
+                    // #520) with the original exception as its cause. Name the cause first.
+                    const cause = event.error && event.error.cause;
+                    const message = String((cause && cause.message ? cause.message + " <- " : "") +
+                        (event.message || "resource load error")).slice(0,180);
                     window.chrome.webview.postMessage({method:"renderer-error", message});
                 });
                 window.addEventListener("unhandledrejection", function(event) {
@@ -961,6 +1065,10 @@ struct View : implements<View, IFrameworkView> {
         auto lifetime = get_strong();
         closed = true;
         updateShellCursor(false);
+        // Give keyboard focus back to the account host while the WebView that holds it still
+        // exists. A WebView closed while focused, as after an unresponsive renderer, leaves the
+        // CoreWindow without key events, and a hosted game loses remote and keyboard input.
+        if (primaryPanel) showPrimaryShell(false);
         if (cloudCache) cloudCache->cancel();
         if (store) { store->close(); store.reset(); }
         closePopup();
@@ -968,7 +1076,6 @@ struct View : implements<View, IFrameworkView> {
         web = nullptr;
         controller = nullptr;
         if (primaryPanel) {
-            showPrimaryShell(false);
             Windows::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(primaryPanel, nullptr);
             Uninitialize();
         } else window.Dispatcher().StopProcessEvents();

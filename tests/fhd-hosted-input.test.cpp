@@ -74,8 +74,9 @@ static HRESULT getState(void *, UINT *result) {
     *result = state;
     return S_OK;
 }
+static KeyStatus keyStatus = {1, 0, 0, 0, 0, 0};
 static HRESULT getKeyStatus(void *, KeyStatus *result) {
-    *result = {1, 0, 0, 0, 0, 0};
+    *result = keyStatus;
     return S_OK;
 }
 static HRESULT query(void *o, REFIID, void **result) {
@@ -218,6 +219,9 @@ int main() {
     assert(box.gamepad.buttons & (1 << 4));
     physical.buttons = 3; // Menu joins View on the next controller sample.
     clockMs += 16;
+    assert(!FhdPollHostedInput(&box, &fakeWindow)); // The pair settles before it counts.
+    assert(!(box.gamepad.buttons & (1 << 4 | 1 << 6)));
+    clockMs += 50;
     assert(FhdPollHostedInput(&box, &fakeWindow) == 1);
     assert(!FhdPollHostedInput(&box, &fakeWindow));
     assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[4] == -32768);
@@ -321,6 +325,64 @@ int main() {
     state = 1;
     event(InputEnabledChanged, (IUnknown *)&arg);
     assert(foreground());
+    // Device Portal remote input arrives as VK_GAMEPAD_* key events and joins the hosted pad.
+    argVt[6] = (void *)getState;
+    physical = {};
+    physical.ly = .5;
+    clockMs += 200;  // Leave the earlier physical movement outside the settle period.
+    FhdPollHostedInput(&box, &fakeWindow);
+    for (UINT key : {0xC3u, 0xCCu, 0xD3u, 0xD5u, 0xCAu}) {
+        state = key;
+        event(KeyDown, (IUnknown *)&arg);
+    }
+    clockMs += 16;
+    assert(!FhdPollHostedInput(&box, &fakeWindow));
+    assert(box.gamepad.buttons == (SDL_HOST_PAD_CONNECTED | 1 | 1 << 12));
+    // The partly deflected physical stick keeps its value; resting axes take the remote keys.
+    assert(box.gamepad.axes[0] == 32767 && box.gamepad.axes[1] == -16384 && box.gamepad.axes[5] == 32767);
+    for (UINT key : {0xC3u, 0xCCu, 0xD3u, 0xD5u, 0xCAu}) {
+        state = key;
+        event(KeyUp, (IUnknown *)&arg);
+    }
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.buttons == SDL_HOST_PAD_CONNECTED && box.gamepad.axes[0] == 0 && box.gamepad.axes[5] == -32768);
+    // A physical stick that recenters before its key-up arrives does not jump to full deflection.
+    physical = {};
+    physical.lx = .75;
+    state = 0xD5;
+    event(KeyDown, (IUnknown *)&arg);
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] > 0 && box.gamepad.axes[0] < 32767);
+    physical.lx = 0;
+    clockMs += 16;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] == 0);
+    event(KeyUp, (IUnknown *)&arg);
+    clockMs += 200;
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.axes[0] == 0);
+    // A release lost while the game was in the background does not leave the button held.
+    state = 0xC5;
+    event(KeyDown, (IUnknown *)&arg);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(box.gamepad.buttons & (1 << 2));
+    state = 1;
+    event(Activated, (IUnknown *)&arg);
+    state = 0;
+    event(Activated, (IUnknown *)&arg);
+    FhdPollHostedInput(&box, &fakeWindow);
+    assert(!(box.gamepad.buttons & (1 << 2)));
+    // A navigation key without the extended flag is not its keypad twin.
+    keyStatus.scan = 0x48;
+    state = VK_UP;
+    event(KeyDown, (IUnknown *)&arg);
+    assert(box.keyboard.entries[(box.keyboard.write - 1) % SDL_HOST_KEY_QUEUE_SIZE].scan == 82);
+    state = VK_NUMPAD8;
+    event(KeyUp, (IUnknown *)&arg);
+    assert(box.keyboard.entries[(box.keyboard.write - 1) % SDL_HOST_KEY_QUEUE_SIZE].scan == 96);
+    keyStatus.scan = 0;
     FhdEndHostedInput();
     box.input_serial = box.input_pointer = 0;
     assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
@@ -335,6 +397,140 @@ int main() {
     assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
     FhdSetHostedInputProfile(FALSE, 1024, 768);
     assert(box.input_pointer == 0 && box.input_serial == firstSerial);
+    FhdEndHostedInput();
+    // Menu + View, as the primary panel uses it: the menu opens on release of a chord
+    // pressed together on one controller and held through the settle period.
+    auto beginChords = [&] {
+        physical = {};
+        assert(FhdBeginHostedInput(&box, nullptr, &fakeWindow) == S_OK);
+        FhdSetHostedInputProfile(TRUE, 1920, 1080);
+        FhdHostedMenuOnRelease(TRUE);
+        clockMs += 100;
+        assert(!FhdPollHostedInput(&box, &fakeWindow));
+    };
+    auto poll = [&](DWORD advance) {
+        clockMs += advance;
+        return FhdPollHostedInput(&box, &fakeWindow);
+    };
+    auto key = [&](UINT code, bool down) {
+        state = code;
+        event(down ? KeyDown : KeyUp, (IUnknown *)&arg);
+    };
+    auto counts = [] {
+        FhdHostedChordCounts value{};
+        FhdReadHostedChordCounts(&value);
+        return value;
+    };
+    const LONG menuView = 1 << 4 | 1 << 6;
+    beginChords();
+    physical.buttons = 3;
+    assert(!poll(16) && !FhdHostedMenuHeld());
+    assert(!poll(30) && !FhdHostedMenuHeld()); // A brush shorter than the settle period is not a chord.
+    physical.buttons = 0;
+    assert(!poll(16) && counts().pad == 0);
+    physical.buttons = 3;
+    assert(!poll(400));
+    assert(!poll(60) && FhdHostedMenuHeld() && counts().pad == 1);
+    assert(!(box.gamepad.buttons & menuView));
+    physical.buttons = 1; // Menu released first; the game still sees neither button.
+    assert(!poll(16) && !(box.gamepad.buttons & menuView));
+    physical.buttons = 0;
+    assert(poll(16) == 1);
+    FhdResumeHostedInput();
+    assert(!poll(16));
+    // View held as a game action, then Menu: both reach the game and no menu opens.
+    physical.buttons = 2;
+    assert(!poll(16) && (box.gamepad.buttons & (1 << 4)));
+    physical.buttons = 3;
+    assert(!poll(800) && !poll(100) && !FhdHostedMenuHeld());
+    assert((box.gamepad.buttons & menuView) == menuView && counts().ignored == 1);
+    physical.buttons = 0;
+    assert(!poll(16) && !poll(16));
+    // A remote View whose key-up never arrived does not pair with a later remote Menu.
+    key(0xD0, true);
+    assert(!poll(16) && !poll(8000));
+    key(0xCF, true);
+    assert(!poll(16) && !poll(100) && !FhdHostedMenuHeld() && counts().ignored == 2);
+    key(0xCF, false);
+    assert(!poll(16) && (box.gamepad.buttons & menuView) == (1 << 4));
+    key(0xD0, false);
+    assert(!poll(16) && counts().keys == 0);
+    // One button from each source is not a chord either.
+    physical.buttons = 1;
+    key(0xD0, true);
+    assert(!poll(16) && !poll(100) && !FhdHostedMenuHeld() && counts().ignored == 3);
+    physical.buttons = 0;
+    key(0xD0, false);
+    assert(!poll(16));
+    // Remote Menu and View pressed together are a chord.
+    key(0xCF, true);
+    clockMs += 40;
+    key(0xD0, true);
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld() && counts().keys == 1);
+    key(0xCF, false);
+    key(0xD0, false);
+    assert(poll(16) == 1);
+    FhdResumeHostedInput();
+    assert(!poll(16));
+    // A pending chord whose last button stays down past the release window expires,
+    // and that button stays hidden from the game until it is released.
+    physical.buttons = 3;
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld());
+    physical.buttons = 2;
+    assert(!poll(16) && FhdHostedMenuHeld());
+    assert(!poll(1000) && !FhdHostedMenuHeld() && counts().expired == 1);
+    assert(!poll(16) && !(box.gamepad.buttons & menuView));
+    physical.buttons = 0;
+    assert(!poll(16) && !poll(16));
+    // A key-up delivered while the game is covered still releases the remote button.
+    key(0xC5, true);
+    assert(!poll(16) && (box.gamepad.buttons & (1 << 2)));
+    FhdPauseHostedInput();
+    remotePad[0xC5 - remotePadFirst] = true; // as if its key-down landed just before the switch
+    key(0xC5, false);
+    assert(!remotePad[0xC5 - remotePadFirst]);
+    FhdResumeHostedInput();
+    assert(!poll(16) && !(box.gamepad.buttons & (1 << 2)));
+    // Big Picture failed while it covered the game after a chord, and recovery shows the game
+    // again. The pause ends with no held or pending chord, key events delivered meanwhile are
+    // counted but not applied, the next sample is published under a fresh serial although it
+    // is unchanged, and remote buttons reach the game again.
+    physical.buttons = 3;
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld());
+    FhdPauseHostedInput();
+    assert(FhdHostedInputPaused() && !FhdHostedInputForeground() && !FhdHostedMenuHeld());
+    const UINT keysBefore = FhdHostedKeyEvents();
+    key(0xC3, true);
+    key(0xC3, false);
+    assert(FhdHostedKeyEvents() == keysBefore + 2 && !remotePad[0]);
+    physical.buttons = 0;
+    FhdResumeHostedInput();
+    assert(!FhdHostedInputPaused() && FhdHostedInputForeground() && !FhdHostedMenuHeld());
+    const LONG resumedSerial = box.gamepad.serial;
+    LONG resumeSample = -1, resumeAck = -1;
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == 0); // Nothing is published until the shown game is polled.
+    assert(!poll(16) && box.gamepad.serial != resumedSerial && box.gamepad.buttons == SDL_HOST_PAD_CONNECTED);
+    const LONG idleSerial = box.gamepad.serial;
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == idleSerial && resumeAck != idleSerial);
+    box.gamepad.ack = idleSerial; // The game reads the sample.
+    FhdReadHostedResumeSample(&resumeSample, &resumeAck);
+    assert(resumeSample == idleSerial && resumeAck == idleSerial);
+    assert(!poll(16) && box.gamepad.serial == idleSerial);
+    key(0xC3, true);
+    assert(!poll(16) && (box.gamepad.buttons & 1) && FhdHostedKeyEvents() == keysBefore + 3);
+    key(0xC3, false);
+    assert(!poll(16) && !(box.gamepad.buttons & 1));
+    // A new chord after recovery still opens the menu.
+    key(0xCF, true);
+    key(0xD0, true);
+    assert(!poll(16) && !poll(60) && FhdHostedMenuHeld());
+    key(0xCF, false);
+    key(0xD0, false);
+    assert(poll(16) == 1 && FhdHostedInputPaused());
+    FhdResumeHostedInput();
+    assert(!poll(16));
     FhdEndHostedInput();
 
     SdlRumbleMailbox vibration{};

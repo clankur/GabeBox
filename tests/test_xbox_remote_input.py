@@ -93,7 +93,29 @@ class MessageEncodingTests(unittest.TestCase):
     def test_hold_and_repeat(self):
         self.assertEqual(remote.parse_step('hold:RT:1.5'), [(0, b'\x01\xca\x01'), (1.5, b'\x01\xca\x00')])
         self.assertEqual(len(remote.parse_step('DOWN*3')), 6)
+        self.assertEqual(remote.parse_step('chord:menu+VIEW'), [
+            (0, b'\x01\xcf\x01'), (0, b'\x01\xd0\x01'),
+            (remote.CHORD_SECONDS, b'\x01\xcf\x00'), (0, b'\x01\xd0\x00')])
+        self.assertEqual(remote.parse_step('chord:MENU+VIEW:1')[2], (1.0, b'\x01\xcf\x00'))
         self.assertEqual(remote.parse_step('DOWN*3')[4][1], b'\x01\xcc\x01')
+
+    def test_hold_timeline_overlaps_inputs(self):
+        view_down, view_up = b'\x01\xd0\x01', b'\x01\xd0\x00'
+        menu_down, menu_up = b'\x01\xcf\x01', b'\x01\xcf\x00'
+        self.assertEqual(remote.parse_step('hold:VIEW:2+MENU:0.3@1.0'),
+                         [(0, view_down), (1.0, menu_down), (0.3, menu_up), (0.7, view_up)])
+        # Without SECONDS an input is tapped; order of items does not matter.
+        self.assertEqual(remote.parse_step('hold:menu@1+view:2'),
+                         [(0, view_down), (1.0, menu_down), (remote.TAP_SECONDS, menu_up), (0.88, view_up)])
+        # A press is sent after a release due at the same moment, and a later start leaves a leading pause.
+        self.assertEqual(remote.parse_step('hold:A:1@0.5+B:1@1.5'),
+                         [(0.5, b'\x01\xc3\x01'), (1.0, b'\x01\xc3\x00'), (0, b'\x01\xc4\x01'),
+                          (1.0, b'\x01\xc4\x00')])
+        self.assertEqual(len(remote.parse_step('hold:A:1+B@0.5*2')), 8)
+        for step in ('hold:A:1+A@0.5', 'hold:A:1+Q@1', 'hold:A:1+B@-1', 'hold:A:1+B:2@599', 'hold:A+B@x',
+                     'hold:A:1+', 'hold:A@1:2+B'):
+            with self.subTest(step=step), self.assertRaises(ValueError):
+                remote.parse_step(step)
 
     def test_keyboard_uses_scancodes_except_navigation_keys(self):
         self.assertEqual(remote.parse_step('key:enter')[0][1], b'\x02\x1c\x01')
@@ -118,7 +140,7 @@ class MessageEncodingTests(unittest.TestCase):
         self.assertEqual(struct.unpack('>BHII', remote.parse_step('move:960,540')[0][1])[2:], (32785, 32798))
 
     def test_invalid_steps(self):
-        for step in ('Z', 'key:NOPE', 'shot:a.jpg', 'hold:Q:1', 'click:1920,0', 'click:1,2,3', 'scan:100', 'wait:-1',
+        for step in ('chord:MENU', 'chord:MENU+MENU', 'chord:MENU+Q', 'chord:MENU+VIEW:-1', 'Z', 'key:NOPE', 'shot:a.jpg', 'hold:Q:1', 'click:1920,0', 'click:1,2,3', 'scan:100', 'wait:-1',
                      'A*0', 'vk:zz'):
             with self.subTest(step=step), self.assertRaises(ValueError):
                 remote.parse_step(step)
@@ -142,11 +164,18 @@ class MessageEncodingTests(unittest.TestCase):
                 sent.append(path)
 
         log = io.StringIO()
-        remote.run(Client(), ['A', 'wait:2', 'key:ENTER', 'shot:out/a.png'], 0.5, log, sleep=slept.append)
+        times = iter(['2026-11-25T19:19:54.740Z', '2026-11-25T19:19:55.360Z', '2026-11-25T19:19:57.860Z',
+                      '2026-11-25T19:19:58.440Z'])
+        remote.run(Client(), ['A', 'wait:2', 'key:ENTER', 'shot:out/a.png'], 0.5, log, sleep=slept.append,
+                   now=lambda: next(times))
         self.assertEqual(sent, [b'\x01\xc3\x01', b'\x01\xc3\x00', b'\x02\x1c\x01', b'\x02\x1c\x00',
                                 Path('out/a.png')])
         self.assertIn(2, slept)
-        self.assertEqual(len(log.getvalue().splitlines()), 4)
+        # Each step is logged with the UTC time it started; for wait: that is when the pause began.
+        self.assertEqual(log.getvalue().splitlines(), ['2026-11-25T19:19:54.740Z A', '2026-11-25T19:19:55.360Z wait:2',
+                                                       '2026-11-25T19:19:57.860Z key:ENTER',
+                                                       '2026-11-25T19:19:58.440Z shot:out/a.png'])
+        self.assertRegex(remote.utc_now(), r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$')
 
 
 class HandshakeTests(unittest.TestCase):
@@ -226,6 +255,27 @@ class HandshakeTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_wait_is_stamped_before_its_pause(self):
+        events = []
+
+        class Client:
+            def send(self, message):
+                events.append(('send', message))
+
+        clock = iter(range(10))
+        remote.run(Client(), ['wait:3', 'A'], 0, io.StringIO(), sleep=lambda seconds: events.append(('sleep', seconds)),
+                   now=lambda: events.append(('now', None)) or str(next(clock)))
+        self.assertEqual(events[:2], [('now', None), ('sleep', 3.0)])
+
+    def test_uniform_screenshot_is_noted_in_the_step_log(self):
+        class Client:
+            def screenshot(self, path):
+                return ['uniform-color=#ffffffff']
+
+        log = io.StringIO()
+        remote.run(Client(), ['shot:a.png'], 0, log, sleep=lambda seconds: None, now=lambda: 'T')
+        self.assertEqual(log.getvalue(), 'T shot:a.png uniform-color=#ffffffff\n')
+
     def test_dry_run_prints_messages(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

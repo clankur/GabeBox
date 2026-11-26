@@ -1,0 +1,8 @@
+26655341
+SlayTheSpire2.exe
+opengl3
+godot
+
+
+loader-trace
+accessibility=disabled

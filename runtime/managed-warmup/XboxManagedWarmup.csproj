@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- netstandard2.1 loads in every CoreCLR from .NET Core 3.0 on, including the
+         runtimes that Godot .NET, MonoGame and other .NET titles bundle. -->
+    <!-- A desktop check may build the same source for a framework it has installed. -->
+    <WarmupFramework Condition="'$(WarmupFramework)' == ''">netstandard2.1</WarmupFramework>
+    <TargetFramework>$(WarmupFramework)</TargetFramework>
+    <AssemblyName>XboxManagedWarmup</AssemblyName>
+    <RootNamespace>XboxManagedWarmup</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>9.0</LangVersion>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="check/**" />
+  </ItemGroup>
+</Project>

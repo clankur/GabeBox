@@ -30,7 +30,7 @@ from probe.catalog import (
 )
 from probe.runner import report_fields, run_case
 from tools.artifacts import SDL_LIMIT, SDL_TRIALS, load_sdl_artifact, pe_summary
-from tools.device_portal import PACKAGE_API, DevicePortal, PortalError
+from tools.device_portal import PACKAGE_API, CertificateChanged, DevicePortal, PortalError, utc_text
 
 
 PROBE_LIFETIME_NAME = PROBE_NAME + '.Lifetime'
@@ -40,6 +40,7 @@ NATIVE_MOUSE_REPORTS = {NATIVE_MOUSE_CAPTURE_REPORT, NATIVE_MOUSE_DEVICE_REPORT,
 STEAMAPPS_PATH = r'\LocalState\SteamLibrary\steamapps'
 DEVELOPER_STEAMAPPS_PATH = r'\SteamLibrary\steamapps'
 LIFETIME_REPORT = 'lifetime-report.txt'
+OBSERVE_LIMIT = 3600
 PROTOCOL_REPORT = 'protocol-return.txt'
 SETTING_NAMES = ('XBOX_PORTAL_URL', 'XBOX_PORTAL_USERNAME', 'XBOX_PORTAL_CERT_SHA256',
                  'XBOX_PORTAL_PASSWORD')
@@ -162,10 +163,40 @@ SDL_INPUT_GAMEPAD_OFFSET = SDL_INPUT_HEADER.size + 5 * 4 + 1920 * 1080 * 4
 SDL_INPUT_KEYBOARD_COUNTERS = Struct('<3I')
 # The gamepad snapshot ends at the first keyboard word (available).
 SDL_INPUT_KEYBOARD_COUNTERS_OFFSET = SDL_INPUT_GAMEPAD_OFFSET + SDL_INPUT_GAMEPAD.size
-SDL_INPUT_PANEL_MARKERS = (b'panel_input=ready', b'menu_chord=held', b'menu_request=ready')
 SDL_INPUT_RUMBLE = Struct('<4IQ')
 SDL_INPUT_RUMBLE_EVENTS = ('presenter_attached', 'nonzero_requested', 'nonzero_published',
                            'nonzero_applied', 'stop_applied', 'device_error', 'bridge_attached')
+
+# The presenter labels each held chord with its source, pad (Windows.Gaming.Input) or keys
+# (VK_GAMEPAD events, as Device Portal remote input sends), and records rejected and expired chords.
+# Older presenters write a bare menu_chord=held.
+SDL_INPUT_PANEL_MARKERS = {
+    'panel_ready': (b'panel_input=ready',),
+    'chord_held': (b'menu_chord=held', b'menu_chord=held source=pad', b'menu_chord=held source=keys'),
+    'chord_from_keys': (b'menu_chord=held source=keys',),
+    'chord_ignored': (b'menu_chord=ignored reason=unpaired',),
+    'chord_expired': (b'menu_chord=expired',),
+    'menu_request': (b'menu_request=ready',),
+    # The game shown again: hosted input left its overlay pause, keyboard focus went back to
+    # the account host (or the XAML control declined it), and a key event arrived afterwards.
+    'input_resumed': (b'panel_input=resumed',),
+    'focus_restored': (b'panel_focus=restored',),
+    'focus_declined': (b'panel_focus=declined',),
+    'keys_after_show': (b'panel_keys=after-show',),
+    # Win32 keyboard focus given back to the view's window when the game was shown, or while it
+    # was shown and no window held focus, and attempts that did not take.
+    'window_focus_taken': (b'panel_window_focus=taken from=other', b'panel_window_focus=taken from=none'),
+    'window_focus_retaken': (b'panel_window_focus=retaken from=none',),
+    'window_focus_declined': (b'panel_window_focus=declined from=other', b'panel_window_focus=declined from=none'),
+}
+SDL_INPUT_PANEL_LINES = frozenset(line for lines in SDL_INPUT_PANEL_MARKERS.values() for line in lines)
+# fhd-panel-stats.txt: the game panel's composition totals, rewritten in place by the presenter.
+# Hides split by cause (the Steam shell over the game, the panel collapsed or without size, the
+# view hidden or inactive), shows, reorders among the page's layers, and presents of a producer
+# frame that was already presented. clankur/GabeBox#89 tracks a white flicker over a game.
+SDL_INPUT_PANEL_STATS = ('panel_hidden', 'panel_hidden_shell', 'panel_hidden_panel', 'panel_hidden_window',
+                         'panel_uncovered', 'panel_reordered', 'panel_repeat_presents', 'panel_presented')
+SDL_INPUT_PANEL_STATS_LIMIT = 1024
 
 
 def host_rumble_snapshot(raw):
@@ -224,9 +255,22 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         if raw is None or len(raw) > 4096:
             return None
         complete, _, _ = raw.rpartition(b'\n')
-        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_MARKERS)
+        return tuple(line for line in complete.splitlines() if line in SDL_INPUT_PANEL_LINES)
+
+    def panel_stats():
+        raw = blob('fhd-panel-stats.txt', SDL_INPUT_PANEL_STATS_LIMIT)
+        if raw is None or len(raw) > SDL_INPUT_PANEL_STATS_LIMIT:
+            return None
+        values = {}
+        for line in raw.split(b'\r\n'):
+            name, _, value = line.partition(b'=')
+            if name.decode('ascii', 'replace') in SDL_INPUT_PANEL_STATS and re.fullmatch(rb'[0-9]{1,16}', value):
+                values[name.decode()] = int(value)
+        # A rewrite in progress can be read part way; only a complete set is reported.
+        return values if len(values) == len(SDL_INPUT_PANEL_STATS) else None
 
     panel_before = panel_trace() if args.panel_menu else None
+    stats_before = panel_stats() if args.panel_menu else None
     samples = []
     if args.seconds and progress:
         progress('sampling-host-input')
@@ -260,6 +304,7 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
         pause(min(0.5, args.seconds - elapsed))
 
     panel_after = panel_trace() if args.panel_menu else None
+    stats_after = panel_stats() if args.panel_menu else None
     rumble = blob(mailbox + '.rumble', SDL_INPUT_RUMBLE.size) if args.rumble else None
     last = launch_report()
     if (not matching_probe(last, args.run_id, args.app_id)
@@ -275,11 +320,19 @@ def inspect_host_input(args, portal, app, *, clock=time.monotonic, pause=time.sl
     if args.panel_menu:
         menu = {'scope': 'package', 'state': 'unavailable'}
         if panel_after is not None:
-            names = ('panel_ready', 'chord_held', 'menu_request')
-            menu.update(state='observed', counts=dict(zip(names, map(panel_after.count, SDL_INPUT_PANEL_MARKERS))))
+            def count(trace):
+                return {name: sum(map(trace.count, lines)) for name, lines in SDL_INPUT_PANEL_MARKERS.items()}
+            menu.update(state='observed', counts=count(panel_after))
             if panel_before is not None and args.seconds and panel_after[:len(panel_before)] == panel_before:
-                added = panel_after[len(panel_before):]
-                menu['added'] = dict(zip(names, map(added.count, SDL_INPUT_PANEL_MARKERS)))
+                menu['added'] = count(panel_after[len(panel_before):])
+        if stats_after is not None:
+            menu['composition'] = {'state': 'observed', 'totals': stats_after}
+            if (stats_before is not None and args.seconds
+                    and all(stats_after[name] >= stats_before[name] for name in SDL_INPUT_PANEL_STATS)):
+                menu['composition']['added'] = {name: stats_after[name] - stats_before[name]
+                                                for name in SDL_INPUT_PANEL_STATS}
+        else:
+            menu['composition'] = {'state': 'unavailable'}
         result['panel_menu'] = menu
     if args.rumble:
         result['rumble'] = host_rumble_snapshot(rumble)
@@ -691,6 +744,32 @@ def stop_probe(portal, app, allow_inactive=False):
         raise
 
 
+def package_processes(portal, app):
+    _, raw = portal.request('GET', '/api/resourcemanager/processes', read_limit=4 * 1024 * 1024)
+    return sorted((item['ImageName'], item['ProcessId']) for item in json.loads(raw)['Processes']
+                  if item.get('PackageFullName') == app['PackageFullName'])
+
+
+def relaunch_package(portal, app, timeout, *, clock=time.monotonic, pause=time.sleep):
+    """Stop every process of an installed package, wait until none remain, then activate it again."""
+    before = package_processes(portal, app)
+    stop_probe(portal, app, allow_inactive=True)
+    started = clock()
+    while True:
+        remaining = package_processes(portal, app)
+        if not remaining:
+            break
+        if clock() - started >= timeout:
+            names = ', '.join(sorted({image for image, _ in remaining}))
+            raise ValueError(f'{app["PackageFullName"]} still has running processes after {timeout}s ({names}). '
+                             'It was not activated again.')
+        pause(0.5)
+    stopped_seconds = round(clock() - started, 3)
+    activate_probe(portal, app)
+    return {'package': app['PackageFullName'], 'stopped_processes': [image for image, _ in before],
+            'stop_seconds': stopped_seconds, 'activated_utc': utc_text(time.time())}
+
+
 def collect_probe(portal, key, version, manual, timeout, restart=False, json_output=False):
     case = CASES[key]
     app = find_installed_probe(portal, case.package, version)
@@ -800,6 +879,82 @@ def request_protocol_return(portal, control, run):
     query = local_state_query(control, extract='false')
     portal.request('POST', f'/api/filesystem/apps/file?{query}', body,
                    {'Content-Type': f'multipart/form-data; boundary={boundary}'})
+
+
+STEAM_CLOUD_SYNC_REPORT = 'steam-cloud-sync-report.txt'
+CLOUD_CHOICES = ('cloud', 'local')
+CLOUD_CHOICE_HOURS = 24
+# The host ignores and removes a choice whose expiry is more than 7 days away.
+MAX_CLOUD_CHOICE_HOURS = 72
+STEAM_ACCOUNT_FOLDER = re.compile(r'[1-9][0-9]{0,9}')
+
+
+def cloud_resolve_line(keep, account, expires):
+    """The choice line the host accepts: the side, the account's id32 and a UTC expiry."""
+    if keep not in CLOUD_CHOICES or not 0 < account <= 0xFFFFFFFF or not 0 < expires < 253402300800:
+        raise ValueError('Keep cloud or local for a Steam account id32 with a future expiry.')
+    return f'{keep} account={account} expires={time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires))}\n'
+
+
+def cloud_resolve_upload(app_id, keep, account, expires, boundary):
+    """Build the one-shot conflict choice the next launch of app_id may apply once."""
+    if not 0 < app_id <= 0xFFFFFFFF or not re.fullmatch(r'[0-9a-f]{32}', boundary):
+        raise ValueError('Use a positive AppID.')
+    line = cloud_resolve_line(keep, account, expires)
+    filename = f'steam-cloud-resolve-{app_id}.txt'
+    body = (f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{filename}"; filename="{filename}"\r\n'
+            # The file ends in a newline: the CRLF before the boundary belongs to the delimiter,
+            # and read_probe_report treats a file without a final newline as still being written.
+            f'Content-Type: text/plain\r\n\r\n{line}\r\n'
+            f'--{boundary}--\r\n').encode()
+    return filename, body, line
+
+
+def steam_accounts(portal, app):
+    """Steam account id32 folders under LocalState\\SteamUserData."""
+    query = local_state_query(app, path=r'\LocalState\SteamUserData')
+    try:
+        _, raw = portal.request('GET', f'/api/filesystem/apps/files?{query}')
+    except PortalError as error:
+        if error.status not in (404, 409):
+            raise
+        return []
+    accounts = []
+    for item in json.loads(raw).get('Items', []):
+        name = item.get('Name')
+        if (isinstance(name, str) and STEAM_ACCOUNT_FOLDER.fullmatch(name) and int(name) <= 0xFFFFFFFF
+                and item.get('Type', 16) == 16):
+            accounts.append(int(name))
+    return sorted(accounts)
+
+
+def cloud_resolve_account(portal, app, account):
+    """The account to bind the choice to: the given id32 or the console's only Steam account."""
+    accounts = steam_accounts(portal, app)
+    if account is not None:
+        if account not in accounts:
+            raise ValueError(f'LocalState\\SteamUserData has no folder for account {account}.')
+        return account
+    if len(accounts) != 1:
+        found = ', '.join(map(str, accounts)) or 'none'
+        raise ValueError(f'Pass --account with the Steam account id32 (LocalState\\SteamUserData has: {found}).')
+    return accounts[0]
+
+
+def write_cloud_resolve(portal, app, app_id, keep, account=None, hours=CLOUD_CHOICE_HOURS):
+    if not 0 < hours <= MAX_CLOUD_CHOICE_HOURS:
+        raise ValueError(f'Use --hours from 1 to {MAX_CLOUD_CHOICE_HOURS}.')
+    account = cloud_resolve_account(portal, app, account)
+    boundary = uuid4().hex
+    filename, body, line = cloud_resolve_upload(app_id, keep, account, int(time.time()) + hours * 3600, boundary)
+    query = local_state_query(app, extract='false')
+    portal.request('POST', f'/api/filesystem/apps/file?{query}', body,
+                   {'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    if read_probe_report(portal, app, filename) != line:
+        raise ValueError(f'{filename} did not read back as written.')
+    print(f'{filename}: {line.strip()}. A launch of {app_id} by account {account} before the expiry applies it '
+          'once to a Steam Cloud conflict; a launch without a conflict, or any launch after the expiry, removes it.')
 
 
 def run_lifetime(portal, version, dwell, timeout, portal_return):
@@ -919,6 +1074,9 @@ def main():
                                 const='steam-library-migration.json', help='read the Steam library migration result')
     report_variant.add_argument('--steam-cloud', dest='report_file', action='store_const',
                                 const='steam-cloud-report.txt', help='read the Steam Cloud restore checkpoint')
+    report_variant.add_argument('--steam-cloud-sync', dest='report_file', action='store_const',
+                                const=STEAM_CLOUD_SYNC_REPORT,
+                                help='read the Win32 trial launch download and exit upload of Steam Cloud files')
     report_variant.add_argument('--sdl-startup', dest='report_file', action='store_const',
                                 const='sdl-startup', help='read the SDL startup checkpoints for the current launch')
     report_variant.add_argument('--slay-console', dest='report_file', action='store_const',
@@ -944,8 +1102,10 @@ def main():
     observation.add_argument('--app-id', type=int, help='wait for a new launch of this Steam AppID')
     observe_command.add_argument('--run-id', type=int, help='collect an existing game launch with this steam_launch_run_id')
     observe_command.add_argument('--image-name', help='optionally observe this game process by executable basename')
-    observe_command.add_argument('--timeout', type=int, default=150, help='observation deadline in seconds')
-    observe_command.add_argument('--frame-seconds', type=int, default=30, help='seconds to observe after the first hosted frame')
+    observe_command.add_argument('--timeout', type=int, default=150,
+                                 help=f'observation deadline in seconds (1–{OBSERVE_LIMIT}, default 150)')
+    observe_command.add_argument('--frame-seconds', type=int, default=30,
+                                 help=f'seconds to observe after the first hosted frame (0–{OBSERVE_LIMIT}, default 30)')
     observe_command.add_argument('--require-checkpoint', action='append', default=[], metavar='[SECONDS:]TRACE',
                                  help='require this loader record or prefix in sequence, optionally with its own deadline')
     observe_command.add_argument('--fail-on-checkpoint', action='append', default=[], metavar='TRACE',
@@ -982,6 +1142,19 @@ def main():
     game.add_argument('--export-inputs', type=Path, help='save the build-matched profile files to a new local directory')
     game.add_argument('--fingerprint-input', help='hash one installed game-relative EXE or DLL without saving its contents')
     game.add_argument('--expected-build', help='required exact Steam build ID for --fingerprint-input')
+    resolve = commands.add_parser('cloud-resolve',
+                                  help='override which side wins a Steam Cloud conflict at the next Win32 trial launch (default: cloud)')
+    resolve.add_argument('--version', required=True, help='installed Steam package version')
+    resolve.add_argument('--app-id', type=int, required=True, help='Steam AppID')
+    resolve.add_argument('--keep', required=True, choices=CLOUD_CHOICES,
+                         help='cloud downloads the cloud files, local uploads this console\'s files; '
+                              'local files are backed up under LocalState\\SteamCloudSync first')
+    resolve.add_argument('--account', type=int,
+                         help='Steam account id32, the folder name under LocalState\\SteamUserData '
+                              '(default: the only one there)')
+    resolve.add_argument('--hours', type=int, default=CLOUD_CHOICE_HOURS,
+                         help=f'hours until the choice expires (default {CLOUD_CHOICE_HOURS}, '
+                              f'maximum {MAX_CLOUD_CHOICE_HOURS})')
     sdl = commands.add_parser('sdl-trial', help='test a version-matched SDL2 workflow artifact and restore the original')
     sdl.add_argument('--version', required=True, help='installed Steam diagnostic package version')
     sdl.add_argument('--app-id', required=True, type=int, choices=tuple(SDL_TRIALS))
@@ -998,6 +1171,37 @@ def main():
     lifetime.add_argument('--portal-return', action='store_true',
                           help='reproduce return through Device Portal’s app launcher')
     lifetime.add_argument('--dwell', type=int, default=15, help='seconds to keep the control foreground')
+    relaunch = commands.add_parser(
+        'relaunch', help='stop the installed Steam Core package and its game, then activate it again',
+        description='Stop the installed Steam Core package and any game it started, wait until none of its '
+                    'processes remain, then activate it again. This restarts Steam only. A configured '
+                    '--play-installed-app-id Play runs once per installed package version and is not repeated; '
+                    'select Play on the console or install a new package version to launch the game again.')
+    relaunch.add_argument('--version', help='require a specific installed package version')
+    relaunch.add_argument('--stop-timeout', type=int, default=30, help='seconds to wait for every package process to exit')
+    sampler = commands.add_parser('sample-processes',
+                                  help='record memory and CPU of the Steam Core package and named processes without controlling the Xbox')
+    sampler.add_argument('--version', help='require a specific installed package version')
+    sampler.add_argument('--image-name', action='append', default=[], metavar='EXE',
+                         help='also sample this executable basename, for example a game outside the package')
+    sampler.add_argument('--seconds', type=int, required=True, help='sampling duration (1–7200)')
+    sampler.add_argument('--interval', type=float, default=1.0, help='seconds between samples (0.5–60, default 1)')
+    sampler.add_argument('--output', type=Path, required=True, help='new JSON Lines file for samples and process events')
+    shots = commands.add_parser('screenshots', help='save Device Portal screenshots on a schedule without controlling the Xbox')
+    shots.add_argument('--output', type=Path, required=True, help='new directory for PNG files and screenshots.jsonl')
+    shots.add_argument('--delay', type=float, default=0, help='seconds before the first screenshot (default 0)')
+    shots.add_argument('--interval', type=float, default=30, help='seconds between screenshots (default 30)')
+    shots.add_argument('--count', type=int, default=1, help='number of screenshots (1–240, default 1)')
+    list_command = commands.add_parser('list-files', help='list a Steam Core package folder such as \\TempState')
+    list_command.add_argument('folder', help='package folder beginning with \\LocalState, \\TempState, \\LocalCache, \\RoamingState or \\AC')
+    list_command.add_argument('--version', help='require a specific installed package version')
+    list_command.add_argument('--recursive', action='store_true', help='include subfolders up to six levels deep')
+    list_command.add_argument('--since-utc', help='keep entries created or modified at or after this UTC time')
+    get_command = commands.add_parser('get-file', help='copy one file from a Steam Core package folder')
+    get_command.add_argument('folder', help='package folder beginning with \\LocalState, \\TempState, \\LocalCache, \\RoamingState or \\AC')
+    get_command.add_argument('name', help='file name within the folder')
+    get_command.add_argument('--version', help='require a specific installed package version')
+    get_command.add_argument('--output', type=Path, required=True, help='new local file')
     for command in (deploy, probe, lifetime):
         command.add_argument('--timeout', type=int, default=20, help='seconds to wait per checkpoint')
     for command in (deploy, probe):
@@ -1039,8 +1243,10 @@ def main():
             observe_command.error('--image-name requires --app-id and an executable basename')
         if args.bootstrap_frame and not (args.output and args.app_id):
             observe_command.error('--bootstrap-frame requires --output and --app-id')
-        if not 1 <= args.timeout <= 900 or not 0 <= args.frame_seconds <= 900:
-            observe_command.error('Use a 1–900 second timeout and 0–900 seconds after the first frame')
+        # The bound only catches typos. The poll loop holds no per-second state, so an hour-long
+        # gameplay session can be observed in one run.
+        if not 1 <= args.timeout <= OBSERVE_LIMIT or not 0 <= args.frame_seconds <= OBSERVE_LIMIT:
+            observe_command.error(f'Use a 1–{OBSERVE_LIMIT} second timeout and 0–{OBSERVE_LIMIT} seconds after the first frame')
         if (args.fail_on_checkpoint or args.watch_checkpoint or args.checkpoint_timeout is not None) and not args.require_checkpoint:
             observe_command.error('--fail-on-checkpoint, --watch-checkpoint and --checkpoint-timeout require --require-checkpoint')
         args.checkpoint_timeouts = []
@@ -1076,6 +1282,29 @@ def main():
 
     if args.command == 'sdl-trial' and not 1 <= args.frame_timeout <= 120:
         sdl.error('--frame-timeout must be between 1 and 120 seconds')
+    if args.command == 'relaunch' and not 1 <= args.stop_timeout <= 300:
+        relaunch.error('--stop-timeout must be between 1 and 300 seconds')
+    if args.command == 'sample-processes':
+        if not 1 <= args.seconds <= 7200 or not 0.5 <= args.interval <= 60:
+            sampler.error('Use 1–7200 seconds of sampling and an interval of 0.5–60 seconds')
+        if any(not re.fullmatch(r'[a-z0-9_. -]{1,100}\.exe', name, re.I) for name in args.image_name):
+            sampler.error('--image-name takes an executable basename')
+    if args.command == 'screenshots' and not (1 <= args.count <= 240 and 0 <= args.delay <= 3600
+                                              and 1 <= args.interval <= 3600):
+        shots.error('Use 1–240 screenshots, a 0–3600 second delay and a 1–3600 second interval')
+    if args.command in ('sample-processes', 'screenshots', 'get-file'):
+        if args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir():
+            parser.error('--output must name a new path under an existing directory')
+    if args.command in ('list-files', 'get-file'):
+        from tools.xbox_capture import file_name, package_folder, utc_filetime
+
+        try:
+            package_folder(args.folder)
+            if args.command == 'get-file':
+                file_name(args.name)
+            args.since = utc_filetime(args.since_utc) if args.command == 'list-files' and args.since_utc else None
+        except ValueError as error:
+            (list_command if args.command == 'list-files' else get_command).error(str(error))
 
     settings = load_settings(args.env_file)
     fingerprint = settings.get('XBOX_PORTAL_CERT_SHA256', '').lower().replace(':', '')
@@ -1112,14 +1341,39 @@ def main():
         if not args.portal_return and args.dwell >= 120:
             lifetime.error('protocol return requires --dwell below the control app’s 120-second request window')
 
-    if not hmac.compare_digest(portal.request(), fingerprint):
-        raise ValueError('Xbox portal certificate does not match XBOX_PORTAL_CERT_SHA256.')
+    observed = portal.request()
+    if not hmac.compare_digest(observed, fingerprint):
+        raise CertificateChanged(observed, fingerprint)
     if username:
         if not password:
             if not sys.stdin.isatty():
                 raise ValueError('Set XBOX_PORTAL_PASSWORD or run this command in a terminal.')
             password = getpass.getpass('Xbox Device Portal password: ')
         portal.authorization = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode('ascii')
+    if args.command in ('relaunch', 'sample-processes', 'screenshots', 'list-files', 'get-file'):
+        from tools import xbox_capture
+
+        def progress(stage):
+            print(stage, file=sys.stderr, flush=True)
+
+        if args.command == 'screenshots':
+            result = xbox_capture.capture_screenshots(portal, args.output, args.delay, args.interval, args.count,
+                                                      progress=progress)
+        else:
+            app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+            if args.command == 'relaunch':
+                result = relaunch_package(portal, app, args.stop_timeout)
+            elif args.command == 'sample-processes':
+                images = list(dict.fromkeys([*args.image_name, *xbox_capture.CRASH_IMAGES]))
+                progress(f'sampling {app["PackageFullName"]} and {", ".join(images)}')
+                result = xbox_capture.sample_processes(portal, app['PackageFullName'], images, args.seconds,
+                                                       args.interval, args.output, progress=progress)
+            elif args.command == 'list-files':
+                result = xbox_capture.list_files(portal, app, args.folder, recursive=args.recursive, since=args.since)
+            else:
+                result = xbox_capture.get_file(portal, app, args.folder, args.name, args.output)
+        print(json.dumps(result, indent=2))
+        return
     if args.command == 'lifetime':
         run_lifetime(portal, args.version, args.dwell, args.timeout, args.portal_return)
         return
@@ -1234,6 +1488,10 @@ def main():
         app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
         inspect_game(portal, app, args.app_id, args.executable, args.source_profile, args.export_inputs,
                      fingerprint_input=args.fingerprint_input, expected_build=args.expected_build)
+        return
+    if args.command == 'cloud-resolve':
+        app = find_installed_probe(portal, PROBE_STEAM_CORE_NAME, args.version)
+        write_cloud_resolve(portal, app, args.app_id, args.keep, args.account, args.hours)
         return
     if args.command == 'sdl-trial':
         trial_sdl(portal, args)

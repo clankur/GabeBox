@@ -7,3 +7,5 @@ EXPORTS
     D3DReflect=XboxD3DReflect @5
     XboxGetOutputMonitorRect @6
     D3D11CreateDeviceAndSwapChain=XboxD3D11CreateDeviceAndSwapChain @7
+    DCompositionCreateDevice=XboxDCompositionCreateDevice @8
+    XboxInstallGpuMemoryBudget @9
