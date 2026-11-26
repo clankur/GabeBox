@@ -8,6 +8,7 @@
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
+#include "d3d12-pipeline-replay.h"
 
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
@@ -744,6 +745,24 @@ static BOOL SameAdapter(LUID left, LUID right) {
     return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
 }
 
+static BOOL PipelineReplayEnabled(void) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_PIPELINE_REPLAY", enabled, ARRAYSIZE(enabled)) == 1 &&
+        enabled[0] == L'1';
+}
+
+// Records the title's pipelines and precompiles them on the next run (d3d12-pipeline-replay.h).
+static void InstallPipelineReplay(void *device) {
+    if (!device || !PipelineReplayEnabled()) return;
+    WCHAR path[1024];
+    if (!XboxPipelineReplayDefaultPath(path, ARRAYSIZE(path))) {
+        const char line[] = "asset pso-replay open status=no-path\r\n";
+        AppendTrace(line, sizeof(line) - 1);
+        return;
+    }
+    XboxPipelineReplayInstall((ID3D12Device *)device, path, NULL, TRUE, AppendTrace);
+}
+
 static BOOL DefaultD3D12AdapterEnabled(void) {
     WCHAR enabled[2];
     return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_DEFAULT_ADAPTER", enabled, ARRAYSIZE(enabled)) == 1 &&
@@ -776,6 +795,7 @@ void WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup) {
         char *out = Hex(Text(line, "asset d3d12-crt-entry result=0x"), (DWORD)result, 8);
         out = Text(out, "\r\n");
         AppendTrace(line, (DWORD)(out - line));
+        if (SUCCEEDED(result)) InstallPipelineReplay(startupDevice);
     }
     SetLastError(previous);
 }
@@ -812,6 +832,7 @@ static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, cons
     SetLastError(previous);
     const HRESULT result = create(useDefault ? NULL : adapter, level, iid, device);
     const DWORD error = GetLastError();
+    if (SUCCEEDED(result) && iid && device && *device) InstallPipelineReplay(*device);
     if (InterlockedIncrement(&deviceEvents) <= 16) {
         char line[170];
         char *out = Text(line, adapter && !useDefault ? "asset d3d12-create adapter=explicit level=0x" :
