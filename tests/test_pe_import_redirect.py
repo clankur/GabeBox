@@ -183,6 +183,30 @@ class PeImportRedirectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlay"):
             tool["patch_recipe"](image, *parts, overlays=[(retained - 1, b"too long")])
 
+    def test_recipe_overlay_merge_retunes_an_entry_and_adds_new_ones(self):
+        image = bytes(fixture())
+        rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
+        parts = tool["PeImage"](image).redirect(rules)
+        header, padding, section, retained = parts
+        first = len(header)
+        recipe = tool["patch_recipe"](image, *parts, overlays=[(first, b"first"), (first + 6, b"second")])
+        merged = tool["merge_recipe_overlays"](recipe, image, [(first, b"FIRST"), (first + 20, b"third")])
+        tool["validate_patch_recipe"](merged)
+        metadata = tool["OVERLAY_PATCH_HEADER"]
+        entry = tool["OVERLAY_ENTRY"]
+        self.assertEqual(metadata.unpack_from(merged)[5], 3)
+        cursor = metadata.size + len(header) + len(padding) + len(section)
+        self.assertEqual(merged[:cursor], metadata.pack(*metadata.unpack_from(recipe)[:5], 3,
+                                                        hashlib.sha256(image).digest()) + recipe[metadata.size:cursor])
+        self.assertEqual(merged[cursor:], entry.pack(first, 5) + b"FIRST" + entry.pack(first + 6, 6) + b"second"
+                         + entry.pack(first + 20, 5) + b"third")
+        with self.assertRaisesRegex(ValueError, "length"):
+            tool["merge_recipe_overlays"](recipe, image, [(first, b"longer")])
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            tool["merge_recipe_overlays"](recipe, image, [(first + 2, b"xx")])
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            tool["merge_recipe_overlays"](recipe, image[:-1] + b"\1", [(first + 20, b"third")])
+
     def test_dwarf_omission_compacts_only_the_opt_in_mapped_section_table(self):
         image = bytes(dwarf_fixture())
         rules = tool["parse_rules"]({"ole32.dll": {"GetErrorInfo": "oleaut32.dll"}})
