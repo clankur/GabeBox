@@ -186,6 +186,36 @@ Trace lines:
 
 `inspect-loader` lists all of these under `events.residency`.
 
+### Check that Mesa's blocking fence waits block
+
+Mesa's d3d12 driver recycles a batch, including its shader-visible descriptor heaps, once that batch's fence has passed. `d3d12_reset_batch` waits through `d3d12_fence_finish`. For an infinite timeout, that calls `ID3D12Fence::SetEventOnCompletion(value, NULL)`, trusts the returned `HRESULT`, and then clears the view and sampler heaps. A `NULL` event means the call blocks until the fence reaches `value`. If the call returned success early on Xbox, Mesa would rewrite descriptors the GPU is still reading. That is one explanation for the Slay the Spire 2 white frames in [#89](https://github.com/clankur/GabeBox/issues/89). [Mesa fence finish](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_fence.cpp#L153-L173) · [Mesa batch reset](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_batch.cpp#L165-L214) · [SetEventOnCompletion](https://learn.microsoft.com/windows/win32/api/d3d12/nf-d3d12-id3d12fence-seteventoncompletion)
+
+To check every such wait, put `xbox-d3d12-fence-trace.txt` in the package root. Without the file, nothing is hooked and no line is written. Once `d3d12.dll` is loaded, `XboxWin32LoaderTrace.dll` creates its own device, a plain fence, a shared fence and a direct queue. Through them it wraps the shared method tables: `ID3D12Fence::SetEventOnCompletion` (slot 9) and `ID3D12CommandQueue::ExecuteCommandLists` (slot 10). The shared fence matters because Mesa creates its fence with `D3D12_FENCE_FLAG_SHARED`. The adapter also wraps `ID3D12Device::CreateFence` (36) and `CreateCommandQueue` (8), so that a fence or queue created later with a method table of its own gets patched too. Mesa's fence and queue may exist before the hooks; the shared tables cover them.
+
+| File | Behavior |
+| --- | --- |
+| absent | No hooks. |
+| empty, `trace` or `mode=trace` | Each `SetEventOnCompletion(value, NULL)` is timed. After it returns success, `GetCompletedValue()` is compared with `value`. Calls with an event, and calls that fail, are passed through and counted. |
+| `wait` or `mode=wait` | Trace, plus a bounded mitigation. After an early return, the hook polls `GetCompletedValue()` until it reaches `value`, so Mesa cannot reset the batch ahead of the GPU. It spins, then yields, then sleeps 1 ms at a time, and gives up after 2 s. |
+| `off` or `mode=off` | No hooks. |
+
+Any other content is treated as `trace`, and the start line shows `override=invalid`. Every hook returns the driver's `HRESULT` and last-error value unchanged and passes the caller's arguments through. The create hooks take and release one `QueryInterface` reference, so the new object's reference count is unchanged. A device removal makes `GetCompletedValue` return `UINT64_MAX`, which is never counted as early.
+
+Trace lines (UTC stamps are to the millisecond, so they line up with `white_first_utc` and the flash probe):
+- At start: `asset d3d12-fence mode=trace|wait|off source=package-file[ override=invalid] hooks=pending|off|thread-failed`.
+- After the hooks install: `asset d3d12-fence install result=… tables=… mode=… utc=…`. A typical `tables` value is 3: one table each for the fence, the queue and the device.
+- `asset d3d12-fence selftest result=… wait_us=… utc=…`. This signals 1 from the adapter's own queue, then waits for 1 with the original method and a `NULL` event. That wait is not counted. `0x00000001` means the wait returned before the fence reached 1. An install line with no self-test line means that wait never returned.
+- For each second with at least one call: `asset d3d12-fence null_waits=… early=… max_wait_us=… exec=… [event_waits=…] [settled=… max_settle_us=…] [timeouts=…] [failed=…] utc=…`. Here `exec` counts `ExecuteCommandLists` calls on every queue in the process, and Mesa makes one per batch.
+- Once: `asset d3d12-fence first-early mode=… value=… completed=… wait_us=… utc=…`.
+- For each of the first 16 `wait`-mode timeouts: `asset d3d12-fence timeout mode=wait value=… completed=… wait_us=… settle_us=… settle_completed=… utc=…`.
+- For each of the first 16 later creations: `asset d3d12-fence create kind=fence|queue detail=… result=… table=new|known utc=…`. `detail` holds the fence flags or the queue type.
+- Every 60 s: `asset d3d12-fence-total mode=… t_s=… null_waits=… early=… max_wait_us=… exec=… …` with the totals.
+
+`inspect-loader` lists these lines under `events.d3d12-fence`. It also sums them under `loader_trace.d3d12_fence`, with a `verdict`:
+- `early-returns` supports the in-flight heap reset.
+- `no-early-returns` refutes it for the waits the hooks saw.
+- `no-null-waits` with batches means the hooks did not reach the fence Mesa waits on.
+
 ### Warm a CoreCLR title's managed code before first use
 
 An IL-only game assembly is JIT-compiled the first time each method runs, on every launch. The first card play, attack or save then compiles new code on the game thread. Add `steam-win32-managed-warmup-APPID.txt` to the trial profile to select [`runtime/managed-warmup`](../runtime/managed-warmup). The component is packaged as `XboxManagedWarmup.dll`. It prepares the listed assemblies' methods on a below-normal-priority background thread with `RuntimeHelpers.PrepareMethod`. The publisher's files are not changed. [Slay the Spire 2 plan](../profiles/2868840/26655341/steam-win32-managed-warmup-2868840.txt)

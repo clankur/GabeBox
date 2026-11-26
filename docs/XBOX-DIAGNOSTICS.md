@@ -275,6 +275,8 @@ The loader trace also carries measurement records with their own exact formats. 
 
 The Steam delay shift tests write general `asset steam-relay=worker-delay|worker-start` and `asset steam-init=…` records, which the child exit report also keeps. `inspect-loader` summarizes them under `steam_shift` ([Steam title overrides](GAME-LAUNCH.md#override-steamworks-calls-for-one-title)).
 
+With `xbox-d3d12-fence-trace.txt` in the package root, the loader trace also checks Mesa's blocking fence waits. `inspect-loader` lists those records under `events.d3d12-fence`. It sums them under `d3d12_fence`: NULL-event waits, early returns, the longest wait, `ExecuteCommandLists` calls, the seconds with an early return, the first early return, and a `verdict` ([fence-wait check](GAME-LAUNCH.md#check-that-mesas-blocking-fence-waits-block)).
+
 The runtime deletes the staging folder, and its raw `loader-trace.txt`, when the game exits normally. The child exit report carries only the general load, export, fault, asset, DXGI and input records, so measurement records cannot be recovered from it afterwards. To keep them, run `observe` with `--output` while the game runs, or copy the raw trace with `get-file` before the game exits.
 
 ## Collect and measure

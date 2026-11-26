@@ -6,6 +6,7 @@
 #include "shell-lookup.h"
 #include "d3d12-pipeline-cache.h"
 #include "d3d12-residency.h"
+#include "d3d12-fence-trace.h"
 #include "managed-warmup.h"
 #include <appmodel.h>
 #include <d3dcommon.h>
@@ -592,6 +593,7 @@ static void StartFaultTrace(void) {
     AppendTrace(line, length);
     StartAudioMeter();
     XboxD3D12ResidencyStart(XboxPipelineHooksStart());
+    XboxD3D12FenceTraceStart();
 }
 
 static void RecordFaultCall(const char *api, DWORD code, const void *caller) {
