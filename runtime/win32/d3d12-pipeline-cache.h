@@ -10,8 +10,15 @@
    only), XBOX_WIN32_PSO_CACHE=<LocalState prefix> and
    XBOX_WIN32_PSO_CACHE_MODE=library|blobs|replay|replay-idle (any other value
    or none: passthrough, which times creation and makes no cache call on the
-   device). */
-void XboxPipelineHooksStart(void);
+   device). TRUE when the hooks' thread runs, from this call or an earlier
+   one: the thread creates a device of its own once d3d12.dll is loaded. */
+BOOL XboxPipelineHooksStart(void);
+
+/* Serializes writes to the shared ID3D12Device method table between these
+   hooks and the residency hooks (d3d12-residency.c). Both change the page's
+   protection, so one patcher restoring it while the other writes would
+   fault. */
+extern SRWLOCK XboxD3D12MethodTableLock;
 
 /* Patches the shared ID3D12Device method table through this device: slots 10,
    11 and 47, and with keyRoots also slot 16, so root signatures created from

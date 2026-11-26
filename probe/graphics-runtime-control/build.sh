@@ -334,9 +334,14 @@ if $d3d11_hosted || $hosted_xinput_loader || $hosted_controller_notify || $wgl_l
         "/def:$repo/runtime/win32/ntdll-eh.def" "/out:$build/ntdll-eh.lib"
     "${win32_compiler[@]}" -fms-extensions -funwind-tables -fasynchronous-unwind-tables \
         -c "$repo/runtime/win32/loader-trace.c" -o "$build/loader-trace.obj"
+    # The same sources as the packaged adapter (.github/workflows/xbox-probe.yml).
+    for source in d3d12-pipeline-cache d3d12-residency; do
+        "${win32_compiler[@]}" -c "$repo/runtime/win32/$source.c" -o "$build/$source.obj"
+    done
     "${linker[@]}" /dll /noentry "/def:$repo/runtime/win32/loader-trace.def" \
         "/out:$layout/XboxWin32LoaderTrace.dll" "/implib:$build/XboxWin32LoaderTrace.lib" \
-        "$build/loader-trace.obj" "$windows_app" "$build/ntdll-eh.lib"
+        "$build/loader-trace.obj" "$build/d3d12-pipeline-cache.obj" "$build/d3d12-residency.obj" \
+        "$windows_app" "$build/ntdll-eh.lib"
 fi
 if $hosted_controller_notify; then
     "${win32_compiler[@]}" -c "$repo/runtime/win32/controller-notify.c" -o "$build/controller-notify.obj"

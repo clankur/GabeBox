@@ -62,6 +62,9 @@ LIVE_LOADER_EVENTS = {
     'shell-request': re.compile(r'(?:asset|input) (?:boot-)?shell-request(?:[ =-]|$)'),
     # The DXGI adapter's video memory budget install and its periodic usage samples.
     'gpu-memory': re.compile(r'dxgi gpu-memory(?:[ -]|$)'),
+    # Direct3D 12 residency: the selected mode, the hook install, per-second Evict/MakeResident counts and
+    # the 60-second totals (runtime/win32/d3d12-residency.c).
+    'residency': re.compile(r'asset residency(?:[ -]|$)'),
 }
 PIPELINE_MARKER = re.compile(r'asset (graphics|compute)-pso-(before|after) bytes=0x[0-9a-fA-F]{16} '
                              r'flags=0x([0-9a-fA-F]{8}) available-commit-kib=0x([0-9a-fA-F]{8})(?: .+)?')

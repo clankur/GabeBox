@@ -135,6 +135,32 @@ Every hosted WGL title (the Mesa route) now installs a cap when its first GL con
 
 Trace lines: `dxgi gpu-memory-budget install result=… dedicated_mib=… shared_mib=… capacity_mib=… cap_mib=… source=default|override`, the first values Mesa receives as `dxgi gpu-memory-first local_budget_mib=… local_used_mib=… reservable_mib=… nonlocal_budget_mib=… nonlocal_used_mib=… budget_mib=… mode=capped|native`, and every 60 seconds `dxgi gpu-memory local_used_mib=… nonlocal_used_mib=… budget_mib=… native_budget_mib=… peak_mib=… queries=… t_s=… utc=…`. `inspect-loader` lists them under `events.gpu-memory`.
 
+### Count and pin Mesa's residency changes
+
+Mesa's d3d12 residency manager calls `ID3D12Device::Evict` on least recently used allocations when usage passes 70% of the budget, or when an `ID3D12Device15` trim notification asks it to. It calls `ID3D12Device3::EnqueueMakeResident` before a batch uses an evicted allocation. On a device with `ID3D12Device8`, Mesa also creates textures and buffers with `D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT`, so that first `EnqueueMakeResident` is what makes them resident. [Mesa d3d12 residency](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_residency.cpp) · [Not-resident creation](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_resource.cpp#L366-L368) · [MakeResident](https://learn.microsoft.com/windows/win32/api/d3d12/nf-d3d12-id3d12device-makeresident) · [EnqueueMakeResident](https://learn.microsoft.com/windows/win32/api/d3d12/nf-d3d12-id3d12device3-enqueuemakeresident)
+
+`XboxWin32LoaderTrace.dll` wraps the shared device method table: `MakeResident` (slot 34), `Evict` (35), `EnqueueMakeResident` (50), and `RegisterTrimNotificationCallback` (83) when the runtime implements `ID3D12Device15`. The slot numbers are counted from `d3d12.idl`. To select a mode, put `xbox-d3d12-residency.txt` in the package root:
+
+| File | Behavior |
+| --- | --- |
+| absent or empty | `native`. The calls are counted only when the pipeline hooks already create a device of their own, as the Slay the Spire 2 profile does. |
+| `native` | Every call goes to the driver and is counted. |
+| `pin` | `Evict` returns `S_OK` without reaching the driver, so nothing is ever evicted. `MakeResident` and `EnqueueMakeResident` still go to the driver, which signals the requested fence value itself. |
+| `off` | No residency hooks. |
+
+`pin` cannot skip the make-resident calls, because a `CREATE_NOT_RESIDENT` allocation would then never become resident. On an allocation that a pinned `Evict` left resident, the driver call only raises its residency count. No hook changes a COM reference count, return value or last-error value.
+
+Under a budget that binds, `pin` makes Mesa stall. Usage never falls, so Mesa's `evict_to_fence_or_budget` keeps evicting (now a no-op) and waits on the CPU for older batches. Under `pin`, use a budget that does not bind. To vary memory pressure, use the cap in `native` mode.
+
+Trace lines:
+- At start: `asset residency mode=native|pin|off source=default|package-file hooks=pending|none|off`.
+- After the hooks install: `asset residency install result=… slots=34-35-50[-83] device3=… device15=… mode=…`.
+- For each second with at least one call: `asset residency evict=… makeresident=… enqueue=… evict_obj=… evict_kib=… res_obj=… res_kib=… restored=… [trim=…] [failed=…] utc=…`. The `evict`, `makeresident` and `enqueue` fields count calls. `res_*` covers both make-resident calls. `restored` counts objects made resident again after an `Evict` of the same address, which is a paging round trip in `native` mode.
+- Every 60 s: `asset residency-total mode=… t_s=… …` with the totals.
+- `asset residency trim flags=… bytes_kib=…` and `asset residency trim-register result=…`.
+
+`inspect-loader` lists all of these under `events.residency`.
+
 ### Warm a CoreCLR title's managed code before first use
 
 An IL-only game assembly is JIT-compiled the first time each method runs, on every launch. The first card play, attack or save then compiles new code on the game thread. Add `steam-win32-managed-warmup-APPID.txt` to the trial profile to select [`runtime/managed-warmup`](../runtime/managed-warmup). The component is packaged as `XboxManagedWarmup.dll`. It prepares the listed assemblies' methods on a below-normal-priority background thread with `RuntimeHelpers.PrepareMethod`. The publisher's files are not changed. [Slay the Spire 2 plan](../profiles/2868840/26655341/steam-win32-managed-warmup-2868840.txt)

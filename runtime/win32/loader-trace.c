@@ -5,6 +5,7 @@
 #include "hosted-xinput-load.h"
 #include "shell-lookup.h"
 #include "d3d12-pipeline-cache.h"
+#include "d3d12-residency.h"
 #include "managed-warmup.h"
 #include <appmodel.h>
 #include <d3dcommon.h>
@@ -590,7 +591,7 @@ static void StartFaultTrace(void) {
     while (line[length]) ++length;
     AppendTrace(line, length);
     StartAudioMeter();
-    XboxPipelineHooksStart();
+    XboxD3D12ResidencyStart(XboxPipelineHooksStart());
 }
 
 static void RecordFaultCall(const char *api, DWORD code, const void *caller) {

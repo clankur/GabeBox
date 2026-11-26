@@ -2746,6 +2746,8 @@ static HRESULT STDMETHODCALLTYPE HookRootSignature(void *device, UINT nodeMask, 
 
 /* ------------------------------------------------------------- public API */
 
+SRWLOCK XboxD3D12MethodTableLock = SRWLOCK_INIT;
+
 HRESULT XboxPipelineHooksInstall(void *device, BOOL keyRoots) {
     if (!device) return E_POINTER;
     if (keyRoots) InterlockedExchange(&keyRootSignatures, 1);
@@ -2775,14 +2777,19 @@ HRESULT XboxPipelineHooksInstall(void *device, BOOL keyRoots) {
     /* Slot 16 only when keys are built: timing alone patches 10, 11 and 47. */
     const int count = keyRoots ? 4 : 3;
     ULONG previous = 0;
-    if (!VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), PAGE_READWRITE, &previous))
-        return HRESULT_FROM_WIN32(GetLastError());
+    AcquireSRWLockExclusive(&XboxD3D12MethodTableLock);
+    if (!VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), PAGE_READWRITE, &previous)) {
+        const DWORD error = GetLastError();
+        ReleaseSRWLockExclusive(&XboxD3D12MethodTableLock);
+        return HRESULT_FROM_WIN32(error);
+    }
     for (int i = 0; i < count; ++i) {
         if (methods[slots[i]] == hooks[i]) continue;
         *originals[i] = methods[slots[i]];
         InterlockedExchangePointer(&methods[slots[i]], hooks[i]);
     }
     VirtualProtectFromApp(&methods[10], 38 * sizeof(void *), previous, &previous);
+    ReleaseSRWLockExclusive(&XboxD3D12MethodTableLock);
     return S_OK;
 }
 
@@ -3118,13 +3125,14 @@ static LONG SelectedMode(void) {
     return 0;
 }
 
-void XboxPipelineHooksStart(void) {
-    static volatile LONG started;
+BOOL XboxPipelineHooksStart(void) {
+    static volatile LONG started, running;
     WCHAR enabled[2];
     const BOOL timing = GetEnvironmentVariableW(L"XBOX_WIN32_PSO_TRACE", enabled, ARRAYSIZE(enabled)) == 1 &&
         enabled[0] == L'1';
     const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_PSO_CACHE", NULL, 0);
-    if ((!timing && length <= 1) || InterlockedExchange(&started, 1)) return;
+    if (!timing && length <= 1) return FALSE;
+    if (InterlockedExchange(&started, 1)) return running != 0;
     WCHAR *prefix = NULL;
     if (length > 1 && length < ARRAYSIZE(cache.prefix)) {
         prefix = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, length * sizeof(WCHAR));
@@ -3139,6 +3147,11 @@ void XboxPipelineHooksStart(void) {
     if (prefix && cache.selected) cache.configured = 1;
     else if (prefix) cache.passthrough = 1;
     HANDLE thread = CreateThread(NULL, 0, StartHooks, prefix, 0, NULL);
-    if (thread) CloseHandle(thread);
-    else if (prefix) HeapFree(GetProcessHeap(), 0, prefix);
+    if (thread) {
+        InterlockedExchange(&running, 1);
+        CloseHandle(thread);
+    } else if (prefix) {
+        HeapFree(GetProcessHeap(), 0, prefix);
+    }
+    return thread != NULL;
 }
