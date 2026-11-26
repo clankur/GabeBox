@@ -41,6 +41,20 @@ The `Minified React error #520` in `renderer_error_latest` is React 19.1's recov
 
 The report keeps the first renderer script failure as `renderer_error`. When more follow, it also writes `renderer_error_count` and `renderer_error_latest`, which records the latest failure with the status it arrived in. Valve's audio store sends `Audio.GetSupportedFeatures` once at startup and has no rejection handler. The bridge now answers that request as an unavailable service, so it no longer fills `renderer_error`.
 
+### WebView2 child processes
+
+The Big Picture renderer writes `LocalState\big-picture-webview-processes.txt`. Each host process starts the file again, and it stops growing at 256 KiB. The file has one line when each WebView2 environment is created, and one line for every `ProcessInfosChanged` event:
+
+```text
+webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=default
+webview2 processes env=1 utc=2026-11-26T04:00:02.000Z tick_ms=1650 count=6 added=browser:40,renderer:41,gpu:44,utility:45,utility:46,utility:47 removed=-
+webview2 processes env=1 utc=2026-11-26T04:01:44.461Z tick_ms=104111 count=7 added=utility:52 removed=-
+```
+
+`added` and `removed` list `kind:pid` pairs, where the kind is a `COREWEBVIEW2_PROCESS_KIND` name. To find how long a child lived, match its pid in the `added` and `removed` lines, then look the pid up in the `sample-processes` output. `utc` is when the handler ran on the host's UI thread, so it trails the actual process change by the dispatcher's delay. `observe --output` saves the filtered lines as `webview2-processes.txt`. Outside an observation, use `get-file '\LocalState' big-picture-webview-processes.txt --output …`.
+
+The browser arguments stay at their defaults unless `xbox-webview2-arguments.txt` is in the package root before signing. The file may hold `--disable-component-update`, `--disable-background-networking` or both, separated by spaces or newlines, at most once each and in at most 256 characters. Anything else rejects the whole file, and the browser keeps its default arguments. The environment line then reads `arguments=package-file switches=…`, `arguments=invalid` or `arguments=unreadable`. Both switches disable Chromium background services (component updates, and background network requests such as variations and safe-browsing list updates) for this host's browser process only. A change to the arguments applies only once the existing browser process for the profile has exited, so restart Steam Core after you install the file.
+
 ## Inspect an active Steam install
 
 ```sh

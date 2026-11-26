@@ -33,6 +33,16 @@ GPU_MAILBOX_NAME = re.compile(r'sdl-host-[0-9]{1,10}-[0-9]{1,20}\.bin')
 LOCAL = r'\LocalState'
 TEMP = r'\TempState'
 PRIMARY_REPORT = 'big-picture-primary-startup.txt'
+# The Big Picture host's WebView2 environment arguments and process changes
+# (ui/big-picture-webview/renderer.cpp). Each host process starts the file again.
+WEBVIEW_PROCESS_LOG = 'big-picture-webview-processes.txt'
+WEBVIEW_PROCESS_LIMIT = 256 * 1024
+_WEB_PROCESSES = r'(?:-|[a-z-]{1,16}:[0-9]{1,10}(?:,[a-z-]{1,16}:[0-9]{1,10}){0,63})'
+WEBVIEW_PROCESS = re.compile(
+    r'webview2 (?:environment|processes) env=[0-9]{1,10} '
+    r'utc=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z tick_ms=[0-9]{1,20}'
+    rf'(?: arguments=[a-z-]{{1,16}}(?: switches=[a-z,-]{{1,128}})?| count=[0-9]{{1,4}} added={_WEB_PROCESSES} '
+    rf'removed={_WEB_PROCESSES}| error=0x[0-9a-f]{{8}})')
 COUNT = re.compile(r'[0-9]{1,20}')
 CHECKPOINT = re.compile(r'[a-z][a-z0-9_.-]{0,62}(?::(?:0x[0-9a-f]{1,8}|[a-z][a-z0-9-]{0,40}))?', re.I)
 TIMINGS = re.compile(r'[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}(?:,[a-z][a-z0-9_.-]{0,63}:[0-9]{1,12}){0,63}')
@@ -579,6 +589,9 @@ def collect_artifacts(report, blob, last_probe, launch_id, app_id, include_frame
         lines = filtered_lines(primary, LIFECYCLE)
         if lines:
             artifacts['primary-lifecycle.txt'] = ('\n'.join(lines) + '\n').encode()
+    web_processes = filtered_lines(report(WEBVIEW_PROCESS_LOG, WEBVIEW_PROCESS_LIMIT), WEBVIEW_PROCESS, 4096)
+    if web_processes:
+        artifacts['webview2-processes.txt'] = ('\n'.join(web_processes) + '\n').encode()
     if launch_id is None:
         return artifacts
 

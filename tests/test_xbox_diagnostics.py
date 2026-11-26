@@ -198,6 +198,15 @@ class ObserverTests(unittest.TestCase):
                          b'    Version:  Direct3D 11.0 [level 11.0]\r\n'
                          b'path=C:\\private-secret\r\n'
                          b'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\r\n',
+             diagnostics.WEBVIEW_PROCESS_LOG:
+                 b'webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=package-file '
+                 b'switches=--disable-component-update\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:00:02.000Z tick_ms=1650 count=2 '
+                 b'added=browser:40,renderer:41 removed=-\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:01:44.461Z tick_ms=104111 count=3 '
+                 b'added=utility:52 removed=-\r\n'
+                 b'webview2 processes env=1 path=C:\\private-secret\r\n'
+                 b'webview2 processes env=1 utc=2026-11-26T04:01:47.000Z tick_ms=106650 error=0x80004005\r\n',
              'fhd-present-times.bin': frame(launch)},
         ], stages=[
             [{'Name': 'SteamWin32Trial', 'DateCreated': 1}],
@@ -219,6 +228,14 @@ class ObserverTests(unittest.TestCase):
                              'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\n')
             self.assertEqual((output / 'fhd-present-times.bin').read_bytes(), frame(launch))
             self.assertEqual((output / 'bootstrap.bmp').read_bytes(), bmp())
+            self.assertEqual((output / 'webview2-processes.txt').read_text(), (
+                'webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=package-file '
+                'switches=--disable-component-update\n'
+                'webview2 processes env=1 utc=2026-11-26T04:00:02.000Z tick_ms=1650 count=2 '
+                'added=browser:40,renderer:41 removed=-\n'
+                'webview2 processes env=1 utc=2026-11-26T04:01:44.461Z tick_ms=104111 count=3 '
+                'added=utility:52 removed=-\n'
+                'webview2 processes env=1 utc=2026-11-26T04:01:47.000Z tick_ms=106650 error=0x80004005\n'))
             self.assertEqual(json.loads((output / 'observation.json').read_text()), result)
             self.assertNotIn('do-not-save', json.dumps(result))
 

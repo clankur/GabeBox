@@ -9,6 +9,7 @@
 #include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Composition.h>
@@ -19,8 +20,11 @@
 #include <winrt/Windows.UI.Xaml.Hosting.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdio>
 #include <deque>
 #include <string>
+#include <vector>
 #include "cloud-cache.h"
 #include "display-layout.h"
 #include "library-capture.h"
@@ -74,6 +78,41 @@ void checkpoint(std::wstring_view stage) {
     if (!std::wstring_view(status).starts_with(L"process-error:")) status = hstring(stage);
 }
 
+// LocalState\big-picture-webview-processes.txt: the WebView2 environment's arguments and
+// every ProcessInfosChanged event with the process kinds and pids that appeared or left,
+// stamped with the UTC time the handler ran. The first line of a host process replaces
+// the previous host's log; the file stops growing at 256 KiB.
+slim_mutex processLogGate;
+bool processLogStarted = false;
+std::atomic<unsigned> webEnvironments{0};
+
+std::string processLogStamp() {
+    SYSTEMTIME now;
+    GetSystemTime(&now);
+    char text[64];
+    const int count = std::snprintf(text, sizeof(text), "utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ tick_ms=%llu",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()));
+    return count > 0 && count < static_cast<int>(sizeof(text)) ? std::string(text, count) : std::string("utc=unknown");
+}
+
+void processLog(std::string line) noexcept {
+    try {
+        line += "\r\n";
+        const auto path = std::wstring(Windows::Storage::ApplicationData::Current().LocalFolder().Path()) +
+            L"\\big-picture-webview-processes.txt";
+        slim_lock_guard lock(processLogGate);
+        file_handle file{CreateFile2(path.c_str(), processLogStarted ? FILE_APPEND_DATA : GENERIC_WRITE,
+            FILE_SHARE_READ, processLogStarted ? OPEN_ALWAYS : CREATE_ALWAYS, nullptr)};
+        if (!file) return;
+        processLogStarted = true;
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file.get(), &size) || size.QuadPart + static_cast<LONGLONG>(line.size()) > 256 * 1024) return;
+        DWORD written = 0;
+        WriteFile(file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    } catch (...) {}
+}
+
 struct View : implements<View, IFrameworkView> {
     CoreWindow window{nullptr};
     Compositor compositor{nullptr};
@@ -118,6 +157,8 @@ struct View : implements<View, IFrameworkView> {
     CoreWindow::VisibilityChanged_revoker visibility;
     CoreWindow::Closed_revoker closing;
     CoreWindow::Activated_revoker activated;
+    CoreWebView2Environment::ProcessInfosChanged_revoker processInfos;
+    std::vector<steam_webview::WebProcess> webProcesses;
     steam_display::Placement placement{{}, 1.f};
 
     void Initialize(CoreApplicationView const&) {}
@@ -480,6 +521,24 @@ struct View : implements<View, IFrameworkView> {
         return true;
     }
 
+    // Names each WebView2 child as it appears or exits, so a short-lived host process
+    // seen in the console's process list can be matched to its kind.
+    void recordProcesses(CoreWebView2Environment const& sender, unsigned environmentId) {
+        std::string line = "webview2 processes env=" + std::to_string(environmentId) + " " + processLogStamp();
+        try {
+            std::vector<steam_webview::WebProcess> current;
+            for (auto const& info : sender.GetProcessInfos())
+                current.push_back({static_cast<uint32_t>(info.ProcessId()), static_cast<int>(info.Kind())});
+            line += steam_webview::processChanges(webProcesses, current);
+            webProcesses = std::move(current);
+        } catch (hresult_error const& error) {
+            char code[24];
+            std::snprintf(code, sizeof(code), " error=0x%08x", static_cast<uint32_t>(error.code().value));
+            line += code;
+        }
+        processLog(std::move(line));
+    }
+
     void configure(CoreWebView2 const& browser, bool allowMessages) {
         // WebView2 virtual hosts are scoped to one CoreWebView2. Valve's
         // independently composed SP BPM child loads its own CSS and fonts.
@@ -829,8 +888,40 @@ struct View : implements<View, IFrameworkView> {
                 auto profiles = co_await cache.CreateFolderAsync(L"SteamWebProfiles", Windows::Storage::CreationCollisionOption::OpenIfExists);
                 profile = profiles.Path() + L"\\" + account;
             }
-            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", profile, nullptr);
+            // Opt-in browser switches from xbox-webview2-arguments.txt in the package root;
+            // without the file the browser keeps its default arguments.
+            std::wstring browserArguments;
+            std::string argumentState = "default";
+            try {
+                auto item = co_await Package::Current().InstalledLocation().TryGetItemAsync(L"xbox-webview2-arguments.txt");
+                if (auto file = item.try_as<Windows::Storage::StorageFile>()) {
+                    argumentState = "invalid";
+                    if ((co_await file.GetBasicPropertiesAsync()).Size() <= 256 &&
+                        steam_webview::browserArguments(co_await Windows::Storage::FileIO::ReadTextAsync(file), browserArguments))
+                        argumentState = "package-file";
+                }
+            } catch (...) {
+                browserArguments.clear();
+                argumentState = "unreadable";
+            }
+            CoreWebView2EnvironmentOptions options{nullptr};
+            if (!browserArguments.empty()) {
+                options = CoreWebView2EnvironmentOptions();
+                options.AdditionalBrowserArguments(browserArguments);
+            }
+            const auto environmentId = ++webEnvironments;
+            {
+                std::string switches;
+                for (auto c : browserArguments) switches += c == L' ' ? ',' : static_cast<char>(c);
+                processLog("webview2 environment env=" + std::to_string(environmentId) + " " + processLogStamp() +
+                    " arguments=" + argumentState + (switches.empty() ? std::string() : " switches=" + switches));
+            }
+            environment = co_await CoreWebView2Environment::CreateWithOptionsAsync(L"", profile, options);
             if (closed) co_return;
+            processInfos = environment.ProcessInfosChanged(auto_revoke, [this, environmentId](auto const& sender, auto const&) {
+                recordProcesses(sender, environmentId);
+            });
+            recordProcesses(environment, environmentId);
 
             step = L"controller";
             checkpoint(step);
