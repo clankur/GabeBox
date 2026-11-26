@@ -216,6 +216,28 @@ Trace lines (UTC stamps are to the millisecond, so they line up with `white_firs
 - `no-early-returns` refutes it for the waits the hooks saw.
 - `no-null-waits` with batches means the hooks did not reach the fence Mesa waits on.
 
+The 2026-11-26 combat run saw 821,829 such waits with `early=0`, which refutes the in-flight reset for Slay the Spire 2.
+
+### Turn off Mesa's threaded context, or lock its descriptor pools
+
+st/mesa asks the d3d12 driver for a threaded context, and `GALLIUM_THREAD` defaults to on. Through `u_threaded_context`, `create_sampler_view` and `create_sampler_state` run on the GL thread, while sampler-view releases, `set_sampler_views` and batch resets run on the driver thread. `d3d12_create_sampler_view` allocates its CPU descriptor under `descriptor_pool_mutex`. `d3d12_destroy_sampler_view` frees it without the mutex, and the per-context sampler pool takes no lock on either side. A free that races an allocation can give one descriptor slot to two live views, and a draw then samples another texture. This is a candidate cause of the Slay the Spire 2 white frames in [#89](https://github.com/clankur/GabeBox/issues/89). [Root-cause note](../analysis/slay-the-spire-2-compatibility.md#white-flicker-root-cause-2026-11-26) · [Allocation under the mutex](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp#L944-L946) · [Free without it](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/drivers/d3d12/d3d12_context_graphics.cpp#L1036-L1043) · [Views created on the caller's thread](https://github.com/XboxEmulationHub/mesa-uwp/blob/34732bbc207daea10bdf2fb969a4a0f7769ea1de/src/gallium/auxiliary/util/u_threaded_context.c#L2381-L2392)
+
+Both switches are build-matched profile markers for an `opengl3` trial, and both are removed by deleting the marker:
+
+| Marker | Child environment | Needs |
+| --- | --- | --- |
+| Empty `steam-win32-mesa-no-thread-APPID.txt` | `GALLIUM_THREAD=0`. The launch report adds `steam_shadow_mesa_thread=off` | Any Mesa runtime, including the prebuilt one |
+| `steam-win32-mesa-descriptors-APPID.txt` holding `stats` | `D3D12_DESCRIPTOR_STATS=LocalState\mesa-descriptors-APPID-<launch>.txt`. The report adds `steam_shadow_mesa_descriptors=stats` and `steam_shadow_mesa_descriptor_stats=<file name>` | A `--mesa-runtime` built with [patch 0004](../runtime/mesa/README.md) |
+| The same marker holding `lock` | The stats file plus `D3D12_DESCRIPTOR_POOL_LOCK=1`, which takes `descriptor_pool_mutex` around the view-pool free, the sampler-pool allocations and the zombie-sampler frees | The same runtime |
+
+The stats file begins with `d3d12_descriptor_stats=1 lock=0|1 start_filetime=…`. Mesa then appends at most one line a second, after a batch is submitted:
+
+```text
+filetime=… threaded=1 lock=0 allocs=… frees=… dup_allocs=… double_frees=… overlaps=… cross_thread_frees=… first_dup_filetime=… first_double_free_filetime=… first_overlap_filetime=…
+```
+
+`threaded=1` confirms the threaded context. `cross_thread_frees` above 0 shows frees on a thread other than the one that allocated. `overlaps` counts calls that found another thread inside the same pool heap. `dup_allocs` counts allocations of a slot that was still live, which is two views sharing one descriptor. `double_frees` counts frees of a slot that was already free. The counters are cumulative. The `first_*` fields are UTC FILETIMEs, so they compare directly with `white_first_filetime` from the [white-flash probe](XBOX-DIAGNOSTICS.md#white-flash-probe). Copy the file with `xbox_deploy get-file`.
+
 ### Warm a CoreCLR title's managed code before first use
 
 An IL-only game assembly is JIT-compiled the first time each method runs, on every launch. The first card play, attack or save then compiles new code on the game thread. Add `steam-win32-managed-warmup-APPID.txt` to the trial profile to select [`runtime/managed-warmup`](../runtime/managed-warmup). The component is packaged as `XboxManagedWarmup.dll`. It prepares the listed assemblies' methods on a below-normal-priority background thread with `RuntimeHelpers.PrepareMethod`. The publisher's files are not changed. [Slay the Spire 2 plan](../profiles/2868840/26655341/steam-win32-managed-warmup-2868840.txt)

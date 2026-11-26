@@ -70,6 +70,36 @@ Until one of these lands, the first combat of each launch has stalls up to 217 m
 - **Multiplayer.** Co-op is in scope and has not been tested on the console. It needs a second Steam account that owns the game on another PC or console. Check that a lobby can be hosted from the Xbox and joined from the other side, and the reverse. Play a combat turn together, with the relay status read from `GetRelayNetworkStatus`. `steam-win32-steam-relay-status-2868840.txt` records it in the loader trace ([relay status](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title)). A fix elsewhere must not disable or defer these paths.
 - **T97, a one-time stall about 97 s after the first frame.** Fixed. It was caused by the Big Picture host's delayed Chromium GPU-info process, which the host now skips by default. An independent verifier confirmed the fix on three idle-menu runs. Gameplay and other titles still need checking. See [console results](#console-results-on-2026-11-26-102741-102743).
 
+## White flicker root cause (2026-11-26)
+
+This is an offline analysis for [#89](https://github.com/clankur/GabeBox/issues/89). It has not been checked on the console. The flash probe on 2026-11-26 attributed every white frame to the game's own renderbuffer. In combat on Insatiable, Turn 1, there were 617 white frames in about 140 s. In those frames the card portraits and the HP-bar fills are pure white, and the frames, text and sprites around them are unchanged.
+
+**Confirmed from the game data and Godot 4.5 source.** Every white element is the output of a draw that reads Godot's screen-copy texture, `color_buffer`, at texture unit `GL_MAX_TEXTURE_IMAGE_UNITS − 4`.
+
+- **Card portraits.** `PortraitCanvasGroup` in `scenes/cards/card.tscn` is a `CanvasGroup`. Its composite draw reads that unit.
+- **HP bars.** `scenes/combat/health_bar.tscn` nests three `clip_children` controls. Each clip composite reads the same unit, and Godot's default clip shader sets `COLOR.rgb` from it.
+- **Main menu.** `BlurBackstop` uses `dark_blur.gdshader`, which reads `hint_screen_texture`.
+
+Godot binds its 4×4 white texture to that same unit while a group's children render into the backbuffer. It binds white to unit 0 at every `canvas_begin`. A draw that used the binding from one step earlier would produce exactly these frames. Godot itself never records such a draw. [Godot canvas_begin](https://github.com/godotengine/godot/blob/4.5-stable/drivers/gles3/rasterizer_canvas_gles3.cpp#L2205-L2243) · [Canvas-group flow](https://github.com/godotengine/godot/blob/4.5-stable/drivers/gles3/rasterizer_canvas_gles3.cpp#L463-L516)
+
+**Confirmed from the Mesa source at `34732bb`; upstream `main` is the same.** st/mesa runs the d3d12 driver through `u_threaded_context`, because `GALLIUM_THREAD` defaults to on. Sampler views and sampler states are created on the GL thread and freed on the driver thread. `d3d12_create_sampler_view` allocates its CPU descriptor under `descriptor_pool_mutex`. `d3d12_destroy_sampler_view` frees it without that mutex, and the sampler pool takes no lock on either side. A free that races an allocation can give one descriptor slot to two live views.
+
+Both scenes that flicker churn views every frame:
+
+- the menu's backstop;
+- the Insatiable background's `the_insatiable_sand_fall_2.gdshader`, which uses `filter_linear_mipmap`.
+
+Each makes Godot blur the backbuffer, and the blur changes `BASE_LEVEL`/`MAX_LEVEL` 14 times per pass. A corrupted pool stays corrupted for the rest of the process. That matches whole runs with no white frames against runs with hundreds.
+
+**Hypothesis.** The cause is this race, or another threaded-context race. Why a mis-bound draw lands on the white texture specifically is not established. Residency eviction, early fence waits, the exchange and the presenter are ruled out.
+
+**Opt-in arms on branch `claude/sts2-white-flicker-fix`.**
+
+- An empty `steam-win32-mesa-no-thread-2868840.txt` sets `GALLIUM_THREAD=0`. It works with the prebuilt Mesa.
+- Mesa [patch 0004](../runtime/mesa/patches/0004-d3d12-serialize-descriptor-pool-frees.patch) adds a lock and counters. `steam-win32-mesa-descriptors-2868840.txt` holding `stats` or `lock` turns them on ([markers](../docs/GAME-LAUNCH.md#turn-off-mesas-threaded-context-or-lock-its-descriptor-pools)).
+
+The A/B compares four arms: control, no-thread, the patched runtime with `stats`, and the same runtime with `lock`. Each arm runs at least twice, idle for 150 s on Insatiable Turn 1. The deciding numbers are `white_frames` per minute, against a baseline of about 260 a minute, and the `dup_allocs`, `overlaps` and `first_dup_filetime` counters in the stats file. These are still to run on the console.
+
 ## T97: one-time stall about 97 s after the first frame
 
 On packages `1.0.244`–`1.0.272` (build 26655341), every session has a disturbance window of about 3 s. It starts **97.6 ± 0.4 s after the game's first present** (SD over 8 of 9 runs) and contains several frame gaps, one of them 0.05–5.1 s long. It happens whatever the game is doing: on the idle menu, in menu navigation and during combat. It is locked to the game process start, not to the main menu: replay builds reach the menu about 6 s earlier and the onset does not move. CPU stays low in every process. Run-3's loader trace shows one native `glDraw*` blocked for 119.7 ms inside the window. No `sts2.dll` timer, delay, telemetry, save, preload or `GC.Collect` fires 60–120 s after start. The cause is not identified. This is offline analysis of the `console-246` to `console-262` artifacts, not a console result.
