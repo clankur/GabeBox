@@ -451,3 +451,38 @@ Open work:
 - Clean up the roughly 175 `SteamWin32Trial (N)` staging folders left in the package TempState.
 - Move demand-committed pools into the shared runtime as a profile-selected component.
 - Run the independent `xbox-game-verify` pass. Coverage is not claimed.
+
+### Reference launcher tweaks and the full TempState volume (November 26)
+
+**Buffer cuts.** UWP-Spider-Launcher `0.6.0.57` patches six engine buffers through its `ModulePatch.json`. Commit `1865c24` matches the local snapshot. The patches map onto our verified executable at the same file offsets; their controller patch at file `0x1ce0698` is byte-identical to ours.
+
+[`memory-cuts-overlay.json`](../profiles/1817070/23986256/memory-cuts-overlay.json) records eight byte overlays from those patches. Every expected hash is checked by `read_overlays`.
+
+| Buffer | Before | After |
+| --- | --- | --- |
+| File System Asset Data Buffer | 112 MiB (our earlier overlay) | 64 MiB |
+| Default dx12 render heap | 64 MiB | 32 MiB |
+| `SkinningBuffer_CPU` | 96 MiB | 32 MiB |
+| Asset Loader Temp Allocator | 90 MiB | 64 MiB |
+| Scratch Allocator | 66 MiB | 16 MiB |
+| `TextureAlloc` | — | 8 MiB |
+
+Build `1.0.273.224` merged them into the `.315` shadow recipe as an `XWPEV3` overlay table: 797 entries, three of them replacing existing entries in place. The recipe passes `validate_patch_recipe`.
+
+**Reference pool caps.** The reference also runs larger pools than ours: DynamicHeap 208, ManagedBuffer 448, AssetHeap 576, SoundBankAlloc 224 and Physics 184 MiB. Its runtime adds decommit-on-free reclaim switches and graphics defaults with dynamic resolution off and a 1280×720 window. Its source does not explain the mirrored roads or the white-box hero. Issue #26 reports a white-cube character after an outfit change.
+
+**Routing.** The routing comparison against `runtime-toc.tsv` matches every asset except 13 vehicle LODs. Commit `fb53030` now follows the reference index. The roads already route to the reference's `local_ground29_1024` restores (`mo_asphalt_01` and `asphalt_alley` textures), and the mirrored sky persists with that routing in place. The white-box hero, mirrored roads and floating props are therefore not a routing difference.
+
+**Build `1.0.273.223`** (play loader with the 242 restores):
+
+- The trace confirmed 18 reads from the appended restore range.
+- The main-menu hero was textured, at low resolution.
+- In the world, roads still mirrored the sky and the hero appeared as a small white box.
+
+**TempState full.** Build `1.0.273.224` failed staging with `0x80070070` (`ERROR_DISK_FULL`). The package TempState held 180 `SteamWin32Trial (N)` stages, about 197 MiB each for Spider-Man. A stage is removed when its child exits, but a host terminated mid-game (a package update or crash) never reaches that step. Commit `4807c4c` sweeps stale stages before staging a new launch; it is not yet built, since the native component builds in CI. Deleting the existing stages on the console is waiting for the user's approval.
+
+**Ready to test.** Build `1.0.273.225`:
+
+- buffer cuts and restores, with routing that follows the reference index;
+- DynamicHeap 208, Physics 184 and SoundBankAlloc 224 MiB, committed on demand;
+- on-demand commit extended to pools whose size is not a multiple of 64 KiB.
