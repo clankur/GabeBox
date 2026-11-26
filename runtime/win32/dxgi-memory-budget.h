@@ -5,7 +5,9 @@
 // method table is replaced once per process. The replacement calls the original, then caps Budget with
 // gpu_memory_budget::Apply for the hardware adapters recorded at install. CurrentUsage, the reservation fields,
 // the return value and every other method stay native. Mesa does not call SetVideoMemoryReservation or
-// RegisterVideoMemoryBudgetChangeNotificationEvent, so those stay native as well.
+// RegisterVideoMemoryBudgetChangeNotificationEvent at mesa-uwp 34732bb, so those stay native as well; the
+// registration (slot 16) is wrapped only to record each call as a `dxgi gpu-memory-budget-event` line, so a
+// runtime or title that does register is visible next to the residency counters (d3d12-residency.c).
 //
 // The loader trace records the install, the first values Mesa receives, and a `dxgi gpu-memory` line every
 // 60 seconds with the process's native usage and the budget it was given, so a console run shows the curve.
@@ -13,6 +15,8 @@
 // IUnknown (3), IDXGIObject (4), IDXGIAdapter (3), GetDesc1, GetDesc2 and the two content-protection
 // methods precede it.
 constexpr unsigned queryVideoMemoryInfoSlot = 14;
+// SetVideoMemoryReservation (15) comes between them.
+constexpr unsigned registerBudgetChangeSlot = 16;
 constexpr ULONGLONG memoryTraceIntervalMs = 60 * 1000;
 
 struct MemoryBudgetAdapter {
@@ -23,6 +27,7 @@ struct MemoryBudgetAdapter {
 struct MemoryBudgetTable {
     void** vtable;
     void* original;
+    void* registerOriginal;
 };
 
 MemoryBudgetAdapter memoryBudgetAdapters[4];
@@ -37,6 +42,7 @@ volatile LONG memoryBudgetFirstTraced = 0;
 volatile LONG64 memoryBudgetQueries = 0;
 volatile LONG64 memoryBudgetPeakUsage = 0;
 volatile LONG64 memoryBudgetNextTrace = 0;
+volatile LONG memoryBudgetEventLines = 0;
 ULONGLONG memoryBudgetStart = 0;
 
 class TraceLine {
@@ -92,6 +98,32 @@ void* OriginalMemoryBudgetSlot(const void* self) {
     for (LONG index = 0; index < count; ++index)
         if (memoryBudgetTables[index].vtable == vtable) return memoryBudgetTables[index].original;
     return nullptr;
+}
+
+void* OriginalBudgetRegistration(const void* self) {
+    void** const vtable = *static_cast<void** const*>(self);
+    const LONG count = InterlockedCompareExchange(&memoryBudgetTableCount, 0, 0);
+    for (LONG index = 0; index < count; ++index)
+        if (memoryBudgetTables[index].vtable == vtable) return memoryBudgetTables[index].registerOriginal;
+    return nullptr;
+}
+
+HRESULT STDMETHODCALLTYPE ObservedBudgetRegistration(IDXGIAdapter3* self, HANDLE event, DWORD* cookie) {
+    using Call = HRESULT (STDMETHODCALLTYPE*)(IDXGIAdapter3*, HANDLE, DWORD*);
+    const auto original = reinterpret_cast<Call>(OriginalBudgetRegistration(self));
+    if (!original) return E_UNEXPECTED;
+    const HRESULT result = original(self, event, cookie);
+    const DWORD error = GetLastError();
+    const LONG line = InterlockedIncrement(&memoryBudgetEventLines);
+    if (line <= 16)
+        TraceLine()
+            .Hex("dxgi gpu-memory-budget-event register result=0x", static_cast<DWORD>(result))
+            .Field(" cookie=", SUCCEEDED(result) && cookie ? *cookie : 0)
+            .Field(" count=", static_cast<UINT64>(line))
+            .Utc()
+            .Write();
+    SetLastError(error);
+    return result;
 }
 
 const MemoryBudgetAdapter* RecordedMemoryBudgetAdapter(IDXGIAdapter3* self) {
@@ -194,15 +226,19 @@ HRESULT PatchMemoryBudgetTable(void** vtable) {
         if (memoryBudgetTables[index].vtable == vtable) return S_FALSE;
     if (memoryBudgetTableCount == ARRAYSIZE(memoryBudgetTables)) return E_OUTOFMEMORY;
     void** const slot = &vtable[queryVideoMemoryInfoSlot];
-    memoryBudgetTables[memoryBudgetTableCount] = {vtable, *slot};
-    // Publish the original before any call can route through the replacement.
+    void** const registration = &vtable[registerBudgetChangeSlot];
+    memoryBudgetTables[memoryBudgetTableCount] = {vtable, *slot, *registration};
+    // Publish the originals before any call can route through the replacements.
     InterlockedIncrement(&memoryBudgetTableCount);
+    // One protection change covers slots 14 to 16.
+    const SIZE_T span = (registerBudgetChangeSlot - queryVideoMemoryInfoSlot + 1) * sizeof(*slot);
     ULONG protection = 0;
-    if (!VirtualProtectFromApp(slot, sizeof(*slot), PAGE_READWRITE, &protection))
+    if (!VirtualProtectFromApp(slot, span, PAGE_READWRITE, &protection))
         return HRESULT_FROM_WIN32(GetLastError());
     InterlockedExchangePointer(slot, reinterpret_cast<void*>(&BudgetedVideoMemoryInfo));
+    InterlockedExchangePointer(registration, reinterpret_cast<void*>(&ObservedBudgetRegistration));
     ULONG ignored = 0;
-    VirtualProtectFromApp(slot, sizeof(*slot), protection, &ignored);
+    VirtualProtectFromApp(slot, span, protection, &ignored);
     return S_OK;
 }
 
