@@ -633,9 +633,11 @@ The host app process (`SteamPrimary.exe`) used 0.0–0.4% CPU in these states an
 
 The console was returned to the play configuration as `1.0.290.247`, without autoplay. The SteamCore package identity is shared with the STS2 session; this version replaces its `1.0.281.2`.
 
-### The world is frozen after entry (November 26, late afternoon)
+### The world is paused by the swing tutorial (November 26, late afternoon)
 
-**This corrects the section above.** The host is not the limit, and the world is not playable on these builds.
+**Update:** this "freeze" is the game's own tutorial pause, not a compatibility bug. See [Holding RT resumes the tutorial](#holding-rt-resumes-the-tutorial) below. The host measurements in this section still stand.
+
+**This corrects the section above.** The host is not the limit.
 
 **The host shows every frame it receives.** A test-only change to the staged `steam-sdl-native-view.js` (build `1.0.290.249`) wrote `host.panelStatus()` to LocalState every 5 s. Over 30 s in the world:
 
@@ -679,3 +681,27 @@ So after world entry the game keeps rendering and presenting the same scene at 2
 The frame-rate work cannot be judged until gameplay advances.
 
 The console was returned to the play configuration as `1.0.290.253`, without autoplay.
+
+### Holding RT resumes the tutorial
+
+The current save continues at the opening dive of **Clearing the Way**. There the game pauses the world and shows "Hold RT to swing." until RT is held. Earlier probes sent only `RS_RIGHT`, `LS_UP` and `MENU`.
+
+Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--autoplay`. Pixel differences between Device Portal screenshots (320 px, threshold 24):
+
+| Step | Change |
+| --- | --- |
+| No input, 5 s apart | 0.01%, 0.01% |
+| `hold:RS_RIGHT:1.5` before RT | 0.00% |
+| `hold:RT:3` | 76.90% |
+| Next two shots, no input | 56.12%, 16.39% |
+| `hold:RS_RIGHT:1.5` after RT | 87.68% (camera turns) |
+| `hold:LS_UP:2` | 73.55% (the hero walks; the next prompt is "Press A to jump, then hold RT to swing") |
+| `MENU` | 98.97% (pause menu: Resume, Restart Last Checkpoint, Manual Save, Photo Mode, Settings, Quit) |
+
+**Saves.** The save files' checksums were unchanged after the run.
+
+**The save changed, not the build.** Earlier builds such as `.231` and `.233` continued at street level. On the console, `slot0-s.save` was rewritten during the `.234` run (the game log records "Request save type 2"), and every run since lands on the dive. The `zone-type-load-error` line appears in working and paused runs alike.
+
+**Impact on measurements.** Automated drives must hold RT after Continue before sampling gameplay. The 25–31 frames per second recorded above were measured on the paused tutorial frame. They show how fast the render loop runs, but gameplay frame rate still has to be measured.
+
+**Rendering bugs are still present while moving.** After RT, the street surface shows the sky reflection and the hero is a white placeholder cube.
