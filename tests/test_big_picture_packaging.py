@@ -26,6 +26,11 @@ MANIFEST = b"""<Package xmlns="http://schemas.microsoft.com/appx/manifest/founda
 <Capabilities><Capability Name="internetClient"/></Capabilities>
 </Package>"""
 
+PROBE_PROPERTIES = (b"<Properties><DisplayName>Steam Core Loader Probe</DisplayName>"
+                    b"<PublisherDisplayName>Xbox Portability Probe</PublisherDisplayName></Properties>")
+PROBE_TILE = (b'<uap:VisualElements DisplayName="Steam Core Loader Probe" Description="Measures launching one '
+              b'fixed packaged child process" BackgroundColor="#202020" Square150x150Logo="Assets\\Logo.png"/>')
+
 
 def stage_trials(layout, profiles, template, source_profiles=()):
     with ZipFile(template) as package:
@@ -85,8 +90,8 @@ class BigPicturePackageTests(unittest.TestCase):
                     .replace(b"BigPicture.Native.dll", b"ProbeNative.dll")
                     .replace(b"BigPicture.Native.Launcher", b"XboxProbe.Native.ProbeRunner")
                     .replace(b'<Package xmlns=', b'<Package xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns=')
-                    .replace(b'StartPage="big-picture.html"/>', b'StartPage="steam-signin.html"><uap:VisualElements/></Application>')
-                    .replace(b"<Applications>", b"<Dependencies/><Applications>"))
+                    .replace(b'StartPage="big-picture.html"/>', b'StartPage="steam-signin.html">' + PROBE_TILE + b'</Application>')
+                    .replace(b"<Applications>", PROBE_PROPERTIES + b"<Dependencies/><Applications>"))
         base = self.work / "fhd.appx"
         page = (b'<html lang="en"><script src="steam-signin.js"></script>'
                 b'<script id="steam-sdl-profiles" data-apps="975370" src="steam-sdl-host.js"></script></html>')
@@ -101,6 +106,8 @@ class BigPicturePackageTests(unittest.TestCase):
             package.writestr("StardewStartupDiagnostic.dll", b"recovery hook")
             package.writestr("xcom-runtime/placeholder", b"dos runtime")
             package.writestr("AppxBlockMap.xml", b"stale footprint")
+            for name in library_builder.BRAND_FILES:
+                package.writestr(f"Assets/{name}", b"probe tile")
             for name in ("SDL2.dll", "opengl32.dll", "libEGL.dll", "dxil.dll"):
                 package.writestr(name, b"runtime fixture")
 
@@ -210,6 +217,13 @@ class BigPicturePackageTests(unittest.TestCase):
         identity = result.find("{*}Identity")
         self.assertEqual(identity.get("Name"), "XboxPortabilityProbe.ChildProcess.SteamCore")
         self.assertEqual(identity.get("Version"), "1.0.230.1")
+        self.assertEqual(result.findtext("{*}Properties/{*}DisplayName"), "GabeBox")
+        self.assertEqual(result.findtext("{*}Properties/{*}PublisherDisplayName"), "Xbox Portability Probe")
+        tile = next(item for item in result.iter() if item.tag.endswith("}VisualElements"))
+        self.assertEqual((tile.get("DisplayName"), tile.get("BackgroundColor")), ("GabeBox", "#0B0B0B"))
+        for name in library_builder.BRAND_FILES:
+            self.assertEqual((self.layout / "Assets" / name).read_bytes(),
+                             (ROOT / "ui/big-picture/Assets" / name).read_bytes())
         classes = {item.get("ActivatableClassId") for item in result.iter() if item.tag.endswith("}ActivatableClass")}
         self.assertTrue({"XboxProbe.Native.ProbeRunner", "BigPictureView.Native.Renderer",
                          "Microsoft.Web.WebView2.Core.CoreWebView2Environment"} <= classes)
@@ -230,6 +244,31 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertTrue((self.layout / "ValveClient/steamui/steaminputglyphs/shared_button_a.svg").is_file())
         self.assertEqual((self.layout / "xcom-runtime/xcom-dos.js").read_bytes(),
                          (ROOT / "runtime/dos/xcom-dos.js").read_bytes())
+
+    def test_branding_keeps_identity_and_rejects_unexpected_manifests(self):
+        uap = b' xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"'
+        manifest = (b'<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"' + uap + b'>'
+                    b'<Identity Name="XboxPortabilityProbe.ChildProcess.SteamCore" Version="1.0.232.61"/>'
+                    + PROBE_PROPERTIES + b'<Applications><Application Id="App">' + PROBE_TILE
+                    + b'</Application></Applications></Package>')
+        self.layout.mkdir()
+        (self.layout / "Assets").mkdir()
+        (self.layout / "AppxManifest.xml").write_bytes(manifest)
+        for name in library_builder.BRAND_FILES[:-1]:
+            (self.layout / "Assets" / name).write_bytes(b"probe tile")
+        with self.assertRaisesRegex(ValueError, "StoreLogo.png"):
+            library_builder.stage_branding(self.layout)
+        self.assertEqual((self.layout / "AppxManifest.xml").read_bytes(), manifest)
+        (self.layout / "Assets/StoreLogo.png").write_bytes(b"probe tile")
+        library_builder.stage_branding(self.layout)
+        branded = (self.layout / "AppxManifest.xml").read_bytes()
+        self.assertEqual(branded, manifest.replace(b"Steam Core Loader Probe", b"GabeBox")
+                         .replace(b"Measures launching one fixed packaged child process", b"Steam Big Picture on Xbox")
+                         .replace(b"#202020", b"#0B0B0B"))
+        for broken in (manifest.replace(PROBE_PROPERTIES, b""), manifest.replace(b' Description="', b' Summary="')):
+            (self.layout / "AppxManifest.xml").write_bytes(broken)
+            with self.subTest(broken=broken), self.assertRaisesRegex(ValueError, "one package display name"):
+                library_builder.stage_branding(self.layout)
 
     def test_default_library_bridge_preserves_partial_layouts_and_enables_cache_reads(self):
         stage_bridge = library_builder.stage_bridge
