@@ -273,6 +273,8 @@ The loader trace also carries measurement records with their own exact formats. 
 | `asset steam-run-callbacks us=… utc=…` (with `steam-win32-steam-callback-trace-APPID.txt`) | `steam_callbacks`: the number of `SteamAPI_RunCallbacks` calls that took at least 2 ms, their total and longest durations, and the five slowest records. The runtime stops after 4096 records. [Steam title overrides](GAME-LAUNCH.md#override-steamworks-calls-for-one-title) |
 | `asset steam-relay-status avail=… config=… relay=… ping=… init_ms=… utc=… msg=…` and `asset steam-relay-status-slow us=… utc=…` (with `steam-win32-steam-relay-status-APPID.txt`) | `steam_relay`: the number of relay status changes, whether `avail` reached 100 (`Current`), with its `init_ms` and UTC time, the latest `avail`, the first 16 changes, and the count, longest and five slowest `GetRelayNetworkStatus` polls of 2 ms or more. The runtime stops after 256 changes and 1024 slow polls. [Steam title overrides](GAME-LAUNCH.md#override-steamworks-calls-for-one-title) |
 
+The Steam delay shift tests write general `asset steam-relay=worker-delay|worker-start` and `asset steam-init=…` records, which the child exit report also keeps. `inspect-loader` summarizes them under `steam_shift` ([Steam title overrides](GAME-LAUNCH.md#override-steamworks-calls-for-one-title)).
+
 The runtime deletes the staging folder, and its raw `loader-trace.txt`, when the game exits normally. The child exit report carries only the general load, export, fault, asset, DXGI and input records, so measurement records cannot be recovered from it afterwards. To keep them, run `observe` with `--output` while the game runs, or copy the raw trace with `get-file` before the game exits.
 
 ## Collect and measure

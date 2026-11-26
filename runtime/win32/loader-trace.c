@@ -1214,6 +1214,20 @@ static BOOL SteamOptionEnabled(const WCHAR *variable) {
     return GetEnvironmentVariableW(variable, enabled, ARRAYSIZE(enabled)) == 1 && enabled[0] == L'1';
 }
 
+/* A launch-scoped delay in decimal milliseconds, or 0 when the variable is unset, not a
+   plain number, or outside [minimum, maximum]. The launcher validates the profile value. */
+static DWORD SteamDelayMilliseconds(const WCHAR *variable, DWORD minimum, DWORD maximum) {
+    WCHAR text[8];
+    const DWORD length = GetEnvironmentVariableW(variable, text, ARRAYSIZE(text));
+    if (!length || length >= ARRAYSIZE(text)) return 0;
+    DWORD value = 0;
+    for (DWORD index = 0; index < length; ++index) {
+        if (text[index] < L'0' || text[index] > L'9') return 0;
+        value = value * 10 + (DWORD)(text[index] - L'0');
+    }
+    return value >= minimum && value <= maximum ? value : 0;
+}
+
 /* YYYYMMDDTHHMMSS.mmmZ, 20 characters, in the loader trace's record character set. */
 static char *UtcMilliseconds(char *out) {
     SYSTEMTIME now;
@@ -1308,8 +1322,13 @@ static void __cdecl TimedSteamRunCallbacks(void) {
    worker, InitRelayNetworkAccess still runs on the caller's thread and its duration is
    recorded.
 
+   XBOX_WIN32_STEAM_RELAY_DELAY_MS=N (1000-120000, with the worker only) is a diagnostic
+   shift test: the worker waits N ms before the first real call. If relay start-up drives
+   a later stall, the stall moves by about N.
+
    Both stop before SteamAPI_Shutdown: the wrapped shutdown sets a stop flag and waits up
-   to 5 s for a call in flight, so no thread calls into a released interface. */
+   to 5 s for a call in flight, so no thread calls into a released interface. The delay
+   checks the flag every 50 ms and skips the call once it is set. */
 typedef void (__cdecl *SteamRelayAccess)(void *);
 typedef int (__cdecl *SteamRelayStatus)(void *, void *);
 typedef void (__cdecl *SteamVoidCall)(void);
@@ -1322,6 +1341,7 @@ static SRWLOCK steamRelayLock = SRWLOCK_INIT;
 static volatile LONG steamRelayStopped;
 static volatile LONG steamRelayCalls;
 static volatile LONG steamRelayPolling;
+static volatile LONG steamRelayDelay;
 static LARGE_INTEGER steamRelayStart;
 
 /* The SDK's SteamRelayNetworkStatus_t: four 32-bit fields and a 256-byte message, 272
@@ -1456,8 +1476,28 @@ static BOOL RunSteamRelayAccess(void *utils, ULONGLONG *us) {
     return run;
 }
 
+/* Waits up to delay ms, or until SteamAPI_Shutdown sets the stop flag; returns the ms waited. */
+static unsigned long WaitSteamRelayDelay(DWORD delay) {
+    LARGE_INTEGER start, now;
+    QueryPerformanceCounter(&start);
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        const ULONGLONG waited = ElapsedMicroseconds(&start, &now) / 1000;
+        if (waited >= delay || SteamRelayStopped()) return Clamped(waited);
+        Sleep(delay - waited < 50 ? (DWORD)(delay - waited) : 50);
+    }
+}
+
 static DWORD WINAPI SteamRelayWorker(LPVOID parameter) {
     const LONG call = (LONG)(LONG_PTR)parameter;
+    const DWORD delay = call == 1 ? (DWORD)InterlockedCompareExchange(&steamRelayDelay, 0, 0) : 0;
+    if (delay) {
+        const unsigned long waited = WaitSteamRelayDelay(delay);
+        char line[112];
+        char *out = Unsigned(Text(line, "asset steam-relay=worker-start call=1 waited_ms="), waited);
+        out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
     ULONGLONG us;
     const BOOL ran = RunSteamRelayAccess(InterlockedCompareExchangePointer(&steamRelayUtils, NULL, NULL), &us);
     if (call <= 8) TraceRelayCall(ran ? "worker-done" : "worker-skipped", call, ran, us);
@@ -1475,6 +1515,15 @@ static void __cdecl SteamRelayAccessOverride(void *utils) {
     InterlockedCompareExchangePointer(&steamRelayUtils, utils, NULL);
     if (SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_WORKER")) {
         if (call <= 8) TraceRelayCall("worker", call, FALSE, 0);
+        /* Diagnostic shift test: only the first call waits, on the worker, never on the caller. */
+        const DWORD delay = call == 1 ? SteamDelayMilliseconds(L"XBOX_WIN32_STEAM_RELAY_DELAY_MS", 1000, 120000) : 0;
+        if (delay) {
+            InterlockedExchange(&steamRelayDelay, (LONG)delay);
+            char line[112];
+            char *out = Unsigned(Text(line, "asset steam-relay=worker-delay call=1 delay_ms="), delay);
+            out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+            AppendTrace(line, (DWORD)(out - line));
+        }
         HANDLE thread = CreateThread(NULL, 0, SteamRelayWorker, (LPVOID)(LONG_PTR)call, 0, NULL);
         if (thread) {
             CloseHandle(thread);
@@ -1540,8 +1589,128 @@ static FARPROC SteamRelayOverride(HMODULE module, const char *name, FARPROC reso
     return NULL;
 }
 
+/* Diagnostic shift test for Steam initialization (XBOX_WIN32_STEAM_INIT_DELAY_MS=N,
+   1000-30000). The first Steam API init call sleeps N ms on the calling thread, then calls
+   the real export and returns its result and last error unchanged. Steamworks.NET's
+   SteamAPI.InitEx binds SteamInternal_SteamAPI_Init(const char *, SteamErrMsg *), which
+   returns ESteamAPIInitResult. Slay the Spire 2's steam_api64.dll (build 26655341,
+   SHA-256 1add7f15...dccbc) also exports SteamAPI_InitFlat(SteamErrMsg *), with the same
+   result type, and the legacy bool SteamAPI_InitSafe(void); all three are covered. If a
+   stall is timed from the title's own Steam session, it moves by about N relative to the
+   first frame; if it is timed from process creation, it does not move. */
+typedef int (__cdecl *SteamInternalInit)(const char *, void *);
+typedef int (__cdecl *SteamInitFlat)(void *);
+typedef unsigned char (__cdecl *SteamInitSafe)(void);
+static PVOID volatile steamInternalInit;
+static PVOID volatile steamInitFlat;
+static PVOID volatile steamInitSafe;
+static volatile LONG steamInitCalls;
+
+static DWORD SteamInitDelay(void) {
+    return SteamDelayMilliseconds(L"XBOX_WIN32_STEAM_INIT_DELAY_MS", 1000, 30000);
+}
+
+/* Sleeps before the first init call and returns its call number. Restores the caller's last error. */
+static LONG BeforeSteamInit(const char *name, DWORD *slept, LARGE_INTEGER *start) {
+    const DWORD previous = GetLastError();
+    const LONG call = InterlockedIncrement(&steamInitCalls);
+    *slept = 0;
+    const DWORD delay = call == 1 ? SteamInitDelay() : 0;
+    if (delay) {
+        char line[160];
+        char *out = Text(Text(line, "asset steam-init=delayed export="), name);
+        out = Unsigned(Text(out, " call=1 delay_ms="), delay);
+        out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+        LARGE_INTEGER before, after;
+        QueryPerformanceCounter(&before);
+        Sleep(delay);
+        QueryPerformanceCounter(&after);
+        *slept = Clamped(ElapsedMicroseconds(&before, &after) / 1000);
+    }
+    QueryPerformanceCounter(start);
+    SetLastError(previous);
+    return call;
+}
+
+/* Records the real call's duration and result. Leaves the export's last error in place. */
+static void AfterSteamInit(const char *name, LONG call, DWORD slept, const LARGE_INTEGER *start, int result) {
+    const DWORD error = GetLastError();
+    LARGE_INTEGER end;
+    QueryPerformanceCounter(&end);
+    if (call <= 8) {
+        char line[192];
+        char *out = Text(Text(line, "asset steam-init=called export="), name);
+        out = Unsigned(Text(out, " call="), (unsigned long)call);
+        out = Unsigned(Text(out, " slept_ms="), slept);
+        out = Unsigned(Text(out, " us="), Clamped(ElapsedMicroseconds(start, &end)));
+        out = Signed(Text(out, " result="), result);
+        out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(error);
+}
+
+static int __cdecl DelayedSteamInternalInit(const char *versions, void *message) {
+    DWORD slept;
+    LARGE_INTEGER start;
+    const LONG call = BeforeSteamInit("SteamInternal_SteamAPI_Init", &slept, &start);
+    const int result = ((SteamInternalInit)InterlockedCompareExchangePointer(&steamInternalInit, NULL, NULL))(
+        versions, message);
+    AfterSteamInit("SteamInternal_SteamAPI_Init", call, slept, &start, result);
+    return result;
+}
+
+static int __cdecl DelayedSteamInitFlat(void *message) {
+    DWORD slept;
+    LARGE_INTEGER start;
+    const LONG call = BeforeSteamInit("SteamAPI_InitFlat", &slept, &start);
+    const int result = ((SteamInitFlat)InterlockedCompareExchangePointer(&steamInitFlat, NULL, NULL))(message);
+    AfterSteamInit("SteamAPI_InitFlat", call, slept, &start, result);
+    return result;
+}
+
+static unsigned char __cdecl DelayedSteamInitSafe(void) {
+    DWORD slept;
+    LARGE_INTEGER start;
+    const LONG call = BeforeSteamInit("SteamAPI_InitSafe", &slept, &start);
+    const unsigned char result = ((SteamInitSafe)InterlockedCompareExchangePointer(&steamInitSafe, NULL, NULL))();
+    AfterSteamInit("SteamAPI_InitSafe", call, slept, &start, result);
+    return result;
+}
+
+static FARPROC SteamInitOverride(const char *name, FARPROC resolved) {
+    PVOID volatile *slot;
+    FARPROC wrapper;
+    if (SameName(name, "SteamInternal_SteamAPI_Init")) {
+        slot = &steamInternalInit;
+        wrapper = (FARPROC)(void *)DelayedSteamInternalInit;
+    } else if (SameName(name, "SteamAPI_InitFlat")) {
+        slot = &steamInitFlat;
+        wrapper = (FARPROC)(void *)DelayedSteamInitFlat;
+    } else if (SameName(name, "SteamAPI_InitSafe")) {
+        slot = &steamInitSafe;
+        wrapper = (FARPROC)(void *)DelayedSteamInitSafe;
+    } else {
+        return NULL;
+    }
+    const DWORD delay = resolved ? SteamInitDelay() : 0;
+    if (!delay) return NULL;
+    const PVOID first = InterlockedCompareExchangePointer(slot, (PVOID)resolved, NULL);
+    if (first && first != (PVOID)resolved) return NULL;
+    if (!first) {
+        char line[128];
+        char *out = Text(Text(line, "asset steam-init-override="), name);
+        out = Text(Unsigned(Text(out, " delay_ms="), delay), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    return wrapper;
+}
+
 static FARPROC SteamTitleOverride(HMODULE module, const char *name, FARPROC resolved) {
     if (!module || module != GetModuleHandleW(L"steam_api64.dll")) return NULL;
+    const FARPROC init = SteamInitOverride(name, resolved);
+    if (init) return init;
     if (SameName(name, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess")) {
         /* The diagnostic stub wins; staging and the launcher refuse it beside the worker or status options. */
         if (!SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STUB")) return SteamRelayOverride(module, name, resolved);

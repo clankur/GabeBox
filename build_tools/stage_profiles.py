@@ -114,6 +114,14 @@ STEAM_OVERRIDES = {
 }
 # The relay stub skips InitRelayNetworkAccess, so it cannot be combined with the options that run it.
 STEAM_RELAY_RUNNERS = ("steam-relay-worker", "steam-relay-status")
+# Diagnostic shift tests (T97 in analysis/slay-the-spire-2-compatibility.md). Each marker holds
+# "delay_ms=N" and sets the variable to N: the relay worker's real InitRelayNetworkAccess, or the
+# first Steam API init call, waits N ms. They are opt-in trial switches, never a checked-in profile.
+STEAM_DELAYS = {
+    "steam-relay-delay": ("XBOX_WIN32_STEAM_RELAY_DELAY_MS", 1000, 120000),
+    "steam-init-delay": ("XBOX_WIN32_STEAM_INIT_DELAY_MS", 1000, 30000),
+}
+STEAM_DELAY = re.compile(rb"delay_ms=([1-9][0-9]{3,5})\r?\n?")
 WARMUP_ASSEMBLY = re.compile(
     r"assembly=([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})"
     r"(?: mvid=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
@@ -313,9 +321,24 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 files[marker] = b""
                 if option in STEAM_OVERRIDES:
                     title_overrides.add(option)
-        if "no-steam-relay" in title_overrides and title_overrides.intersection(STEAM_RELAY_RUNNERS):
+        for option, (_, minimum, maximum) in STEAM_DELAYS.items():
+            marker = f"steam-win32-{option}-{app}.txt"
+            if not (root / marker).is_file():
+                continue
+            content = (root / marker).read_bytes() if (root / marker).stat().st_size <= 32 else b""
+            match = STEAM_DELAY.fullmatch(content)
+            if (not match or not minimum <= int(match[1]) <= maximum or source_profile is None
+                    or fields[6:7] != ["loader-trace"]):
+                raise ValueError(f"The {option} option needs 'delay_ms=N' with N from {minimum} to {maximum}, "
+                                 f"a source profile and a loader trace for AppID {app}.")
+            if option == "steam-relay-delay" and "steam-relay-worker" not in title_overrides:
+                raise ValueError(f"The steam-relay-delay option needs the steam-relay-worker option for AppID {app}.")
+            files[marker] = b"delay_ms=" + match[1]
+            title_overrides.add(option)
+        runners = title_overrides.intersection((*STEAM_RELAY_RUNNERS, *STEAM_DELAYS))
+        if "no-steam-relay" in title_overrides and runners:
             raise ValueError(f"The no-steam-relay option cannot be combined with "
-                             f"{' or '.join(sorted(title_overrides.intersection(STEAM_RELAY_RUNNERS)))} for AppID {app}.")
+                             f"{' or '.join(sorted(runners))} for AppID {app}.")
         steam_overrides |= title_overrides
         cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
         if (root / cache_marker).is_file():
@@ -703,7 +726,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError("Use a Steam Core artifact with launch-scoped controller notification support.")
     for option in sorted(steam_overrides):
-        variable = (STEAM_OVERRIDES[option] + "\0").encode("utf-16le")
+        name = STEAM_OVERRIDES[option] if option in STEAM_OVERRIDES else STEAM_DELAYS[option][0]
+        variable = (name + "\0").encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError(f"Use a Steam Core artifact with the launch-scoped {option} option.")
     if default_audio:

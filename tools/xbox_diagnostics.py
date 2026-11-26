@@ -90,9 +90,20 @@ LIVE_LOADER_EVENTS = {
     # the 60-second totals (runtime/win32/d3d12-residency.c).
     'residency': re.compile(r'asset residency(?:[ -]|$)'),
     # Steam title overrides: the relay start-up stub or worker, relay status changes and slow status polls,
-    # and SteamAPI_RunCallbacks calls of 2 ms or more (runtime/win32/loader-trace.c).
-    'steam': re.compile(r'asset steam-(?:relay|run-callbacks)(?:[ =-]|$)'),
+    # SteamAPI_RunCallbacks calls of 2 ms or more, and the delayed Steam API init (runtime/win32/loader-trace.c).
+    'steam': re.compile(r'asset steam-(?:relay|run-callbacks|init)(?:[ =-]|$)'),
 }
+# Diagnostic shift tests (XBOX_WIN32_STEAM_RELAY_DELAY_MS, XBOX_WIN32_STEAM_INIT_DELAY_MS): when the delayed
+# call was scheduled, when it started, and how the real call returned.
+UTC_STAMP = r'([0-9]{8}T[0-9]{6}\.[0-9]{3}Z)'
+STEAM_RELAY_DELAY = re.compile(rf'asset steam-relay=worker-delay call=1 delay_ms=([0-9]{{1,6}}) utc={UTC_STAMP}')
+STEAM_RELAY_START = re.compile(rf'asset steam-relay=worker-start call=1 waited_ms=([0-9]{{1,10}}) utc={UTC_STAMP}')
+STEAM_RELAY_DONE = re.compile(rf'asset steam-relay=(worker-done|worker-skipped) call=1(?: us=([0-9]{{1,10}}))? '
+                              rf'utc={UTC_STAMP}')
+STEAM_INIT_DELAY = re.compile(rf'asset steam-init=delayed export=([A-Za-z_]{{1,40}}) call=1 delay_ms=([0-9]{{1,6}}) '
+                              rf'utc={UTC_STAMP}')
+STEAM_INIT_CALL = re.compile(rf'asset steam-init=called export=([A-Za-z_]{{1,40}}) call=1 slept_ms=([0-9]{{1,10}}) '
+                             rf'us=([0-9]{{1,10}}) result=(-?[0-9]{{1,10}}) utc={UTC_STAMP}')
 PIPELINE_MARKER = re.compile(r'asset (graphics|compute)-pso-(before|after) bytes=0x[0-9a-fA-F]{16} '
                              r'flags=0x([0-9a-fA-F]{8}) available-commit-kib=0x([0-9a-fA-F]{8})(?: .+)?')
 PIPELINE_SAMPLE = re.compile(r'asset live-pipeline-(graphics|compute) bytes=0x([0-9a-fA-F]{16}) '
@@ -496,6 +507,35 @@ def live_loader_snapshot(raw):
     return loader_summary(lines, len(data), bool(raw and len(raw) > LIVE_LOADER_LIMIT)), lines
 
 
+def first_match(pattern, lines):
+    return next((match for match in map(pattern.fullmatch, lines) if match), None)
+
+
+def steam_shift_summary(lines):
+    """Summarize the delayed relay start-up and the delayed Steam API init, when either ran."""
+    summary = {}
+    scheduled = first_match(STEAM_RELAY_DELAY, lines)
+    if scheduled:
+        started = first_match(STEAM_RELAY_START, lines)
+        done = first_match(STEAM_RELAY_DONE, lines)
+        summary['relay'] = {
+            'delay_ms': int(scheduled[1]), 'scheduled_utc': scheduled[2],
+            'waited_ms': int(started[1]) if started else None, 'started_utc': started[2] if started else None,
+            # worker-skipped: SteamAPI_Shutdown began during the delay, so the real call did not run.
+            'outcome': done[1] if done else None, 'call_us': int(done[2]) if done and done[2] else None,
+        }
+    delayed = first_match(STEAM_INIT_DELAY, lines)
+    if delayed:
+        called = first_match(STEAM_INIT_CALL, lines)
+        summary['init'] = {
+            'export': delayed[1], 'delay_ms': int(delayed[2]), 'delayed_utc': delayed[3],
+            'slept_ms': int(called[2]) if called else None, 'call_us': int(called[3]) if called else None,
+            # ESteamAPIInitResult (0 is OK), or 1 for a successful legacy SteamAPI_InitSafe.
+            'result': int(called[4]) if called else None, 'called_utc': called[5] if called else None,
+        }
+    return summary
+
+
 def loader_summary(lines, bytes_read, truncated=False):
     summary = {'state': 'observed' if lines else 'no-complete-records' if bytes_read else 'unavailable',
                'bytes_read': bytes_read, 'truncated': truncated,
@@ -504,6 +544,9 @@ def loader_summary(lines, bytes_read, truncated=False):
     measured = diagnostic_summary(diagnostic_lines(lines))
     if measured:
         summary['diagnostics'] = measured
+    shift = steam_shift_summary(lines)
+    if shift:
+        summary['steam_shift'] = shift
     for label, pattern in LIVE_LOADER_EVENTS.items():
         matching = [line for line in lines if pattern.match(line)]
         summary['events'][label] = {'count': len(matching), 'latest': matching[-4:]}

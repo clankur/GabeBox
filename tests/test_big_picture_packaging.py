@@ -452,7 +452,9 @@ class BigPicturePackageTests(unittest.TestCase):
 
     def test_no_checked_in_profile_stubs_steam_relay_start_up(self):
         # The relay stub defers multiplayer start-up and is for A/B trials only (docs/GAME-LAUNCH.md).
-        self.assertEqual(sorted((ROOT / "profiles").rglob("steam-win32-no-steam-relay-*.txt")), [])
+        # The relay and Steam init delays are diagnostic shift tests that defer Steam networking too.
+        for option in ("no-steam-relay", "steam-relay-delay", "steam-init-delay"):
+            self.assertEqual(sorted((ROOT / "profiles").rglob(f"steam-win32-{option}-*.txt")), [], option)
 
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
@@ -1069,6 +1071,69 @@ class BigPicturePackageTests(unittest.TestCase):
         stage_trials(self.layout, trial, runtime)
         for option in ("steam-relay-worker", "steam-relay-status"):
             self.assertEqual((self.layout / f"steam-win32-{option}-{app}.txt").read_bytes(), b"")
+
+    def test_steam_delay_shift_tests_are_bounded_and_need_the_worker_and_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        runtime = self.work / "steam-delay-runtime.appx"
+        trial = [f"{app}={profile}"]
+
+        def package(*names):
+            variables = b"".join((name + "\0").encode("utf-16le") for name in names)
+            with ZipFile(runtime, "w") as archive:
+                for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                    archive.writestr(member, b"runtime fixture")
+                archive.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variables)
+                archive.writestr("XboxWin32LoaderTrace.dll", variables)
+
+        everything = ("XBOX_WIN32_STEAM_RELAY_STUB", "XBOX_WIN32_STEAM_RELAY_WORKER",
+                      "XBOX_WIN32_STEAM_RELAY_DELAY_MS", "XBOX_WIN32_STEAM_INIT_DELAY_MS")
+        worker = profile / f"steam-win32-steam-relay-worker-{app}.txt"
+        for option, variable, low, high in (("steam-relay-delay", "XBOX_WIN32_STEAM_RELAY_DELAY_MS", 1000, 120000),
+                                            ("steam-init-delay", "XBOX_WIN32_STEAM_INIT_DELAY_MS", 1000, 30000)):
+            marker = profile / f"steam-win32-{option}-{app}.txt"
+            if option == "steam-relay-delay":
+                marker.write_text("delay_ms=30000\n")
+                package(*everything)
+                with self.assertRaisesRegex(ValueError, "steam-relay-delay option needs the steam-relay-worker"):
+                    stage_trials(self.layout, trial, runtime)
+                worker.touch()
+            for content in ("", "1", f"delay_ms={low - 1}", f"delay_ms={high + 1}", "delay_ms=01000",
+                            "delay_ms=5000 ", "delay=5000", "delay_ms=5000\nextra"):
+                marker.write_text(content)
+                with self.assertRaisesRegex(ValueError, f"The {option} option needs 'delay_ms=N' with N from "
+                                                        f"{low} to {high}"):
+                    stage_trials(self.layout, trial, runtime)
+            for content, staged in ((f"delay_ms={low}", f"delay_ms={low}"), (f"delay_ms={high}\r\n", f"delay_ms={high}")):
+                marker.write_bytes(content.encode())
+                package(*everything)
+                stage_trials(self.layout, trial, runtime)
+                self.assertEqual((self.layout / marker.name).read_bytes(), staged.encode())
+            # An artifact without the variable would ignore the marker.
+            package(*(name for name in everything if name != variable))
+            with self.assertRaisesRegex(ValueError, f"launch-scoped {option} option"):
+                stage_trials(self.layout, trial, runtime)
+            package(*everything)
+            shadow.write_text(f"{build}\nGame.exe\n")
+            with self.assertRaisesRegex(ValueError, "source profile and (?:a )?loader trace"):
+                stage_trials(self.layout, trial, runtime)
+            shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+            # The relay stub defers the start-up that the shift tests time, so the two are refused together.
+            stub = profile / f"steam-win32-no-steam-relay-{app}.txt"
+            stub.touch()
+            with self.assertRaisesRegex(ValueError, f"no-steam-relay option cannot be combined with .*{option}"):
+                stage_trials(self.layout, trial, runtime)
+            stub.unlink()
+            marker.unlink()
+            worker.unlink(missing_ok=True)
 
     def test_hosted_dxgi_output_requires_matching_profile_and_runtime(self):
         self.layout.mkdir()

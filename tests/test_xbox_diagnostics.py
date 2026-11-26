@@ -1227,6 +1227,35 @@ class LoaderDiagnosticTests(unittest.TestCase):
         self.assertIsNone(never['current_init_ms'])
         self.assertEqual(never['slow_polls'], 0)
 
+    def test_steam_delay_shift_tests_are_listed_and_summarized(self):
+        lines = ['asset steam-relay-override=InitRelayNetworkAccess mode=worker',
+                 'asset steam-init-override=SteamInternal_SteamAPI_Init delay_ms=10000',
+                 'asset steam-init=delayed export=SteamInternal_SteamAPI_Init call=1 delay_ms=10000 '
+                 'utc=20261126T015000.100Z',
+                 'asset steam-init=called export=SteamInternal_SteamAPI_Init call=1 slept_ms=10002 us=41800 result=0 '
+                 'utc=20261126T015010.144Z',
+                 'asset steam-relay=worker call=1 utc=20261126T015010.200Z',
+                 'asset steam-relay=worker-delay call=1 delay_ms=30000 utc=20261126T015010.200Z',
+                 'asset steam-relay=worker-start call=1 waited_ms=30008 utc=20261126T015040.208Z',
+                 'asset steam-relay=worker-done call=1 us=830 utc=20261126T015040.209Z']
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in lines))
+        summary = diagnostics.loader_summary(lines, 1024)
+        self.assertEqual(summary['events']['steam']['count'], len(lines))
+        self.assertEqual(summary['steam_shift'], {
+            'relay': {'delay_ms': 30000, 'scheduled_utc': '20261126T015010.200Z', 'waited_ms': 30008,
+                      'started_utc': '20261126T015040.208Z', 'outcome': 'worker-done', 'call_us': 830},
+            'init': {'export': 'SteamInternal_SteamAPI_Init', 'delay_ms': 10000,
+                     'delayed_utc': '20261126T015000.100Z', 'slept_ms': 10002, 'call_us': 41800, 'result': 0,
+                     'called_utc': '20261126T015010.144Z'}})
+        # Shutdown during the delay: the worker skips the real call.
+        skipped = diagnostics.loader_summary(lines[4:7] + ['asset steam-relay=worker-skipped call=1 '
+                                                           'utc=20261126T015012.000Z'], 512)['steam_shift']
+        self.assertEqual(skipped['relay']['outcome'], 'worker-skipped')
+        self.assertIsNone(skipped['relay']['call_us'])
+        self.assertNotIn('init', skipped)
+        self.assertNotIn('steam_shift', diagnostics.loader_summary(lines[:1], 64))
+
     def test_pipeline_events_from_a_replay_mode_are_summarized_by_outcome(self):
         lines = ['pso timing result=0x00000000',
                  'pso kind=S utc=10:00:00.000 us=5800000 result=0x00000000 cache=miss',

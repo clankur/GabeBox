@@ -76,8 +76,8 @@ On packages `1.0.244`–`1.0.272` (build 26655341), every session has a disturba
 
 | Candidate | Evidence | Switch |
 | --- | --- | --- |
-| Steam Datagram Relay start-up on the game thread | `SteamInitializer.Initialize` calls `SteamNetworkingUtils.InitRelayNetworkAccess()` at boot, and `SteamAPI.RunCallbacks()` runs on the main thread every frame. A steamclient lock or IPC wait there would be a low-CPU stall that does not depend on game state. | `steam-win32-no-steam-relay-2868840.txt` makes the flat export a no-op (diagnostic only). `steam-win32-steam-relay-worker-2868840.txt` keeps the real call at start-up but runs it on a worker thread. `steam-win32-steam-relay-status-2868840.txt` records relay status changes and slow `GetRelayNetworkStatus` polls. `steam-win32-steam-callback-trace-2868840.txt` times `SteamAPI_RunCallbacks` and records calls of 2 ms or more. [Steam title overrides](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title) |
-| First background gen2 GC (CoreCLR 9.0.7) | A window of several pauses fits a background GC. Private working set rose 8–17 MiB at onset, which fits a mark-array commit. Against: the timing does not move with activity. | `collect=after` in the warm-up plan forces one blocking, compacting gen2 collection once the warm-up completes, 22–34 s after the first frame. [Warm-up plan](../docs/GAME-LAUNCH.md#warm-a-coreclr-titles-managed-code-before-first-use) |
+| Steam Datagram Relay start-up on the game thread | `SteamInitializer.Initialize` calls `SteamNetworkingUtils.InitRelayNetworkAccess()` at boot, and `SteamAPI.RunCallbacks()` runs on the main thread every frame. A steamclient lock or IPC wait there would be a low-CPU stall that does not depend on game state. | `steam-win32-no-steam-relay-2868840.txt` makes the flat export a no-op (diagnostic only). `steam-win32-steam-relay-worker-2868840.txt` keeps the real call at start-up but runs it on a worker thread. `steam-win32-steam-relay-status-2868840.txt` records relay status changes and slow `GetRelayNetworkStatus` polls. `steam-win32-steam-callback-trace-2868840.txt` times `SteamAPI_RunCallbacks` and records calls of 2 ms or more. Two shift tests, `steam-win32-steam-relay-delay-2868840.txt` and `steam-win32-steam-init-delay-2868840.txt`, delay the real relay start-up or Steam init (diagnostic only). [Steam title overrides](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title) |
+| First background gen2 GC (CoreCLR 9.0.7) | A window of several pauses fits a background GC. Private working set rose 8–17 MiB at onset, which fits a mark-array commit. Against: the timing does not move with activity, and the [offline timer search](#offline-timer-search) rules out CoreCLR's 100 s gen2 time trigger. | `collect=after` in the warm-up plan forces one blocking, compacting gen2 collection once the warm-up completes, 22–34 s after the first frame. [Warm-up plan](../docs/GAME-LAUNCH.md#warm-a-coreclr-titles-managed-code-before-first-use) |
 | One-shot `msedgewebview2.exe` child of the Big Picture host | It lives 1–4 s and appears 120–125 s after the host's WebView2 starts, which is about 93–99 s after the game's first frame in the normal launch flow. Against: `console-246` run2 had the spawn and no stall, and the `1.0.232` runs had a small T97 with no spawn. | The host now logs every WebView2 `ProcessInfosChanged` change with kind, pid and UTC time. `xbox-webview2-arguments.txt` in the package root can add `--disable-component-update` or `--disable-background-networking`. [WebView2 child processes](../docs/XBOX-DIAGNOSTICS.md#webview2-child-processes) |
 
 Every switch is off by default. The pinned profile carries none of the markers, and its warm-up plan is unchanged.
@@ -85,6 +85,24 @@ Every switch is off by default. The pinned profile carries none of the markers, 
 Multiplayer is in scope for this title, so the relay stub can only locate the stall; it cannot ship. It defers relay start-up to the first co-op connection ([relay stub](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title)). If arm B removes T97, the fix must keep `InitRelayNetworkAccess` at start-up and take the wait off the game thread or out of the first two minutes. It must then pass a co-op session that hosts and joins through Steam lobbies and the relay.
 
 The relay worker is the first such candidate (arm B2). It keeps the real call at start-up, so relay access is ready before the first co-op connection, but it runs the call on its own thread. The call returns `void` and starts asynchronous work, so the game never depended on it finishing ([why the worker keeps the contract](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title)). There is a limit to what it can fix. The start-up call runs at boot, about 97 s before T97, and the game renders normally afterwards, so the call itself is not the 97 s stall. The worker can only help if the call leaves a later wait on the game thread. If B removes T97 and B2 does not, the stall comes from relay work that steamclient does later, for example a retry, a ping refresh or the first status callback. The game thread then waits on that work through `RunCallbacks`. In that case the B2 trace should show a relay status change, a slow poll or a long `steam-run-callbacks` call inside the window. The next fix would then target that later work, still without deferring start-up.
+
+### Offline timer search
+
+A search of the game process's components for a 90–100 s one-shot timer found no match. This is offline analysis of source and disassembly, not a console result.
+
+- **Timing anchor.** The loader traces of `console-260` runs 3–5 load `hostfxr.dll` after the first present, so CoreCLR starts at about the first present, 2–3 s after process creation. T97 is therefore about 99–101 s after process creation.
+- **CoreCLR's gen2 time trigger is ruled out.** It is the only 90–100 s constant in CoreCLR 9.0.7. For workstation background GC, gen2 has `time_clock = 100*1000*1000` µs and `gc_clock = 100` ([`gc.cpp` L2185](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/gc/gc.cpp#L2185)). When 100 s and 100 GCs have passed since the last gen2, `generation_to_condemn` raises the next GC to a background gen2 ([`gc.cpp` L21885](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/gc/gc.cpp#L21885)). The clock starts at GC init and is reset by every gen2. That gives two reasons to rule it out:
+  - Counted from GC init, it fires at first present + 99.8 s or later, 1.6–2.7 s after the observed onsets.
+  - Runs 2–5 entered combat at 60–75 s, where `PreloadManager` calls `GC.Collect()` after each load. That blocking gen2 resets the clock, so no time-triggered gen2 could fire before about 160 s, yet T97 still came at about 97 s.
+- **Arm C is predicted to change nothing.** Those runs already had a forced gen2 before T97. It stays in the matrix because it is cheap. `System.GC.Concurrent=false` is the direct switch for the time trigger.
+- **Other runtime defaults have no 90–100 s timer.** This covers tiered compilation, the thread pool, the finalizer, `SocketsHttpHandler` and Sentry ([`clrconfigvalues.h`](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/inc/clrconfigvalues.h#L563)).
+- **This repository's code has no 90–100 s timer.** A search of the runtime, presenter, host and observer timers found none. The perf sampler last fired 13.7–15 s before every onset.
+- **Steam remains the leading suspect, but no matching timer was found.**
+  - `steam_api64.dll` has no timer.
+  - `steamclient64.dll` has no 90–100 s constant on a plausible path.
+  - Steam Datagram Relay re-probes relay pings after 120 s (`ThinkPingProbes`). Counted from the game's own `InitRelayNetworkAccess`, that lands near +123–128 s.
+  - It fits T97 only if it counts from the hosted Steam client's earlier pings, about 22 s before the game's first present. T97 locks more tightly to the game's first present (SD 0.4 s) than to host activation (SD 1.5 s), so this is speculation.
+- **Arms B3 and F are the shift tests that separate these clocks.** Both delay Steam start-up, so they are diagnostic only and cannot ship.
 
 ### Console test matrix
 
@@ -95,8 +113,10 @@ Take the console through the `xbox-queue` skill. Build every arm from one Steam 
 | A, baseline | none | Restart Steam Core. Select **Play** as soon as Big Picture is ready, as in earlier runs. |
 | B, relay stub (diagnostic only) | `steam-win32-no-steam-relay-2868840.txt` | as A |
 | B2, relay worker | `steam-win32-steam-relay-worker-2868840.txt` and `steam-win32-steam-relay-status-2868840.txt` | as A, then keep the game running until at least 130 s after the first frame, so the status trace covers T97 |
-| C, early GC | append `collect=after` to `steam-win32-managed-warmup-2868840.txt` | as A |
+| B3, delayed relay (`delay_ms=30000`) | the B2 markers, plus `steam-win32-steam-relay-delay-2868840.txt` holding `delay_ms=30000` | as A, keeping the game running for at least 140 s after the first frame |
+| C, early GC (predicted null, but cheap; see [offline timer search](#offline-timer-search)) | append `collect=after` to `steam-win32-managed-warmup-2868840.txt` | as A |
 | D, long-lived host | none (the A package) | Restart Steam Core, then wait until at least 180 s after the `webview2 environment` line before **Play**. Confirm that the host's short-lived child (`added=` then `removed=` within a few seconds) is logged before the game starts. |
+| F, Steam init delayed (`delay_ms=10000`) | `steam-win32-steam-init-delay-2868840.txt` holding `delay_ms=10000` | as A, keeping the game running for at least 140 s after the first frame |
 
 To stage an arm, copy the profile and add its markers:
 
@@ -106,9 +126,13 @@ cp profiles/2868840/26655341/steam-win32-* "$profile/"
 touch "$profile/steam-win32-steam-callback-trace-2868840.txt"
 touch "$profile/steam-win32-no-steam-relay-2868840.txt"                  # arm B only
 touch "$profile/steam-win32-steam-relay-worker-2868840.txt" \
-      "$profile/steam-win32-steam-relay-status-2868840.txt"              # arm B2 only
+      "$profile/steam-win32-steam-relay-status-2868840.txt"              # arms B2 and B3
+printf 'delay_ms=30000\n' > "$profile/steam-win32-steam-relay-delay-2868840.txt"   # arm B3 only
 printf 'collect=after\n' >> "$profile/steam-win32-managed-warmup-2868840.txt"  # arm C only
+printf 'delay_ms=10000\n' > "$profile/steam-win32-steam-init-delay-2868840.txt"    # arm F only
 ```
+
+The B3 and F markers are shift tests. They must never be added to `profiles/`, and `tests/test_big_picture_packaging.py` enforces this.
 
 Rebuild the recipe and package with `--win32-trial-profile "2868840=$profile"` as described in [Build-matched profile](#build-matched-profile). Give each arm its own package version.
 
@@ -117,7 +141,7 @@ For each run:
 1. Start the observers before **Play**:
    ```sh
    python3 -m tools.xbox_deploy observe --version "$version" --app-id 2868840 --image-name SlayTheSpire2.exe \
-       --frame-seconds 130 --timeout 300 --output "t97-$arm-$n"
+       --frame-seconds 130 --timeout 300 --output "t97-$arm-$n"   # B3 and F: --frame-seconds 145
    python3 -m tools.xbox_deploy sample-processes --version "$version" --seconds 300 \
        --image-name SlayTheSpire2.exe --image-name msedgewebview2.exe --output "t97-$arm-$n-processes.jsonl"
    ```
@@ -128,6 +152,7 @@ For each run:
    python3 -m tools.measure "t97-$arm-$n/fhd-present-times.bin" --start-offset-s 95 --duration 7 --list-gaps 45
    python3 -m tools.measure "t97-$arm-$n/fhd-present-times.bin" --start-offset-s 60 --duration 30 --list-gaps 45
    ```
+   For B3, also list gaps from offset 125 s; for F, from offset 105 s. Use `--duration 7` for both.
 
 Record for each run:
 - the package version and arm;
@@ -137,6 +162,8 @@ Record for each run:
 - `steam_callbacks` from `loader_diagnostics` and any `asset steam-run-callbacks` line within ±3 s of the onset;
 - for B, `asset steam-relay=stubbed call=1`;
 - for B2, `steam_shadow_steam_relay=worker` and `steam_shadow_steam_relay_status=loader-trace` in the launch report. Record `asset steam-relay=worker call=1` and `worker-done call=1 us=…` (the `us` value is how long the real call took off the game thread). From `loader_diagnostics.steam_relay`, record `reached_current`, `current_init_ms` and `latest_avail`. Record every `asset steam-relay-status` change and every `steam-relay-status-slow` poll within ±3 s of the onset, and `asset steam-relay=shutdown wait_us=…` after **Quit**;
+- for B3, `steam_shadow_steam_relay_delay_ms=30000` in the launch report. From `steam_shift.relay` in `inspect-loader`, record `scheduled_utc`, `started_utc`, `waited_ms` and `outcome`. Record the B2 fields too; `init_ms` there includes the 30 s delay;
+- for F, `steam_shadow_steam_init_delay_ms=10000`. From `steam_shift.init`, record `export`, `delayed_utc`, `slept_ms`, `called_utc` and `result` (it must be 0). Check that the first present comes before `delayed_utc`. Record the UTC of `asset steam-relay…` or the relay call, which follows Steam init;
 - for C, the `managed_warmup_collect` line, including its `ms` and `pause_ms` (this is a new stall during menu loading), and `gen2` at `managed_warmup=complete`;
 - the `webview2 processes` lines from 60 s to 130 s after the first frame;
 - the STS2 private working set around the onset.
@@ -146,8 +173,13 @@ Interpret the runs as follows:
 - If A records a `steam-run-callbacks` call of 100 ms or more that covers a T97 gap, the stall is in Steam's callback dispatch even if B does not remove it.
 - B2 counts as a fix only if it removes T97 by the same rule as the other arms and relay status reaches `avail=100` (`reached_current: true`) in every run. It must also pass the co-op check under [Remaining open items](#remaining-open-items) on the same package. If B2 removes T97 but status never reaches 100, the relay did not start, and B2 is no better than the stub.
 - If B removes T97 and B2 does not, check B2's trace for a relay status change or slow poll inside the window. A slow poll that lines up with a T97 gap means another thread held the networking lock that `RunCallbacks` also takes. If B2's result is unclear, run arm A once more with only `steam-win32-steam-relay-status-2868840.txt` added, to see the relay status timeline without the worker.
+- **B3 and F are shift tests.** Each time T97 is measured as an offset from the first present. A move counts only if all three runs move it by the predicted amount ±1.5 s, and the 95–102 s window is clean. Both arms delay Steam's start, so neither is a fix.
+  - **B3 moves T97 to about +127.6 s.** Relay start-up drives the stall. F should then move it by about +10 s, because the relay call follows Steam init. The fix must take that relay work off the game thread without deferring start-up.
+  - **B3 does not move T97, and F moves it to about +107.6 s.** The trigger is timed from the game's own Steam session (client connection, IPC pipe or stats) but not from relay start-up. The next step is to time other Steam calls on the game thread around the window.
+  - **Neither moves T97.** The stall is timed from process creation or from outside the game's Steam session, such as the hosted Steam client's earlier relay pings. Steam start-up is then excluded as the clock. Compare with arm D, and if T97 still follows the game, look at the host-ping hypothesis.
+  - **B3 moves T97 but F does not.** This contradicts the call order. Check the trace order of `steam-init=called` and `steam-relay=worker-start`, then rerun both arms.
 - If D keeps T97 at +97 s after the game's first frame, the event is inside the game process. If T97 disappears in D, or moves to about 120–125 s after the host's WebView2 start, it comes from the host. Then try `xbox-webview2-arguments.txt` with `--disable-component-update` as arm E.
-- If C removes T97, keep `collect=after` only if its own pause during menu loading is shorter than the T97 stall it replaces. `System.GC.Concurrent=false` in a staged runtimeconfig is the alternative to test.
+- C is predicted to leave T97 unchanged ([offline timer search](#offline-timer-search)). If C removes T97, keep `collect=after` only if its own pause during menu loading is shorter than the T97 stall it replaces. `System.GC.Concurrent=false` in a staged runtimeconfig is the alternative to test.
 
 Whichever switch wins stays in the build-matched profile and is documented there. A switch that does not help is left off.
 
