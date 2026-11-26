@@ -76,11 +76,31 @@ Verified off-console:
   - `DXIL_DEBUG` disables the cache;
   - non-Windows builds are warning-free.
 
-Not verified (needs CI or the console):
+Verified in CI (run 45715041407, commit `f33948e`, windows-latest with VS 18 / MSVC 14.52):
 
-- **The Windows build.** `d3d12_screen.cpp` and `d3d12_compiler.cpp` were not compiled: they need generated NIR headers and DirectX-Headers. `ProbeNative.cpp` was not compiled either.
-- **The UWP Meson fork.** Pairing `SternXD/meson@2fa53d29` (its `subsystem = 'uwp'` support) with the VS backend, a same-architecture cross file and `needs_exe_wrapper` has not been run. The maintainers' own Meson (with a `--uwp` option) is not published. The `baseline` job's import/export comparison is the check that the CI build matches the prebuilt one.
-- **On the console:** whether `CreateFileMappingFromApp` and the CRT file calls work in the game process's container; whether `GetEnvironmentVariableA` sees the launcher's variables inside Mesa (no Mesa variable has been used on the console before); cache hits; and the size of the stall reduction.
+- **Both variants build.** They use the Ninja backend with the UWP machine file. The pinned prebuilt's linker is 14.51, which is also VS 18. The fork's Visual Studio backend can't build Mesa: it generates Store projects with /ZW, PCH and XAML compilation. The build has no Vulkan driver (`-Dvulkan-drivers=[]`), since only the five GL libraries are packaged.
+- **The shader-cache artifact** is `xbox-mesa-uwp-34732bb-shader-cache-x64`, with `SHA256SUMS` SHA-256 `3a4e806c33945469d57e23096ed5275025e0a50dc23b576c137e4cfceb7988e1`.
+- **The baseline matches the 26.2.2 release's exports exactly** in all five DLLs, including every WGL and GL entry point in `opengl32.dll`.
+- **19 import differences from the release.** None is a desktop-only API or a new module outside the API sets:
+
+  | Difference | DLLs |
+  | --- | --- |
+  | `IsProcessorFeaturePresent` from `api-ms-win-core-processthreads-l1-1-1` (newer CRT startup) | all five |
+  | `CreateEventA` in place of `CreateEventW`. The Store projects define `UNICODE`; Ninja does not. Same API set; Mesa passes no event name | `libgallium_wgl`, `libEGL` |
+  | No `copysign`, `fmin` or `fmax` (float and double) imports from the CRT; the compiler now inlines them | `libgallium_wgl` |
+
+- **The shader-cache build adds only app-container imports to `libgallium_wgl.dll`:**
+  - CRT file and time calls;
+  - `CreateFileMappingFromApp`, `MapViewOfFileFromApp` and `UnmapViewOfFile`;
+  - zlib `deflate`/`inflate` from the packaged `z-1.dll`.
+- The workflow now fails on any export difference, and on any new imported module other than an `api-ms-win-*` set or `z-1.dll`.
+
+Not verified (needs the console):
+
+- **Mesa sources and host.** The d3d12 sources compiled in CI. `ProbeNative.cpp` and `window-gl.c` build in the separate Xbox probe workflow.
+- **The cache's calls.** Whether `CreateFileMappingFromApp` and the CRT file calls work in the game process's container.
+- **Environment variables.** Whether `GetEnvironmentVariableA` sees the launcher's variables inside Mesa. No Mesa variable has been used on the console before.
+- **Results.** Cache hits, and the size of the stall reduction.
 
 ## Live test recipe (STS2, AppID 2868840, build 26655341)
 

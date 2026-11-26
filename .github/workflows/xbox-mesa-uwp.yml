@@ -153,6 +153,7 @@ jobs:
           # Compare imports and exports with the pinned 26.2.2 release built by the mesa-uwp maintainers.
           $reference = $env:MESA_REFERENCE
           $differences = 0
+          $failures = @()
           foreach ($name in $pin.libraries) {
             $old = Join-Path $reference "$($pin.prebuilt.prefix)$name"
             $new = Join-Path $output $name
@@ -168,9 +169,25 @@ jobs:
                 Write-Host "::warning::$name $mode differs from the 26.2.2 release:"
                 $delta | ForEach-Object { Write-Host "  $($_.SideIndicator) $($_.InputObject)" }
               }
+              # Gate: the exported ABI (WGL, GL, EGL and zlib entry points) must match the
+              # release exactly. A newer toolset may change api-ms-win-* contract versions and
+              # CRT symbols, and the shader cache adds zlib, but any other new module would be
+              # a dependency the Xbox package does not provide.
+              if ($mode -eq '--coff-exports' -and $delta) {
+                $failures += "$name exports differ from the pinned release"
+              }
+              if ($mode -eq '--coff-imports') {
+                $delta | Where-Object { $_.SideIndicator -eq '=>' -and $_.InputObject -like 'Name *' } | ForEach-Object {
+                  $module = $_.InputObject.Substring(5)
+                  if ($module -notmatch '^api-ms-win-(core|crt)-[a-z0-9-]+\.dll$' -and $module -ne 'z-1.dll') {
+                    $failures += "$name imports $module, which the pinned release does not"
+                  }
+                }
+              }
             }
           }
           Write-Host "Import/export differences from the pinned release: $differences"
+          if ($failures) { throw ($failures -join "`n") }
 
           Copy-Item (Join-Path $env:MESA_WORK "mesa/$($pin.source.license)") (Join-Path $output 'LICENSE.mesa-uwp')
           $applied = $pin.patches | Where-Object { $_.variants -contains $env:VARIANT } |
