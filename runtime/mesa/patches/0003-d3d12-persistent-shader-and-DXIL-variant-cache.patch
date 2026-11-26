@@ -21,7 +21,10 @@ every launch, at its first draw.
   experimental (unvalidated) mode and verbose debugging bypass the cache.
 - D3D12_SHADER_CACHE_STATS=<path> writes variant counts (hits, misses,
   uncached) and time spent creating variants, hashing, loading, in
-  nir_to_dxil and in validation, at most once a second and at exit.
+  nir_to_dxil and in validation, followed by the disk cache's own
+  diagnostics (disk_cache_print_diagnostics). The file is written once when
+  the cache is created, at most once a second while variants are created,
+  and at screen destruction after queued entries have been written.
 
 diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/d3d12/d3d12_compiler.cpp
 --- a/src/gallium/drivers/d3d12/d3d12_compiler.cpp
@@ -49,12 +52,10 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
  
  #ifdef _WIN32
  #include "dxil_validator.h"
-@@ -71,6 +76,168 @@
- {
-    const struct glsl_type *base_type = glsl_without_array(var->type);
+@@ -73,6 +78,172 @@
     return glsl_type_is_sampler(base_type) && !glsl_type_is_bare_sampler(base_type);
-+}
-+
+ }
+ 
 +/* Persistent DXIL variant cache.
 + *
 + * A variant's DXIL depends only on the NIR handed to nir_to_dxil() and on the
@@ -105,6 +106,10 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
 +                 stats->variant_ns / 1000, stats->key_ns / 1000,
 +                 stats->load_ns / 1000, stats->nir_to_dxil_ns / 1000,
 +                 stats->validate_ns / 1000);
++         /* Whether entries reach the disk, and the first failed file
++          * operation if they do not.
++          */
++         disk_cache_print_diagnostics(screen->disk_cache, file);
 +         fclose(file);
 +      }
 +   }
@@ -215,10 +220,12 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
 +   if (!entry.out_of_memory)
 +      disk_cache_put(screen->disk_cache, key, entry.data, entry.size, NULL);
 +   blob_finish(&entry);
- }
- 
++}
++
  static struct d3d12_shader *
-@@ -137,9 +304,38 @@
+ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
+             struct d3d12_shader_key *key, struct nir_shader *nir)
+@@ -137,9 +308,38 @@
  #endif
  
     struct blob tmp;
@@ -260,7 +267,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
     }
  
     // Non-ubo variables
-@@ -173,10 +369,13 @@
+@@ -173,10 +373,13 @@
  
  #ifdef _WIN32
     if (ctx->dxil_validator) {
@@ -278,7 +285,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
              debug_printf(
                 "== VALIDATION ERROR =============================================\n"
                 "%s\n"
-@@ -184,6 +383,9 @@
+@@ -184,6 +387,9 @@
                 err);
              ralloc_free(err);
           }
@@ -288,11 +295,10 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
        }
  
        if (d3d12_debug & D3D12_DEBUG_DISASS) {
-@@ -200,6 +402,17 @@
- #endif
+@@ -201,6 +407,17 @@
  
     blob_finish_get_buffer(&tmp, &shader->bytecode, &shader->bytecode_length);
-+
+ 
 +   if (screen->shader_cache_stats_path) {
 +      mtx_lock(&screen->shader_cache_mutex);
 +      if (cached)
@@ -303,10 +309,11 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
 +         screen->shader_cache_stats.uncached++;
 +      mtx_unlock(&screen->shader_cache_mutex);
 +   }
- 
++
     if (d3d12_debug & D3D12_DEBUG_DXIL) {
        char buf[256];
-@@ -1070,6 +1283,9 @@
+       static int i;
+@@ -1070,6 +1287,9 @@
        }
     }
  
@@ -316,7 +323,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_compiler.cpp b/src/gallium/drivers/
     /* Clone the NIR shader */
     new_nir_variant = nir_shader_clone(sel, sel->initial);
  
-@@ -1206,6 +1422,14 @@
+@@ -1206,6 +1426,14 @@
     /* prepend the new shader in the selector chain and pick it */
     new_variant->next_variant = sel->first;
     sel->current = sel->first = new_variant;
@@ -358,10 +365,12 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
  
  #include "frontend/sw_winsys.h"
  
-@@ -686,6 +687,10 @@
+@@ -686,6 +687,12 @@
  #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
     d3d12_varying_cache_destroy(screen);
     mtx_destroy(&screen->varying_info_mutex);
++   /* Let queued entries reach the disk before the final counters. */
++   disk_cache_wait_for_idle(screen->disk_cache);
 +   d3d12_shader_cache_write_stats(screen, true);
 +   disk_cache_destroy(screen->disk_cache);
 +   free(screen->shader_cache_stats_path);
@@ -369,7 +378,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
  #endif // HAVE_GALLIUM_D3D12_GRAPHICS
  
     if (screen->d3d12_mod)
-@@ -1137,6 +1142,67 @@
+@@ -1137,6 +1144,70 @@
     screen->dev->CreateRenderTargetView(NULL, &rtv, screen->null_rtv.cpu_handle);
  }
  
@@ -428,8 +437,11 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
 +   char driver_id[BLAKE3_HEX_LEN];
 +   _mesa_blake3_format(driver_id, hash);
 +   screen->disk_cache = disk_cache_create("d3d12", driver_id, 0);
-+   if (screen->disk_cache)
++   if (screen->disk_cache) {
 +      screen->shader_cache_stats_path = os_get_option_dup("D3D12_SHADER_CACHE_STATS");
++      /* Report the cache's state at once, before any variant is compiled. */
++      d3d12_shader_cache_write_stats(screen, true);
++   }
 +#endif
 +}
 +#endif // HAVE_GALLIUM_D3D12_GRAPHICS
@@ -437,7 +449,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
  static void
  d3d12_get_adapter_luid(struct pipe_screen *pscreen, char *luid)
  {
-@@ -1412,6 +1478,8 @@
+@@ -1412,6 +1483,8 @@
  #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
     d3d12_varying_cache_init(screen);
     mtx_init(&screen->varying_info_mutex, mtx_plain);
@@ -446,7 +458,7 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
  
     for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
        screen->base.nir_options[i] = &screen->nir_options;
-@@ -1889,5 +1957,10 @@
+@@ -1889,5 +1962,10 @@
     d3d12_init_compute_caps(screen);
     d3d12_init_screen_caps(screen);
  
@@ -460,14 +472,14 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3
 diff --git a/src/gallium/drivers/d3d12/d3d12_screen.h b/src/gallium/drivers/d3d12/d3d12_screen.h
 --- a/src/gallium/drivers/d3d12/d3d12_screen.h
 +++ b/src/gallium/drivers/d3d12/d3d12_screen.h
-@@ -39,8 +39,25 @@
+@@ -39,9 +39,26 @@
  
  #include "d3d12_common.h"
  
 +struct disk_cache;
  struct pb_manager;
  struct util_dl_library;
-+
+ 
 +/* Counters for the persistent DXIL variant cache (d3d12_compiler.cpp).
 + * Times are in nanoseconds and guarded by d3d12_screen::shader_cache_mutex.
 + */
@@ -483,9 +495,10 @@ diff --git a/src/gallium/drivers/d3d12/d3d12_screen.h b/src/gallium/drivers/d3d1
 +   uint64_t validate_ns;     /* DXIL validation and signing, when compiled */
 +   int64_t last_write_ns;
 +};
- 
++
  enum resource_dimension
  {
+    RESOURCE_DIMENSION_UNKNOWN = 0,
 @@ -161,6 +178,14 @@
     bool support_create_not_resident;
     bool supports_dynamic_queue_priority;

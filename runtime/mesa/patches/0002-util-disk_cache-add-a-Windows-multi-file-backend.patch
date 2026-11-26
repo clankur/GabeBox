@@ -10,17 +10,34 @@ Upstream Mesa (main at 66e82ef1, 2026-11-25, and 26.2.2) refuses
 - The Windows backend keeps the POSIX multi-file layout and entry format:
   <dir>/mesa_shader_cache/<2 hex>/<62 hex>, written to a .tmp file and
   renamed into place, plus the shared "index" file (size and key index).
-  An exclusive share mode on the .tmp file stands in for flock(); rename()
-  never replaces an existing entry, so the size accounting stays right.
-- It uses only C runtime calls and AppContainer-safe Win32 calls
-  (CreateFileMappingFromApp/MapViewOfFileFromApp when WINAPI_FAMILY_APP).
+  An exclusive share mode on the .tmp file stands in for flock(); the
+  rename never replaces an existing entry, so the size accounting stays
+  right.
+- It uses only Win32 calls that AppContainer (UWP) binaries may make:
+  CreateFile2, CreateDirectoryW, GetFileAttributesExW, MoveFileExW,
+  DeleteFileW, FindFirstFileExW, and CreateFileMappingFromApp and
+  MapViewOfFileFromApp under WINAPI_FAMILY_APP.
+- Paths are UTF-8 internally and reach the wide file APIs with backslash
+  separators in extended-length form (\\?\X:\...). A packaged app's
+  LocalState path plus the cache's ~90 characters takes a temporary entry
+  past MAX_PATH, where the C runtime's narrow file calls fail; the extended
+  form has no such limit. Missing parent directories are created from the
+  deepest existing one down, so the folders above an app's own storage are
+  never touched.
 - The directory must be named by MESA_SHADER_CACHE_DIR: a packaged process
   has no per-user default location, so without it the cache is disabled.
-  MESA_SHADER_CACHE_MAX_SIZE and MESA_SHADER_CACHE_DISABLE work as upstream.
+  The variable is read in its wide form. MESA_SHADER_CACHE_MAX_SIZE and
+  MESA_SHADER_CACHE_DISABLE work as upstream.
+- disk_cache_print_diagnostics() writes key=value lines for a driver's
+  statistics file: whether the cache is usable, the step at which its
+  directory setup stopped, its directory and size limit, and the entries
+  queued. The Windows backend adds the entries written and read, the write
+  and read failures, and the first failed file operation with its path and
+  Win32 error. A storage failure is otherwise visible only as misses.
+- disk_cache_wait_for_idle() does nothing for a cache without a queue
+  (one whose directory could not be set up).
 - On Windows the meson 'shader-cache' option stays off for 'auto' and is
   built with -Dshader-cache=enabled.
-
-
 - Enabling the cache also builds shaderapi.c's shader-replacement code on
   Windows for the first time. Its empty replacement table was a zero-length
   array, which MSVC rejects (C2466); it now holds one entry that never
@@ -78,40 +95,172 @@ diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
 -#include <sys/mman.h>
  #include <fcntl.h>
  #include <errno.h>
-+#include <inttypes.h>
+-#include <dirent.h>
+ #include <inttypes.h>
 +#if !DETECT_OS_WINDOWS
 +#include <ftw.h>
 +#include <sys/file.h>
 +#include <sys/mman.h>
- #include <dirent.h>
--#include <inttypes.h>
++#include <dirent.h>
 +#endif
  
  #include "util/compress.h"
  #include "util/crc32.h"
+@@ -119,10 +123,13 @@
+    /* Assume failure. */
+    cache->path_init_failed = true;
+    cache->type = DISK_CACHE_NONE;
++   cache->max_size = max_size;
+ 
++   cache->init_failure = "disabled";
+    if (!disk_cache_enabled())
+       goto path_fail;
+ 
++   cache->init_failure = "directory";
+    const char *path =
+       disk_cache_generate_cache_dir(local, gpu_name, driver_id, cache_dir_name, cache_type, true);
+    if (!path)
+@@ -139,6 +146,7 @@
+    if (strcmp(driver_id, "make_check_uncompressed") == 0)
+       cache->compression_disabled = true;
+ 
++   cache->init_failure = "database";
+    if (cache_type == DISK_CACHE_SINGLE_FILE) {
+       if (!disk_cache_load_cache_index_foz(local, cache))
+          goto path_fail;
+@@ -155,11 +163,10 @@
+    cache->stats.enabled = debug_get_bool_option("MESA_SHADER_CACHE_SHOW_STATS",
+                                                 false);
+ 
++   cache->init_failure = "index";
+    if (!disk_cache_mmap_cache_index(local, cache))
+       goto path_fail;
+ 
+-   cache->max_size = max_size;
+-
+    if (cache->type == DISK_CACHE_DATABASE)
+       mesa_cache_db_multipart_set_size_limit(&cache->cache_db, cache->max_size);
+ 
+@@ -167,6 +174,7 @@
+       goto fail;
+ 
+    cache->path_init_failed = false;
++   cache->init_failure = NULL;
+ 
+  path_fail:
+ 
+@@ -352,7 +360,33 @@
+ void
+ disk_cache_wait_for_idle(struct disk_cache *cache)
+ {
+-   util_queue_finish(&cache->cache_queue);
++   /* A cache whose directory could not be set up has no queue. */
++   if (cache && util_queue_is_initialized(&cache->cache_queue))
++      util_queue_finish(&cache->cache_queue);
++}
++
++void
++disk_cache_print_diagnostics(struct disk_cache *cache, FILE *file)
++{
++   if (!cache) {
++      fprintf(file, "disk_cache=none\n");
++      return;
++   }
++
++   if (cache->path_init_failed)
++      fprintf(file, "disk_cache=unavailable\ndisk_cache_init_failure=%s\n",
++              cache->init_failure ? cache->init_failure : "unknown");
++   else
++      fprintf(file, "disk_cache=ready\n");
++   fprintf(file, "disk_cache_dir=%s\n", cache->path ? cache->path : "");
++   fprintf(file, "disk_cache_max_size=%" PRIu64 "\n", cache->max_size);
++   if (cache->size)
++      fprintf(file, "disk_cache_size=%" PRIu64 "\n",
++              p_atomic_read_relaxed(&cache->size->value));
++   fprintf(file, "disk_cache_puts=%u\n", p_atomic_read_relaxed(&cache->puts));
++#if DETECT_OS_WINDOWS
++   disk_cache_os_print_diagnostics(file);
++#endif
+ }
+ 
+ void
+@@ -572,6 +606,7 @@
+       create_put_job(cache, key, (void*)data, size, cache_item_metadata, false);
+ 
+    if (dc_job) {
++      p_atomic_inc(&cache->puts);
+       util_queue_fence_init(&dc_job->fence);
+       util_queue_add_job(&cache->cache_queue, dc_job, &dc_job->fence,
+                          cache_put, destroy_put_job, dc_job->size);
+@@ -592,6 +627,7 @@
+       create_put_job(cache, key, data, size, cache_item_metadata, true);
+ 
+    if (dc_job) {
++      p_atomic_inc(&cache->puts);
+       util_queue_fence_init(&dc_job->fence);
+       util_queue_add_job(&cache->cache_queue, dc_job, &dc_job->fence,
+                          cache_put, destroy_put_job_nocopy, dc_job->size);
+diff --git a/src/util/disk_cache.h b/src/util/disk_cache.h
+--- a/src/util/disk_cache.h
++++ b/src/util/disk_cache.h
+@@ -32,6 +32,7 @@
+ #include <assert.h>
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <stdio.h>
+ #include <sys/stat.h>
+ #include "util/mesa-blake3.h"
+ #include "util/detect_os.h"
+@@ -270,6 +271,15 @@
+ disk_cache_set_callbacks(struct disk_cache *cache, disk_cache_put_cb put,
+                          disk_cache_get_cb get);
+ 
++/**
++ * Write "disk_cache..." key=value lines that describe the cache's storage:
++ * whether it is usable, why its directory could not be set up, the entries
++ * queued, written and read, and the first failed file operation with its path
++ * and error code.  For drivers' statistics files.
++ */
++void
++disk_cache_print_diagnostics(struct disk_cache *cache, FILE *file);
++
+ #else
+ 
+ static inline struct disk_cache *
+@@ -340,6 +350,16 @@
+ {
+ }
+ 
++static inline void
++disk_cache_wait_for_idle(struct disk_cache *cache)
++{
++}
++
++static inline void
++disk_cache_print_diagnostics(struct disk_cache *cache, FILE *file)
++{
++}
++
+ #endif /* ENABLE_SHADER_CACHE */
+ 
+ #ifdef __cplusplus
 diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 --- a/src/util/disk_cache_os.c
 +++ b/src/util/disk_cache_os.c
-@@ -82,7 +82,17 @@
+@@ -82,7 +82,11 @@
  #ifdef ENABLE_SHADER_CACHE
  
  #if DETECT_OS_WINDOWS
 -/* TODO: implement disk cache support on windows */
 +
-+#include <direct.h>
-+#include <errno.h>
-+#include <io.h>
-+#include <limits.h>
-+#include <share.h>
 +#include <stdio.h>
-+#include <sys/types.h>
-+#include <sys/stat.h>
++#include <wchar.h>
 +#include <windows.h>
 +#include "util/u_string.h"
  
  #else
  
-@@ -98,11 +108,16 @@
+@@ -98,12 +102,17 @@
  #include <unistd.h>
  #include "utime.h"
  
@@ -123,12 +272,13 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  #include "util/u_debug.h"
  #include "util/ralloc.h"
  #include "util/rand_xor.h"
-+
-+#if !DETECT_OS_WINDOWS
  
++#if !DETECT_OS_WINDOWS
++
  /* Check if directory exists or if mkdir_if_needed param is set create a
   * directory named 'path' if it does not already exist.
-@@ -547,6 +562,8 @@
+  * This is for use by find_or_create_dir(). Use that instead.
+@@ -547,6 +556,8 @@
        p_atomic_add(&cache->size->value, - (uint64_t)sb.st_blocks * 512);
  }
  
@@ -137,7 +287,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  static void *
  parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
                                size_t cache_item_size, size_t *size)
-@@ -629,6 +646,8 @@
+@@ -629,6 +640,8 @@
     return NULL;
  }
  
@@ -146,25 +296,25 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  void *
  disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
  {
-@@ -670,6 +689,8 @@
- 
+@@ -671,6 +684,8 @@
     return NULL;
  }
-+
-+#endif /* !DETECT_OS_WINDOWS */
  
++#endif /* !DETECT_OS_WINDOWS */
++
  /* Return a filename within the cache's directory corresponding to 'key'.
   *
-@@ -767,6 +788,8 @@
- 
+  * Returns NULL if out of memory.
+@@ -768,6 +783,8 @@
     return false;
  }
-+
-+#if !DETECT_OS_WINDOWS
  
++#if !DETECT_OS_WINDOWS
++
  void
  disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
-@@ -999,6 +1022,8 @@
+                               char *filename)
+@@ -999,6 +1016,8 @@
     return path;
  }
  
@@ -173,7 +323,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  bool
  disk_cache_enabled()
  {
-@@ -1078,6 +1103,7 @@
+@@ -1078,6 +1097,7 @@
     return foz_prepare(&cache->foz_db, cache->path);
  }
  
@@ -181,7 +331,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  
  void
  disk_cache_touch_cache_user_marker(char *path)
-@@ -1183,6 +1209,8 @@
+@@ -1183,6 +1203,8 @@
     munmap(cache->index_mmap, cache->index_mmap_size);
  }
  
@@ -190,16 +340,16 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  void *
  disk_cache_db_load_item(struct disk_cache *cache, const cache_key key,
                          size_t *size)
-@@ -1222,6 +1250,8 @@
- {
+@@ -1223,6 +1245,8 @@
     return mesa_cache_db_multipart_open(&cache->cache_db, cache->path);
  }
-+
-+#if !DETECT_OS_WINDOWS
  
++#if !DETECT_OS_WINDOWS
++
  static void
  delete_dir(const char* path)
-@@ -1285,6 +1315,480 @@
+ {
+@@ -1285,6 +1309,847 @@
  finish:
     ralloc_free(ctx);
  }
@@ -211,14 +361,71 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 + * It keeps the POSIX layout and entry format: <dir>/<2 hex>/<62 hex> files
 + * written to a temporary file and renamed into place, plus a fixed-size
 + * "index" file mapped into every process that uses the cache.  It uses only
-+ * C runtime and Win32 calls that are available to AppContainer (UWP)
-+ * binaries.
++ * Win32 calls that are available to AppContainer (UWP) binaries.
++ *
++ * Paths go to the wide-character file APIs in extended-length form
++ * (\\?\X:\...), with every separator a backslash.  Entry paths are the cache
++ * directory plus about 90 characters, so a packaged app's LocalState folder
++ * alone takes a temporary entry past MAX_PATH, where the C runtime's narrow
++ * file calls fail.
 + *
 + * A packaged process has no per-user default cache location, so the cache
 + * directory has to be named by MESA_SHADER_CACHE_DIR (or the deprecated
 + * MESA_GLSL_CACHE_DIR).  Without it the cache stays disabled.  The single
 + * file (Fossilize) and database caches are not available on Windows.
++ *
++ * The first failed file operation is kept with its path and Win32 error, and
++ * reported with the operation counters by disk_cache_print_diagnostics(),
++ * because a failure here is otherwise only visible as cache misses.
 + */
++
++static struct {
++   volatile LONG claimed;
++   volatile LONG ready;
++   const char *operation;
++   DWORD error;
++   char path[1024];
++} win32_first_failure;
++
++static volatile LONG win32_entries_written;
++static volatile LONG win32_write_failures;
++static volatile LONG win32_entries_read;
++static volatile LONG win32_read_failures;
++
++static void
++win32_record_failure(const char *operation, const char *path, DWORD error)
++{
++   if (InterlockedCompareExchange(&win32_first_failure.claimed, 1, 0) != 0)
++      return;
++
++   win32_first_failure.operation = operation;
++   win32_first_failure.error = error;
++   snprintf(win32_first_failure.path, sizeof(win32_first_failure.path), "%s",
++            path ? path : "");
++   InterlockedExchange(&win32_first_failure.ready, 1);
++}
++
++void
++disk_cache_os_print_diagnostics(FILE *file)
++{
++   fprintf(file,
++           "disk_cache_entries_written=%ld\n"
++           "disk_cache_write_failures=%ld\n"
++           "disk_cache_entries_read=%ld\n"
++           "disk_cache_read_failures=%ld\n",
++           InterlockedCompareExchange(&win32_entries_written, 0, 0),
++           InterlockedCompareExchange(&win32_write_failures, 0, 0),
++           InterlockedCompareExchange(&win32_entries_read, 0, 0),
++           InterlockedCompareExchange(&win32_read_failures, 0, 0));
++
++   if (InterlockedCompareExchange(&win32_first_failure.ready, 0, 0))
++      fprintf(file, "disk_cache_first_failure=%s error=0x%08lx path=%s\n",
++              win32_first_failure.operation,
++              (unsigned long)win32_first_failure.error,
++              win32_first_failure.path);
++   else
++      fprintf(file, "disk_cache_first_failure=none\n");
++}
 +
 +/* Windows reports file sizes rather than allocated blocks.  Account in 4 KiB
 + * clusters so that additions and evictions use the same unit.
@@ -229,64 +436,210 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   return (bytes + 4095) & ~(uint64_t)4095;
 +}
 +
-+static int
-+win32_find_or_mkdir(const char *path, bool mkdir_if_needed)
++static bool
++win32_is_separator(wchar_t c)
 +{
-+   struct _stat64 sb;
-+
-+   if (_stat64(path, &sb) == 0) {
-+      if (sb.st_mode & _S_IFDIR)
-+         return 0;
-+
-+      fprintf(stderr, "Cannot use %s for shader cache (not a directory)"
-+                      "---disabling.\n", path);
-+      return -1;
-+   }
-+
-+   if (!mkdir_if_needed)
-+      return -1;
-+
-+   if (_mkdir(path) == 0 || errno == EEXIST)
-+      return 0;
-+
-+   fprintf(stderr, "Failed to create %s for shader cache (%s)---disabling.\n",
-+           path, strerror(errno));
-+   return -1;
++   return c == L'\\' || c == L'/';
 +}
 +
-+/* Create 'path' and any missing parents.  Both separators are accepted, and
-+ * a drive prefix such as "C:" is never created.  An AppContainer may not be
-+ * allowed to inspect or create the folders above its own storage, so only the
-+ * final directory has to exist or be creatable.
-+ */
-+static int
-+win32_find_or_create_dir(const char *path, bool mkdir_with_parents_if_needed)
++static bool
++win32_has_dot_component(const wchar_t *path)
 +{
-+   if (path[0] == '\0')
-+      return -1;
-+
-+   if (!mkdir_with_parents_if_needed || win32_find_or_mkdir(path, false) == 0)
-+      return win32_find_or_mkdir(path, false);
-+
-+   char *p = strdup(path);
-+   if (!p)
-+      return -1;
-+
-+   size_t length = strlen(p);
-+   for (size_t i = 1; i < length; i++) {
-+      if (p[i] != '/' && p[i] != '\\')
++   for (const wchar_t *part = path; *part;) {
++      if (win32_is_separator(*part)) {
++         part++;
 +         continue;
++      }
++      const wchar_t *end = part;
++      while (*end && !win32_is_separator(*end))
++         end++;
++      if ((end - part == 1 && part[0] == L'.') ||
++          (end - part == 2 && part[0] == L'.' && part[1] == L'.'))
++         return true;
++      part = end;
++   }
++   return false;
++}
 +
-+      char separator = p[i];
-+      p[i] = '\0';
-+      bool drive = i == 2 && p[1] == ':';
-+      if (!drive && p[i - 1] != '/' && p[i - 1] != '\\')
-+         (void)_mkdir(p);
-+      p[i] = separator;
++/* Returns a heap copy of the UTF-8 'path' as a wide string for the Win32 file
++ * APIs, or NULL.  Separators become backslashes and repeated separators
++ * collapse.  An absolute drive or UNC path gets the extended-length prefix
++ * (\\?\ or \\?\UNC\), which lifts MAX_PATH; a path that already has a \\?\
++ * or \\.\ prefix keeps it.  Relative paths and paths with "." or ".."
++ * components are passed on without the prefix, because the extended form
++ * does not resolve them.
++ */
++static wchar_t *
++win32_wide_path(const char *path)
++{
++   const int count = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
++   if (count <= 0)
++      return NULL;
++
++   wchar_t *source = malloc((size_t)count * sizeof(wchar_t));
++   if (!source)
++      return NULL;
++   if (MultiByteToWideChar(CP_UTF8, 0, path, -1, source, count) != count) {
++      free(source);
++      return NULL;
 +   }
 +
-+   free(p);
-+   return win32_find_or_mkdir(path, true);
++   /* "\\?\UNC\" is the longest prefix; the result is never longer than the
++    * source plus that prefix.
++    */
++   wchar_t *result = malloc(((size_t)count + 8) * sizeof(wchar_t));
++   if (!result) {
++      free(source);
++      return NULL;
++   }
++
++   const wchar_t *in = source;
++   wchar_t *out = result;
++   const bool verbatim = win32_is_separator(in[0]) && win32_is_separator(in[1]) &&
++                         (in[2] == L'?' || in[2] == L'.') && win32_is_separator(in[3]);
++   const bool drive = ((in[0] | 0x20) >= L'a' && (in[0] | 0x20) <= L'z') &&
++                      in[1] == L':' && win32_is_separator(in[2]);
++   const bool unc = !verbatim && win32_is_separator(in[0]) && win32_is_separator(in[1]);
++   const bool extend = (drive || unc) && !win32_has_dot_component(in);
++
++   if (verbatim) {
++      memcpy(out, L"\\\\", 2 * sizeof(wchar_t));
++      out[2] = in[2];
++      out[3] = L'\\';
++      out += 4;
++      in += 4;
++   } else if (extend && drive) {
++      memcpy(out, L"\\\\?\\", 4 * sizeof(wchar_t));
++      out += 4;
++   } else if (extend && unc) {
++      memcpy(out, L"\\\\?\\UNC\\", 8 * sizeof(wchar_t));
++      out += 8;
++      in += 2;
++   } else if (unc) {
++      memcpy(out, L"\\\\", 2 * sizeof(wchar_t));
++      out += 2;
++      in += 2;
++   }
++
++   for (; *in; in++) {
++      if (!win32_is_separator(*in)) {
++         *out++ = *in;
++      } else if (out == result || out[-1] != L'\\') {
++         *out++ = L'\\';
++      }
++   }
++   /* Keep the separator of a drive root such as "C:\". */
++   if (out - result > 1 && out[-1] == L'\\' && out[-2] != L':')
++      out--;
++   *out = L'\0';
++
++   free(source);
++   return result;
++}
++
++/* Length of the root that is never created: "\\?\C:", "C:",
++ * "\\?\UNC\server\share" or "\\server\share".  0 for other paths.
++ */
++static size_t
++win32_root_length(const wchar_t *path)
++{
++   size_t start;
++   if (wcsncmp(path, L"\\\\?\\UNC\\", 8) == 0) {
++      start = 8;
++   } else if (wcsncmp(path, L"\\\\?\\", 4) == 0 ||
++              wcsncmp(path, L"\\\\.\\", 4) == 0) {
++      /* A drive, device or volume name ends at the first separator. */
++      const wchar_t *end = wcschr(path + 4, L'\\');
++      return end ? (size_t)(end - path) : wcslen(path);
++   } else if (path[0] == L'\\' && path[1] == L'\\') {
++      start = 2;
++   } else if (path[0] && path[1] == L':') {
++      return 2;
++   } else {
++      return 0;
++   }
++
++   /* server\share */
++   const wchar_t *server = wcschr(path + start, L'\\');
++   if (!server)
++      return wcslen(path);
++   const wchar_t *share = wcschr(server + 1, L'\\');
++   return share ? (size_t)(share - path) : wcslen(path);
++}
++
++static DWORD
++win32_directory_state(const wchar_t *path)
++{
++   WIN32_FILE_ATTRIBUTE_DATA data;
++   if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data))
++      return GetLastError();
++   return (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ?
++          ERROR_SUCCESS : ERROR_DIRECTORY;
++}
++
++/* Create the directory 'path' and any missing parents, from the deepest
++ * existing one down.  Folders that already exist are never created again,
++ * which matters because an AppContainer may not inspect or create the
++ * folders above its own storage.  Returns a Win32 error code.
++ */
++static DWORD
++win32_create_directory(wchar_t *path, unsigned depth)
++{
++   if (CreateDirectoryW(path, NULL))
++      return ERROR_SUCCESS;
++
++   DWORD error = GetLastError();
++   if (error == ERROR_ALREADY_EXISTS || error == ERROR_ACCESS_DENIED) {
++      /* Access is also denied for an existing folder the caller may not
++       * create, such as a drive root.
++       */
++      const DWORD state = win32_directory_state(path);
++      return state == ERROR_SUCCESS ? ERROR_SUCCESS :
++             error == ERROR_ALREADY_EXISTS ? state : error;
++   }
++   if (error != ERROR_PATH_NOT_FOUND || depth >= 64)
++      return error;
++
++   wchar_t *separator = wcsrchr(path, L'\\');
++   if (!separator || (size_t)(separator - path) <= win32_root_length(path))
++      return error;
++
++   *separator = L'\0';
++   const DWORD parent = win32_create_directory(path, depth + 1);
++   *separator = L'\\';
++   if (parent != ERROR_SUCCESS)
++      return parent;
++
++   if (CreateDirectoryW(path, NULL))
++      return ERROR_SUCCESS;
++   error = GetLastError();
++   return error == ERROR_ALREADY_EXISTS ? win32_directory_state(path) : error;
++}
++
++/* Find or, when 'mkdir' is set, create the directory 'path' (UTF-8).
++ * Failures are recorded for diagnostics.
++ */
++static bool
++win32_find_or_create_dir(const char *path, bool mkdir)
++{
++   wchar_t *wide = win32_wide_path(path);
++   if (!wide) {
++      win32_record_failure("convert-path", path, GetLastError());
++      return false;
++   }
++
++   const DWORD error = mkdir ? win32_create_directory(wide, 0) :
++                               win32_directory_state(wide);
++   free(wide);
++   if (error == ERROR_SUCCESS)
++      return true;
++
++   if (mkdir) {
++      win32_record_failure("create-directory", path, error);
++      fprintf(stderr, "Failed to create %s for shader cache (error 0x%08lx)"
++                      "---disabling.\n", path, (unsigned long)error);
++   }
++   return false;
 +}
 +
 +static char *
@@ -295,7 +648,7 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +{
 +   char *new_path = ralloc_asprintf(ctx, "%s/%s", path, name);
 +
-+   if (new_path && win32_find_or_create_dir(new_path, mkdir) == 0)
++   if (new_path && win32_find_or_create_dir(new_path, mkdir))
 +      return new_path;
 +
 +   return NULL;
@@ -311,40 +664,46 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   if (asprintf(&dir, "%s/%c%c", cache->path, buf[0], buf[1]) == -1)
 +      return;
 +
-+   win32_find_or_mkdir(dir, true);
++   win32_find_or_create_dir(dir, true);
 +   free(dir);
 +}
 +
-+static int
-+win32_read_all(int fd, void *buf, size_t count)
++static bool
++win32_read_all(HANDLE file, void *buf, size_t count)
 +{
 +   char *in = buf;
 +   size_t done = 0;
 +
 +   while (done < count) {
-+      size_t chunk = MIN2(count - done, (size_t)INT_MAX);
-+      int read_ret = _read(fd, in + done, (unsigned)chunk);
-+      if (read_ret <= 0)
-+         return -1;
-+      done += read_ret;
++      const DWORD chunk = (DWORD)MIN2(count - done, (size_t)1 << 30);
++      DWORD read = 0;
++      if (!ReadFile(file, in + done, chunk, &read, NULL) || read == 0)
++         return false;
++      done += read;
 +   }
-+   return 0;
++   return true;
 +}
 +
-+static int
-+win32_write_all(int fd, const void *buf, size_t count)
++static bool
++win32_write_all(HANDLE file, const void *buf, size_t count)
 +{
 +   const char *out = buf;
 +   size_t done = 0;
 +
 +   while (done < count) {
-+      size_t chunk = MIN2(count - done, (size_t)INT_MAX);
-+      int written = _write(fd, out + done, (unsigned)chunk);
-+      if (written <= 0)
-+         return -1;
++      const DWORD chunk = (DWORD)MIN2(count - done, (size_t)1 << 30);
++      DWORD written = 0;
++      if (!WriteFile(file, out + done, chunk, &written, NULL) || written == 0)
++         return false;
 +      done += written;
 +   }
-+   return 0;
++   return true;
++}
++
++static uint64_t
++win32_file_time(FILETIME time)
++{
++   return ((uint64_t)time.dwHighDateTime << 32) | time.dwLowDateTime;
 +}
 +
 +/* Remove the least recently used entry in one two-character directory.
@@ -357,44 +716,68 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   if (asprintf(&pattern, "%s/*", dir_path) == -1)
 +      return 0;
 +
-+   struct __finddata64_t entry;
-+   intptr_t find = _findfirst64(pattern, &entry);
++   wchar_t *wide_pattern = win32_wide_path(pattern);
 +   free(pattern);
-+   if (find == -1)
++   if (!wide_pattern)
 +      return 0;
 +
-+   char lru_name[sizeof(entry.name)];
-+   __time64_t lru_time = 0;
++   WIN32_FIND_DATAW entry;
++   HANDLE find = FindFirstFileExW(wide_pattern, FindExInfoBasic, &entry,
++                                  FindExSearchNameMatch, NULL, 0);
++   free(wide_pattern);
++   if (find == INVALID_HANDLE_VALUE)
++      return 0;
++
++   wchar_t lru_name[MAX_PATH];
++   uint64_t lru_time = 0;
 +   uint64_t lru_size = 0;
 +   bool found = false;
 +   do {
-+      size_t length = strlen(entry.name);
-+      if ((entry.attrib & _A_SUBDIR) ||
-+          (length >= 4 && strcmp(entry.name + length - 4, ".tmp") == 0))
++      const size_t length = wcslen(entry.cFileName);
++      if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
++          length >= ARRAY_SIZE(lru_name) ||
++          (length >= 4 && wcscmp(entry.cFileName + length - 4, L".tmp") == 0))
 +         continue;
 +
 +      /* Last-access updates are often disabled on NTFS, so a written entry
 +       * counts as used when it was written.
 +       */
-+      __time64_t used = MAX2(entry.time_access, entry.time_write);
++      const uint64_t used = MAX2(win32_file_time(entry.ftLastAccessTime),
++                                 win32_file_time(entry.ftLastWriteTime));
 +      if (!found || used < lru_time) {
 +         found = true;
 +         lru_time = used;
-+         lru_size = entry.size;
-+         memcpy(lru_name, entry.name, length + 1);
++         lru_size = ((uint64_t)entry.nFileSizeHigh << 32) | entry.nFileSizeLow;
++         memcpy(lru_name, entry.cFileName, (length + 1) * sizeof(wchar_t));
 +      }
-+   } while (_findnext64(find, &entry) == 0);
-+   _findclose(find);
++   } while (FindNextFileW(find, &entry));
++   FindClose(find);
 +
 +   if (!found)
 +      return 0;
 +
-+   char *path;
-+   if (asprintf(&path, "%s/%s", dir_path, lru_name) == -1)
++   char *dir;
++   if (asprintf(&dir, "%s/", dir_path) == -1)
++      return 0;
++   wchar_t *wide_dir = win32_wide_path(dir);
++   free(dir);
++   if (!wide_dir)
 +      return 0;
 +
-+   uint64_t size = remove(path) == 0 ? win32_disk_size(lru_size) : 0;
-+   free(path);
++   /* win32_wide_path drops the trailing separator. */
++   const size_t dir_length = wcslen(wide_dir);
++   const size_t name_length = wcslen(lru_name);
++   wchar_t *path = malloc((dir_length + name_length + 2) * sizeof(wchar_t));
++   uint64_t size = 0;
++   if (path) {
++      memcpy(path, wide_dir, dir_length * sizeof(wchar_t));
++      path[dir_length] = L'\\';
++      memcpy(path + dir_length + 1, lru_name, (name_length + 1) * sizeof(wchar_t));
++      if (DeleteFileW(path))
++         size = win32_disk_size(lru_size);
++      free(path);
++   }
++   free(wide_dir);
 +   return size;
 +}
 +
@@ -423,13 +806,23 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +void
 +disk_cache_evict_item(struct disk_cache *cache, char *filename)
 +{
-+   struct _stat64 sb;
++   wchar_t *wide = win32_wide_path(filename);
++   WIN32_FILE_ATTRIBUTE_DATA data;
 +
-+   if (_stat64(filename, &sb) == 0 && remove(filename) == 0)
-+      p_atomic_add(&cache->size->value,
-+                   - (uint64_t)win32_disk_size(sb.st_size));
++   if (wide && GetFileAttributesExW(wide, GetFileExInfoStandard, &data) &&
++       DeleteFileW(wide)) {
++      const uint64_t bytes = ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
++      p_atomic_add(&cache->size->value, - (uint64_t)win32_disk_size(bytes));
++   }
 +
++   free(wide);
 +   free(filename);
++}
++
++static bool
++win32_missing(DWORD error)
++{
++   return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 +}
 +
 +void *
@@ -437,34 +830,63 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +{
 +   uint8_t *data = NULL;
 +   uint8_t *uncompressed_data = NULL;
-+   int fd = -1;
++   HANDLE file = INVALID_HANDLE_VALUE;
++   wchar_t *wide = win32_wide_path(filename);
 +
-+   if (_sopen_s(&fd, filename, _O_RDONLY | _O_BINARY | _O_NOINHERIT,
-+                _SH_DENYNO, 0) != 0) {
-+      fd = -1;
++   if (!wide) {
++      win32_record_failure("convert-path", filename, GetLastError());
++      InterlockedIncrement(&win32_read_failures);
 +      goto fail;
 +   }
 +
-+   struct _stat64 sb;
-+   if (_fstat64(fd, &sb) != 0 || sb.st_size <= 0 || (uint64_t)sb.st_size > SIZE_MAX)
++   /* Delete sharing lets eviction remove an entry that is being read. */
++   file = CreateFile2(wide, GENERIC_READ,
++                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                      OPEN_EXISTING, NULL);
++   if (file == INVALID_HANDLE_VALUE) {
++      /* A missing entry is an ordinary cache miss. */
++      const DWORD error = GetLastError();
++      if (!win32_missing(error)) {
++         win32_record_failure("open-entry", filename, error);
++         InterlockedIncrement(&win32_read_failures);
++      }
 +      goto fail;
++   }
 +
-+   data = malloc((size_t)sb.st_size);
++   LARGE_INTEGER file_size;
++   if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart <= 0 ||
++       (uint64_t)file_size.QuadPart > SIZE_MAX) {
++      win32_record_failure("size-entry", filename, GetLastError());
++      InterlockedIncrement(&win32_read_failures);
++      goto fail;
++   }
++
++   data = malloc((size_t)file_size.QuadPart);
 +   if (data == NULL)
 +      goto fail;
 +
 +   /* Read entire file into memory */
-+   if (win32_read_all(fd, data, (size_t)sb.st_size) == -1)
++   if (!win32_read_all(file, data, (size_t)file_size.QuadPart)) {
++      win32_record_failure("read-entry", filename, GetLastError());
++      InterlockedIncrement(&win32_read_failures);
 +      goto fail;
++   }
 +
 +   uncompressed_data =
-+      parse_and_validate_cache_item(cache, data, (size_t)sb.st_size, size);
++      parse_and_validate_cache_item(cache, data, (size_t)file_size.QuadPart, size);
++   if (uncompressed_data) {
++      InterlockedIncrement(&win32_entries_read);
++   } else {
++      win32_record_failure("validate-entry", filename, ERROR_INVALID_DATA);
++      InterlockedIncrement(&win32_read_failures);
++   }
 +
 + fail:
 +   free(data);
++   free(wide);
 +   free(filename);
-+   if (fd != -1)
-+      _close(fd);
++   if (file != INVALID_HANDLE_VALUE)
++      CloseHandle(file);
 +
 +   return uncompressed_data;
 +}
@@ -473,17 +895,29 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
 +                              char *filename)
 +{
-+   const int flags = _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY | _O_NOINHERIT;
-+   int fd = -1;
++   HANDLE file = INVALID_HANDLE_VALUE;
++   wchar_t *wide = NULL;
++   wchar_t *wide_tmp = NULL;
++   char *filename_tmp = NULL;
++   const char *operation = NULL;
++   const char *failed_path = filename;
++   DWORD error = ERROR_SUCCESS;
 +   struct blob cache_blob;
 +   blob_init(&cache_blob);
 +
 +   /* Write to a temporary file and rename it into place, so that readers
 +    * never see a partially written entry.
 +    */
-+   char *filename_tmp = NULL;
 +   if (asprintf(&filename_tmp, "%s.tmp", filename) == -1) {
 +      filename_tmp = NULL;
++      goto done;
++   }
++
++   wide = win32_wide_path(filename);
++   wide_tmp = win32_wide_path(filename_tmp);
++   if (!wide || !wide_tmp) {
++      operation = "convert-path";
++      error = GetLastError();
 +      goto done;
 +   }
 +
@@ -492,61 +926,121 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +    * entry.  A temporary file left by a process that exited is truncated
 +    * and reused.
 +    */
-+   errno_t err = _sopen_s(&fd, filename_tmp, flags, _SH_DENYRW,
-+                          _S_IREAD | _S_IWRITE);
-+   if (err == ENOENT) {
++   file = CreateFile2(wide_tmp, GENERIC_WRITE, 0, CREATE_ALWAYS, NULL);
++   if (file == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND) {
 +      /* Make the two-character subdirectory within the cache as needed. */
 +      win32_make_cache_file_directory(dc_job->cache, dc_job->key);
-+      err = _sopen_s(&fd, filename_tmp, flags, _SH_DENYRW,
-+                     _S_IREAD | _S_IWRITE);
++      file = CreateFile2(wide_tmp, GENERIC_WRITE, 0, CREATE_ALWAYS, NULL);
 +   }
-+   if (err != 0) {
-+      fd = -1;
++   if (file == INVALID_HANDLE_VALUE) {
++      error = GetLastError();
++      if (error != ERROR_SHARING_VIOLATION) {
++         operation = "create-temporary";
++         failed_path = filename_tmp;
++      }
 +      goto done;
 +   }
 +
 +   /* If the destination exists, another process won the race between when
 +    * we saw that the file didn't exist and now.
 +    */
-+   struct _stat64 sb;
-+   if (_stat64(filename, &sb) == 0)
++   WIN32_FILE_ATTRIBUTE_DATA existing;
++   if (GetFileAttributesExW(wide, GetFileExInfoStandard, &existing))
 +      goto remove_tmp;
 +
-+   if (!create_cache_item_header_and_blob(dc_job, &cache_blob))
++   if (!create_cache_item_header_and_blob(dc_job, &cache_blob)) {
++      operation = "serialize-entry";
++      error = ERROR_OUTOFMEMORY;
 +      goto remove_tmp;
++   }
 +
-+   if (win32_write_all(fd, cache_blob.data, cache_blob.size) == -1)
++   if (!win32_write_all(file, cache_blob.data, cache_blob.size)) {
++      operation = "write-temporary";
++      failed_path = filename_tmp;
++      error = GetLastError();
 +      goto remove_tmp;
++   }
 +
-+   /* Windows cannot rename a file that is still open without delete
-+    * sharing, so close it first.
++   /* The temporary file has to be closed before it can be renamed, because
++    * it is open without delete sharing.
 +    */
-+   int close_ret = _close(fd);
-+   fd = -1;
-+   if (close_ret != 0)
++   const BOOL closed = CloseHandle(file);
++   file = INVALID_HANDLE_VALUE;
++   if (!closed) {
++      operation = "close-temporary";
++      failed_path = filename_tmp;
++      error = GetLastError();
 +      goto remove_tmp;
++   }
 +
-+   /* rename() does not replace an existing destination, which keeps the
-+    * size accounting right if another process wrote the entry meanwhile.
++   /* Without MOVEFILE_REPLACE_EXISTING an existing destination is kept,
++    * which keeps the size accounting right if another process wrote the
++    * entry meanwhile.  A sharing violation means another writer reopened
++    * the temporary file after it was closed; that writer finishes the entry.
 +    */
-+   if (rename(filename_tmp, filename) != 0)
++   if (!MoveFileExW(wide_tmp, wide, 0)) {
++      error = GetLastError();
++      if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS &&
++          error != ERROR_SHARING_VIOLATION)
++         operation = "rename-entry";
 +      goto remove_tmp;
++   }
 +
 +   p_atomic_add(&dc_job->cache->size->value, win32_disk_size(cache_blob.size));
++   InterlockedIncrement(&win32_entries_written);
 +   goto done;
 +
 + remove_tmp:
-+   if (fd != -1) {
-+      _close(fd);
-+      fd = -1;
++   if (file != INVALID_HANDLE_VALUE) {
++      CloseHandle(file);
++      file = INVALID_HANDLE_VALUE;
 +   }
-+   remove(filename_tmp);
++   DeleteFileW(wide_tmp);
 +
 + done:
-+   if (fd != -1)
-+      _close(fd);
++   if (operation) {
++      win32_record_failure(operation, failed_path, error);
++      InterlockedIncrement(&win32_write_failures);
++   }
++   if (file != INVALID_HANDLE_VALUE)
++      CloseHandle(file);
++   free(wide);
++   free(wide_tmp);
 +   free(filename_tmp);
 +   blob_finish(&cache_blob);
++}
++
++/* Returns the UTF-8 value of an environment variable on 'mem_ctx', or NULL
++ * if it is unset or empty.  The wide form is read so that a directory name
++ * outside the ANSI code page survives.
++ */
++static char *
++win32_get_option(void *mem_ctx, const wchar_t *name)
++{
++   const DWORD size = GetEnvironmentVariableW(name, NULL, 0);
++   if (size <= 1)
++      return NULL;
++
++   wchar_t *value = malloc(size * sizeof(wchar_t));
++   if (!value)
++      return NULL;
++
++   char *result = NULL;
++   const DWORD length = GetEnvironmentVariableW(name, value, size);
++   if (length > 0 && length < size) {
++      const int bytes = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
++      if (bytes > 1) {
++         result = ralloc_size(mem_ctx, (size_t)bytes);
++         if (result &&
++             WideCharToMultiByte(CP_UTF8, 0, value, -1, result, bytes, NULL, NULL) != bytes) {
++            ralloc_free(result);
++            result = NULL;
++         }
++      }
++   }
++
++   free(value);
++   return result;
 +}
 +
 +const char *
@@ -566,18 +1060,13 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +         cache_dir_name = CACHE_DIR_NAME_DB;
 +   }
 +
-+   /* os_get_option() returns a per-thread buffer on Windows, so copy the
-+    * value before the next lookup.
-+    */
-+   const char *option = os_get_option_secure("MESA_SHADER_CACHE_DIR");
-+   if (!option)
-+      option = os_get_option_secure("MESA_GLSL_CACHE_DIR");
-+   if (!option || !option[0])
-+      return NULL;
-+
-+   const char *path = ralloc_strdup(mem_ctx, option);
++   const char *path = win32_get_option(mem_ctx, L"MESA_SHADER_CACHE_DIR");
 +   if (!path)
++      path = win32_get_option(mem_ctx, L"MESA_GLSL_CACHE_DIR");
++   if (!path) {
++      win32_record_failure("cache-directory-unset", "", ERROR_ENVVAR_NOT_FOUND);
 +      return NULL;
++   }
 +
 +   path = win32_concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
 +   if (path && cache_type == DISK_CACHE_SINGLE_FILE) {
@@ -601,30 +1090,48 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
 +{
 +   bool mapped = false;
-+   int fd = -1;
++   HANDLE file = INVALID_HANDLE_VALUE;
++   wchar_t *wide = NULL;
++   const char *operation = NULL;
++   DWORD error = ERROR_SUCCESS;
 +
 +   char *path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
 +   if (path == NULL)
 +      goto path_fail;
 +
-+   if (_sopen_s(&fd, path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT,
-+                _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0) {
-+      fd = -1;
++   wide = win32_wide_path(path);
++   if (!wide) {
++      operation = "convert-path";
++      error = GetLastError();
 +      goto path_fail;
 +   }
 +
-+   struct _stat64 sb;
-+   if (_fstat64(fd, &sb) != 0)
++   file = CreateFile2(wide, GENERIC_READ | GENERIC_WRITE,
++                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                      OPEN_ALWAYS, NULL);
++   if (file == INVALID_HANDLE_VALUE) {
++      operation = "open-index";
++      error = GetLastError();
 +      goto path_fail;
++   }
 +
 +   /* Force the index file to be the expected size. */
-+   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
-+   if (sb.st_size != (__int64)size && _chsize_s(fd, (__int64)size) != 0)
++   const size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
++   LARGE_INTEGER current;
++   if (!GetFileSizeEx(file, &current)) {
++      operation = "size-index";
++      error = GetLastError();
 +      goto path_fail;
-+
-+   HANDLE file = (HANDLE)_get_osfhandle(fd);
-+   if (file == INVALID_HANDLE_VALUE)
-+      goto path_fail;
++   }
++   if ((uint64_t)current.QuadPart != size) {
++      LARGE_INTEGER end;
++      end.QuadPart = (LONGLONG)size;
++      if (!SetFilePointerEx(file, end, NULL, FILE_BEGIN) || !SetEndOfFile(file)) {
++         operation = "resize-index";
++         error = GetLastError();
++         goto path_fail;
++      }
++   }
 +
 +   /* As on POSIX, the view is shared so that every process using the cache
 +    * sees the same size and key index; dirty pages reach the file even if
@@ -635,14 +1142,21 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +#else
 +   HANDLE mapping = CreateFileMappingFromApp(file, NULL, PAGE_READWRITE, 0, NULL);
  #endif
-+   if (mapping == NULL)
++   if (mapping == NULL) {
++      operation = "map-index";
++      error = GetLastError();
 +      goto path_fail;
++   }
 +
 +#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 +   void *view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
 +#else
 +   void *view = MapViewOfFileFromApp(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, size);
 +#endif
++   if (view == NULL) {
++      operation = "view-index";
++      error = GetLastError();
++   }
 +   /* The view keeps the section alive. */
 +   CloseHandle(mapping);
 +   if (view == NULL)
@@ -656,8 +1170,11 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   mapped = true;
 +
 +path_fail:
-+   if (fd != -1)
-+      _close(fd);
++   if (operation)
++      win32_record_failure(operation, path, error);
++   if (file != INVALID_HANDLE_VALUE)
++      CloseHandle(file);
++   free(wide);
 +
 +   return mapped;
 +}
@@ -683,20 +1200,49 @@ diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 diff --git a/src/util/disk_cache_os.h b/src/util/disk_cache_os.h
 --- a/src/util/disk_cache_os.h
 +++ b/src/util/disk_cache_os.h
-@@ -26,12 +26,6 @@
- 
+@@ -27,12 +27,6 @@
  #include "util/u_queue.h"
  #include "util/disk_cache.h"
--
+ 
 -#if DETECT_OS_WINDOWS
 -
 -/* TODO: implement disk cache support on windows */
 -
 -#else
- 
+-
  #include "util/fossilize_db.h"
  #include "util/mesa_cache_db.h"
-@@ -190,6 +184,4 @@
+ #include "util/mesa_cache_db_multipart.h"
+@@ -105,6 +99,13 @@
+ 
+    /* Internal RO FOZ cache for combined use of RO and RW caches. */
+    struct disk_cache *foz_ro_cache;
++
++   /* Diagnostics (disk_cache_print_diagnostics): the step at which path
++    * initialization stopped, or NULL, and the number of entries queued for
++    * writing.
++    */
++   const char *init_failure;
++   uint32_t puts;
+ };
+ 
+ struct cache_entry_file_data {
+@@ -170,6 +171,14 @@
+ bool
+ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache);
+ 
++#if DETECT_OS_WINDOWS
++/* Writes the Windows backend's file operation counters and its first failed
++ * file operation, for disk_cache_print_diagnostics().
++ */
++void
++disk_cache_os_print_diagnostics(FILE *file);
++#endif
++
+ void
+ disk_cache_destroy_mmap(struct disk_cache *cache);
+ 
+@@ -190,6 +199,4 @@
  }
  #endif
  

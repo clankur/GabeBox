@@ -35,8 +35,8 @@ The series therefore reuses upstream's cache format, keys and GL front-end integ
 | Patch | Change | Size |
 | --- | --- | --- |
 | 0001 | `with_uwp` from the machine file's subsystem. Needed because the published UWP Meson fork has no `uwp` builtin option | +3 −1 |
-| 0002 | Windows backend for `util/disk_cache` (multi-file layout, same entry format). Uses only C runtime and AppContainer-safe Win32 calls. `-Dshader-cache=enabled` is allowed on Windows, while `auto` stays off | +427 −16 |
-| 0003 | d3d12 `get_disk_shader_cache`, a DXIL variant cache in `compile_nir`, and `D3D12_SHADER_CACHE_STATS` counters | +309 −10 |
+| 0002 | Windows backend for `util/disk_cache` (multi-file layout, same entry format). Uses AppContainer-safe wide-character Win32 file calls with extended-length (`\\?\`) paths, and `disk_cache_print_diagnostics` reports the first failed file operation. `-Dshader-cache=enabled` is allowed on Windows, while `auto` stays off | +953 −28 |
+| 0003 | d3d12 `get_disk_shader_cache`, a DXIL variant cache in `compile_nir`, and `D3D12_SHADER_CACHE_STATS` counters with the disk cache's diagnostics | +344 −10 |
 
 **Keys.** A variant's DXIL is a function of the NIR passed to `nir_to_dxil` and of the `nir_to_dxil_options`. The key is therefore the serialized pre-compile NIR plus every option field. The `d3d12_shader_key` is already reflected in that NIR through the passes it selects, and it holds pointers, so it is not hashed directly. The disk cache's driver id adds the Mesa version, git SHA and build time, the adapter IDs, the UMD version, and the capabilities that shape NIR and DXIL. Every new Mesa build therefore starts with a cold cache.
 
@@ -61,14 +61,48 @@ The series therefore reuses upstream's cache format, keys and GL front-end integ
    - `D3D12_SHADER_CACHE_STATS = LocalState\mesa-shader-cache-<appid>-<launch>.txt`
 
    Its launch report records `steam_shadow_mesa_shader_cache=profile` and the stats file name. Removing the marker restores the old behaviour. The cache folder persists across launches by design; delete it to reset.
+
+   The stats file is written once when the cache is created, then at most once a second while variants are created, and last at screen destruction after queued entries are written. After the variant counters it carries the disk cache's own lines:
+
+   | Line | Meaning |
+   | --- | --- |
+   | `disk_cache=ready` or `unavailable` | Whether the cache directory, its `index` mapping and the writer queue were set up. `unavailable` means every lookup misses and nothing is stored |
+   | `disk_cache_init_failure=` | With `unavailable`: `disabled` (`MESA_SHADER_CACHE_DISABLE`), `directory` or `index` |
+   | `disk_cache_dir=`, `disk_cache_max_size=`, `disk_cache_size=` | The directory in use, the parsed `MESA_SHADER_CACHE_MAX_SIZE` in bytes, and the accounted size in the index |
+   | `disk_cache_puts=` | Entries queued for writing, from the DXIL cache and st/mesa's program cache |
+   | `disk_cache_entries_written=`, `disk_cache_write_failures=` | Entries renamed into place, and writes that failed |
+   | `disk_cache_entries_read=`, `disk_cache_read_failures=` | Entries loaded and validated, and reads that failed for a reason other than a missing entry |
+   | `disk_cache_first_failure=` | `none`, or the first failed operation with its Win32 error and path, for example `create-directory error=0x00000003 path=…` |
 4. **Measure (optional).** An empty `steam-win32-gl-trace-<appid>.txt` needs a `loader-trace` profile. It sets `XBOX_WIN32_GL_TRACE=1` and the existing `XBOX_WIN32_PSO_TRACE=1`, without the CoreCLR JIT trace. The hosted WGL adapter (`runtime/win32/window-gl.c`) then wraps `glCompileShader`, `glLinkProgram`, `glProgramBinary`, `glDrawArrays`, `glDrawElements` and their instanced forms. It writes `gl kind=<compile|link|binary|draw> utc=… us=… count=… total_us=…` for every call of 2 ms or more, beside the `pso kind=… us=…` lines. `total_us` includes the shorter calls, so the Mesa share of a stall window is the `total_us` difference across it minus the `pso` time inside it. A slow draw includes the variant compile and the pipeline creation it triggers.
+
+## Console result: nothing stored on packages 1.0.270.4 and 1.0.270.5
+
+STS2 (AppID 2868840, build 26655341) ran with the Mesa cache marker and the CI artifact `3a4e806c…`. The stats file appeared with `d3d12_shader_cache=enabled`, so the variables reached Mesa. The cold run had 77 misses and 0 hits (`nir_to_dxil_us=731120`, `validate_us=179693`). The warm run had 75 misses and 0 hits. `MesaShaderCache` was created by the launcher and was still empty afterwards.
+
+**Cause: the disk cache's directory setup failed, and that build discarded the error.** Confidence is high that setup failed and that this alone explains the result. The exact failing call is not established.
+
+- `d3d12_shader_cache=enabled` only proves that `disk_cache_create` returned an object. `disk_cache_type_create` returns one even when its directory setup fails. It marks the cache `path_init_failed`, leaves its type `DISK_CACHE_NONE` and never starts the writer queue. It returns NULL only when it runs out of memory or cannot start the queue.
+- In that state `disk_cache_get` returns at once, and `disk_cache_put` returns before it queues anything. The 77 lookups took 26 µs in total, about 0.3 µs each. A lookup that opened a file would take much longer. The DXIL cache in 0003 called the store on every validated miss (`misses` counts only cacheable variants), and the store was dropped there.
+- Setup creates `MesaShaderCache\mesa_shader_cache` and its `index` file first. The folder stayed empty, so setup stopped at or before that directory. In the old backend, that step was the C runtime's `_stat64` and `_mkdir` on a path that mixed `\` and `/`. Its error went only to stderr, which a packaged process does not show.
+- A second defect would have blocked every write even after a successful setup. The package's LocalState path is about 98 characters (`…\Packages\XboxPortabilityProbe.ChildProcess.SteamCore_<publisher>`, an estimate from the package identity). The account folder is a 17-digit SteamID. A temporary entry, `…\MesaShaderCache/mesa_shader_cache/ab/<62 hex>.tmp`, is then about 263 characters, past `MAX_PATH`. The C runtime's narrow file calls fail at that length, and the old backend ignored the failure. Godot's shader cache hits the same limit at a similar depth (`SetCurrentDirectoryW` error 206, see [the STS2 note](../../analysis/slay-the-spire-2-compatibility.md#shader-cache-and-the-current-directory-limit)).
+- These were ruled out by reading the code. `MESA_SHADER_CACHE_MAX_SIZE=512M` parses to 536,870,912 bytes. The writer queue never started because setup failed; it did not fail to flush. The 0003 store path reaches `disk_cache_put` with validated DXIL.
+
+**Fix (patch 0002).**
+
+- The Windows backend now calls the wide-character Win32 file APIs: `CreateFile2`, `CreateDirectoryW`, `GetFileAttributesExW`, `MoveFileExW`, `DeleteFileW` and `FindFirstFileExW`.
+- Paths use backslashes and the extended-length form (`\\?\X:\…`), so entry depth no longer meets `MAX_PATH`. Godot uses the same form successfully in the same child process.
+- `MESA_SHADER_CACHE_DIR` is read in its wide form.
+- Missing directories are created from the deepest existing parent down.
+- Every failed file operation is counted. The first one is kept with its path and Win32 error, so the next run names the cause even if this fix misses.
+- Screen destruction now waits for queued writes before it writes the final counters.
 
 ## Verification status
 
 Verified off-console:
 
 - The patches apply in order to the pinned files and reproduce the edited tree. They were generated from those exact files.
-- Patch 0002's Windows backend and the patched `disk_cache.c` pass a mingw-w64 `clang -fsyntax-only` check with `WINAPI_FAMILY_APP`. The remaining diagnostics come from the mingw environment (`timespec`, perfetto) and appear identically for the unpatched file. The POSIX path shows the same diagnostics before and after the patch.
+- Patch 0002's Windows backend and the patched `disk_cache.c` pass a mingw-w64 `gcc -fsyntax-only -Wall -Wextra -Werror=implicit-function-declaration` check with `WINAPI_FAMILY_APP`, so every Win32 call it makes is declared for the app partition. They also pass with the desktop partition. The one remaining error is upstream's own `CreateFileW` in `disk_cache_get_function_identifier`, which mingw places outside the app partition and MSVC does not; CI already builds it. The POSIX build of both files passes a host `clang -fsyntax-only` check.
+- A host test of the extended-length path conversion and the root that directory creation stops at covers drive, UNC, `\\?\`, mixed and repeated separators, `..` and relative paths. The file operations themselves have not run on Windows.
 - `window-gl.c` compiles with `-ffreestanding -Wall -Wextra -Werror` against mingw-w64 headers.
 - The packager, staging and pin tests pass (`tests/test_mesa_runtime.py`).
 - A separate review agent read both patches against the pinned headers. It found no compile or hit-vs-miss errors. Its three actionable findings are fixed:
@@ -76,7 +110,7 @@ Verified off-console:
   - `DXIL_DEBUG` disables the cache;
   - non-Windows builds are warning-free.
 
-Verified in CI (run 45715041407, commit `f33948e`, windows-latest with VS 18 / MSVC 14.52):
+Verified in CI (run 45715041407, commit `f33948e`, windows-latest with VS 18 / MSVC 14.52). This predates the long-path backend and its diagnostics. The new series needs a new run; its artifact will have a new `SHA256SUMS` digest, and `libgallium_wgl.dll` should import `api-ms-win-core-file-*` calls in place of the CRT file calls:
 
 - **Both variants build.** They use the Ninja backend with the UWP machine file. The pinned prebuilt's linker is 14.51, which is also VS 18. The fork's Visual Studio backend can't build Mesa: it generates Store projects with /ZW, PCH and XAML compilation. The build has no Vulkan driver (`-Dvulkan-drivers=[]`), since only the five GL libraries are packaged.
 - **The shader-cache artifact** is `xbox-mesa-uwp-34732bb-shader-cache-x64`, with `SHA256SUMS` SHA-256 `3a4e806c33945469d57e23096ed5275025e0a50dc23b576c137e4cfceb7988e1`.
@@ -98,8 +132,8 @@ Verified in CI (run 45715041407, commit `f33948e`, windows-latest with VS 18 / M
 Not verified (needs the console):
 
 - **Mesa sources and host.** The d3d12 sources compiled in CI. `ProbeNative.cpp` and `window-gl.c` build in the separate Xbox probe workflow.
-- **The cache's calls.** Whether `CreateFileMappingFromApp` and the CRT file calls work in the game process's container.
-- **Environment variables.** Whether `GetEnvironmentVariableA` sees the launcher's variables inside Mesa. No Mesa variable has been used on the console before.
+- **The cache's calls.** Whether `CreateFile2`, `CreateDirectoryW`, `MoveFileExW` and `CreateFileMappingFromApp` work on extended-length paths in the game process's container. The `disk_cache_*` lines in the stats file answer this.
+- **Environment variables.** `GetEnvironmentVariableA` sees the launcher's variables inside Mesa (`d3d12_shader_cache=enabled` on 1.0.270.4). The wide read of `MESA_SHADER_CACHE_DIR` is new.
 - **Results.** Cache hits, and the size of the stall reduction.
 
 ## Live test recipe (STS2, AppID 2868840, build 26655341)
@@ -111,7 +145,9 @@ Package two runtimes: A uses the prebuilt Mesa with the GL trace marker; B uses 
 
 Acceptance:
 
-- The warm run's `mesa-shader-cache-2868840-*.txt` has `hits` > 0 and `misses` near 0, against all misses on the cold run.
+- The cold run's stats file has `disk_cache=ready`, `disk_cache_max_size=536870912`, `disk_cache_write_failures=0` and `disk_cache_first_failure=none`. `disk_cache_entries_written` should approach `disk_cache_puts` within a second, and equal it in the final write at exit. `MesaShaderCache\mesa_shader_cache` holds an `index` file of 2,097,160 bytes and two-character folders with entries.
+- If not, `disk_cache_init_failure` and `disk_cache_first_failure` name the failed step, call, Win32 error and path. Record them verbatim.
+- The warm run's `mesa-shader-cache-2868840-*.txt` has `hits` > 0 and `misses` near 0, against all misses on the cold run. `disk_cache_entries_read` is at least `hits`.
 - `nir_to_dxil_us` and `validate_us` fall to near 0 on the warm run.
 - On the warm run, `gl kind=link` `total_us` drops sharply (program-cache hits) and `gl kind=draw` total time falls.
 - `python3 -m tools.measure --require-gpu-60` on the first-turn window shows fewer and shorter gaps than run A and the cold run.
@@ -131,7 +167,7 @@ Record the cache folder size after each run.
 - **Shared state.** The `pso` trace and the PSO costs are unaffected. A driver-side `ID3D12PipelineLibrary` cache is separate work.
 - **NIR after `nir_to_dxil` is serialized**, which upstream never does. A deref left pointing at a uniform struct that `nir_to_dxil` removed would assert in `nir_serialize`. GL lowers those structs earlier, so this is not expected. A `NIR_DEBUG=validate` debug build would confirm it.
 - **Build identity.** It comes from `MESA_GIT_SHA1`, `__DATE__` and `__TIME__` in `d3d12_screen.cpp`. A clean CI build always changes it. An incremental local build that touches only the compiler sources would not, and would reuse old entries, so do not ship incremental builds.
-- **Lost entries at exit.** Writes go through a background queue. A process that exits without destroying the screen can lose its last few entries, and the stats file can lag by up to 1 s. Expect "misses near 0" on a warm run.
-- **Path length.** Entry paths are the LocalState path plus about 150 characters. A failure past `MAX_PATH` shows up only as misses.
+- **Lost entries at exit.** Writes go through a background queue. Screen destruction waits for it, but a process that exits without destroying the screen can lose its last few entries, and the stats file can lag by up to 1 s. `disk_cache_puts` against `disk_cache_entries_written` shows the loss. Expect "misses near 0" on a warm run.
+- **Path length.** Entry paths are the cache directory plus about 90 characters, and the temporary entry below this package's LocalState is past `MAX_PATH`. The backend therefore uses extended-length paths. A `MESA_SHADER_CACHE_DIR` with `.` or `..` components, or a relative one, is passed on without the prefix and is still limited to `MAX_PATH`.
 - **Build tests.** `-Dbuild-tests=true` with the cache adds upstream's POSIX-only `cache_test.cpp`. The workflow does not build tests.
 - **Fork maintenance.** The patches touch `util/disk_cache*` and the d3d12 compiler. A mesa-uwp rebase needs them re-applied and re-pinned.

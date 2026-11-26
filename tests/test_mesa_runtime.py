@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -38,6 +39,21 @@ class MesaComponentPinTests(unittest.TestCase):
         self.assertEqual(sorted(listed), sorted(f"patches/{path.name}" for path in (COMPONENT / "patches").iterdir()))
         cache_patch = (COMPONENT / pin["patches"][-1]["file"]).read_text()
         self.assertIn(stage_mesa_uwp.SHADER_CACHE_MARKER.decode(), cache_patch)
+
+    def test_windows_cache_backend_uses_long_paths_and_reports_failures(self):
+        pin = json.loads((COMPONENT / "mesa-uwp.json").read_text())
+        backend, driver = ((COMPONENT / entry["file"]).read_text() for entry in pin["patches"][1:])
+        added = "\n".join(line[1:] for line in backend.splitlines() if line.startswith("+"))
+        windows = added[added.index("#else /* DETECT_OS_WINDOWS */"):]
+        # Entry paths below a packaged app's LocalState pass MAX_PATH, so the Windows backend
+        # must not fall back to the C runtime's narrow file calls.
+        for call in ("_sopen_s", "_mkdir", "_stat64", "rename", "_findfirst64", "_chsize_s"):
+            self.assertIsNone(re.search(rf"(?<!\w){call}\(", windows), call)
+        for call in ("CreateFile2", "CreateDirectoryW", "MoveFileExW", "\\\\\\\\?\\\\"):
+            self.assertIn(call, windows)
+        self.assertIn("disk_cache_print_diagnostics", added)
+        self.assertIn("disk_cache_first_failure=", added)
+        self.assertIn("+         disk_cache_print_diagnostics(screen->disk_cache, file);", driver)
 
     def test_baseline_only_changes_the_build(self):
         pin = json.loads((COMPONENT / "mesa-uwp.json").read_text())
