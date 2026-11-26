@@ -405,6 +405,32 @@ The frame rate moved from 27.8 to 31.0 FPS: 929 presents in 30 s, median 33.37 m
 
 **The ray-tracing manager cannot be skipped through its gate byte.** The engine sets the byte at `exe+0x07A89150` to 1 within 1.4 s of launch. Clearing it during startup crashed the game at `exe+0x018584B6` (null read) before the menu, so the BVH heaps cannot be removed that way.
 
+**Ruled out for the 30 FPS limit:**
+
+- **Copy queue.** Build `1.0.273.221` signaled a fence after every submission to the game's copy queue and timed its completion from the CPU. The copy queue received no submissions in the world.
+- **Process resources.** Microsoft's [UWP resource page](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/system-resource-allocation) gives games "full access to available GPU cycles", "4 exclusive and 2 shared CPU cores", 5 GB of memory, and DirectX 12 at feature level 11.0 on Xbox Series X|S. The process used about 1.75 cores.
+- **Device-removed checks.** Caching the check only moved the frame rate to 31 FPS.
+
+Still unknown:
+
+- The direct-queue timestamps total about 2.6 s per window, whatever the window length. They may be written when the command processor reaches the query rather than after prior work finishes, so they could undercount.
+- Engine 5 also read 76% with only Big Picture showing after a crash, so it cannot be attributed to the game alone.
+
+The bound on the frame is unresolved.
+
+**Missing surface textures.** The hero is drawn as an untextured silhouette, and road surfaces show a mirrored sky. The recipe caps every routed texture at 256 pixels. The reference also applies eight texture-restore recipes, which `prepare-mip-overlay.py` does not support yet:
+
+- `local_ground29_1024`
+- `local_street12_sd512`
+- `local_opening51_1024`
+- `local_openingroom36_1024`
+- `local_openingbroad111_512`
+- `local_openingbill3_1024`
+- `local_openingfinishes9_1024`
+- `local_openingscreen3_1024`
+
+These restore textures in the opening area to 512 or 1024 pixels.
+
 **Installed build.** The console holds `1.0.273.220`, built from the `1.0.273.213` configuration (demand-committed pools and the cached device-removed check) without autoplay.
 
 Open work:

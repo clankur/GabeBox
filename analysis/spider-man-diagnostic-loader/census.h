@@ -383,7 +383,6 @@ static DWORD WINAPI RtGateWatch(void *unused) {
 
 static DWORD WINAPI CensusWatch(void *unused) {
     (void)unused;
-    { HANDLE rt = CreateThread(NULL, 0, RtGateWatch, NULL, 0, NULL); if (rt) CloseHandle(rt); }
     CensusCpuSets();
     CensusTimer();
     LARGE_INTEGER frequency, previous, now;

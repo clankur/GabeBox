@@ -37,6 +37,41 @@ static LONG GpuQueueKind(ID3D12CommandQueue *queue) {
     return -1;
 }
 
+/* Copy queues: no timestamp support, so each submission signals a fence and a watcher records when the CPU
+   sees it complete. Busy time assumes the copy queue executes its submissions in order. */
+#define GPUCOPY_RING 8192u
+static ID3D12Fence *gpuCopyFence;
+static volatile LONG64 gpuCopyNext;
+static volatile LONG64 gpuCopySubmit[GPUCOPY_RING];
+static volatile LONG64 gpuCopyBusy, gpuCopyBatches, gpuCopyLists, gpuCopyLatency, gpuCopyMaxLatency;
+static DWORD WINAPI GpuCopyWatch(void *unused) {
+    (void)unused;
+    UINT64 seen = 0;
+    LONG64 previousEnd = 0;
+    for (;;) {
+        const UINT64 completed = ID3D12Fence_GetCompletedValue(gpuCopyFence);
+        if (completed == ~0ull) return 0;
+        if (completed > seen) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            for (UINT64 v = seen + 1; v <= completed; ++v) {
+                const LONG64 submit = gpuCopySubmit[v % GPUCOPY_RING];
+                if (!submit) continue;
+                const LONG64 start = submit > previousEnd ? submit : previousEnd;
+                if (now.QuadPart > start) InterlockedAdd64(&gpuCopyBusy, now.QuadPart - start);
+                const LONG64 latency = now.QuadPart - submit;
+                InterlockedAdd64(&gpuCopyLatency, latency);
+                if (latency > gpuCopyMaxLatency) gpuCopyMaxLatency = latency;
+                InterlockedIncrement64(&gpuCopyBatches);
+                previousEnd = now.QuadPart;
+            }
+            seen = completed;
+        }
+        YieldProcessor();
+        Sleep(0);
+    }
+}
+
 static BOOL GpuSetup(ID3D12CommandQueue *queue) {
     if (gpuReady) return gpuReady > 0;
     AcquireSRWLockExclusive(&gpuLock);
@@ -58,6 +93,10 @@ static BOOL GpuSetup(ID3D12CommandQueue *queue) {
         D3D12_RANGE none = {0, 0};
         if (SUCCEEDED(hr)) hr = ID3D12Resource_Map(gpuReadback, 0, &none, (void **)&gpuStamps);
         if (SUCCEEDED(hr)) hr = ID3D12Device_CreateFence(allocDevice, 0, D3D12_FENCE_FLAG_NONE, &fenceIid, (void **)&gpuFence);
+        if (SUCCEEDED(hr) && SUCCEEDED(ID3D12Device_CreateFence(allocDevice, 0, D3D12_FENCE_FLAG_NONE, &fenceIid, (void **)&gpuCopyFence))) {
+            HANDLE watcher = CreateThread(NULL, 0, GpuCopyWatch, NULL, 0, NULL);
+            if (watcher) CloseHandle(watcher); else gpuCopyFence = NULL;
+        }
         if (SUCCEEDED(hr)) {
             D3D12_QUERY_HEAP_DESC copyDesc = {(D3D12_QUERY_HEAP_TYPE)5 /* COPY_QUEUE_TIMESTAMP */, GPUPROF_PAIRS * 2, 0};
             if (FAILED(ID3D12Device_CreateQueryHeap(allocDevice, &copyDesc, &heapIid, (void **)&gpuCopyHeap))) gpuCopyHeap = NULL;
@@ -75,7 +114,7 @@ static BOOL GpuSetup(ID3D12CommandQueue *queue) {
         gpuReady = SUCCEEDED(hr) ? 1 : -1;
         char line[96], *out = Hex(Text(line, "asset gpuprof-setup hr=0x"), (unsigned long)hr, 8);
         out = CensusDec(Text(out, " frequency="), gpuFrequency);
-        out = Text(out, gpuCopyHeap ? " copy-heap=ok build=6" : " copy-heap=none build=6");
+        out = Text(out, gpuCopyHeap ? " copy-heap=ok build=7" : " copy-heap=none build=7");
         CensusEmit(line, out);
     }
     ReleaseSRWLockExclusive(&gpuLock);
@@ -85,6 +124,16 @@ static BOOL GpuSetup(ID3D12CommandQueue *queue) {
 static void STDMETHODCALLTYPE GpuExecute(ID3D12CommandQueue *queue, UINT count, ID3D12CommandList *const *lists) {
     const ULONG_PTR caller = (ULONG_PTR)__builtin_return_address(0);
     const LONG kind = GpuQueueKind(queue);
+    if (kind == 2 && GpuSetup(queue) && gpuCopyFence) {
+        gpuExecuteOriginal(queue, count, lists);
+        const UINT64 value = (UINT64)InterlockedIncrement64(&gpuCopyNext);
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        gpuCopySubmit[value % GPUCOPY_RING] = now.QuadPart;
+        InterlockedAdd64(&gpuCopyLists, count);
+        ID3D12CommandQueue_Signal(queue, gpuCopyFence, value);
+        return;
+    }
     if (kind < 0 || !GpuSetup(queue) || (kind == 2 && !gpuCopyHeap)) { gpuExecuteOriginal(queue, count, lists); return; }
     ID3D12QueryHeap *heap = kind == 2 ? gpuCopyHeap : gpuHeap;
     const LONG setIndex = (LONG)((ULONG)InterlockedIncrement(&gpuSetCursor) % GPUPROF_SETS);
@@ -177,6 +226,27 @@ static void GpuReport(unsigned sample) {
         sites[s].lists += (unsigned)gpuPairs[p].lists;
     }
     reported = completed;
+    {
+        static LONG64 lastBusy, lastBatches, lastLists, lastLatency;
+        static LARGE_INTEGER lastQpc;
+        LARGE_INTEGER now, frequency;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        const LONG64 busyNow = gpuCopyBusy, batchesNow = gpuCopyBatches, listsNow = gpuCopyLists, latencyNow = gpuCopyLatency;
+        if (lastQpc.QuadPart && frequency.QuadPart) {
+            const LONG64 batches = batchesNow - lastBatches;
+            char copyLine[200], *c = CensusDec(Text(copyLine, "asset gpuprof-copy sample="), sample);
+            c = CensusDec(Text(c, " wall-ms="), (unsigned long long)((now.QuadPart - lastQpc.QuadPart) * 1000 / frequency.QuadPart));
+            c = CensusDec(Text(c, " busy-ms="), (unsigned long long)((busyNow - lastBusy) * 1000 / frequency.QuadPart));
+            c = CensusDec(Text(c, " batches="), (unsigned long long)batches);
+            c = CensusDec(Text(c, " lists="), (unsigned long long)(listsNow - lastLists));
+            c = CensusDec(Text(c, " mean-latency-us="), batches ? (unsigned long long)((latencyNow - lastLatency) * 1000000 / frequency.QuadPart / batches) : 0);
+            c = CensusDec(Text(c, " max-latency-us="), (unsigned long long)(gpuCopyMaxLatency * 1000000 / frequency.QuadPart));
+            CensusEmit(copyLine, c);
+            gpuCopyMaxLatency = 0;
+        }
+        lastQpc = now; lastBusy = busyNow; lastBatches = batchesNow; lastLists = listsNow; lastLatency = latencyNow;
+    }
     if (!pairs || last <= first) return;
     const UINT64 spanUs = (last - first) * 1000000ull / gpuFrequency;
     char line[220], *out = CensusDec(Text(line, "asset gpuprof sample="), sample);
