@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 
 from build_tools.redirect_pe_imports import validate_patch_recipe
+from build_tools.stage_mesa_uwp import has_shader_cache
 from build_tools.stage_session import read_package_member
 from build_tools.verify_win32_source import read_profile, valid_win32_component
 from tools.artifacts import pe_summary
@@ -189,6 +190,8 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     pipeline_cache = False
     managed_warmup = False
     hostfxr_warmup = False
+    gl_trace = False
+    mesa_shader_cache = False
     for entry in profiles:
         app, separator, directory = entry.partition("=")
         if (not separator or not directory or not re.fullmatch(r"[1-9][0-9]{0,7}", app)
@@ -339,6 +342,19 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
             files[warmup_marker] = read_managed_warmup_plan(root / warmup_marker, app)
             managed_warmup = True
             hostfxr_warmup |= fields[3:4] == ["godot"]
+        gl_trace_marker = f"steam-win32-gl-trace-{app}.txt"
+        if (root / gl_trace_marker).is_file():
+            if ((root / gl_trace_marker).stat().st_size or fields[2:3] != ["opengl3"]
+                    or fields[6:7] != ["loader-trace"]):
+                raise ValueError(f"The GL trace needs an empty marker, the OpenGL renderer and a loader trace for AppID {app}.")
+            files[gl_trace_marker] = b""
+            gl_trace = True
+        mesa_cache_marker = f"steam-win32-mesa-shader-cache-{app}.txt"
+        if (root / mesa_cache_marker).is_file():
+            if (root / mesa_cache_marker).stat().st_size or fields[2:3] != ["opengl3"]:
+                raise ValueError(f"The Mesa shader cache needs an empty marker and the OpenGL renderer for AppID {app}.")
+            files[mesa_cache_marker] = b""
+            mesa_shader_cache = True
         shader_cache = f"steam-win32-godot-shader-cache-{app}.txt"
         if (root / shader_cache).is_file():
             with (root / shader_cache).open("rb") as source:
@@ -513,6 +529,16 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_SYSTEM_COMPANIONS\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError("Use a Steam Core artifact with verified system companion support.")
+    if gl_trace:
+        variable = "XBOX_WIN32_GL_TRACE\0".encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32Window.dll"]:
+            raise ValueError("Use a Steam Core artifact with GL first-use timing.")
+    if mesa_shader_cache:
+        if "MESA_SHADER_CACHE_DIR\0".encode("utf-16le") not in native:
+            raise ValueError("Use a Steam Core artifact that sets the Mesa shader cache directory.")
+        driver = layout / "libgallium_wgl.dll"
+        if not driver.is_file() or not has_shader_cache(driver.read_bytes()):
+            raise ValueError("The Mesa shader cache needs the shader-cache Mesa UWP runtime (--mesa-runtime).")
 
     if managed_warmup:
         variable = "XBOX_WIN32_MANAGED_WARMUP_PLAN\0".encode("utf-16le")

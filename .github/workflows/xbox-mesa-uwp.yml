@@ -1,0 +1,210 @@
+name: Build Mesa UWP runtime
+
+# Builds the pinned mesa-uwp revision (runtime/mesa/mesa-uwp.json) with the
+# UWP Meson fork and the Ninja backend. The upstream README uses the Visual
+# Studio backend; the build step explains why this workflow does not.
+#   baseline      patch 0001 only; checked against the pinned 26.2.2 release
+#   shader-cache  patches 0001-0003; published for the packager
+# The packager consumes an artifact by the SHA-256 of its SHA256SUMS file:
+#   python3 -m build_tools.prepare_big_picture_library ... --mesa-runtime DIR SUMS_SHA256
+
+on:
+  push:
+    paths:
+      - '.github/workflows/xbox-mesa-uwp.yml'
+      - 'runtime/mesa/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mesa-uwp-x64:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, shader-cache]
+    env:
+      VARIANT: ${{ matrix.variant }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch pinned sources and tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $pin = Get-Content runtime/mesa/mesa-uwp.json -Raw | ConvertFrom-Json
+          $release = Join-Path $env:RUNNER_TEMP 'mesa-uwp-release.zip'
+          Invoke-WebRequest $pin.prebuilt.url -OutFile $release
+          if ((Get-FileHash $release -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.prebuilt.sha256) {
+            throw 'Unexpected Mesa UWP release archive.'
+          }
+          $reference = Join-Path $env:RUNNER_TEMP 'mesa-uwp-release'
+          Expand-Archive $release $reference
+          Write-Host 'DLLs in the pinned 26.2.2 release:'
+          Get-ChildItem $reference -Recurse -Filter *.dll | ForEach-Object { Write-Host "  $($_.FullName.Substring($reference.Length + 1))" }
+          Write-Host 'Imported modules of the pinned 26.2.2 release:'
+          foreach ($name in $pin.libraries) {
+            $modules = & "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe" --coff-imports "$reference/$($pin.prebuilt.prefix)$name" |
+              Select-String '^\s*Name: (.+\.dll)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+            Write-Host "  $name -> $($modules -join ', ')"
+          }
+          # The linker version identifies the toolset the maintainers used (14.4x is VS 2022, 14.5x VS 18).
+          $linker = & "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe" --file-headers "$reference/$($pin.prebuilt.prefix)libgallium_wgl.dll" |
+            Select-String 'LinkerVersion' | ForEach-Object { $_.Line.Trim() }
+          Write-Host "Pinned release linker: $($linker -join ', ')"
+          "MESA_REFERENCE=$reference" | Out-File -Append $env:GITHUB_ENV
+          foreach ($patch in $pin.patches) {
+            $hash = (Get-FileHash "runtime/mesa/$($patch.file)" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $patch.sha256) { throw "Patch $($patch.file) differs from its pin." }
+          }
+          $work = Join-Path $env:RUNNER_TEMP 'mesa-uwp'
+          New-Item -ItemType Directory $work | Out-Null
+          foreach ($repo in @(@{ Dir = 'mesa'; Pin = $pin.source }, @{ Dir = 'meson'; Pin = $pin.meson })) {
+            $dir = Join-Path $work $repo.Dir
+            git init --quiet $dir
+            # Pinned hashes and patches cover the LF bytes. Mesa's .gitattributes sets
+            # text=auto, which checks out CRLF on Windows unless core.eol is lf.
+            git -C $dir config core.autocrlf false
+            git -C $dir config core.eol lf
+            git -C $dir fetch --quiet --depth 1 $repo.Pin.repository $repo.Pin.commit
+            git -C $dir -c advice.detachedHead=false checkout --quiet FETCH_HEAD
+            if ((git -C $dir rev-parse HEAD) -ne $repo.Pin.commit) { throw "Unexpected $($repo.Dir) revision." }
+          }
+          $license = Join-Path $work "mesa/$($pin.source.license)"
+          if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.source.license_sha256) {
+            throw 'Unexpected Mesa license text at the pinned revision.'
+          }
+          foreach ($patch in $pin.patches | Where-Object { $_.variants -contains $env:VARIANT }) {
+            git -C (Join-Path $work 'mesa') apply --whitespace=nowarn (Resolve-Path "runtime/mesa/$($patch.file)")
+            Write-Host "Applied $($patch.file)"
+          }
+          python -m pip install --disable-pip-version-check @($pin.python)
+          # Chocolatey checks the package's own checksums; retry its transient gateway errors.
+          $PSNativeCommandUseErrorActionPreference = $false
+          for ($attempt = 1; ; $attempt++) {
+            choco install winflexbison3 --version $pin.win_flex_bison --no-progress -y
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge 5) { throw 'Could not install win_flex_bison.' }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+          "MESA_WORK=$work" | Out-File -Append $env:GITHUB_ENV
+      - name: Configure, build and install with the UWP toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $pin = Get-Content runtime/mesa/mesa-uwp.json -Raw | ConvertFrom-Json
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          # -app_platform=UWP puts the Store libraries (vcruntime140_app) on LIB, the same
+          # runtime the Visual Studio backend's Windows Store projects link against.
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -app_platform=UWP'
+          $env:PATH = "$env:ChocolateyInstall\lib\winflexbison3\tools;$env:PATH"
+          $meson = Join-Path $env:MESA_WORK 'meson/meson.py'
+          $source = Join-Path $env:MESA_WORK 'mesa'
+          $build = Join-Path $env:MESA_WORK 'build'
+          $prefix = Join-Path $env:MESA_WORK 'install'
+          $machine = Resolve-Path "runtime/mesa/$($pin.meson.machine_file)"
+          # Options from the mesa-uwp README, with the UWP machine file in place of --uwp.
+          # The fork's Visual Studio backend generates Windows Store projects that turn on
+          # C++/CX (/ZW), precompiled headers and XAML compilation for every target, which
+          # VS 18 rejects for Mesa's C sources. The Ninja backend takes the same UWP settings
+          # from the machine file (WINAPI_FAMILY_APP, /APPCONTAINER, WindowsApp.lib) without
+          # them. mesa-uwp uses C++/WinRT, not C++/CX, so /ZW is not needed.
+          python $meson setup $build $source --backend=ninja --cross-file $machine --buildtype=release `
+            --prefix $prefix -Dcpp_std=vc++17 "-Dc_args=['/D_XBOX_UWP']" "-Dcpp_args=['/D_XBOX_UWP']" `
+            -Db_pch=false @($pin.variants.$env:VARIANT)
+          python $meson compile -C $build
+          python $meson install -C $build
+      - name: Check the runtime and stage the artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $pin = Get-Content runtime/mesa/mesa-uwp.json -Raw | ConvertFrom-Json
+          $readobj = "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe"
+          $bin = Join-Path $env:MESA_WORK 'install/bin'
+          $output = New-Item -ItemType Directory (Join-Path $env:MESA_WORK "xbox-mesa-uwp-$env:VARIANT")
+          foreach ($name in $pin.libraries) {
+            $library = Join-Path $bin $name
+            if (!(Test-Path $library)) { throw "The build did not install $name." }
+            $imports = (& $readobj --coff-imports $library | Select-String '^\s*Name: (.+\.dll)$').Matches |
+              ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() }
+            # The Xbox package supplies the UWP C++ runtime through Microsoft.VCLibs.140.00.
+            if ($imports -contains 'vcruntime140.dll' -or $imports -contains 'msvcp140.dll') {
+              throw "$name links the desktop C++ runtime instead of the UWP (_app) runtime."
+            }
+            Copy-Item $library $output
+          }
+          $driver = [IO.File]::ReadAllBytes((Join-Path $output 'libgallium_wgl.dll'))
+          $text = [Text.Encoding]::ASCII.GetString($driver)
+          $expectCache = $env:VARIANT -eq 'shader-cache'
+          if ($text.Contains('D3D12_SHADER_CACHE_STATS') -ne $expectCache -or ($expectCache -and !$text.Contains('mesa_shader_cache'))) {
+            throw "libgallium_wgl.dll does not match the $env:VARIANT variant."
+          }
+
+          # Compare imports and exports with the pinned 26.2.2 release built by the mesa-uwp maintainers.
+          $reference = $env:MESA_REFERENCE
+          $differences = 0
+          $failures = @()
+          foreach ($name in $pin.libraries) {
+            $old = Join-Path $reference "$($pin.prebuilt.prefix)$name"
+            $new = Join-Path $output $name
+            foreach ($mode in @('--coff-imports', '--coff-exports')) {
+              # Module and symbol names only: hints, ordinals and RVAs differ between builds.
+              $names = { param($path) & $readobj $mode $path | ForEach-Object {
+                if ($_ -match '^\s*(Name|Symbol): (\S+)') { "$($Matches[1]) $($Matches[2])" } } | Sort-Object -Unique }
+              $a = & $names $old
+              $b = & $names $new
+              $delta = Compare-Object @($a) @($b)
+              if ($delta) {
+                $differences += $delta.Count
+                Write-Host "::warning::$name $mode differs from the 26.2.2 release:"
+                $delta | ForEach-Object { Write-Host "  $($_.SideIndicator) $($_.InputObject)" }
+              }
+              # Gate: the exported ABI (WGL, GL, EGL and zlib entry points) must match the
+              # release exactly. A newer toolset may change api-ms-win-* contract versions and
+              # CRT symbols, and the shader cache adds zlib, but any other new module would be
+              # a dependency the Xbox package does not provide.
+              if ($mode -eq '--coff-exports' -and $delta) {
+                $failures += "$name exports differ from the pinned release"
+              }
+              if ($mode -eq '--coff-imports') {
+                $delta | Where-Object { $_.SideIndicator -eq '=>' -and $_.InputObject -like 'Name *' } | ForEach-Object {
+                  $module = $_.InputObject.Substring(5)
+                  if ($module -notmatch '^api-ms-win-(core|crt)-[a-z0-9-]+\.dll$' -and $module -ne 'z-1.dll') {
+                    $failures += "$name imports $module, which the pinned release does not"
+                  }
+                }
+              }
+            }
+          }
+          Write-Host "Import/export differences from the pinned release: $differences"
+          if ($failures) { throw ($failures -join "`n") }
+
+          Copy-Item (Join-Path $env:MESA_WORK "mesa/$($pin.source.license)") (Join-Path $output 'LICENSE.mesa-uwp')
+          $applied = $pin.patches | Where-Object { $_.variants -contains $env:VARIANT } |
+            ForEach-Object { "patch $($_.sha256) $($_.file)" }
+          $sourceLines = @("$($pin.source.repository)/tree/$($pin.source.commit)", "variant $env:VARIANT") + $applied +
+            @("meson $($pin.meson.repository)/tree/$($pin.meson.commit)", "workflow run $env:GITHUB_RUN_ID")
+          [IO.File]::WriteAllText((Join-Path $output 'mesa-uwp-source.txt'), ($sourceLines -join "`n") + "`n")
+          $sums = Get-ChildItem $output -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          }
+          [IO.File]::WriteAllText((Join-Path $output 'SHA256SUMS'), ($sums -join "`n") + "`n")
+          $digest = (Get-FileHash (Join-Path $output 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA256SUMS digest (pass to --mesa-runtime): $digest"
+          "### Mesa UWP $env:VARIANT`nSHA256SUMS digest: ``$digest``" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "MESA_OUTPUT=$output" | Out-File -Append $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-mesa-uwp-34732bb-${{ matrix.variant }}-x64
+          path: ${{ env.MESA_OUTPUT }}
+          if-no-files-found: error
