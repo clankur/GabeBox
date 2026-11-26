@@ -522,3 +522,13 @@ So the about 30 FPS bound is not pixel or fill rate. The remaining candidates ar
 - a synchronization stall that scales with scene content (the world without ground reached 54–60 FPS).
 
 The trial profile's display settings were left at Windowed with a dynamic-resolution target of 60 and need restoring to Fullscreen and 30.
+
+**Fence-timed GPU work.** Build `1.0.276.234` signaled a per-queue fence after every `ExecuteCommandLists` call. A watcher thread recorded when each value completed, giving each submission's completion time minus the later of its submit time and the previous completion on the same queue.
+
+- The instrumentation itself cut the world to 4.8 FPS, so frame pacing in this run is not representative.
+- Busy time was 5.0–5.4 s per 30-second window over 143–400 presents. That is about 35–38 ms of GPU work per frame, consistent with the uninstrumented 23–31 FPS.
+- Most of it comes from submissions at `exe+0x018D8E15` (about 4.4 s per window, about 7 ms per batch). Submissions at `exe+0x018D8CBC` add about 1 s, and the presenter copy adds 9–237 ms.
+
+With the resolution result above, this puts the about 30 FPS bound in GPU work that does not scale with pixel count: geometry, compute, or fixed-resolution passes such as shadow maps. The next step is attributing GPU time to individual command lists, for example by counting draws and dispatches per list.
+
+The console was returned to the play configuration as `1.0.276.235`, without autoplay.

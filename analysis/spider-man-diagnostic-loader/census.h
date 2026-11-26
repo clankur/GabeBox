@@ -260,7 +260,7 @@ static void CensusThreads(unsigned long long wallMicros, unsigned sample) {
         CensusEmit(line, out);
     }
     /* Once a minute after the first two minutes, profile the two busiest threads for 2 s each. */
-    if (sample >= 12 && sample % 6 == 0)
+    if (sample >= 99999 && sample % 6 == 0)
         for (unsigned slot = 0; slot < 4 && top[slot].delta; ++slot) ProfileThread(top[slot].id, sample, 300, 5);
 }
 
