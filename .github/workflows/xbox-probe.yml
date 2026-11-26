@@ -191,7 +191,7 @@ jobs:
             }
             foreach ($adapter in @(@{ Module = 'input'; Name = 'XboxWin32Input'; Sources = @('input', 'input-raw', 'input-cursor', 'xinput') },
                                     @{ Module = 'desktop'; Name = 'XboxWin32Desktop'; Sources = @('desktop') },
-                                    @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace', 'd3d12-pipeline-cache', 'd3d12-residency') },
+                                    @{ Module = 'loader-trace'; Name = 'XboxWin32LoaderTrace'; Sources = @('loader-trace', 'd3d12-pipeline-cache', 'd3d12-residency', 'd3d12-fence-trace') },
                                     @{ Module = 'controller-notify'; Name = 'XboxWin32ControllerNotify'; Sources = @('controller-notify') },
                                     @{ Module = 'unity'; Name = 'XboxWin32Unity'; Sources = @('unity') },
                                     @{ Module = 'display-config'; Name = 'XboxWin32DisplayConfig'; Sources = @('display-config') },

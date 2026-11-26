@@ -1256,6 +1256,53 @@ class LoaderDiagnosticTests(unittest.TestCase):
         self.assertNotIn('init', skipped)
         self.assertNotIn('steam_shift', diagnostics.loader_summary(lines[:1], 64))
 
+    def test_fence_wait_trace_is_listed_and_summarized(self):
+        # The lines runtime/win32/d3d12-fence-trace.c writes (formats in tests/steam-d3d12-fence-trace.test.cpp).
+        lines = ['asset d3d12-fence mode=trace source=package-file hooks=pending',
+                 'asset d3d12-fence install result=0x00000000 tables=3 mode=trace utc=20261126T133820.004Z',
+                 'asset d3d12-fence selftest result=0x00000000 wait_us=211 utc=20261126T133820.005Z',
+                 'asset d3d12-fence null_waits=470 early=0 max_wait_us=9100 exec=478 utc=20261126T133858.000Z',
+                 'asset d3d12-fence first-early mode=trace value=91234 completed=91233 wait_us=12 '
+                 'utc=20261126T133859.960Z',
+                 'asset d3d12-fence null_waits=476 early=3 max_wait_us=16210 exec=480 event_waits=2 '
+                 'utc=20261126T133900.000Z',
+                 'asset d3d12-fence-total mode=trace t_s=60 null_waits=946 early=3 max_wait_us=16210 exec=958 '
+                 'event_waits=2 settled=0 timeouts=0 failed=0 utc=20261126T133920.000Z']
+        self.assertTrue(all(diagnostics.LOADER_TRACE.fullmatch(line) for line in lines))
+        self.assertFalse(any(diagnostics.diagnostic_record(line) for line in lines))
+        summary = diagnostics.loader_summary(lines, 2048)
+        self.assertEqual(summary['events']['d3d12-fence']['count'], len(lines))
+        self.assertEqual(summary['events']['d3d12-fence']['latest'][-1], lines[-1])
+        self.assertEqual(summary['d3d12_fence'], {
+            'mode': 'trace', 'source': 'package-file', 'hooks': 'pending', 'install_result': '0x00000000',
+            'tables': 3, 'selftest_result': '0x00000000', 'selftest_wait_us': 211, 'seconds': 2,
+            'null_waits': 946, 'early': 3, 'exec': 958, 'event_waits': 2, 'settled': 0, 'timeouts': 0, 'failed': 0,
+            'max_wait_us': 16210, 'max_settle_us': 0, 'max_exec_per_second': 480, 'verdict': 'early-returns',
+            'first_early': lines[4], 'early_seconds': ['20261126T133900.000Z'], 'timeouts_logged': []})
+
+        # Wait mode: early returns that then settle, and one that timed out after 2 s.
+        waited = ['asset d3d12-fence mode=wait source=package-file override=invalid hooks=pending',
+                  'asset d3d12-fence null_waits=10 early=2 max_wait_us=40 exec=12 settled=1 max_settle_us=820 '
+                  'timeouts=1 utc=20261126T133900.000Z',
+                  'asset d3d12-fence timeout mode=wait value=7 completed=6 wait_us=3 settle_us=2000104 '
+                  'settle_completed=6 utc=20261126T133900.500Z']
+        fence = diagnostics.loader_summary(waited, 512)['d3d12_fence']
+        self.assertEqual((fence['mode'], fence['source'], fence['settled'], fence['timeouts']),
+                         ('wait', 'package-file override=invalid', 1, 1))
+        self.assertEqual(fence['max_settle_us'], 820)
+        self.assertEqual(fence['timeouts_logged'], [waited[2]])
+        self.assertIsNone(fence['install_result'])
+
+        # No early return in the waits the hooks saw refutes the hypothesis for them; batches without any
+        # NULL-event wait mean the hooks did not reach the fence Mesa waits on.
+        quiet = diagnostics.loader_summary(lines[:4], 512)['d3d12_fence']
+        self.assertEqual((quiet['verdict'], quiet['early'], quiet['first_early']), ('no-early-returns', 0, None))
+        unreached = diagnostics.loader_summary(
+            ['asset d3d12-fence null_waits=0 early=0 max_wait_us=0 exec=480 utc=20261126T133858.000Z'], 128)
+        self.assertEqual(unreached['d3d12_fence']['verdict'], 'no-null-waits')
+        self.assertNotIn('d3d12_fence', diagnostics.loader_summary(['asset residency mode=native source=default '
+                                                                     'hooks=none'], 64))
+
     def test_pipeline_events_from_a_replay_mode_are_summarized_by_outcome(self):
         lines = ['pso timing result=0x00000000',
                  'pso kind=S utc=10:00:00.000 us=5800000 result=0x00000000 cache=miss',

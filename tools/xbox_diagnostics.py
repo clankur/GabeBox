@@ -89,6 +89,10 @@ LIVE_LOADER_EVENTS = {
     # Direct3D 12 residency: the selected mode, the hook install, per-second Evict/MakeResident counts and
     # the 60-second totals (runtime/win32/d3d12-residency.c).
     'residency': re.compile(r'asset residency(?:[ -]|$)'),
+    # Direct3D 12 fence waits (xbox-d3d12-fence-trace.txt): the selected mode, the hook install and self-test,
+    # per-second NULL-event SetEventOnCompletion and ExecuteCommandLists counts, the first early return and the
+    # 60-second totals (runtime/win32/d3d12-fence-trace.c).
+    'd3d12-fence': re.compile(r'asset d3d12-fence(?:[ -]|$)'),
     # Steam title overrides: the relay start-up stub or worker, relay status changes and slow status polls,
     # SteamAPI_RunCallbacks calls of 2 ms or more, and the delayed Steam API init (runtime/win32/loader-trace.c).
     'steam': re.compile(r'asset steam-(?:relay|run-callbacks|init)(?:[ =-]|$)'),
@@ -511,6 +515,73 @@ def first_match(pattern, lines):
     return next((match for match in map(pattern.fullmatch, lines) if match), None)
 
 
+FENCE_UTC = r'([0-9]{8}T[0-9]{6}\.[0-9]{3}Z)'
+FENCE_MODE = re.compile(r'asset d3d12-fence mode=(trace|wait|off) source=(package-file(?: override=invalid)?) '
+                        r'hooks=([a-z-]{1,16})')
+FENCE_INSTALL = re.compile(rf'asset d3d12-fence install result=0x([0-9A-F]{{8}}) tables=([0-9]{{1,3}}) '
+                           rf'mode=(trace|wait|off) utc={FENCE_UTC}')
+FENCE_SELFTEST = re.compile(rf'asset d3d12-fence selftest result=0x([0-9A-F]{{8}}) wait_us=([0-9]{{1,20}}) '
+                            rf'utc={FENCE_UTC}')
+FENCE_WINDOW = re.compile(r'asset d3d12-fence null_waits=([0-9]{1,20}) early=([0-9]{1,20}) '
+                          r'max_wait_us=([0-9]{1,20}) exec=([0-9]{1,20})((?: [a-z_]{1,16}=[0-9]{1,20}){0,8}) '
+                          rf'utc={FENCE_UTC}')
+FENCE_EVENT = re.compile(r'asset d3d12-fence (first-early|timeout) mode=(trace|wait) value=([0-9]{1,20}) '
+                         r'completed=([0-9]{1,20}) wait_us=([0-9]{1,20})(?: settle_us=[0-9]{1,20} '
+                         rf'settle_completed=[0-9]{{1,20}})? utc={FENCE_UTC}')
+
+
+def fence_summary(lines):
+    """Summarize the fence-wait trace: whether a blocking SetEventOnCompletion(value, NULL) ever returned
+    before the fence reached value, and the batch rate."""
+    mode = first_match(FENCE_MODE, lines)
+    install = first_match(FENCE_INSTALL, lines)
+    selftest = first_match(FENCE_SELFTEST, lines)
+    windows = [match for match in map(FENCE_WINDOW.fullmatch, lines) if match]
+    events = [(line, match) for line, match in ((line, FENCE_EVENT.fullmatch(line)) for line in lines) if match]
+    if not (mode or install or windows or events):
+        return {}
+    totals = {'null_waits': 0, 'early': 0, 'exec': 0, 'event_waits': 0, 'settled': 0, 'timeouts': 0, 'failed': 0}
+    max_wait_us = max_settle_us = max_exec = 0
+    early_seconds = []
+    for match in windows:
+        null_waits, early, wait_us, executed = (int(value) for value in match.groups()[:4])
+        extra = dict(field.split('=') for field in match[5].split())
+        totals['null_waits'] += null_waits
+        totals['early'] += early
+        totals['exec'] += executed
+        for name in ('event_waits', 'settled', 'timeouts', 'failed'):
+            totals[name] += int(extra.get(name, 0))
+        max_wait_us = max(max_wait_us, wait_us)
+        max_settle_us = max(max_settle_us, int(extra.get('max_settle_us', 0)))
+        max_exec = max(max_exec, executed)
+        if early:
+            early_seconds.append(match[6])
+    first_early = next((line for line, match in events if match[1] == 'first-early'), None)
+    # early-returns supports the in-flight descriptor-heap reset; no-early-returns refutes it for the waits the
+    # hooks saw; no-null-waits with batches means the hooks did not reach the waiting fence.
+    verdict = ('early-returns' if totals['early'] or first_early else
+               'no-early-returns' if totals['null_waits'] else
+               'no-null-waits' if totals['exec'] else 'no-calls')
+    return {
+        'mode': mode[1] if mode else install[3] if install else None,
+        'source': mode[2] if mode else None,
+        'hooks': mode[3] if mode else None,
+        'install_result': f'0x{install[1]}' if install else None,
+        'tables': int(install[2]) if install else None,
+        'selftest_result': f'0x{selftest[1]}' if selftest else None,
+        'selftest_wait_us': int(selftest[2]) if selftest else None,
+        'seconds': len(windows),
+        **totals,
+        'max_wait_us': max_wait_us,
+        'max_settle_us': max_settle_us,
+        'max_exec_per_second': max_exec,
+        'verdict': verdict,
+        'first_early': first_early,
+        'early_seconds': early_seconds[:32],
+        'timeouts_logged': [line for line, match in events if match[1] == 'timeout'][:16],
+    }
+
+
 def steam_shift_summary(lines):
     """Summarize the delayed relay start-up and the delayed Steam API init, when either ran."""
     summary = {}
@@ -547,6 +618,9 @@ def loader_summary(lines, bytes_read, truncated=False):
     shift = steam_shift_summary(lines)
     if shift:
         summary['steam_shift'] = shift
+    fence = fence_summary(lines)
+    if fence:
+        summary['d3d12_fence'] = fence
     for label, pattern in LIVE_LOADER_EVENTS.items():
         matching = [line for line in lines if pattern.match(line)]
         summary['events'][label] = {'count': len(matching), 'latest': matching[-4:]}
