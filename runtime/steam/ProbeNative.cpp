@@ -3004,6 +3004,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 shadowOriginalExecutablePath = steam_win32_stage::SourceFile(source, shadowExecutable);
             }
             auto temporary = ApplicationData::Current().TemporaryFolder();
+            const auto staleStages = co_await steam_win32_stage::RemoveStaleStages(temporary);
+            if (staleStages) report += L"steam_shadow_stale_stages_removed=" + std::to_wstring(staleStages) + L"\r\n";
             shadowStage.folder = co_await temporary.CreateFolderAsync(L"SteamWin32Trial", CreationCollisionOption::GenerateUniqueName);
             co_await steam_win32_stage::ApplyRecipe(shadowRecipe, original, shadowStage.folder);
             if (shadowFiles) {
