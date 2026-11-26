@@ -380,3 +380,38 @@ Remaining problems on this build:
 - **Frame rate is capped at 30 FPS by a busy CPU thread.** Two 30-second in-world windows measured 27.9 and 27.7 FPS, with a 33.38 ms median and 604–610 intervals over 33 ms. All frames were shared-texture presents with no CPU uploads. One job-worker thread (start `exe+0x01BBF8B0`) used 94% of a core and the main thread 70%. Device Portal reported 11% on GPU engine 0.
 - **The street surface shows a sky reflection instead of road material.** The reference also prepares `local_ground29_1024`, which restores 29 ground textures to 1024 pixels. It is not part of this recipe yet.
 - **Headroom is about 170 MB.** Longer traversal still needs a soak.
+
+### Frame rate with the restored world (November 26)
+
+Builds `1.0.273.211` through `1.0.273.219` used the demand-committed pools and added profilers. They also reuse a successful `GetDeviceRemovedReason` result for up to 8 ms. The sources are in [spider-man-diagnostic-loader](spider-man-diagnostic-loader/README.md).
+
+**The engine spins on the device-removed check while waiting for GPU fences.** The render worker's samples resolve to `exe+0x018E2764`, next to the string `g_RenderDevice.GetDevice()->GetDeviceRemovedReason()`, inside a fence-wait loop. On Xbox each call is a kernel device-state query through `win32u`. Build `1.0.273.213` counted:
+
+| Measure | Count |
+| --- | --- |
+| `GetDeviceRemovedReason` calls in about 4 minutes | 76,092,618 |
+| Kernel queries after reusing an `S_OK` result for up to 8 ms | 30,989 (311 ms in total) |
+
+The frame rate moved from 27.8 to 31.0 FPS: 929 presents in 30 s, median 33.37 ms.
+
+**The world frame is held at about 30 FPS whatever the pacing settings.**
+
+- **VSync off.** With VSync off in the game's settings, a 30-second window measured 27.8 FPS with a 33.38 ms median.
+- **CPU placement.** The process used about 1.75 cores. Only two threads were busy: a job worker (start `exe+0x01BBF8B0`) spinning in the fence wait, and the main thread (start `exe+0x03637C50`), which mostly waits on jobs at `exe+0x01BBF3FA`. Widening every thread's affinity to the full process mask found no narrowed mask and left the frame rate at 31.4 FPS.
+- **GPU engine load.** Device Portal reported engine 5 at 76–90% in the world and 0% once the game had exited, so engine 5 measures this game's GPU load.
+- **Queue timestamps.** The game creates three direct queues and one copy queue, and no compute queue. Timestamps around each `ExecuteCommandLists` call on the direct queues added up to about 2.65 s of GPU time per 8.2–8.6 s span. The copy queue could not be timed because this console's D3D12 does not support copy-queue timestamps. The low direct-queue total does not match the engine 5 reading, so these timestamps may not measure execution time on this driver.
+
+**Changing settings in the world runs out of memory.** Changing the dynamic-resolution target in the world rebuilt render targets. A 10.5 MiB render-target heap then failed with 10,944 KiB available, and the game faulted at `exe+0x01CBDD53`. Setting the target to 60 at the main menu let the world load, but the game then faulted in Scaleform at `exe+0x0363E338` before a frame sample.
+
+**The ray-tracing manager cannot be skipped through its gate byte.** The engine sets the byte at `exe+0x07A89150` to 1 within 1.4 s of launch. Clearing it during startup crashed the game at `exe+0x018584B6` (null read) before the menu, so the BVH heaps cannot be removed that way.
+
+**Installed build.** The console holds `1.0.273.220`, built from the `1.0.273.213` configuration (demand-committed pools and the cached device-removed check) without autoplay.
+
+Open work:
+
+- Find what bounds the GPU frame. Candidates: shader codegen on the Xbox compiler, the replaced world shaders, and per-frame BVH or upload work.
+- Free memory so that settings changes and traversal survive. Start with the distant-light archive (about 210 MiB) and the temporary allocators.
+- Restore the road material. Candidate: the reference's `local_ground29_1024` recipe.
+- Clean up the roughly 175 `SteamWin32Trial (N)` staging folders left in the package TempState.
+- Move demand-committed pools into the shared runtime as a profile-selected component.
+- Run the independent `xbox-game-verify` pass. Coverage is not claimed.
