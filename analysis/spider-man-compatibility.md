@@ -507,3 +507,18 @@ Every run below continued from the main menu with the same trial save and was me
 - Reference issue #26 reports a white-cube character, so the reference port shows the same failure mode.
 
 The console now runs `1.0.273.232`: the play loader with the `.223` routing, without autoplay.
+
+**Frame rate does not depend on resolution.**
+
+- The hosted DXGI output offers only 1920×1080, so the display resolution cannot be lowered from the game's menu.
+- Build `1.0.275.233` (play configuration) set Windowed mode and a dynamic-resolution target of 60 at the main menu, so the game was free to lower its internal render resolution. The world loaded.
+- A 30-second window measured 23.3 FPS: 699 presents, median 49.9 ms, minimum 17 frames in one second. That matches 23.2 FPS at full resolution (`.228`).
+- The lower resolution added green streaks and ghosting, and the game later exited.
+
+So the about 30 FPS bound is not pixel or fill rate. The remaining candidates are:
+
+- per-draw CPU submission;
+- geometry or compute work;
+- a synchronization stall that scales with scene content (the world without ground reached 54–60 FPS).
+
+The trial profile's display settings were left at Windowed with a dynamic-resolution target of 60 and need restoring to Fullscreen and 30.
