@@ -66,6 +66,7 @@ Markers are empty files whose presence is the signal. The current families:
 | `steam-win32-dynamic-companions-APPID.txt` | companions resolved at run time; needs the original-executable marker, a companion list and a loader trace |
 | `steam-win32-storage-trace-APPID.txt` | the storage trace adapter; requires a loader trace |
 | `steam-win32-d3d12-default-adapter-APPID.txt`, `steam-win32-streamline-unavailable-APPID.txt` | renderer options; each needs a source profile and a loader trace |
+| `steam-win32-no-steam-relay-APPID.txt`, `steam-win32-steam-callback-trace-APPID.txt` | Steam title overrides in the loader trace: a no-op relay start-up and `SteamAPI_RunCallbacks` timing; each needs a source profile and a loader trace |
 | `steam-win32-release-renderer-APPID.txt` | releases the renderer to a matching hosted build |
 | `steam-win32-godot-shader-cache-APPID.txt` | `control` or `disabled` for a staged Godot OpenGL launcher |
 | `steam-win32-steam-sdk-APPID.txt`, `steam-win32-steam-legacy-sdk-APPID.txt` | the staged publisher Steamworks SDK paths |

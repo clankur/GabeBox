@@ -104,6 +104,12 @@ def stage_surfaceless_profiles(layout, profiles):
 
 
 MANAGED_WARMUP = "XboxManagedWarmup.dll"
+# Profile options that select a Steam title override in the loader trace, and the
+# launch variable each one sets (runtime/steam/ProbeNative.cpp, runtime/win32/loader-trace.c).
+STEAM_OVERRIDES = {
+    "no-steam-relay": "XBOX_WIN32_STEAM_RELAY_STUB",
+    "steam-callback-trace": "XBOX_WIN32_STEAM_CALLBACK_TRACE",
+}
 WARMUP_ASSEMBLY = re.compile(
     r"assembly=([A-Za-z0-9_][A-Za-z0-9_.-]{0,63})"
     r"(?: mvid=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
@@ -203,6 +209,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     disable_sdl_directinput = False
     hosted_controller_notify = False
     default_audio = False
+    steam_overrides = set()
     desktop_documents = False
     unity_direct3d = False
     godot_direct3d = False
@@ -288,12 +295,16 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The storage marker requires an empty file and a loader trace for AppID {app}.")
             files[storage_marker] = b""
             storage_trace = True
-        for option in ("d3d12-default-adapter", "streamline-unavailable"):
+        # no-steam-relay and steam-callback-trace are Steam title overrides served by the
+        # loader trace's GetProcAddress for steam_api64.dll.
+        for option in ("d3d12-default-adapter", "streamline-unavailable", *STEAM_OVERRIDES):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
                 if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:
                     raise ValueError(f"The {option} option needs an empty marker, source profile and loader trace for AppID {app}.")
                 files[marker] = b""
+                if option in STEAM_OVERRIDES:
+                    steam_overrides.add(option)
         cache_marker = f"steam-win32-d3d12-pipeline-cache-{app}.txt"
         if (root / cache_marker).is_file():
             content = (root / cache_marker).read_bytes() if (root / cache_marker).stat().st_size <= 64 else b"?"
@@ -678,6 +689,10 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         variable = "XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
             raise ValueError("Use a Steam Core artifact with launch-scoped controller notification support.")
+    for option in sorted(steam_overrides):
+        variable = (STEAM_OVERRIDES[option] + "\0").encode("utf-16le")
+        if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:
+            raise ValueError(f"Use a Steam Core artifact with the launch-scoped {option} option.")
     if default_audio:
         variable = "XBOX_WIN32_DEFAULT_AUDIO\0".encode("utf-16le")
         if variable not in native or variable not in files["XboxWin32LoaderTrace.dll"]:

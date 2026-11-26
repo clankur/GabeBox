@@ -980,6 +980,47 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "an empty marker"):
             stage_trials(self.layout, trial, runtime)
 
+    def test_steam_title_overrides_require_loader_trace_and_supporting_runtime(self):
+        self.layout.mkdir()
+        profile = self.work / "profile"
+        profile.mkdir()
+        app, build = "2868840", "26655341"
+        shadow = profile / f"steam-win32-shadow-{app}.txt"
+        shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQII32s", b"XWPEV1\r\n", 512, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({
+            build: [{"path": "Game.exe", "size": 512, "sha256": "a" * 64}]}))
+        runtime = self.work / "steam-override-runtime.appx"
+        trial = [f"{app}={profile}"]
+        for option, name in (("no-steam-relay", "XBOX_WIN32_STEAM_RELAY_STUB"),
+                             ("steam-callback-trace", "XBOX_WIN32_STEAM_CALLBACK_TRACE")):
+            marker = f"steam-win32-{option}-{app}.txt"
+            (profile / marker).touch()
+            variable = (name + "\0").encode("utf-16le")
+            for loader in (b"older loader", variable):
+                with ZipFile(runtime, "w") as package:
+                    for member in ("XboxWin32Input.dll", "XboxWin32Desktop.dll"):
+                        package.writestr(member, b"runtime fixture")
+                    package.writestr("ProbeNative.dll", "steam_source_check=".encode("utf-16le") + variable)
+                    package.writestr("XboxWin32LoaderTrace.dll", loader)
+                if loader != variable:
+                    with self.assertRaisesRegex(ValueError, f"launch-scoped {option} option"):
+                        stage_trials(self.layout, trial, runtime)
+                    self.assertFalse((self.layout / marker).exists())
+                else:
+                    stage_trials(self.layout, trial, runtime)
+            self.assertEqual((self.layout / marker).read_bytes(), b"")
+            (profile / marker).write_text("1")
+            with self.assertRaisesRegex(ValueError, f"The {option} option needs an empty marker"):
+                stage_trials(self.layout, trial, runtime)
+            (profile / marker).touch()
+            shadow.write_text(f"{build}\nGame.exe\n")
+            with self.assertRaisesRegex(ValueError, f"The {option} option needs an empty marker, source profile and loader trace"):
+                stage_trials(self.layout, trial, runtime)
+            shadow.write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+            (profile / marker).unlink()
+
     def test_hosted_dxgi_output_requires_matching_profile_and_runtime(self):
         self.layout.mkdir()
         profile = self.work / "profile"

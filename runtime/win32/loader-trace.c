@@ -1209,6 +1209,105 @@ static FARPROC HostedSteamInput(HMODULE module, const char *name) {
     return (FARPROC)(void *)NoSteamInputControllers;
 }
 
+static BOOL SteamOptionEnabled(const WCHAR *variable) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(variable, enabled, ARRAYSIZE(enabled)) == 1 && enabled[0] == L'1';
+}
+
+/* YYYYMMDDTHHMMSS.mmmZ, 20 characters, in the loader trace's record character set. */
+static char *UtcMilliseconds(char *out) {
+    SYSTEMTIME now;
+    GetSystemTime(&now);
+    const WORD fields[] = {(WORD)(now.wYear / 100), (WORD)(now.wYear % 100), now.wMonth, now.wDay};
+    for (UINT index = 0; index < ARRAYSIZE(fields); ++index) {
+        *out++ = (char)('0' + fields[index] / 10 % 10);
+        *out++ = (char)('0' + fields[index] % 10);
+    }
+    *out++ = 'T';
+    const WORD clock[] = {now.wHour, now.wMinute, now.wSecond};
+    for (UINT index = 0; index < ARRAYSIZE(clock); ++index) {
+        *out++ = (char)('0' + clock[index] / 10 % 10);
+        *out++ = (char)('0' + clock[index] % 10);
+    }
+    *out++ = '.';
+    *out++ = (char)('0' + now.wMilliseconds / 100 % 10);
+    *out++ = (char)('0' + now.wMilliseconds / 10 % 10);
+    *out++ = (char)('0' + now.wMilliseconds % 10);
+    *out++ = 'Z';
+    return out;
+}
+
+/* Title override for the Steam Datagram Relay start-up. In the SDK's
+   steamnetworkingutils.h, ISteamNetworkingUtils::InitRelayNetworkAccess() is an
+   inline that calls CheckPingDataUpToDate(1e10f), and the flat export
+   SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(ISteamNetworkingUtils *)
+   tail-calls that virtual and returns void: Slay the Spire 2's steam_api64.dll
+   (build 26655341, SHA-256 1add7f15...dccbc) assembles it as
+   mov rax,[rcx]; movss xmm1,1e10f; jmp [rax+0x38]. Calling it only starts the
+   relay configuration fetch and pings early: steamclient still starts them when
+   the title first uses the relay (P2P connections, GetRelayNetworkStatus), so a
+   no-op keeps the void contract and defers the work to multiplayer use. */
+static void __cdecl NoSteamRelayAccess(void *utils) {
+    (void)utils;
+    static volatile LONG calls;
+    const DWORD previous = GetLastError();
+    const LONG call = InterlockedIncrement(&calls);
+    if (call <= 8) {
+        char line[96];
+        char *out = Unsigned(Text(line, "asset steam-relay=stubbed call="), (unsigned long)call);
+        out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    SetLastError(previous);
+}
+
+/* Optional timing of SteamAPI_RunCallbacks, which Steamworks.NET titles call on the
+   game thread every frame. Calls of 2 ms or more are recorded with their end time,
+   so a stall in Steam's callback dispatch can be matched against frame gaps. */
+typedef void (__cdecl *SteamRunCallbacks)(void);
+static PVOID volatile steamRunCallbacks;
+static volatile LONG steamCallbackLines;
+
+static void __cdecl TimedSteamRunCallbacks(void) {
+    const SteamRunCallbacks run = (SteamRunCallbacks)InterlockedCompareExchangePointer(&steamRunCallbacks, NULL, NULL);
+    LARGE_INTEGER start, end, frequency;
+    QueryPerformanceCounter(&start);
+    run();
+    const DWORD error = GetLastError();
+    QueryPerformanceCounter(&end);
+    if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 && end.QuadPart > start.QuadPart) {
+        const ULONGLONG us = (ULONGLONG)(end.QuadPart - start.QuadPart) * 1000000u / (ULONGLONG)frequency.QuadPart;
+        if (us >= 2000 && InterlockedIncrement(&steamCallbackLines) <= 4096) {
+            char line[96];
+            char *out = Text(line, "asset steam-run-callbacks us=");
+            out = Unsigned(out, us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (unsigned long)us);
+            out = Text(UtcMilliseconds(Text(out, " utc=")), "\r\n");
+            AppendTrace(line, (DWORD)(out - line));
+        }
+    }
+    SetLastError(error);
+}
+
+static FARPROC SteamTitleOverride(HMODULE module, const char *name, FARPROC resolved) {
+    if (!module || module != GetModuleHandleW(L"steam_api64.dll")) return NULL;
+    if (SameName(name, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess")) {
+        if (!SteamOptionEnabled(L"XBOX_WIN32_STEAM_RELAY_STUB")) return NULL;
+        const char trace[] = "asset steam-relay-override=InitRelayNetworkAccess\r\n";
+        AppendTrace(trace, sizeof(trace) - 1);
+        return (FARPROC)(void *)NoSteamRelayAccess;
+    }
+    if (resolved && SameName(name, "SteamAPI_RunCallbacks") && SteamOptionEnabled(L"XBOX_WIN32_STEAM_CALLBACK_TRACE")) {
+        const PVOID first = InterlockedCompareExchangePointer(&steamRunCallbacks, (PVOID)resolved, NULL);
+        if (first && first != (PVOID)resolved) return NULL;
+        if (!first) {
+            const char trace[] = "asset steam-run-callbacks=timed threshold_us=2000\r\n";
+            AppendTrace(trace, sizeof(trace) - 1);
+        }
+        return (FARPROC)(void *)TimedSteamRunCallbacks;
+    }
+    return NULL;
+}
+
 FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     const DWORD previous = GetLastError();
     if (module && (ULONG_PTR)name <= 0xffffu) {
@@ -1221,6 +1320,7 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
     }
     FARPROC result = GetProcAddress(module, name);
     DWORD error = GetLastError();
+    FARPROC steamOverride;
     Record(name, module, 0, result != 0, error);
     if (module && (ULONG_PTR)name > 0xffffu) {
         if (name[0] == 'w' && name[1] == 'g' && name[2] == 'l' &&
@@ -1268,6 +1368,10 @@ FARPROC WINAPI XboxGetProcAddress(HANDLE module, const char *name) {
             result = ManagedWarmupExport((HMODULE)module, name, result);
         } else if (name[0] == 'S' && HostedSteamInput((HMODULE)module, name)) {
             result = HostedSteamInput((HMODULE)module, name);
+        } else if (name[0] == 'S' && name[1] == 't' && name[2] == 'e' &&
+                (steamOverride = SteamTitleOverride((HMODULE)module, name, result)) != NULL) {
+            if (!result) error = previous;
+            result = steamOverride;
         } else if (name[0] == 'S') {
             const FARPROC scoped = ScopedShellExport((HMODULE)module, name);
             if (scoped) {

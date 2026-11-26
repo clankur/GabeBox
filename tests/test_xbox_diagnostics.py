@@ -602,7 +602,10 @@ class ObserverTests(unittest.TestCase):
                     b'capacity_mib=1344 cap_mib=672 source=default\r\n'
                   + sample + b'\r\n'
                   + b'asset residency mode=pin source=package-file hooks=pending\r\n'
-                  + residency + b'\r\n')
+                  + residency + b'\r\n'
+                  + b'asset steam-relay-override=InitRelayNetworkAccess\r\n'
+                  + b'asset steam-relay=stubbed call=1 utc=20261126T015010.112Z\r\n'
+                  + b'asset steam-run-callbacks us=118220 utc=20261126T015148.031Z\r\n')
         fixture = Fixture([{
             diagnostics.PROBE_REPORT: probe(launch, extra=VERIFIED_STAGE),
             LIVE_TRACE: traced + b'load C:\\Users\\private\\sample.dll\r\nasset boot-wait-split',
@@ -613,7 +616,15 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(result['app_id'], APP_ID)
             self.assertEqual(result['run_id'], launch)
             self.assertEqual(result['loader_trace']['state'], 'observed')
-            self.assertEqual(result['loader_trace']['records'], 8)
+            self.assertEqual(result['loader_trace']['records'], 11)
+            self.assertEqual(result['loader_trace']['events']['steam']['count'], 3)
+            self.assertEqual(result['loader_trace']['events']['steam']['latest'][-1],
+                             'asset steam-run-callbacks us=118220 utc=20261126T015148.031Z')
+            self.assertEqual(result['loader_trace']['diagnostics']['steam_callbacks'], {
+                'calls_over_2ms': 1, 'total_ms': 118.22, 'max_ms': 118.22, 'event_limit_reached': False,
+                'slowest': ['asset steam-run-callbacks us=118220 utc=20261126T015148.031Z']})
+            self.assertNotIn('asset steam-run-callbacks us=118220 utc=20261126T015148.031Z',
+                             result['loader_trace']['recent'])
             self.assertEqual(result['loader_trace']['events']['graphics-pso-before']['count'], 2)
             self.assertEqual(result['loader_trace']['events']['boot-wait']['count'], 1)
             self.assertEqual(result['loader_trace']['events']['shell-request']['latest'],

@@ -52,7 +52,9 @@ DRED_NAME = r'[a-zA-Z0-9._?@$#=-]{1,96}'
 DRED_RECORD = re.compile(rf'dxgi dred-node queue={DRED_NAME} list={DRED_NAME} completed=0x[0-9A-F]{{4}}/0x[0-9A-F]{{4}} '
                          r'ops=[0-9A-F\[\] ]{0,64}|'
                          rf'dxgi dred-fault va=0x[0-9A-F]{{16}}(?: (?:existing|freed)={DRED_NAME}:0x[0-9A-F]{{2}}){{0,8}}')
-DIAGNOSTIC_TRACE = (AUDIO_METER, AUDIO_WINDOW, PSO_TIMING, PSO_EVENT, DRED_RECORD)
+# SteamAPI_RunCallbacks calls of 2 ms or more (XBOX_WIN32_STEAM_CALLBACK_TRACE=1), stamped when the call returned.
+STEAM_CALLBACK = re.compile(r'asset steam-run-callbacks us=([0-9]{1,10}) utc=[0-9]{8}T[0-9]{6}\.[0-9]{3}Z')
+DIAGNOSTIC_TRACE = (AUDIO_METER, AUDIO_WINDOW, PSO_TIMING, PSO_EVENT, DRED_RECORD, STEAM_CALLBACK)
 DIAGNOSTIC_LIMIT = 4096
 LOADER_TRACE = re.compile('|'.join([r'(?:load|export|fault|asset|dxgi|input) [a-zA-Z0-9 ._?@$#=-]{1,174}',
                                     *(pattern.pattern for pattern in DIAGNOSTIC_TRACE)]))
@@ -65,6 +67,9 @@ LIVE_LOADER_EVENTS = {
     # Direct3D 12 residency: the selected mode, the hook install, per-second Evict/MakeResident counts and
     # the 60-second totals (runtime/win32/d3d12-residency.c).
     'residency': re.compile(r'asset residency(?:[ -]|$)'),
+    # Steam title overrides: the relay start-up stub and SteamAPI_RunCallbacks calls of 2 ms or
+    # more (runtime/win32/loader-trace.c).
+    'steam': re.compile(r'asset steam-(?:relay|run-callbacks)(?:[ =-]|$)'),
 }
 PIPELINE_MARKER = re.compile(r'asset (graphics|compute)-pso-(before|after) bytes=0x[0-9a-fA-F]{16} '
                              r'flags=0x([0-9a-fA-F]{8}) available-commit-kib=0x([0-9a-fA-F]{8})(?: .+)?')
@@ -164,7 +169,7 @@ def filtered_lines(report, pattern, count=128):
 
 
 def diagnostic_record(line):
-    return line.startswith(('audio ', 'pso ', 'dxgi dred-')) and any(
+    return line.startswith(('audio ', 'pso ', 'dxgi dred-', 'asset steam-run-callbacks us=')) and any(
         pattern.fullmatch(line) for pattern in DIAGNOSTIC_TRACE)
 
 
@@ -184,7 +189,7 @@ def unique_loader_lines(lines):
 
 
 def diagnostic_summary(lines):
-    """Summarize audio meter windows, pipeline timing and device-removed records."""
+    """Summarize audio meter windows, pipeline timing, Steam callback timing and device-removed records."""
     summary = {}
     meter = next((match[1] for match in map(AUDIO_METER.fullmatch, lines) if match), None)
     windows = [tuple(map(int, match.groups())) for match in map(AUDIO_WINDOW.fullmatch, lines) if match]
@@ -224,6 +229,18 @@ def diagnostic_summary(lines):
             'slowest': [event[0] for event in slowest],
             # The runtime stops recording after 2000 events.
             'event_limit_reached': len(events) >= 2000,
+        }
+    callbacks = [(line, int(match[1])) for line, match in ((line, STEAM_CALLBACK.fullmatch(line)) for line in lines)
+                 if match]
+    if callbacks:
+        slowest = sorted(callbacks, key=lambda call: call[1], reverse=True)[:5]
+        summary['steam_callbacks'] = {
+            'calls_over_2ms': len(callbacks),
+            'total_ms': round(sum(us for _, us in callbacks) / 1000, 3),
+            'max_ms': round(slowest[0][1] / 1000, 3),
+            'slowest': [line for line, _ in slowest],
+            # The runtime stops recording after 4096 calls.
+            'event_limit_reached': len(callbacks) >= 4096,
         }
     dred = [line for line in lines if line.startswith('dxgi dred-')]
     if dred:
