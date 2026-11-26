@@ -192,6 +192,7 @@ depth=4
 | `priority=PREFIX` | Up to 32 namespace or type prefixes, warmed first in this order. |
 | `remaining=yes\|no` | Whether the rest of each assembly follows the priorities. The default is `yes`. |
 | `depth=0..8` | How far to follow calls from prepared code to the generic instantiations it needs, such as async state-machine boxes and collections over the game's value types, and to non-generic methods in other IL-only assemblies such as GodotSharp. The default is `4`. |
+| `collect=after` | Optional, off by default. Once the warm-up completes, the warm-up thread runs one `GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true)`. On Slay the Spire 2 that is 22–34 s after the first frame, while the menu loads. A blocking collection suspends every managed thread, including the game thread, for its duration. The large object heap is not compacted. A staged plan with this line needs a component that supports it, because an older one rejects the whole plan. |
 
 **How it is started.** CoreCLR runs `DOTNET_STARTUP_HOOKS` only from `Assembly::ExecuteMainMethod`. Godot .NET never calls `hostfxr_run_app`. It initializes hostfxr for the game assembly and loads `GodotPlugins.Game.Main` through `load_assembly_and_get_function_pointer`, so a startup hook never runs. When the plan is selected, the launcher sets `XBOX_WIN32_MANAGED_WARMUP`. The adapter that serves the engine's `GetProcAddress` then wraps `hostfxr_get_runtime_delegate`: `XboxWin32Window.dll` on the OpenGL route and `XboxWin32LoaderTrace.dll` on Direct3D 12. After the engine's first successful load, the same delegate loads `XboxManagedWarmup.Entry.Start`. Titles started through apphost or `dotnet` run the same assembly as a startup hook. Only one entry starts per process. [CoreCLR startup hooks](https://github.com/dotnet/runtime/blob/v9.0.7/src/coreclr/vm/assembly.cpp) · [Godot .NET hosting](https://github.com/godotengine/godot/blob/4.5.1-stable/modules/mono/mono_gd/gd_mono.cpp)
 
@@ -202,9 +203,11 @@ depth=4
 - the entry path (`via=hostfxr` or `via=startup-hook`);
 - for each assembly, its MVID and image kind;
 - a UTC-stamped line as each priority group finishes;
-- totals for roots, instantiations, cross-assembly callees and failures by exception type.
+- totals for roots, instantiations, cross-assembly callees and failures by exception type;
+- `managed_warmup=complete gen0=… gen1=… gen2=… utc=…`, with the runtime's collection counts so far;
+- with `collect=after`, `managed_warmup_collect=after generation=2 mode=forced blocking=yes compacting=yes ms=… pause_ms=… heap_kib_before=… heap_kib_after=… gen0=… gen1=… gen2=… latency=… server=… start=… utc=…`. `ms` is the wall time of the call and `pause_ms` is the runtime's own suspension time from `GC.GetTotalPauseDuration`, which is present from .NET 7 on. `latency=Interactive` means concurrent (background) GC is enabled.
 
-**Desktop check.** `runtime/managed-warmup/check` runs the shipped assembly against an IL-only fixture loaded into an isolated `AssemblyLoadContext`. It counts `MethodJittingStarted` events for the fixture's hot path. Expect a positive control, zero events after the warm-up through both entries, no type initializer before first use, and a refused MVID pin. The `Build Xbox probe` workflow runs it. [Workflow step](../.github/workflows/xbox-probe.yml)
+**Desktop check.** `runtime/managed-warmup/check` runs the shipped assembly against an IL-only fixture loaded into an isolated `AssemblyLoadContext`. It counts `MethodJittingStarted` events for the fixture's hot path. Expect a positive control, zero events after the warm-up through both entries, no type initializer before first use, and a refused MVID pin. A fourth child runs the plan with `collect=after` and expects exactly one `managed_warmup_collect` line after `managed_warmup=complete`. The default plan must log none. The `Build Xbox probe` workflow runs it. [Workflow step](../.github/workflows/xbox-probe.yml)
 
 **Alternatives considered.**
 

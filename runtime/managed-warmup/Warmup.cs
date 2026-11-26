@@ -55,6 +55,8 @@ namespace XboxManagedWarmup
         public List<string> Priorities { get; } = new List<string>();
         public bool Remaining { get; private set; } = true;
         public int Depth { get; private set; } = 4;
+        /// <summary>collect=after: one blocking, compacting gen2 collection once the warm-up completes.</summary>
+        public bool CollectAfter { get; private set; }
 
         public Target? Find(string? name)
         {
@@ -70,7 +72,7 @@ namespace XboxManagedWarmup
             if (string.IsNullOrEmpty(text) || text!.Length > 2048)
                 return null;
             var plan = new Plan();
-            bool remainingSet = false, depthSet = false;
+            bool remainingSet = false, depthSet = false, collectSet = false;
             foreach (var raw in text.Split(';', '\n'))
             {
                 var line = raw.Trim('\r', ' ');
@@ -117,6 +119,12 @@ namespace XboxManagedWarmup
                             return null;
                         plan.Depth = value[0] - '0';
                         depthSet = true;
+                        break;
+                    case "collect":
+                        if (collectSet || value != "after")
+                            return null;
+                        plan.CollectAfter = true;
+                        collectSet = true;
                         break;
                     default:
                         return null;
@@ -235,7 +243,8 @@ namespace XboxManagedWarmup
                     }
                     Log("managed_warmup=entered via=" + via + " runtime=" + Environment.Version +
                         " processors=" + Environment.ProcessorCount + " depth=" + plan.Depth +
-                        " remaining=" + (plan.Remaining ? "yes" : "no") + " utc=" + Now());
+                        " remaining=" + (plan.Remaining ? "yes" : "no") +
+                        (plan.CollectAfter ? " collect=after" : "") + " utc=" + Now());
                 }
                 var domain = AppDomain.CurrentDomain;
                 domain.AssemblyLoad += (_, loaded) => Offer(loaded.LoadedAssembly);
@@ -286,11 +295,52 @@ namespace XboxManagedWarmup
                     done.Add(assembly.GetName().Name!);
                     new AssemblyWarmup(active, assembly).Run();
                 }
-                Log("managed_warmup=complete utc=" + Now());
+                Log("managed_warmup=complete" + Collections() + " utc=" + Now());
+                if (active.CollectAfter)
+                    CollectAfter();
             }
             catch (Exception exception)
             {
                 Log("managed_warmup=error exception=" + exception.GetType().Name);
+            }
+        }
+
+        static string Collections() =>
+            " gen0=" + GC.CollectionCount(0) + " gen1=" + GC.CollectionCount(1) + " gen2=" + GC.CollectionCount(2);
+
+        // A forced full collection while the game is still loading its menu, so that the
+        // first full (background) collection of the session does not fall later, during
+        // play. It runs on the warm-up thread; a blocking collection suspends every managed
+        // thread, including the game thread, for its duration, which is logged.
+        static void CollectAfter()
+        {
+            var heapBefore = GC.GetTotalMemory(false);
+            var pauseBefore = TotalPause();
+            var start = Now();
+            var clock = Stopwatch.StartNew();
+            GC.Collect(2, GCCollectionMode.Forced, true, true);
+            var elapsed = clock.Elapsed.TotalMilliseconds;
+            var pauseAfter = TotalPause();
+            Log("managed_warmup_collect=after generation=2 mode=forced blocking=yes compacting=yes ms=" +
+                elapsed.ToString("0.0", CultureInfo.InvariantCulture) +
+                (pauseBefore.HasValue && pauseAfter.HasValue ? " pause_ms=" +
+                    (pauseAfter.Value - pauseBefore.Value).TotalMilliseconds.ToString("0.0", CultureInfo.InvariantCulture) : "") +
+                " heap_kib_before=" + heapBefore / 1024 + " heap_kib_after=" + GC.GetTotalMemory(false) / 1024 +
+                Collections() + " latency=" + System.Runtime.GCSettings.LatencyMode +
+                " server=" + (System.Runtime.GCSettings.IsServerGC ? "yes" : "no") + " start=" + start + " utc=" + Now());
+        }
+
+        // GC.GetTotalPauseDuration exists from .NET 7 on; this assembly targets netstandard2.1.
+        static TimeSpan? TotalPause()
+        {
+            try
+            {
+                return typeof(GC).GetMethod("GetTotalPauseDuration", BindingFlags.Public | BindingFlags.Static, null,
+                    Type.EmptyTypes, null)?.Invoke(null, null) as TimeSpan?;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 

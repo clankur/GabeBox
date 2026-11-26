@@ -776,10 +776,20 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertEqual(staged.splitlines(), [line for line in pinned.splitlines() if not line.startswith("#")])
         self.assertTrue(staged.startswith("assembly=sts2 mvid=a5742661-f95f-4ba1-8b21-18dedf86422b\n"))
         self.assertEqual((self.layout / "XboxManagedWarmup.dll").read_bytes(), bytes(managed))
+        self.assertNotIn("collect=", staged)
+
+        # collect=after needs a component that knows the option; an older one rejects the plan.
+        (profile / marker).write_text(pinned + "collect=after\n", encoding="ascii")
+        with self.assertRaisesRegex(ValueError, "supports collect=after"):
+            stage_trials(self.layout, [f"{app}={profile}"], runtime())
+        collecting = bytes(managed) + "managed_warmup_collect=after generation=2".encode("utf-16le")
+        stage_trials(self.layout, [f"{app}={profile}"], runtime(component=collecting))
+        self.assertEqual((self.layout / marker).read_text(encoding="ascii").splitlines()[-1], "collect=after")
 
         for invalid in ("assembly=sts2\nassembly=STS2\n", "priority=MegaCrit\n", "assembly=sts2\nmode=all\n",
                         "assembly=sts2 mvid=A5742661-F95F-4BA1-8B21-18DEDF86422B\n", "assembly=sts2\ndepth=9\n",
-                        "assembly=sts2\nremaining=yes\nremaining=no\n", "assembly=sts2;priority=MegaCrit\n"):
+                        "assembly=sts2\nremaining=yes\nremaining=no\n", "assembly=sts2;priority=MegaCrit\n",
+                        "assembly=sts2\ncollect=before\n", "assembly=sts2\ncollect=after\ncollect=after\n"):
             (profile / marker).write_text(invalid, encoding="ascii")
             with self.assertRaisesRegex(ValueError, "Invalid managed warm-up plan"):
                 stage_trials(self.layout, [f"{app}={profile}"], runtime())

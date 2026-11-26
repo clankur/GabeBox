@@ -19,6 +19,8 @@ using System.Threading;
 //            Win32 bootstrap's path); the hot path must not JIT and no type initializer
 //            may run before the game calls it
 //   hook     the same through DOTNET_STARTUP_HOOKS
+//   collect  the warm path with collect=after; the log must record one forced gen2
+//            collection after the warm-up completes
 // and also checks that a mismatched MVID pin refuses the assembly.
 static class Program
 {
@@ -42,11 +44,17 @@ static class Program
         var warm = Child("warm", warmup, fixture, log + "-warm.log", null);
         var hook = Child("hook", warmup, fixture, log + "-hook.log", warmup);
         var pinned = Child("pinned", warmup, fixture, log + "-pinned.log", null);
+        var collect = Child("collect", warmup, fixture, log + "-collect.log", null);
+        var collectLog = File.Exists(log + "-collect.log") ? File.ReadAllText(log + "-collect.log") : "";
         failures += Expect(control.Code == 0 && control.Jitted > 0, $"control: fixture JIT on first use = {control.Jitted}");
         failures += Expect(warm.Code == 0 && warm.Jitted == 0, $"warm: fixture JIT on first use = {warm.Jitted}");
         failures += Expect(hook.Code == 0 && hook.Jitted == 0, $"hook: fixture JIT on first use = {hook.Jitted}");
         failures += Expect(pinned.Code == 0 && pinned.Jitted > 0, $"pinned to another MVID: fixture JIT on first use = {pinned.Jitted}");
-        foreach (var path in new[] { log + "-warm.log", log + "-hook.log", log + "-pinned.log" })
+        failures += Expect(collect.Code == 0 && collect.Jitted == 0, $"collect=after: fixture JIT on first use = {collect.Jitted}");
+        failures += Expect(CollectedAfterComplete(collectLog), "collect=after: one forced gen2 collection logged after completion");
+        failures += Expect(!File.ReadAllText(log + "-warm.log").Contains("managed_warmup_collect"),
+            "default plan: no forced collection");
+        foreach (var path in new[] { log + "-warm.log", log + "-hook.log", log + "-pinned.log", log + "-collect.log" })
         {
             if (!File.Exists(path))
                 continue;
@@ -56,6 +64,15 @@ static class Program
         }
         Console.WriteLine(failures == 0 ? "managed_warmup_check=passed" : "managed_warmup_check=failed");
         return failures == 0 ? 0 : 1;
+    }
+
+    static bool CollectedAfterComplete(string log)
+    {
+        var complete = log.IndexOf("managed_warmup=complete", StringComparison.Ordinal);
+        var collect = log.IndexOf("managed_warmup_collect=after generation=2 mode=forced blocking=yes compacting=yes ms=",
+            StringComparison.Ordinal);
+        return complete >= 0 && collect > complete && log.IndexOf("managed_warmup_collect", collect + 1, StringComparison.Ordinal) < 0 &&
+            log.IndexOf(" heap_kib_after=", collect, StringComparison.Ordinal) > collect;
     }
 
     static int Expect(bool condition, string description)
@@ -77,7 +94,7 @@ static class Program
         if (log != null)
         {
             start.Environment["XBOX_WIN32_MANAGED_WARMUP_LOG"] = log;
-            start.Environment["XBOX_WIN32_MANAGED_WARMUP_PLAN"] = Plan;
+            start.Environment["XBOX_WIN32_MANAGED_WARMUP_PLAN"] = mode == "collect" ? Plan + ";collect=after" : Plan;
         }
         if (hook != null)
             start.Environment["DOTNET_STARTUP_HOOKS"] = hook;
@@ -100,7 +117,7 @@ static class Program
             Environment.SetEnvironmentVariable("XBOX_WIN32_MANAGED_WARMUP_PLAN",
                 "assembly=WarmupFixture mvid=00000000-0000-0000-0000-000000000001;depth=4");
         }
-        if (mode == "warm" || mode == "pinned")
+        if (mode == "warm" || mode == "pinned" || mode == "collect")
         {
             var component = new AssemblyLoadContext("component").LoadFromAssemblyPath(warmup);
             var started = (int)component.GetType("XboxManagedWarmup.Entry", true)!
@@ -108,7 +125,8 @@ static class Program
             Console.WriteLine("entry_start=" + started);
         }
         var log = Environment.GetEnvironmentVariable("XBOX_WIN32_MANAGED_WARMUP_LOG");
-        if (log != null && !WaitFor(log, mode == "pinned" ? "result=mvid-mismatch" : "managed_warmup=complete"))
+        var finished = mode == "pinned" ? "result=mvid-mismatch" : mode == "collect" ? "managed_warmup_collect=" : "managed_warmup=complete";
+        if (log != null && !WaitFor(log, finished))
         {
             Console.WriteLine("warmup_wait=timeout");
             return 3;

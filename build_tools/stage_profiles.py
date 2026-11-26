@@ -127,7 +127,7 @@ def read_managed_warmup_plan(path, app):
     lines = [] if text is None else [line.strip("\r ") for line in text.split("\n")]
     plan = [line for line in lines if line and not line.startswith("#")]
     assemblies = set()
-    counts = {"priority": 0, "remaining": 0, "depth": 0}
+    counts = {"priority": 0, "remaining": 0, "depth": 0, "collect": 0}
     valid = text is not None and len(data) <= 4096
     for line in plan:
         if match := WARMUP_ASSEMBLY.fullmatch(line):
@@ -140,11 +140,13 @@ def read_managed_warmup_plan(path, app):
             counts["remaining"] += 1
         elif re.fullmatch(r"depth=[0-8]", line):
             counts["depth"] += 1
+        elif line == "collect=after":
+            counts["collect"] += 1
         else:
             valid = False
     staged = "\n".join(plan).encode("ascii") if valid else b""
     if (not valid or not 1 <= len(assemblies) <= 8 or counts["priority"] > 32 or counts["remaining"] > 1
-            or counts["depth"] > 1 or len(staged) > 2048):
+            or counts["depth"] > 1 or counts["collect"] > 1 or len(staged) > 2048):
         raise ValueError(f"Invalid managed warm-up plan for AppID {app}.")
     return staged
 
@@ -225,6 +227,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
     pipeline_cache = False
     pipeline_replay = False
     managed_warmup = False
+    warmup_collect = False
     hostfxr_warmup = False
     gl_trace = False
     mesa_shader_cache = False
@@ -501,6 +504,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The managed warm-up needs a CoreCLR title for AppID {app}.")
             files[warmup_marker] = read_managed_warmup_plan(root / warmup_marker, app)
             managed_warmup = True
+            warmup_collect |= "collect=after" in files[warmup_marker].decode("ascii").split("\n")
             hostfxr_warmup |= fields[3:4] == ["godot"]
         gl_trace_marker = f"steam-win32-gl-trace-{app}.txt"
         if (root / gl_trace_marker).is_file():
@@ -766,6 +770,9 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
         warmup = read_package_member(package, MANAGED_WARMUP)
         if pe_summary(warmup).get("clr_requires_x86") != "no":
             raise ValueError("Expected a managed warm-up assembly that loads in the x64 game.")
+        # An older component rejects the whole plan when it has an option it does not know.
+        if warmup_collect and "managed_warmup_collect=after".encode("utf-16le") not in warmup:
+            raise ValueError("Use a Steam Core artifact whose managed warm-up supports collect=after.")
         # Godot hosts the runtime itself; its resolved hostfxr export is wrapped by the
         # adapter that serves the engine's GetProcAddress (window for OpenGL, loader trace
         # for Direct3D 12).
