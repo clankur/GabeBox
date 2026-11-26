@@ -8,6 +8,7 @@
 #include "d3d12-residency.h"
 #include "d3d12-fence-trace.h"
 #include "managed-warmup.h"
+#include "cpu-sets.h"
 #include <appmodel.h>
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
@@ -23,6 +24,7 @@ static volatile LONG originalImageObserved;
 static volatile LONG assetEvents;
 static volatile LONG deviceEvents;
 static volatile LONG devicePrimed;
+static volatile LONG processorsPlaced;
 static volatile LONG failedCommits;
 static DWORD faultTraceCount;
 static const DWORD delayModuleMissing = 0xC06D007E;
@@ -1002,9 +1004,20 @@ static BOOL DefaultD3D12AdapterEnabled(void) {
         enabled[0] == L'1';
 }
 
+static BOOL HostProcessorsDisabled(void) {
+    WCHAR value[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_HOST_PROCESSORS", value, ARRAYSIZE(value)) == 1 && value[0] == L'0';
+}
+
 void WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup) {
     GetStartupInfoW(startup);
     const DWORD previous = GetLastError();
+    // The CRT asks for startup information before the game creates its worker threads.
+    if (!HostProcessorsDisabled() && InterlockedExchange(&processorsPlaced, 1) == 0) {
+        const XboxCpuSetResult placed = XboxUseHostProcessors();
+        char line[160];
+        AppendTrace(line, (DWORD)(XboxFormatProcessors(line, &placed) - line));
+    }
     if (DefaultD3D12AdapterEnabled() && InterlockedExchange(&devicePrimed, 1) == 0) {
         const HMODULE library = LoadLibraryW(L"d3d12.dll");
         const CreateD3D12Device create = library ?

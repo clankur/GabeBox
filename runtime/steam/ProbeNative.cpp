@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "../shared/child-process.h"
+#include "../win32/cpu-sets.h"
 #include "../shared/pipe-protocol.h"
 #include "SteamChildExitTrace.h"
 #include "SteamSdlSurface.h"
@@ -3772,6 +3773,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     report += L"steam_cloud_sync_exit_watch=unavailable\r\n";
                 }
             }
+            // A child gets none of the title's reserved processors; give it the host's.
+            const auto processors = XboxShareReservedProcessors(GetCurrentProcess(), child.hProcess);
+            report += L"steam_shadow_processors=" + std::wstring(processors.stage, processors.stage + strlen(processors.stage)) +
+                L"\r\nsteam_shadow_processor_mask=" + Hex(static_cast<DWORD>(processors.applied ? processors.applied : processors.owner)) +
+                L"\r\n";
             report += L"steam_shadow_build=" + shadowBuild + L"\r\nsteam_shadow_renderer=" + (mode.empty() ? L"default" : mode) +
                 L"\r\nsteam_shadow_child=created\r\n";
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
