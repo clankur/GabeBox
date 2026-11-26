@@ -67,6 +67,7 @@ Until one of these lands, the first combat of each launch has stalls up to 217 m
 - **Overlay exit.** Leaving through the Steam overlay chord is still open for every title; the game's own **Quit** works.
 - **Virtual current directory trace.** The shader-cache path no longer fails, but the adapter's one-time `virtual-long` trace record has not been read from the console.
 - **Other titles.** Recheck ULTRAKILL, Spider-Man and Hades after the shared input, storage and Steam-client changes.
+- **Multiplayer.** Co-op is in scope and has not been tested on the console. It needs a second Steam account that owns the game on another PC or console. Check that a lobby can be hosted from the Xbox and joined from the other side, and the reverse. Play a combat turn together, with the relay status read from `GetRelayNetworkStatus`. A fix elsewhere must not disable or defer these paths.
 - **T97, a one-time stall about 97 s after the first frame.** Opt-in switches for the three leading candidates are in place. None has run on the console. See [T97](#t97-one-time-stall-about-97-s-after-the-first-frame).
 
 ## T97: one-time stall about 97 s after the first frame
@@ -81,6 +82,8 @@ On packages `1.0.244`–`1.0.272` (build 26655341), every session has a disturba
 
 Every switch is off by default. The pinned profile carries none of the markers, and its warm-up plan is unchanged.
 
+Multiplayer is in scope for this title, so the relay stub can only locate the stall; it cannot ship. It defers relay start-up to the first co-op connection ([relay stub](../docs/GAME-LAUNCH.md#override-steamworks-calls-for-one-title)). If arm B removes T97, the fix must keep `InitRelayNetworkAccess` at start-up and take the wait off the game thread or out of the first two minutes. It must then pass a co-op session that hosts and joins through Steam lobbies and the relay.
+
 ### Console test matrix
 
 Take the console through the `xbox-queue` skill. Build every arm from one Steam Core artifact (ProbeNative, LoaderTrace, `XboxManagedWarmup.dll` and the WebView2 host built from this branch). Add `steam-win32-steam-callback-trace-2868840.txt` to every arm, so that only the switch under test differs between arms. Run each arm at least three times. A single clean run proves nothing, because `console-246` run2 had no stall at all.
@@ -88,7 +91,7 @@ Take the console through the `xbox-queue` skill. Build every arm from one Steam 
 | Arm | Profile change (beyond the callback trace) | Launch |
 | --- | --- | --- |
 | A, baseline | none | Restart Steam Core. Select **Play** as soon as Big Picture is ready, as in earlier runs. |
-| B, relay stub | `steam-win32-no-steam-relay-2868840.txt` | as A |
+| B, relay stub (diagnostic only) | `steam-win32-no-steam-relay-2868840.txt` | as A |
 | C, early GC | append `collect=after` to `steam-win32-managed-warmup-2868840.txt` | as A |
 | D, long-lived host | none (the A package) | Restart Steam Core, then wait until at least 180 s after the `webview2 environment` line before **Play**. Confirm that the host's short-lived child (`added=` then `removed=` within a few seconds) is logged before the game starts. |
 
@@ -250,4 +253,4 @@ If no local Windows install exists, export the executable from the console with 
 
 ## Coverage status
 
-On build `26655341` with SteamCore `1.0.234.10`/`.11`, the following were observed on the console: gameplay, controller input through the hosted pad, save and reload, return to the library, and a sustained 60 FPS at 1920 × 1080 on shared GPU textures. Audio is initialized but has not been heard. Until someone listens and plays with a physical controller, STS2 counts as covered pending those two human checks, not as fully covered.
+On build `26655341` with SteamCore `1.0.234.10`/`.11`, the following were observed on the console: gameplay, controller input through the hosted pad, save and reload, return to the library, and a sustained 60 FPS at 1920 × 1080 on shared GPU textures. Audio is initialized but has not been heard. A person at the console has since heard the audio and played with a physical controller. Co-op multiplayer is in scope and has not been tested, so STS2 is not yet counted as covered. [Multiplayer](#remaining-open-items)

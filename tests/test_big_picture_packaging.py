@@ -450,6 +450,10 @@ class BigPicturePackageTests(unittest.TestCase):
         self.assertIn("XboxWin32LoaderTrace.dll",
                       json.loads((root / "steam-win32-adapters-2868840.json").read_text())["required_adapters"])
 
+    def test_no_checked_in_profile_stubs_steam_relay_start_up(self):
+        # The relay stub defers multiplayer start-up and is for A/B trials only (docs/GAME-LAUNCH.md).
+        self.assertEqual(sorted((ROOT / "profiles").rglob("steam-win32-no-steam-relay-*.txt")), [])
+
     def test_win32_trial_packages_only_the_runtime_and_a_recipe_for_installed_files(self):
         self.layout.mkdir()
         (self.layout / "XboxProbe.Native.winmd").write_bytes(b"older metadata from the base release")
