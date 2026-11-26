@@ -7,8 +7,10 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <algorithm>
 #include <cstdint>
@@ -18,12 +20,13 @@
 
 #include "frame-trace.h"
 #include "hosted-input.h"
+#include "../../probe/mouse-source/native-panel.h"
 
 extern "C" HRESULT FhdClaimMedia(HSTRING, LONG*);
 extern "C" HRESULT FhdDrawMedia(LONG, ID3D11Device*, ID3D11DeviceContext*, ID3D11RenderTargetView*, bool, UINT64&, bool&);
 extern "C" void FhdMediaSequences(LONG, UINT64&, UINT64&);
 extern "C" void FhdReleaseMedia(LONG);
-extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG);
+extern "C" SdlHostMailbox *FhdMediaInputMailbox(LONG, SdlRumbleMailbox**);
 
 namespace {
 using namespace winrt;
@@ -64,6 +67,7 @@ struct Status {
     UINT64 hidden = 0, hiddenShell = 0, hiddenPanel = 0, hiddenWindow = 0;
     UINT64 uncovered = 0, reordered = 0, repeatPresents = 0;
     HRESULT inputError = S_OK;
+    HRESULT pointerTargetError = S_OK;
     HRESULT error = S_OK;
 };
 Status published;
@@ -128,6 +132,26 @@ struct WindowFocus {
     }
 };
 
+void relayPointer(Windows::Foundation::IInspectable const& sender,
+                  Windows::UI::Xaml::Input::PointerRoutedEventArgs const& event,
+                  bool wheel) noexcept {
+    try {
+        const auto target = sender.as<Grid>();
+        const auto width = target.ActualWidth(), height = target.ActualHeight();
+        if (width <= 0 || height <= 0) return;
+        const auto point = event.GetCurrentPoint(target);
+        const auto position = point.Position();
+        const auto props = point.Properties();
+        const LONG buttons = (props.IsLeftButtonPressed() ? SDL_HOST_POINTER_LEFT : 0) |
+            (props.IsRightButtonPressed() ? SDL_HOST_POINTER_RIGHT : 0) |
+            (props.IsMiddleButtonPressed() ? SDL_HOST_POINTER_MIDDLE : 0) |
+            (props.IsXButton1Pressed() ? SDL_HOST_POINTER_X1 : 0) |
+            (props.IsXButton2Pressed() ? SDL_HOST_POINTER_X2 : 0);
+        FhdHostedPointerUpdate(position.X / width, position.Y / height, buttons,
+            wheel ? props.MouseWheelDelta() : 0, wheel && props.IsHorizontalMouseWheel());
+    } catch (...) { /* The view may disappear while a pointer event is being dispatched. */ }
+}
+
 struct Presenter {
     Status status;
     WindowFocus focus;
@@ -143,6 +167,7 @@ struct Presenter {
     com_ptr<IDXGISwapChain2> chain;
     com_ptr<ID3D11RenderTargetView> target;
     FhdFrameTrace trace;
+    std::shared_ptr<NativePanelMouseProbe> mouseProbe = std::make_shared<NativePanelMouseProbe>();
     HANDLE inputTrace = INVALID_HANDLE_VALUE;
     // fhd-panel-stats.txt: the composition counters, rewritten in place at most once a second
     // when they change, so a long session leaves a bounded file with the latest totals.
@@ -297,6 +322,7 @@ struct Presenter {
         watchingKeys = true;
     }
     void updateInputVisibility() {
+        mouseProbe->report(status.visible && (status.gpu || status.cpu));
         const bool pause = !status.visible;
         if (!status.nativeInput || inputPaused == pause) return;
         inputPaused = pause;
@@ -356,7 +382,10 @@ struct Presenter {
         fittedHeight = h;
     }
     void render() noexcept {
-        if (FAILED(status.error)) return;
+        if (FAILED(status.error)) {
+            if (status.nativeInput) FhdStopHostedRumble();
+            return;
+        }
         try {
             fit();
             status.visible = visible();
@@ -364,6 +393,7 @@ struct Presenter {
             updateInputVisibility();
             if (!status.visible) {
                 queuedSequence = 0;
+                if (status.nativeInput) FhdStopHostedRumble();
             } else {
                 pollInput();
                 ++status.renderCallbacks;
@@ -401,6 +431,8 @@ struct Presenter {
         } catch (...) {
             status.error = to_hresult();
             status.visible = false;
+            mouseProbe->report(false);
+            if (status.nativeInput) FhdPauseHostedInput();
         }
         noteOrder();
         snapshotInput();
@@ -445,7 +477,29 @@ struct Presenter {
         check_hresult(device->CreateRenderTargetView(texture.get(), nullptr, target.put()));
         panel = SwapChainPanel{};
         panel.Name(L"SteamGameSurface");
-        panel.IsHitTestVisible(false);
+        bool routedPointer = false;
+        try {
+            // SwapChainPanel rejects Background. Its child can receive the pointer.
+            Grid pointerTarget;
+            pointerTarget.Background(Windows::UI::Xaml::Media::SolidColorBrush(Windows::UI::Color{}));
+            const auto update = [](auto const& sender, auto const& event) { relayPointer(sender, event, false); };
+            pointerTarget.PointerMoved(update);
+            pointerTarget.PointerPressed([probe = mouseProbe](auto const& sender, auto const& event) {
+                probe->press(event);
+                relayPointer(sender, event, false);
+            });
+            pointerTarget.PointerReleased([probe = mouseProbe](auto const& sender, auto const& event) {
+                probe->release(event);
+                relayPointer(sender, event, false);
+            });
+            pointerTarget.PointerWheelChanged([](auto const& sender, auto const& event) { relayPointer(sender, event, true); });
+            pointerTarget.PointerExited([](auto const&, auto const&) { FhdHostedPointerRelease(TRUE); });
+            pointerTarget.PointerCaptureLost([](auto const&, auto const&) { FhdHostedPointerRelease(FALSE); });
+            panel.Children().Append(pointerTarget);
+            routedPointer = true;
+        } catch (...) {
+            status.pointerTargetError = to_hresult();
+        }
         panel.HorizontalAlignment(HorizontalAlignment::Center);
         panel.VerticalAlignment(VerticalAlignment::Center);
         fit();
@@ -454,6 +508,7 @@ struct Presenter {
         check_hresult(panel.as<ISwapChainPanelNative>()->SetSwapChain(chain.get()));
         attached = true;
         trace.open();
+        mouseProbe->open(window);
         WCHAR inputPath[1024];
         if (trace.enabled() && SUCCEEDED(FhdLocalPath(inputPath, ARRAYSIZE(inputPath))) &&
                 FhdFrameTrace::suffix(inputPath, ARRAYSIZE(inputPath), L"\\fhd-panel-input.txt")) {
@@ -466,9 +521,11 @@ struct Presenter {
             statsTrace = CreateFile2(statsPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 CREATE_ALWAYS, nullptr);
         }
-        inputMailbox = FhdMediaInputMailbox(status.token);
-        status.inputError = FhdBeginHostedInput(inputMailbox, get_abi(window));
+        SdlRumbleMailbox *rumble = nullptr;
+        inputMailbox = FhdMediaInputMailbox(status.token, &rumble);
+        status.inputError = FhdBeginHostedInput(inputMailbox, rumble, get_abi(window));
         if (SUCCEEDED(status.inputError)) {
+            if (routedPointer) FhdUseRoutedPointer();
             FhdSetHostedInputProfile(nativePad, width, height);
             FhdHostedMenuOnRelease(TRUE);
             status.nativeInput = true;
@@ -484,6 +541,7 @@ struct Presenter {
         updateVisibility();
     }
     void close() noexcept {
+        mouseProbe->close();
         if (inputTrace != INVALID_HANDLE_VALUE) {
             CloseHandle(inputTrace);
             inputTrace = INVALID_HANDLE_VALUE;
@@ -611,6 +669,7 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
             }
         }
         if (FAILED(s.inputError)) field(L"native_input_hresult", static_cast<uint32_t>(s.inputError));
+        if (FAILED(s.pointerTargetError)) field(L"pointer_target_hresult", static_cast<uint32_t>(s.pointerTargetError));
         if (FAILED(s.error)) field(L"error", static_cast<uint32_t>(s.error));
         return WindowsCreateString(text.data(), static_cast<UINT32>(text.size()), out);
     } catch (...) { return winrt::to_hresult(); }

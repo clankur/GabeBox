@@ -1,0 +1,5 @@
+Factorio/config/config.ini
+; version=13
+
+[input]
+input-method=game-controller

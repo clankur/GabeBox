@@ -78,6 +78,8 @@
         var waitForChordRelease = false;
         var blockedMenuButtons = bigPictureMode ? padButtons.a | padButtons.b : 0;
         var keyboardReady = false;
+        var hostedKeyboard = false, primaryControls = false, controlsViewId, steamMenu, textSending = false;
+        var blockedControlButtons = 0;
         var layoutWidth = 0, layoutHeight = 0;
         var held = {};
         var pointerHeld = false;
@@ -119,8 +121,11 @@
             window.removeEventListener("focus", onFocus);
             window.removeEventListener("steam-game-foreground", onGameForeground);
             document.removeEventListener("visibilitychange", onVisibility);
-            menu.hidden = true;
+            if (primaryControls && !textForm.hidden) hideInputPane();
+            hideControls();
+            if (steamMenu) menu.removeChild(steamMenu);
             textForm.hidden = true;
+            textSend.disabled = false;
             textValue.value = "";
             screen.hidden = true;
             library.hidden = bigPictureMode;
@@ -138,21 +143,69 @@
             if (closing || !ready) return;
             closing = true;
             releaseKeys();
+            if (primaryControls) hideMenu();
             runner.quitSteamSdl();
             menu.hidden = true;
             status.textContent = "Waiting for the game to quit…";
         }
 
+        function hideControls() {
+            menu.hidden = true;
+            if (steamMenu) steamMenu.hidden = true;
+            if (primaryControls) screen.removeAttribute("data-hosted-keyboard-controls");
+            primaryControls = false;
+        }
+
         function hideMenu() {
             blockedMenuButtons = lastButtons & (padButtons.a | padButtons.b);
-            menu.hidden = true;
+            hideControls();
             if (nativeView) nativeView.resume();
             canvas.focus();
         }
 
         function showMenu(gameViewId) {
-            if (menuOpening || stopped) return;
+            if (menuOpening || primaryControls || stopped) return;
             releaseKeys();
+            var player = nativeView;
+            if (bigPictureMode && hostedKeyboard && keyboardReady && player && player.resumeForText && !closing) {
+                menuOpening = true;
+                Promise.resolve().then(function () { return player.cover(); }).then(function (covered) {
+                    menuOpening = false;
+                    if (stopped || closing || nativeView !== player) return;
+                    if (covered === false) { showSteamMenu(gameViewId); return; }
+                    primaryControls = true;
+                    controlsViewId = gameViewId || (view && view.id);
+                    blockedControlButtons = padButtons.a | padButtons.b;
+                    screen.setAttribute("data-hosted-keyboard-controls", "");
+                    if (window.steamBigPictureHost && controlsViewId) {
+                        if (!steamMenu) {
+                            steamMenu = document.createElement("button");
+                            steamMenu.id = "sdl-steam-menu";
+                            steamMenu.type = "button";
+                            steamMenu.textContent = "Steam";
+                            steamMenu.addEventListener("click", openSteamMenu);
+                            menu.insertBefore(steamMenu, exit);
+                        }
+                        steamMenu.hidden = false;
+                    }
+                    menu.hidden = false;
+                    keyboard.focus();
+                }, function () {
+                    menuOpening = false;
+                    if (!stopped && !closing) showSteamMenu(gameViewId);
+                });
+                return;
+            }
+            showSteamMenu(gameViewId);
+        }
+
+        function openSteamMenu() {
+            if (!primaryControls || menuOpening || stopped) return;
+            hideControls();
+            showSteamMenu(controlsViewId);
+        }
+
+        function showSteamMenu(gameViewId) {
             if (bigPictureMode) {
                 var steam = window.steamBigPictureHost;
                 if (!gameViewId && (!nativeView || nativeView.primary) && view) gameViewId = view.id;
@@ -222,18 +275,57 @@
         }
 
         function closeText() {
-            var pane = inputPane();
-            try { if (pane && pane.tryHide) pane.tryHide(); }
-            catch (_) { /* Returning focus to the game also dismisses the input pane. */ }
+            if (textSending) return;
+            hideInputPane();
             textForm.hidden = true;
             textValue.value = "";
             hideMenu();
         }
 
+        function hideInputPane() {
+            var pane = inputPane();
+            try { if (pane && pane.tryHide) pane.tryHide(); }
+            catch (_) { /* Returning focus to the game also dismisses the input pane. */ }
+        }
+
         function sendText(event) {
             if (event) event.preventDefault();
+            if (textSending) return;
+            if (primaryControls && textValue.value) {
+                sendPrimaryText(textValue.value);
+                return;
+            }
             if (!textValue.value || runner.sendSteamSdlText(textValue.value)) closeText();
             else textStatus.textContent = "The game could not accept the text. Try again.";
+        }
+
+        function sendPrimaryText(value) {
+            var player = nativeView;
+            textSending = textSend.disabled = true;
+            hideInputPane();
+            function stillOpen() { return !stopped && !closing && primaryControls && nativeView === player; }
+            function retry() {
+                if (!stillOpen()) return;
+                return Promise.resolve().then(function () { return player.cover(); }).catch(function () {}).then(function () {
+                    if (!stillOpen()) return;
+                    textStatus.textContent = "The game could not accept the text. Try again.";
+                    textValue.focus();
+                });
+            }
+            function finishedSending() {
+                textSending = false;
+                if (!stopped) textSend.disabled = false;
+            }
+            // The presenter's resume clears held input. Submit after that reset so the text survives it.
+            Promise.resolve().then(function () { return player.resumeForText(); }).then(function (shown) {
+                if (!stillOpen()) return;
+                if (!shown || !runner.sendSteamSdlText(value)) return retry();
+                textForm.hidden = true;
+                textValue.value = "";
+                blockedMenuButtons = lastButtons & (padButtons.a | padButtons.b);
+                hideControls();
+                canvas.focus();
+            }).catch(retry).then(finishedSending, finishedSending);
         }
 
         function moveMenuFocus(items, pressed) {
@@ -252,7 +344,11 @@
         }
 
         function setKey(event) {
-            if (!gameInput || nativeOwnsInput()) return;
+            if (!gameInput) return;
+            var controllerKey = (event.keyCode >= 136 && event.keyCode <= 143) ||
+                (event.keyCode >= 195 && event.keyCode <= 218);
+            if (primaryControls && controllerKey) { event.preventDefault(); return; }
+            if (nativeOwnsInput()) return;
             if (event.keyCode === 121 || event.code === "F10") {
                 event.preventDefault();
                 if (event.type === "keydown" && !event.repeat) {
@@ -265,7 +361,7 @@
                 return;
             }
             // Read Xbox buttons from Gamepad. Suppress the browser's duplicate navigation and Back actions.
-            if ((event.keyCode >= 136 && event.keyCode <= 143) || (event.keyCode >= 195 && event.keyCode <= 218)) {
+            if (controllerKey) {
                 event.preventDefault();
                 return;
             }
@@ -633,6 +729,10 @@
                 }
                 var pressed = pad[0] & ~lastButtons;
                 lastButtons = pad[0];
+                if (primaryControls) {
+                    blockedControlButtons &= pad[0];
+                    pressed &= ~blockedControlButtons;
+                }
                 if (!textForm.hidden) {
                     var pane = inputPane();
                     if (!pane || !pane.occludedRect || !pane.occludedRect.height) {
@@ -645,11 +745,16 @@
                         }
                     }
                 } else if (!menu.hidden) {
-                    moveMenuFocus(keyboardReady ? [resume, keyboard, exit] : [resume, exit], pressed);
+                    var controls = [resume];
+                    if (keyboardReady) controls.push(keyboard);
+                    if (steamMenu && !steamMenu.hidden) controls.push(steamMenu);
+                    controls.push(exit);
+                    moveMenuFocus(controls, pressed);
                     if (pressed & padButtons.b) hideMenu();
                     else if (pressed & padButtons.a) {
                         if (document.activeElement === exit) quit();
                         else if (document.activeElement === keyboard) openText();
+                        else if (document.activeElement === steamMenu) openSteamMenu();
                         else hideMenu();
                     }
                 } else if (!closing && foreground) {
@@ -719,6 +824,7 @@
         canvas.focus();
         Promise.resolve(runner.launchSteamSdlGame(appId, attempt.file, attempt.report)).then(function (report) {
             result = report;
+            hostedKeyboard = /^steam_shadow_keyboard=hosted\r?$/m.test(report);
             if (report.split(/\r?\n/).indexOf("steam_sdl_host=ready") < 0) {
                 stop();
                 complete(report);
@@ -732,7 +838,13 @@
                     foreground: function () { return gameInput && foreground; },
                     menu: showMenu,
                     exited: function () { stop("steam_sdl_host_frame=exited\r\n"); },
-                    fallback: function () { nativeView = null; },
+                    fallback: function () {
+                        nativeView = null;
+                        if (primaryControls && !stopped) {
+                            textSending = textSend.disabled = false;
+                            if (textForm.hidden) hideMenu(); else closeText();
+                        }
+                    },
                     mediaError: function (phase, code) {
                         var steam = window.steamBigPictureHost;
                         if (steam && steam.recordGameFrame) steam.recordGameFrame(appId, "fallback",

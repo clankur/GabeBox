@@ -17,6 +17,7 @@
 #define INVALID_FILE_ATTRIBUTES 0xffffffffu
 #define PATH_CAPACITY 260u
 #define CSIDL_PERSONAL 0x0005
+#define CSIDL_APPDATA 0x001a
 #define CSIDL_FLAG_NO_ALIAS 0x1000
 #define CSIDL_FLAG_DONT_VERIFY 0x4000
 #define CSIDL_FLAG_CREATE 0x8000
@@ -70,7 +71,7 @@ long WINAPI XboxEnableThemeDialogTexture(void *window, DWORD flags) {
     return enable ? enable(window, flags) : (long)0x80004001u; // E_NOTIMPL
 }
 
-static long EnsureDocumentsDirectory(const WCHAR *path, int folder) {
+static long EnsureProfileDirectory(const WCHAR *path, int folder) {
     if (folder & CSIDL_FLAG_DONT_VERIFY) return 0;
     DWORD attributes = GetFileAttributesW(path);
     if (attributes == INVALID_FILE_ATTRIBUTES && (folder & CSIDL_FLAG_CREATE)) {
@@ -92,16 +93,22 @@ long WINAPI XboxSHGetFolderPathW(void *window, int folder, void *token, DWORD mo
     output[0] = 0;
     const DWORD previousError = GetLastError();
     const int modifiers = CSIDL_FLAG_CREATE | CSIDL_FLAG_DONT_VERIFY | CSIDL_FLAG_NO_ALIAS;
-    if (!token && (folder & ~modifiers) == CSIDL_PERSONAL &&
-            (mode == SHGFP_TYPE_CURRENT || mode == SHGFP_TYPE_DEFAULT)) {
+    const WCHAR *profilePath = 0;
+    if (!token && (mode == SHGFP_TYPE_CURRENT || mode == SHGFP_TYPE_DEFAULT)) {
+        switch (folder & ~modifiers) {
+        case CSIDL_PERSONAL: profilePath = L"XBOX_WIN32_DOCUMENTS"; break;
+        case CSIDL_APPDATA: profilePath = L"XBOX_WIN32_ROAMING_APPDATA"; break;
+        }
+    }
+    if (profilePath) {
         WCHAR path[PATH_CAPACITY];
-        const DWORD length = GetEnvironmentVariableW(L"XBOX_WIN32_DOCUMENTS", path, PATH_CAPACITY);
+        const DWORD length = GetEnvironmentVariableW(profilePath, path, PATH_CAPACITY);
         if (length) {
             long result;
             if (length >= PATH_CAPACITY) result = PathError(ERROR_INSUFFICIENT_BUFFER);
             else if ((folder & (CSIDL_FLAG_CREATE | CSIDL_FLAG_DONT_VERIFY)) ==
                     (CSIDL_FLAG_CREATE | CSIDL_FLAG_DONT_VERIFY)) result = PathError(ERROR_INVALID_PARAMETER);
-            else result = EnsureDocumentsDirectory(path, folder);
+            else result = EnsureProfileDirectory(path, folder);
             if (!result) {
                 for (DWORD i = 0; i <= length; ++i) output[i] = path[i];
             }

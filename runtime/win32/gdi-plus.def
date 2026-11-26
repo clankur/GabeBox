@@ -1,0 +1,17 @@
+LIBRARY XboxWin32GdiPlus.dll
+EXPORTS
+    GdiplusStartup=XboxGdiplusStartup
+    GdiplusShutdown=XboxGdiplusShutdown
+    GdipAlloc=XboxGdipAlloc
+    GdipFree=XboxGdipFree
+    GdipCreateBitmapFromScan0=XboxGdipCreateBitmapFromScan0
+    GdipCreateBitmapFromStream=XboxGdipCreateBitmapFromStream
+    GdipCloneImage=XboxGdipCloneImage
+    GdipDisposeImage=XboxGdipDisposeImage
+    GdipGetImageWidth=XboxGdipGetImageWidth
+    GdipGetImageHeight=XboxGdipGetImageHeight
+    GdipBitmapLockBits=XboxGdipBitmapLockBits
+    GdipBitmapUnlockBits=XboxGdipBitmapUnlockBits
+    GdipGetImageEncodersSize=XboxGdipGetImageEncodersSize
+    GdipGetImageEncoders=XboxGdipGetImageEncoders
+    GdipSaveImageToStream=XboxGdipSaveImageToStream

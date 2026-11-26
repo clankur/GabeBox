@@ -71,7 +71,7 @@ def gpu_mailbox(generation=2, width=1920, sequence=25, format_code=28):
 def options(**overrides):
     args = dict(version='1.2.3.4', startup=False, app_id=APP_ID, run_id=None, image_name=None, timeout=8,
                 frame_seconds=0, output=None, bootstrap_frame=False, require_checkpoint=[],
-                fail_on_checkpoint=[], watch_checkpoint=[], checkpoint_timeout=2, checkpoint_timeouts=[])
+                fail_on_checkpoint=[], watch_checkpoint=[], checkpoint_timeout=2, checkpoint_timeouts=[], keyboard=False)
     args.update(overrides)
     return SimpleNamespace(**args)
 
@@ -817,6 +817,39 @@ class ObserverTests(unittest.TestCase):
                     cli.export_game_inputs(bad_portal, *inputs, bad)
                 self.assertFalse(bad.exists())
 
+    def test_game_input_fingerprint_is_read_only_and_bound_to_the_installed_build(self):
+        manifest = b'"AppState" { "appid" "42" "buildid" "123" "StateFlags" "4" "installdir" "Fixture" }'
+        payload = b'installed SDK fixture' * 60000
+        requests = []
+
+        class Portal:
+            def __init__(self, final_manifest=manifest):
+                self.final_manifest = final_manifest
+
+            def request(self, method, path, **kwargs):
+                query = parse_qs(urlsplit(path).query)
+                requests.append((method, query))
+                if query['filename'] == ['steam_api64.dll']:
+                    return 200, kwargs['receive'](io.BytesIO(payload))
+                assert query['filename'] == ['appmanifest_42.acf']
+                return 200, self.final_manifest
+
+        relative = 'bin/x64/steam_api64.dll'
+        inputs = (APP, APP_ID, 'DevelopmentFiles', cli.DEVELOPER_STEAMAPPS_PATH, manifest)
+        actual = cli.fingerprint_game_input(Portal(), *inputs, '123', relative)
+        self.assertEqual(actual, {'123': [
+            {'path': relative, 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}]})
+        self.assertEqual(requests[0][1]['path'], [cli.DEVELOPER_STEAMAPPS_PATH + r'\common\Fixture\bin\x64'])
+        self.assertEqual([method for method, _ in requests], ['GET', 'GET'])
+        requests.clear()
+        with self.assertRaisesRegex(ValueError, 'complete installation of build 124'):
+            cli.fingerprint_game_input(Portal(), *inputs, '124', relative)
+        with self.assertRaisesRegex(ValueError, 'game-relative'):
+            cli.fingerprint_game_input(Portal(), *inputs, '123', '../steam_api64.dll')
+        self.assertEqual(requests, [])
+        with self.assertRaisesRegex(ValueError, 'installation changed'):
+            cli.fingerprint_game_input(Portal(manifest.replace(b'"123"', b'"124"')), *inputs, '123', relative)
+
     def test_standard_cli_reuses_pinned_setup_and_get_only_requests(self):
         launch = EPOCH_MS + 1
         fingerprint = '1' * 64
@@ -855,6 +888,7 @@ class ObserverTests(unittest.TestCase):
                     ranges = {
                         'bytes=0-35': struct.pack('<9I', 0x53444C31, 2, 99, 0, 0, 2, 2, 1, 0),
                         'bytes=8294456-8294495': struct.pack('<II6iII', 4, 0x10001, 1, -2, 3, -4, -32768, 32767, 2, 1),
+                        'bytes=8294496-8294507': struct.pack('<3I', 6, 7, 5),
                         'bytes=20-23': struct.pack('<I', 2),
                         'bytes=8294456-8294459': struct.pack('<I', 4),
                     }
@@ -889,13 +923,13 @@ class ObserverTests(unittest.TestCase):
         requests.clear()
         output, errors = io.StringIO(), io.StringIO()
         command = ['xbox_deploy.py', 'inspect-input', '--version', '1.2.3.4', '--app-id', str(APP_ID),
-                   '--run-id', str(launch)]
+                   '--run-id', str(launch), '--keyboard']
         with (patch.object(cli, 'DevicePortal', Portal),
               patch.object(cli, 'load_settings', return_value=settings),
               patch('sys.argv', command), redirect_stdout(output), redirect_stderr(errors)):
             cli.main()
         result = json.loads(output.getvalue())
-        self.assertEqual(requests, [None] + ['GET'] * 7)
+        self.assertEqual(requests, [None] + ['GET'] * 8)
         self.assertEqual(result['activity']['gamepad'], 'insufficient-samples')
         self.assertEqual(result['samples'][0]['gamepad'], {
             'state': 'unacknowledged', 'serial': 4, 'ack': 2, 'connected': True,
@@ -903,6 +937,7 @@ class ObserverTests(unittest.TestCase):
         })
         self.assertEqual(result['samples'][0]['pointer']['state'], 'acknowledged')
         self.assertTrue(result['samples'][0]['keyboard_ready'])
+        self.assertEqual(result['samples'][0]['keyboard_queue'], {'read': 6, 'write': 7, 'reset': 5})
         self.assertNotIn('test_secret', output.getvalue() + errors.getvalue())
 
         requests.clear()
@@ -944,6 +979,7 @@ class ObserverTests(unittest.TestCase):
             bad_range = False
             wrong_offset = False
             changes_launch = False
+            rumble = None
 
             def pause(self, seconds):
                 self.now += seconds
@@ -969,6 +1005,11 @@ class ObserverTests(unittest.TestCase):
                                  f'panel_hidden_window={hidden - 2}\r\npanel_uncovered={hidden + 1}\r\n'
                                  'panel_reordered=0\r\npanel_repeat_presents=7\r\n'
                                  f'panel_presented={600 if self.now else 510}\r\nsecret=do-not-save\r\n').encode()
+                if name == MAILBOX + '.rumble':
+                    assert kwargs['read_limit'] == 25
+                    if self.rumble is None:
+                        raise cli.PortalError(404, 'Sidecar does not exist.')
+                    return 200, self.rumble
                 assert name == MAILBOX
                 step = round(self.now * 2)
                 serial, ack, confirmed = ((2, 2, 2), (4, 2, 4), (6, 6, 6), (8, 6, 9))[step]
@@ -988,8 +1029,9 @@ class ObserverTests(unittest.TestCase):
                 response = SimpleNamespace(getheader=lambda key, default: header, read=read)
                 return (200 if self.bad_range else 206), kwargs['receive'](response)
 
-        args = options(run_id=launch, seconds=1.5, panel_menu=True)
+        args = options(run_id=launch, seconds=1.5, panel_menu=True, rumble=True)
         fake = Portal()
+        fake.rumble = struct.pack('<4IQ', 0x53445231, 9, 9, 0x5F, 9 << 32)
         result = cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
         self.assertEqual(result['activity'], {'gamepad': 'host-activity', 'pointer': 'host-idle'})
         self.assertEqual([sample['gamepad']['state'] for sample in result['samples']],
@@ -1011,8 +1053,14 @@ class ObserverTests(unittest.TestCase):
                        'panel_presented': 600},
             'added': {'panel_hidden': 2, 'panel_hidden_shell': 0, 'panel_hidden_panel': 0, 'panel_hidden_window': 2,
                       'panel_uncovered': 2, 'panel_reordered': 0, 'panel_repeat_presents': 0, 'panel_presented': 90}})
+        self.assertEqual(result['rumble'], {'state': 'armed', 'presenter_attached': True, 'bridge_attached': True,
+                                           'nonzero_requested': True, 'nonzero_published': True,
+                                           'nonzero_applied': True, 'stop_applied': True, 'device_error': False})
         self.assertNotIn('do-not-save', json.dumps(result))
         self.assertNotIn(MAILBOX, json.dumps(result))
+        fake = Portal()
+        result = cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
+        self.assertEqual(result['rumble'], {'state': 'unavailable'})
         fake = Portal()
         fake.bad_range = True
         with self.assertRaisesRegex(ValueError, 'exact requested SDL mailbox range'):
@@ -1028,6 +1076,20 @@ class ObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed during input sampling'):
                 cli.inspect_host_input(args, fake, APP, clock=lambda: fake.now, pause=fake.pause)
             self.assertFalse(args.output.exists())
+
+    def test_host_rumble_snapshot_keeps_old_sidecars_readable_and_flags_transitions(self):
+        magic = 0x53445231
+        self.assertEqual(cli.host_rumble_snapshot(None), {'state': 'unavailable'})
+        self.assertEqual(cli.host_rumble_snapshot(bytes(24)), {'state': 'invalid'})
+        self.assertEqual(cli.host_rumble_snapshot(bytes(25)), {'state': 'invalid'})
+        old = cli.host_rumble_snapshot(struct.pack('<4IQ', magic, 0, 8, 0, 0))
+        self.assertEqual(old.pop('state'), 'disarmed')
+        self.assertFalse(any(old.values()))
+        changing = cli.host_rumble_snapshot(struct.pack('<4IQ', magic, 0, 8, 0x2F, 8 << 32))
+        self.assertEqual(changing['state'], 'updating')
+        self.assertTrue(changing['nonzero_applied'])
+        self.assertTrue(changing['device_error'])
+        self.assertFalse(changing['stop_applied'])
 
 
 MEASURED = (b'audio meter=ready\r\n'

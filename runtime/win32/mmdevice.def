@@ -1,0 +1,3 @@
+LIBRARY XboxWin32DefaultAudio.dll
+EXPORTS
+    XboxCreateDefaultAudioEnumerator

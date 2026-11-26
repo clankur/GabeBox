@@ -30,18 +30,6 @@
     // Set EdgeHTML's navigation mode before QR or saved-session recovery starts.
     var originalInputMode = navigator.gamepadInputEmulation;
     if (bigPictureMode && originalInputMode !== undefined) navigator.gamepadInputEmulation = "keyboard";
-    var profile = bigPictureMode && Windows.System && Windows.System.Profile;
-    if (profile && profile.AnalyticsInfo && profile.AnalyticsInfo.versionInfo.deviceFamily === "Windows.Xbox") {
-        document.documentElement.setAttribute("data-steam-controller-ui", "true");
-        signin.addEventListener("click", function (event) {
-            // Keyboard, UI Automation and HTMLElement.click() produce a
-            // zero-detail click. A physical pointer click carries its count.
-            if (event.detail > 0) {
-                event.preventDefault();
-                event.stopImmediatePropagation();
-            }
-        }, true);
-    }
     var bigPictureStatus;
     function showBigPictureStatus(message) {
         if (!bigPictureStatus) {
@@ -1019,7 +1007,7 @@
         });
     }
 
-    function start() {
+    function start(freshCode) {
         if (current && !current.done) return;
         var clock = window.performance && typeof window.performance.now === "function" ?
             function () { return window.performance.now(); } : Date.now;
@@ -1044,6 +1032,7 @@
             attempt.file = file;
             return Windows.Storage.FileIO.writeTextAsync(file, attempt.prefix + "status=steam-session-checking\r\n");
         }).then(function () {
+            if (freshCode) return;
             try {
                 attempt.startup.mark("cache_check_started");
                 var runner = XboxProbe.Native.ProbeRunner;
@@ -1075,10 +1064,20 @@
         });
     }
 
-    retry.addEventListener("click", start);
+    retry.addEventListener("click", function () { start(true); });
     cancel.addEventListener("click", function () {
         finish(current, "Sign-in cancelled.", "steam_approval=cancelled");
     });
+    function activateGamepadControl(event) {
+        var target = event.target;
+        if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+                (event.keyCode !== 142 && event.keyCode !== 195) ||
+                (target.tagName !== "BUTTON" && target !== remember)) return false;
+        event.preventDefault();
+        if (!event.repeat && !target.hidden && !target.disabled) target.click();
+        return true;
+    }
+    signin.addEventListener("keydown", activateGamepadControl);
     search.addEventListener("input", renderList);
     list.addEventListener("focusin", function (event) {
         if (event.target.entry) select(event.target);
@@ -1101,11 +1100,7 @@
         var target = event.target;
         var key = event.keyCode;
         if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-        if ((key === 142 || key === 195) && target.tagName === "BUTTON") {
-            event.preventDefault();
-            if (!event.repeat && !target.disabled) target.click();
-            return;
-        }
+        if (activateGamepadControl(event)) return;
         var direction = directions[key];
         var next;
         if (key === 27 || key === 143 || key === 196) {

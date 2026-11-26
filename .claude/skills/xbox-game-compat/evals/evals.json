@@ -1,0 +1,50 @@
+{
+  "skill_name": "xbox-game-compat",
+  "evals": [
+    {
+      "id": 0,
+      "name": "missing-user32-exports",
+      "prompt": "ULTRAKILL (Steam AppID 1229490, Windows build 22957324) exits right after I pick Play in Big Picture on the Series X. The saved AMD64 import control for this runtime reports that MapVirtualKeyExA and GetRawInputBuffer are not available on the console, and the audit says the launcher and the Unity engine are both AMD64 and import desktop window registration and creation. Work out what the compatibility layer needs for this title and get the adaptation staged as far as you can without the console. Write your diagnosis and plan to plan.md in the output directory.",
+      "expected_output": "Classifies as a missing-export problem, checks the existing XboxWin32* adapters first and notices MapVirtualKeyExA is already exported by the input adapter, finds the Wine reference for the raw input buffer contract, proposes a narrow bindings JSON plus a hash-bound recipe and a build-pinned profile for 1229490-22957324, and lists the console checks that remain pending.",
+      "files": [],
+      "assertions": [
+        "Classifies the failure as unresolved imports (missing exports) and keeps it distinct from a stubbed export that resolves but does nothing",
+        "Checks the existing XboxWin32* adapter exports before proposing new code, and reports that MapVirtualKeyExA is already exported by the input adapter",
+        "Cites a specific upstream Wine source file for the raw input buffer contract, with a commit-pinned permalink rather than a branch link",
+        "Produces a bindings JSON that redirects only the functions the evidence implicates, mapping original DLL and function to a replacement DLL",
+        "Gives the redirect-pe-imports --recipe and --win32-trial-profile commands pinned to AppID 1229490 and build 22957324",
+        "States the console checks that remain pending instead of reporting any result as verified",
+        "Does not claim an observed console outcome, frame rate, or exit code that was not supplied in the prompt"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "x86-managed-boundary",
+      "prompt": "Our library audit says Terraria (AppID 105600, build 24893155) ships an x86 launcher that imports the legacy CLR loader, and the Hades bug reporter failed earlier with a missing mscoree!_CorDllMain. Can we adapt Terraria to run on the Xbox compatibility layer, and what exactly would it take? Write the answer to plan.md in the output directory.",
+      "expected_output": "Identifies the x86 architecture and the managed native entry point as boundaries that an import redirect cannot solve, names what each would actually require (an x86 guest runtime; an upstream rebuild), cites the evidence already in the repository, and does not propose redirecting mscoree.",
+      "files": [],
+      "assertions": [
+        "Identifies the x86 architecture as a boundary the import-redirect machinery cannot cross and names an x86 guest runtime as the actual requirement",
+        "Identifies the managed native entry point (mscoree!_CorDllMain) as requiring an upstream rebuild rather than an import redirect",
+        "Does not propose redirecting mscoree or adding an mscoree binding to a profile",
+        "Grounds the answer in evidence already recorded in the repository rather than general speculation",
+        "Separates what is unsupported today from what is permanently impossible, and leaves the boundary re-checkable",
+        "Does not claim an observed console outcome that was not supplied in the prompt"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "frame-pacing-gap",
+      "prompt": "Hades is playable on the console now but the last native presenter trace over 30 seconds of real play gave 56.03 FPS average with 25 frames in the slowest rolling second and a 450.37 ms hitch, all frames on the shared-texture path. We need sustained 60 FPS at 1080p. What is the next thing to measure or change, and why? Write it to plan.md in the output directory.",
+      "expected_output": "Uses the repository's measurement discipline (settled-scene 30 second sample, --require-gpu-60, distinct frames, lowest rolling second), separates a game-side cause from a presenter or transport cause instead of guessing, proposes a specific next measurement that would distinguish them, and keeps the gap recorded as open performance work.",
+      "files": [],
+      "assertions": [
+        "States that the trace cannot by itself attribute the hitch to the game or to the shared-texture and presentation pipeline, and proposes a measurement that would separate them",
+        "Uses the repository's measurement discipline: a settled-scene 30 second sample, distinct presented frames, lowest rolling one-second count, and measure.py --require-gpu-60",
+        "Names the specific mechanisms in this layer that could cause the gap (for example busy shared textures, publish cadence, swap clock or sync interval) rather than generic optimization advice",
+        "Keeps the shortfall recorded as open performance work against the 60 FPS gate at 1920x1080",
+        "Does not claim an observed console outcome or a new frame rate that was not supplied in the prompt"
+      ]
+    }
+  ]
+}

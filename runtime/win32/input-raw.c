@@ -84,7 +84,7 @@ UINT WINAPI XboxGetRawInputBuffer(PRAWINPUT buffer, PUINT size, UINT headerSize)
         remaining -= (UINT)stride;
         next = (PRAWINPUT)following;
     }
-    if (!buffer) *size = 0;
+    if (!count) *size = 0;
     SetLastError(previous);
     return count;
 }

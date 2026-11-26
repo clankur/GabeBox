@@ -9,6 +9,13 @@ EVIDENCE_FIELDS = {
     'child_exit_code', 'expected_exit_code', 'exit_code_matches',
     'ipc', 'ipc_stage', 'ipc_error', 'ipc_child_exit', 'exit_code',
     'steam_core', 'create_interface', 'steam_error',
+    'hresult', 'relative_motion', 'uncaptured_motion', 'motion', 'callbacks', 'capture_hresult',
+    'hide_cursor_hresult', 'release_capture_hresult', 'restore_cursor_hresult', 'remove_mouse_moved_hresult',
+    'activation_start', 'activation_end', 'core_window_hresult', 'mouse_subscription_hresult',
+    'mouse_capabilities_hresult', 'mouse_present', 'mouse_button_count',
+    'document_visible', 'pointer_input', 'pointer_moves', 'pointer_down', 'pointer_wheel',
+    'visible', 'registered', 'start_tick', 'hr', 'stage', 'presented',
+    'raw_controllers', 'gamepads', 'controllers_seen', 'hid_joystick_found', 'hid_gamepad_found',
 }
 
 

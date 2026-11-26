@@ -4,9 +4,9 @@
 
 **Turn your Xbox into a GabeCube.**
 
-GabeBox aims to bring Valve’s controller-friendly Big Picture interface to Xbox Series X and Series S in Developer Mode. Sign in with Steam Guard to see your own Steam library. Steam checks ownership and downloads the games you select. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
+GabeBox aims to bring Valve’s SteamOS experience to Xbox Series X and Series S. Sign in with Steam Guard to play your own Steam library. GabeBox adapts desktop windowing, graphics, and controller input so supported games can run locally on the Xbox.
 
-The goal is to make the same **Install** and **Play** flow work across the Steam catalog and sustain 60 FPS at native 1080p where the game supports it. Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. The results below are from Series X testing. Series S verification is still open.
+Compatibility is experimental and depends on the game’s Steam build and the runtime packaged for it. The results below are from Series X testing. Series S verification is still open.
 
 [Requirements](#requirements) · [Releases](#releases) · [What works](#what-works) · [Setup](#setup) · [Build from source](#build-from-source) · [Open issues](#open-issues)
 
@@ -20,27 +20,24 @@ The goal is to make the same **Install** and **Play** flow work across the Steam
 
 ## Releases
 
-| Release | What you get |
-| --- | --- |
-| [Big Picture 1.0.230.37](https://github.com/clankur/GabeBox/releases/tag/big-picture-v1.0.230.37) | Latest tagged Big Picture source release. Its Series X test reached the signed-in Library and launched Slay the Spire to its title screen. |
-| [Packaged process probe 0.1.0](https://github.com/clankur/GabeBox/releases/tag/process-probe-v0.1.0) | Diagnostic prerelease. The release notes link to the signed APPX, certificate, and checksums for testing whether the Xbox can start a packaged child process. |
-
-The Big Picture tag provides source archives. The locally signed Steam APPX uses Valve’s pinned files and is assembled separately. Later development builds and title trials are recorded in the hardware notes. [All releases](https://github.com/clankur/GabeBox/releases) · [Series X test ledger](analysis/big-picture-reliability.md)
+The locally signed Steam APPX uses Valve’s pinned files and is assembled separately. Later development builds and title trials are recorded in the hardware notes. [All releases](https://github.com/clankur/GabeBox/releases) · [Series X test ledger](analysis/big-picture-reliability.md)
 
 ## What works
 
-On Series X, the tagged Big Picture build restored a Steam session, displayed the owned and installed libraries, and showed Home and the Wi-Fi indicator. A later development build installed an owned game from Big Picture’s **Install** button and switched the detail page to **Play** when Steam finished downloading it. [Tagged build evidence](analysis/big-picture-reliability.md#build-1023037) · [Install and Downloads evidence](analysis/big-picture.md#steam-machine-experience-on-series-x)
+Development packages built from `main` (the `1.0.232` series) were tested on Series X OS `26100.9673`:
 
-The Steam Core prototype also verified a Slay the Spire cloud-save restore with a backup of the existing save folders. [Cloud-save test](docs/STEAM-CORE.md#direct-steam-cloud-research)
+- **Sign-in and startup.** Cached sign-in reaches a controller-ready Big Picture Library in a median of 14.8 seconds. [Startup measurements](analysis/steam-ui-cached-login-startup.md)
+- **Install, Downloads, and storage.** Big Picture’s **Install** button feeds the authenticated Steam download queue, and the detail page switches to **Play** when the download finishes. The stock Downloads and Storage pages show the queue and the `D:` Xbox Development Storage library with its free space. USB drives can also hold a Steam library. [Downloads and storage evidence](analysis/steam-ui-downloads-storage.md#console-acceptance)
+- **Steam Cloud saves.** The stock **Manage → Cloud backups** menu creates backups and restores them.
+- **Game presentation and input.** Hosted games present through a shared native 1920 × 1080 renderer using shared GPU textures. The SDL, XInput, and presenter paths share one hosted controller packet. [Native fullscreen presentation](docs/GAME-LAUNCH.md#native-fullscreen-presentation)
+- **Store recovery.** A Store request that stalls now times out, clears the loading state, and returns to the Library. [Store investigation](analysis/steam-ui-store.md#latest-series-x-check)
 
 | Game | Observed on Xbox Series X |
 | --- | --- |
-| **Slay the Spire** | Big Picture **Play** reached the title screen on `1.0.230.37`. A separate hosted trial reached Act 1 combat and averaged 59.97 FPS at 1920 × 1080 over 30 seconds using shared GPU textures. [Release test](analysis/big-picture-reliability.md#build-1023037) · [Gameplay measurement](docs/GAME-LAUNCH.md#native-fullscreen-presentation) |
-| **Stardew Valley** | Big Picture reached the title menu on an earlier build. A separate hosted trial averaged 59.97 FPS at 1920 × 1080 during outdoor farm movement using shared GPU textures. [Launch ledger](analysis/big-picture-reliability.md#game-launches-and-returns) · [Gameplay measurement](docs/GAME-LAUNCH.md#native-fullscreen-presentation) |
-| **Dwarf Fortress** | Reached the title menu with controller-driven pointer input. One Big Picture trial kept the same game process alive through a Library visit and **Resume**. A separate title-screen test averaged 49.97 FPS with the default 50 FPS graphics cap. [Resume test](analysis/big-picture-reliability.md#game-launches-and-returns) · [Pointer setup](docs/GAME-LAUNCH.md#play-dwarf-fortress-in-the-steam-library) |
-| **Hades** | The x64 DirectX build supports controller gameplay with its build-matched profile. A 30-second 1080p shared-GPU sample averaged 56.03 FPS with visible hitches. [Hades profile and results](analysis/hades-compatibility.md) |
-| **Marvel’s Spider-Man Remastered** | An experimental profile reached a partially rendered rooftop and responded to right-stick camera input. The 1080p backbuffer presented at 30.2 FPS over 30 seconds. Complete rendering and playable movement are still open. [Spider-Man trial](analysis/spider-man-compatibility.md) |
-| **X-COM: UFO Defense** | The earlier Steam Core library launched the owned DOS edition and rendered its intro. In-game controller input and persistent saves remain open. [DOS runtime test](https://github.com/clankur/GabeBox/issues/44) |
+| **Slay the Spire** | On `1.0.232.13`, stock **Play** continued a Cloud-restored run to floor 34. The settled room averaged 59.90 FPS at 1920 × 1080 over 30 seconds using shared GPU textures. Combat and audio still need a recheck on the current build. [Current-build results](analysis/steam-ui-cloud-performance.md#xbox-acceptance) |
+| **Stardew Valley** | Earlier builds reached the title menu from Big Picture and averaged 59.97 FPS at 1920 × 1080 during outdoor farm movement using shared GPU textures. It has not been rechecked on a `1.0.232` package. [Launch ledger](analysis/big-picture-reliability.md#game-launches-and-returns) · [Gameplay measurement](docs/GAME-LAUNCH.md#native-fullscreen-presentation) |
+| **Hades** | The x64 DirectX build supports controller gameplay with its build-matched profile. A 30-second 1080p shared-GPU sample on `1.0.230.106` averaged 56.03 FPS with visible hitches. It has not been rechecked since the runtime reorganization. [Hades profile and results](analysis/hades-compatibility.md) |
+| **Marvel’s Spider-Man Remastered** | On `1.0.232.15`, Big Picture **Play** entered the Clearing the Way world and responded to right-stick camera input. The 30-second world sample averaged 51.23 FPS at 1920 × 1080 output. Surfaces are missing and the player character is not clearly visible. [Spider-Man trial](analysis/spider-man-compatibility.md#world-entry-recovery-after-the-runtime-restructure) |
 
 ## Setup
 
@@ -107,11 +104,14 @@ The builder verifies Valve’s [pinned client manifest](runtime/steam/pins/steam
 
 | Area | What’s still open |
 | --- | --- |
-| **Windows game compatibility** | Broader startup and gameplay support, including Factorio and later Unity, Godot, and DirectX titles. Spider-Man needs complete world rendering and a verified gameplay cycle. [Compatibility investigations](analysis/steam-compatibility.md) · [Factorio #43](https://github.com/clankur/GabeBox/issues/43) · [Spider-Man #67](https://github.com/clankur/GabeBox/issues/67) |
-| **Store, overlay, and Steam Input** | The tagged release reached the Store loading screen. Reliable storefront rendering, complete Play → overlay → Resume → Exit cycles, and Steam-owned controller remapping need more console verification. [Big Picture ledger](analysis/big-picture-reliability.md) · [Steam Input design](analysis/steam-input.md) |
-| **Downloads and storage** | Verify active download changes and the first-time shared prerequisite recovery on Xbox. [Queue and path analysis](analysis/steam-ui-downloads-storage.md) · [Game paths #54](https://github.com/clankur/GabeBox/issues/54) · [Download queue #55](https://github.com/clankur/GabeBox/issues/55) |
-| **Saves and performance** | Verify Cloud backups, per-title save and reload, and sustained 60 FPS at native 1080p during gameplay. [Cloud and performance analysis](analysis/steam-ui-cloud-performance.md) · [Steam Cloud #56](https://github.com/clankur/GabeBox/issues/56) |
-| **Cached sign-in and Big Picture startup** | Measure the time from remembered sign-in to a populated, controller-ready Library on Xbox. [Startup analysis](analysis/steam-ui-cached-login-startup.md) |
+| **Windows game compatibility** | Spider-Man needs complete world rendering and verified movement. Factorio, Unity titles, and the DOS runtime for X-COM still need work on `main`. 32-bit x86 titles such as Terraria need a shared 32-bit runtime. [Compatibility investigations](analysis/steam-compatibility.md) · [Spider-Man #67](https://github.com/clankur/GabeBox/issues/67) · [Factorio #43](https://github.com/clankur/GabeBox/issues/43) · [Terraria #34](https://github.com/clankur/GabeBox/issues/34) · [X-COM #44](https://github.com/clankur/GabeBox/issues/44) |
+| **Performance** | Hades (56.03 FPS with hitches) and Spider-Man (51.23 FPS) miss sustained 60 FPS at native 1080p. Slay the Spire and Stardew Valley need gameplay samples on the current build. [Cloud and performance analysis](analysis/steam-ui-cloud-performance.md) · [Hades results](analysis/hades-compatibility.md) |
+| **Store** | Store requests reach the WebView2 controller but time out without a navigation start. Loaded storefront content and product navigation are still unconfirmed. [Store investigation](analysis/steam-ui-store.md) |
+| **Overlay and Steam Input** | The physical-controller Play → overlay → Resume → Exit cycle is unverified on the current build. Controller settings show no connected controllers, and Steam-owned remapping is untested. [Overlay and input review](analysis/steam-ui-overlay-input.md) · [Steam Input design](analysis/steam-input.md) |
+| **Downloads and storage** | Cold shared-prerequisite recovery and competing download transitions need an isolated library on Xbox. Pause and queue reordering are unsupported. [Queue and path analysis](analysis/steam-ui-downloads-storage.md) · [Game paths #54](https://github.com/clankur/GabeBox/issues/54) · [Download queue #55](https://github.com/clankur/GabeBox/issues/55) |
+| **Saves** | Cloud backup and restore are verified only for Slay the Spire. Other titles need save and reload checks through Big Picture **Play**. [Steam Cloud #56](https://github.com/clankur/GabeBox/issues/56) |
+| **Mouse input** | A Dev Mode package cannot read a physical Xbox mouse. Presenting the mouse as a controller through an Xbox Adaptive Controller adapter awaits hardware testing. [Mouse input finding](analysis/xbox-mouse-input.md) · [mouse2xac #83](https://github.com/clankur/GabeBox/issues/83) |
+| **Series S** | No results yet. |
 
 [Browse all open issues](https://github.com/clankur/GabeBox/issues?q=is%3Aissue+is%3Aopen)
 

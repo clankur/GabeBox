@@ -1,0 +1,41 @@
+#pragma once
+
+// The mailbox uses SDL/USB usages. A desktop key message carries the Set 1
+// scan and an extended bit. These are the positions the presenter publishes.
+static const UINT16 hostedKeyScans[SDL_HOST_KEY_LIMIT] = {
+    [4] = 0x1e, [5] = 0x30, [6] = 0x2e, [7] = 0x20, [8] = 0x12, [9] = 0x21,
+    [10] = 0x22, [11] = 0x23, [12] = 0x17, [13] = 0x24, [14] = 0x25, [15] = 0x26,
+    [16] = 0x32, [17] = 0x31, [18] = 0x18, [19] = 0x19, [20] = 0x10, [21] = 0x13,
+    [22] = 0x1f, [23] = 0x14, [24] = 0x16, [25] = 0x2f, [26] = 0x11, [27] = 0x2d,
+    [28] = 0x15, [29] = 0x2c, [30] = 0x02, [31] = 0x03, [32] = 0x04, [33] = 0x05,
+    [34] = 0x06, [35] = 0x07, [36] = 0x08, [37] = 0x09, [38] = 0x0a, [39] = 0x0b,
+    [40] = 0x1c, [41] = 0x01, [42] = 0x0e, [43] = 0x0f, [44] = 0x39, [45] = 0x0c,
+    [46] = 0x0d, [47] = 0x1a, [48] = 0x1b, [49] = 0x2b, [51] = 0x27, [52] = 0x28,
+    [53] = 0x29, [54] = 0x33, [55] = 0x34, [56] = 0x35, [57] = 0x3a,
+    [58] = 0x3b, [59] = 0x3c, [60] = 0x3d, [61] = 0x3e, [62] = 0x3f, [63] = 0x40,
+    [64] = 0x41, [65] = 0x42, [66] = 0x43, [67] = 0x44, [68] = 0x57, [69] = 0x58,
+    [70] = 0xe037, [71] = 0x46, [72] = 0x45, [73] = 0xe052, [74] = 0xe047,
+    [75] = 0xe049, [76] = 0xe053, [77] = 0xe04f, [78] = 0xe051, [79] = 0xe04d,
+    [80] = 0xe04b, [81] = 0xe050, [82] = 0xe048, [83] = 0xe045, [84] = 0xe035,
+    [85] = 0x37, [86] = 0x4a, [87] = 0x4e, [88] = 0xe01c, [89] = 0x4f, [90] = 0x50,
+    [91] = 0x51, [92] = 0x4b, [93] = 0x4c, [94] = 0x4d, [95] = 0x47, [96] = 0x48,
+    [97] = 0x49, [98] = 0x52, [99] = 0x53, [100] = 0x56, [101] = 0xe05d,
+    [104] = 0x64, [105] = 0x65, [106] = 0x66, [107] = 0x67, [108] = 0x68, [109] = 0x69,
+    [110] = 0x6a, [111] = 0x6b, [112] = 0x6c, [113] = 0x6d, [114] = 0x6e, [115] = 0x76,
+    [224] = 0x1d, [225] = 0x2a, [226] = 0x38, [227] = 0xe05b, [228] = 0xe01d,
+    [229] = 0x36, [230] = 0xe038, [231] = 0xe05c,
+};
+
+static UINT HostedKeyModifier(UINT key) {
+    switch (key) {
+    case VK_LSHIFT: case VK_RSHIFT: return VK_SHIFT;
+    case VK_LCONTROL: case VK_RCONTROL: return VK_CONTROL;
+    case VK_LMENU: case VK_RMENU: return VK_MENU;
+    default: return key;
+    }
+}
+
+static LPARAM HostedKeyFlags(UINT16 scan, BOOL down) {
+    return (LPARAM)(1u | ((UINT32)LOBYTE(scan) << 16) | (HIBYTE(scan) ? 1u << 24 : 0u) |
+        (down ? 0u : 3u << 30));
+}

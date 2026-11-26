@@ -146,6 +146,113 @@ test("the SDL player decodes bulk RGB while retaining keyboard input", () => exe
 
 test("pointer delivery follows package configuration for any hosted AppID", () => exercisePlayer(false, true));
 
+test("the hosted Big Picture keyboard covers the panel, sends after resume, and keeps Steam reachable", async () => {
+    const elements = new Map(), calls = [], windowEvents = {};
+    let focus, pump, nativeEvents, finishCover, finishResume, pad = 0, acceptText = true;
+    const drain = () => new Promise(setImmediate);
+    const profile = new Map([["data-apps", "427520"]]);
+    function element(id) {
+        if (!elements.has(id)) elements.set(id, {
+            hidden: true, attrs: id === "steam-sdl-profiles" ? profile : new Map(), events: {},
+            getAttribute(name) { return this.attrs.get(name); },
+            setAttribute(name, value) { this.attrs.set(name, value); },
+            removeAttribute(name) { this.attrs.delete(name); },
+            getContext() { return {}; },
+            focus() { focus = this; },
+            addEventListener(name, handler) { this.events[name] = handler; },
+            insertBefore(node) { elements.set(node.id, node); }
+        });
+        return elements.get(id);
+    }
+    const buttons = {a: 1, b: 2, start: 4, back: 8, up: 16, down: 32, left: 64, right: 128};
+    const player = {
+        primary: true, ownsInput: () => true,
+        cover() { calls.push("cover"); return new Promise(resolve => { finishCover = resolve; }); },
+        resume() { calls.push("resume"); return Promise.resolve(true); },
+        resumeForText() { calls.push("resume-for-text"); return new Promise(resolve => { finishResume = resolve; }); }
+    };
+    const window = {
+        addEventListener(name, callback) { windowEvents[name] = callback; },
+        steamSdlGamepad: {connected: 256, buttons, read: () => ({gamepad: [pad], overlay: 256 | pad})},
+        steamSdlNativeView: {open(report, events) {
+            nativeEvents = events;
+            events.presented("width=1920");
+            return player;
+        }},
+        steamBigPictureHost: {async showForGame(id, view) { calls.push(["steam", id, view]); return true; }}
+    };
+    const Windows = {UI: {ViewManagement: {
+        ApplicationView: {getForCurrentView: () => ({id: 7, isFullScreenMode: true, setDesiredBoundsMode() {}})},
+        ApplicationViewBoundsMode: {useCoreWindow: 0},
+        InputPane: {getForCurrentView: () => ({tryShow() { calls.push("pane-show"); }, tryHide() { calls.push("pane-hide"); }})}
+    }}};
+    const runner = {
+        launchSteamSdlGame: () => "steam_sdl_host=ready\r\nsteam_shadow_keyboard=hosted\r\n",
+        steamSdlRunning: () => true, steamSdlKeyboardReady: () => true,
+        sendSteamSdlText(value) { calls.push(["text", value]); return acceptText; }
+    };
+    const document = {getElementById: element, addEventListener() {}, get activeElement() { return focus; },
+        createElement() {
+            return {events: {}, focus() { focus = this; }, addEventListener(name, handler) { this.events[name] = handler; }};
+        }};
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../ui/signin/steam-sdl-host.js"), "utf8"), {
+        document, window, Windows, navigator: {}, performance: {now: () => 100},
+        setTimeout(callback) { pump = callback; }
+    });
+    await window.steamSdlRuntimes[0].launch(runner, 427520, {bigPicture: true});
+    const menu = element("sdl-menu"), form = element("sdl-text"), screen = element("sdl-game");
+    const submit = () => form.events.submit({preventDefault() {}});
+    async function openMenu() {
+        nativeEvents.menu(7);
+        await drain();
+        assert.equal(menu.hidden, true);
+        finishCover(true);
+        await drain();
+        assert.equal(menu.hidden, false);
+        assert.equal(screen.attrs.has("data-hosted-keyboard-controls"), true);
+        assert.equal(focus, element("sdl-keyboard"));
+    }
+
+    await openMenu();
+    let suppressed = false;
+    windowEvents.keydown({keyCode: 195, preventDefault() { suppressed = true; }});
+    assert.equal(suppressed, true);
+    pad = buttons.a;
+    pump();
+    assert.equal(form.hidden, true, "a held game button cannot select Keyboard");
+    pad = 0; pump();
+    pad = buttons.a; pump();
+    assert.equal(form.hidden, false);
+    assert.equal(calls.at(-1), "pane-show");
+    element("sdl-text-value").value = "Factory é🙂";
+    acceptText = false;
+    submit(); submit();
+    await drain();
+    assert.deepEqual(calls.slice(-2), ["pane-hide", "resume-for-text"]);
+    finishResume(true);
+    await drain();
+    assert.deepEqual(calls.slice(-2), [["text", "Factory é🙂"], "cover"]);
+    finishCover(true);
+    await drain();
+    assert.equal(form.hidden, false);
+    assert.equal(element("sdl-text-value").value, "Factory é🙂");
+    acceptText = true;
+    submit();
+    await drain();
+    finishResume(true);
+    await drain();
+    assert.deepEqual(calls.at(-1), ["text", "Factory é🙂"]);
+    assert.equal(form.hidden, true);
+    assert.equal(screen.attrs.has("data-hosted-keyboard-controls"), false);
+
+    await openMenu();
+    element("sdl-steam-menu").events.click();
+    await drain();
+    finishCover(true);
+    await drain();
+    assert.deepEqual(calls.at(-1), ["steam", 427520, 7]);
+});
+
 test("the primary video polls the controller independently and a quick mouse click reaches SDL in order", async () => {
     const elements = new Map(), listeners = {}, edges = [], overlays = [], samples = [];
     let now = 100, pump, ack = 0, buttons = 0, serial = 0, padSerial = 0, rejectPad = false, covers = 0, resumes = 0;

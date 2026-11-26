@@ -1,16 +1,18 @@
 /* Bridge XInput callers to the controller already owned by the Xbox host.
 
-   While the host mailbox is open, user index 0 stays attached for the whole
-   session, with neutral state until the host publishes a connected pad. A
-   console session always has a controller, and callers such as SDL query
-   XInputGetCapabilities once at startup and re-scan only on device-change
-   notifications, which a hosted pad never raises. */
+   User index 0 follows the host pad's connection. When the profile makes the
+   hosted pad the title's only controller (XBOX_WIN32_HOST_XINPUT=1), index 0
+   instead stays attached for the whole session, with neutral state until the
+   host publishes a connected pad. A console session always has a controller,
+   and callers such as SDL query XInputGetCapabilities once at startup and
+   re-scan only on device-change notifications, which such a title never
+   receives. Build-matched profiles can raise those notifications instead
+   (XboxWin32ControllerNotify). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <xinput.h>
-#include <stddef.h>
-#include "../shared/sdl-host-protocol.h"
-#include "loader-trace-output.h"
+#include "hosted-gamepad.h"
+#include "../shared/sdl-rumble-mailbox.h"
 
 #define TRACE(record) AppendTrace(record "\r\n", sizeof(record "\r\n") - 1)
 
@@ -20,11 +22,14 @@ typedef DWORD (WINAPI *SetState)(DWORD, XINPUT_VIBRATION *);
 static INIT_ONCE configured = INIT_ONCE_STATIC_INIT;
 static SRWLOCK stateLock = SRWLOCK_INIT;
 static SdlHostMailbox *mailbox;
+static SdlRumbleMailbox *rumble;
 static GetState nativeGetState;
 static GetCapabilities nativeGetCapabilities;
 static SetState nativeSetState;
 static XINPUT_STATE latest;
+static LONG acknowledged;
 static BOOL connected;
+static BOOL sessionSlot;
 static volatile LONG slotObserved;
 static BOOL connectionObserved, activityObserved;
 
@@ -45,22 +50,13 @@ static BOOL CALLBACK OpenController(PINIT_ONCE once, PVOID parameter, PVOID *con
         }
         return TRUE;
     }
-    if (!length || length >= ARRAYSIZE(path)) return TRUE;
-
-    HANDLE file = CreateFile2FromAppW(path, GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING, NULL);
-    if (file == INVALID_HANDLE_VALUE) return TRUE;
-    const SIZE_T lengthNeeded = offsetof(SdlHostMailbox, keyboard);
-    LARGE_INTEGER size;
-    const BOOL valid = GetFileSizeEx(file, &size) && size.QuadPart >= (LONGLONG)lengthNeeded;
-    HANDLE mapping = valid ? CreateFileMappingFromApp(file, NULL, PAGE_READWRITE, 0, NULL) : NULL;
-    CloseHandle(file);
-    if (!mapping) return TRUE;
-    mailbox = MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, lengthNeeded);
-    CloseHandle(mapping);
-    if (mailbox && SdlHostLoad(&mailbox->magic) != SDL_HOST_MAGIC) {
-        UnmapViewOfFile(mailbox);
-        mailbox = NULL;
+    if (length && length < ARRAYSIZE(path)) {
+        WCHAR padOnly[2];
+        sessionSlot = GetEnvironmentVariableW(L"XBOX_WIN32_HOST_XINPUT", padOnly, ARRAYSIZE(padOnly)) == 1 &&
+            padOnly[0] == L'1';
+        mailbox = MapHostedGamepad(path);
+        if (mailbox && AppendSdlRumbleSuffix(path, length, ARRAYSIZE(path))) rumble = MapSdlRumbleMailbox(path);
+        SdlRumbleRecord(rumble, SDL_RUMBLE_BRIDGE_ATTACHED);
     }
     return TRUE;
 }
@@ -96,7 +92,6 @@ static void UpdateController(SdlHostGamepad *pad) {
     latest.dwPacketNumber = (DWORD)serial;
     latest.Gamepad = (XINPUT_GAMEPAD){mapped, Trigger(axes[4]), Trigger(axes[5]),
         (SHORT)axes[0], ThumbY(axes[1]), (SHORT)axes[2], ThumbY(axes[3])};
-    InterlockedExchange(&pad->ack, serial);
 }
 
 static void ConfigureController(void) {
@@ -119,9 +114,16 @@ DWORD WINAPI XboxXInputGetState(DWORD index, XINPUT_STATE *state) {
 
     AcquireSRWLockExclusive(&stateLock);
     UpdateController(&mailbox->gamepad);
-    const DWORD result = ERROR_SUCCESS;
-    *state = latest;
-    if (!connected) state->Gamepad = (XINPUT_GAMEPAD){0};
+    const LONG serial = (LONG)latest.dwPacketNumber;
+    if (serial && serial != acknowledged) {
+        InterlockedExchange(&mailbox->gamepad.ack, serial);
+        acknowledged = serial;
+    }
+    const DWORD result = connected || sessionSlot ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    if (result == ERROR_SUCCESS) {
+        *state = latest;
+        if (!connected) state->Gamepad = (XINPUT_GAMEPAD){0};
+    }
     BOOL firstConnection = FALSE, firstActivity = FALSE;
     if (connected) {
         firstConnection = !connectionObserved;
@@ -164,15 +166,27 @@ static void TraceCapabilities(DWORD index, DWORD result) {
     SetLastError(error);
 }
 
+/* Slot 0 is available while the host publishes a connected pad, or for the whole
+   session when the profile makes the hosted pad the title's only controller. */
+static BOOL HostedControllerConnected(DWORD index) {
+    if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return FALSE;
+    AcquireSRWLockExclusive(&stateLock);
+    UpdateController(&mailbox->gamepad);
+    const BOOL available = connected || sessionSlot;
+    ReleaseSRWLockExclusive(&stateLock);
+    return available;
+}
+
 DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILITIES *capabilities) {
     if (!capabilities || index >= XUSER_MAX_COUNT || (flags != 0 && flags != XINPUT_FLAG_GAMEPAD))
         return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeGetCapabilities) return nativeGetCapabilities(index, flags, capabilities);
-    const DWORD result = index || !mailbox || SdlHostLoad(&mailbox->quit) ? ERROR_DEVICE_NOT_CONNECTED : ERROR_SUCCESS;
+    const DWORD result = HostedControllerConnected(index) ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
     TraceCapabilities(index, result);
     if (result != ERROR_SUCCESS) return result;
 
+    const WORD motor = SdlRumbleGeneration(rumble) ? 65535 : 0;
     *capabilities = (XINPUT_CAPABILITIES){
         XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD, 0,
         {XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y |
@@ -180,7 +194,7 @@ DWORD WINAPI XboxXInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILI
          XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_UP |
          XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT,
          255, 255, 32767, 32767, 32767, 32767},
-        {0, 0}
+        {motor, motor}
     };
     return ERROR_SUCCESS;
 }
@@ -189,9 +203,16 @@ DWORD WINAPI XboxXInputSetState(DWORD index, XINPUT_VIBRATION *vibration) {
     if (!vibration || index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
     ConfigureController();
     if (nativeSetState) return nativeSetState(index, vibration);
-    if (index || !mailbox || SdlHostLoad(&mailbox->quit)) return ERROR_DEVICE_NOT_CONNECTED;
-    // The hosted capabilities advertise zero motor speeds until the host supports vibration.
-    return vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
+    const LONG generation = SdlRumbleGeneration(rumble);
+    if (!HostedControllerConnected(index)) return ERROR_DEVICE_NOT_CONNECTED;
+    const BOOL nonzero = vibration->wLeftMotorSpeed || vibration->wRightMotorSpeed;
+    if (nonzero) SdlRumbleRecord(rumble, SDL_RUMBLE_NONZERO_REQUESTED);
+    if (SdlRumblePublish(rumble, generation, vibration->wLeftMotorSpeed, vibration->wRightMotorSpeed)) {
+        if (nonzero) SdlRumbleRecord(rumble, SDL_RUMBLE_NONZERO_PUBLISHED);
+        return ERROR_SUCCESS;
+    }
+    // SDL probes the stop command while opening the pad, before the view is attached.
+    return nonzero ? ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
 }
 
 DWORD WINAPI XboxXInputGetDSoundAudioDeviceGuids(DWORD index, GUID *render, GUID *capture) {

@@ -2279,7 +2279,10 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowAccessibilityDisabled = false;
     bool shadowLocalCrashReports = false;
     bool shadowLocalLow = false;
-    bool shadowHostedXInput = false;
+    // steam-win32-host-xinput-APPID.txt: hosted XInput for a hosted graphics title, with the
+    // hosted pad as SDL's only joystick source. The build-matched steam-win32-hosted-xinput
+    // marker (shadowHostedXInput) leaves SDL backend selection to the profile.
+    bool shadowHostedPadOnly = false;
     bool shadowJitTrace = false;
     bool shadowPipelineCache = false;
     std::wstring shadowPipelineCacheMode;
@@ -2287,13 +2290,24 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     bool shadowGlTrace = false;
     bool shadowMesaShaderCache = false;
     bool shadowDxgi = false;
+    bool shadowDxgiOutput = false;
+    bool shadowWindowFrame = false;
+    bool shadowHostedKeyboard = false;
+    bool shadowWgl = false;
+    bool shadowHostedXInput = false;
+    bool shadowDisableSdlDirectInput = false;
+    bool shadowHostedControllerNotify = false;
+    bool shadowDefaultAudio = false;
     bool shadowD3d12DefaultAdapter = false;
     bool shadowStreamlineUnavailable = false;
     bool shadowWorkingDirectory = false;
     bool shadowOriginalExecutable = false;
     bool shadowDynamicCompanions = false;
     bool shadowDocuments = false;
+    bool shadowRoamingAppData = false;
     StorageFile shadowRecipe{nullptr};
+    StorageFile shadowRoamingFolders{nullptr};
+    StorageFile shadowRoamingDefault{nullptr};
     StorageFile shadowFiles{nullptr};
     StorageFile shadowSteamSdk{nullptr};
     StorageFile shadowLegacySteamSdk{nullptr};
@@ -2374,6 +2388,62 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 shadowDxgi = static_cast<bool>(co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-dxgi-" + std::to_wstring(app) + L".txt")));
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-dxgi-output-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDxgiOutput = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-window-frame-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowWindowFrame = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-hosted-keyboard-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowHostedKeyboard = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-hosted-xinput-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowHostedXInput = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-disable-sdl-directinput-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size() || !shadowHostedXInput) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDisableSdlDirectInput = true;
+                }
+                if (auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-hosted-controller-notify-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowHostedControllerNotify = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-default-audio-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDefaultAudio = true;
+                }
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-d3d12-default-adapter-" + std::to_wstring(app) + L".txt")) {
                     const auto file = marker.try_as<StorageFile>();
@@ -2392,7 +2462,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 }
                 auto hostedXInput = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-host-xinput-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
-                shadowHostedXInput = static_cast<bool>(hostedXInput);
+                shadowHostedPadOnly = static_cast<bool>(hostedXInput);
                 if (hostedXInput && (co_await hostedXInput.GetBasicPropertiesAsync()).Size())
                     co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
@@ -2478,6 +2548,29 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     }
                     shadowDocuments = true;
                 }
+                if (const auto roaming = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-roaming-appdata-" + std::to_wstring(app) + L".txt")) {
+                    const auto marker = roaming.try_as<StorageFile>();
+                    if (!marker || !shadowRecipe || !sourceProfile || (co_await marker.GetBasicPropertiesAsync()).Size() ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Desktop.dll")) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowRoamingAppData = true;
+                }
+                if (auto seed = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-roaming-default-" + std::to_wstring(app) + L".txt")) {
+                    shadowRoamingDefault = seed.try_as<StorageFile>();
+                    if (!shadowRoamingDefault || !shadowRoamingAppData) {
+                        shadowRoamingDefault = nullptr;
+                        report += L"steam_shadow_roaming_default=invalid-profile\r\n";
+                    }
+                }
+                if (const auto folders = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-roaming-folders-" + std::to_wstring(app) + L".txt")) {
+                    shadowRoamingFolders = folders.try_as<StorageFile>();
+                    if (!shadowRoamingFolders || !shadowRoamingAppData)
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                }
                 auto shaderCache = (co_await packageFolder.TryGetItemAsync(winrt::hstring(
                     L"steam-win32-godot-shader-cache-" + std::to_wstring(app) + L".txt"))).try_as<StorageFile>();
                 if (shaderCache) {
@@ -2498,11 +2591,12 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 const bool unityDxgi = unity && shadowRenderer == L"d3d11";
                 // Godot's Direct3D 12 driver presents through the hosted DXGI and composition adapter.
                 const bool godotDxgi = shadowDxgi && shadowRuntime == L"godot" && shadowRenderer == L"d3d12";
+                shadowWgl = shadowRuntime.empty() && shadowRenderer == L"opengl3";
                 if (shadowBuild.empty() || shadowBuild.size() > 20 ||
                         shadowBuild.find_first_not_of(L"0123456789") != std::wstring::npos ||
                         !steam_win32_stage::IsImageName(shadowExecutable, L".exe") ||
                         (!shadowRuntime.empty() && shadowRuntime != L"godot" && !unity) ||
-                        (shadowRuntime.empty() && !shadowRenderer.empty()) ||
+                        (shadowRuntime.empty() && !shadowRenderer.empty() && !shadowWgl) ||
                         (unity && (!hostedSurfaceless || !shadowRecipe || !shadowFiles || !shadowTrace ||
                             !shadowImage.empty() || (shadowRenderer != L"opengl3" && !unityDxgi) ||
                             unityDxgi != shadowDxgi ||
@@ -2519,12 +2613,29 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Desktop.dll"))) ||
                         (!shadowPrefsKey.empty() && (!shadowRecipe ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32PlayerPrefs.dll"))) ||
-                        (shadowHostedXInput && (!hostedSurfaceless || !shadowRecipe ||
+                        (shadowHostedPadOnly && (!hostedSurfaceless || !shadowRecipe ||
                             (!shadowDxgi && shadowRenderer != L"opengl3") ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32XInput910.dll"))) ||
                         (shadowDxgi && (!shadowRecipe ||
                             (!unityDxgi && !godotDxgi && (!shadowRuntime.empty() || !shadowRenderer.empty())) ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32Dxgi.dll"))) ||
+                        (shadowDxgiOutput && (!shadowDxgi || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) ||
+                        (shadowWindowFrame && ((!shadowDxgi && !shadowWgl) || !sourceProfile || !shadowTrace ||
+                            !hostedSurfaceless || !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
+                        (shadowHostedKeyboard && (!shadowDxgi || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll"))) ||
+                        (shadowWgl && (!shadowRecipe || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32Window.dll") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
+                        (shadowHostedXInput && (!shadowRecipe || !sourceProfile || !shadowTrace || !hostedSurfaceless ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32XInput910.dll"))) ||
+                        (shadowHostedControllerNotify && (!shadowHostedXInput ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32ControllerNotify.dll"))) ||
+                        (shadowDefaultAudio && (!shadowRecipe || !sourceProfile || !shadowTrace ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32DefaultAudio.dll") ||
+                            !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
                         ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable) &&
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
@@ -2947,6 +3058,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     winrt::handle slayProcess;
     winrt::handle shadowProcess;
     steam_win32_stage::StageFolder shadowStage;
+    StorageFolder shadowRoamingFolder{nullptr};
+    std::array<StorageFolder, 3> shadowRoamingParents{nullptr, nullptr, nullptr};
     std::wstring shadowRoaming;
     std::wstring shadowCache;
     std::wstring shadowMesaCache;
@@ -2967,6 +3080,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             auto session = liveSteamSession;
             if (!session || !session->OwnsSession()) co_return winrt::hstring(L"steam_launch=session-lost\r\n");
             shadowOwner = session->accountId;
+            if ((shadowRoamingFolders || shadowRoamingDefault) && shadowOwner != sourceOwner)
+                co_return winrt::hstring(L"steam_launch=session-lost\r\n");
         }
         auto profiles = co_await root.CreateFolderAsync(L"SteamWin32TrialProfiles", CreationCollisionOption::OpenIfExists);
         auto account = co_await profiles.CreateFolderAsync(winrt::to_hstring(shadowOwner), CreationCollisionOption::OpenIfExists);
@@ -2978,6 +3093,20 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (shadowMesaShaderCache) {
             auto mesa = co_await profile.CreateFolderAsync(L"MesaShaderCache", CreationCollisionOption::OpenIfExists);
             shadowMesaCache = mesa.Path().c_str();
+        }
+        if (shadowRoamingAppData) {
+            try {
+                if (shadowRoaming.empty() || shadowRoaming.size() >= MAX_PATH)
+                    winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+                steam_win32_stage::CheckNativeType(shadowRoaming, true);
+                if (shadowRoamingFolders || shadowRoamingDefault) {
+                    shadowRoamingFolder = roaming;
+                    shadowRoamingParents = {profiles, account, profile};
+                }
+            } catch (winrt::hresult_error const& error) {
+                co_return winrt::hstring(report + L"steam_launch=shadow-roaming-appdata-error\r\nsteam_shadow_win32=" +
+                    Hex(error.code()) + L"\r\n");
+            }
         }
         if (shadowDocuments) {
             try {
@@ -3073,6 +3202,26 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (!fresh || !fresh->installed || (!expectedBuild.empty() && fresh->buildId != expectedBuild) ||
                 (sourceProfile && fresh->installDir != location->app.installDir))
             co_return winrt::hstring(report + L"steam_launch=not-installed\r\n");
+    }
+    if (shadowRoamingFolders) {
+        try {
+            for (const auto& folder : shadowRoamingParents) steam_win32_stage::CheckType(folder, true);
+            co_await steam_win32_stage::PrepareRoamingFolders(shadowRoamingFolder, shadowRoamingFolders);
+            report += L"steam_shadow_roaming_folders=ready\r\n";
+        } catch (winrt::hresult_error const& error) {
+            co_return winrt::hstring(report + L"steam_launch=shadow-roaming-folders-error\r\nsteam_shadow_win32=" +
+                Hex(error.code()) + L"\r\n");
+        }
+    }
+    if (shadowRoamingDefault) {
+        try {
+            for (const auto& folder : shadowRoamingParents) steam_win32_stage::CheckType(folder, true);
+            const bool seeded = co_await steam_win32_stage::SeedRoamingDefault(shadowRoamingFolder, shadowRoamingDefault);
+            report += seeded ? L"steam_shadow_roaming_default=created\r\n" : L"steam_shadow_roaming_default=existing\r\n";
+        } catch (winrt::hresult_error const& error) {
+            report += L"steam_shadow_roaming_default=unavailable\r\nsteam_shadow_roaming_default_hresult=" +
+                Hex(error.code()) + L"\r\n";
+        }
     }
     if (hostedSdl && app == dwarfFortressAppId) {
         try {
@@ -3230,7 +3379,7 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
         if (sdlLateFrame && frameDelayHint.Set(L"12000")) {
             report += L"steam_launch_sdl_frame_delay_ms=12000\r\n";
         }
-        if (hostedSurfaceless && !shadowDxgi && (!videoHint.Set(L"offscreen") ||
+        if (hostedSurfaceless && !shadowDxgi && !shadowWgl && (!videoHint.Set(L"offscreen") ||
                 !sdlGlDriver.Set((packageRoot + L"\\opengl32.dll").c_str()) ||
                 !sdlEglDriver.Set((packageRoot + L"\\libEGL.dll").c_str()) ||
                 !sdlCompiler.Set(L"none") || !sdlSurfaceless.Set(L"1"))) {
@@ -3250,6 +3399,9 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 if (gpu == GpuMailbox::Optional)
                     report += prepared ? L"steam_sdl_opengl_gpu_mailbox=ready\r\n" :
                         L"steam_sdl_opengl_gpu_mailbox=deferred\r\n";
+                if (nativeSdlView && (shadowHostedXInput || shadowHostedPadOnly))
+                    report += pendingSdlSurface->OpenRumble(mailbox) ? L"steam_sdl_rumble_mailbox=ready\r\n" :
+                        L"steam_sdl_rumble_mailbox=unavailable\r\n";
             } catch (winrt::hresult_error const& error) {
                 co_return winrt::hstring(report + L"steam_sdl_host=mailbox-error\r\nsteam_sdl_host_hresult=" +
                     Hex(error.code()) + L"\r\n");
@@ -3361,19 +3513,23 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 report += L"steam_shadow_mesa_shader_cache=profile\r\nsteam_shadow_mesa_cache_stats=" + name + L"\r\n";
             }
             if (shadowGlTrace) report += L"steam_shadow_gl_trace=loader-trace\r\n";
-            const std::pair<std::wstring, std::wstring> variables[] = {
+            std::vector<std::pair<std::wstring, std::wstring>> variables = {
                 {L"APPDATA", shadowRoaming}, {L"LOCALAPPDATA", shadowCache}, {L"SteamAppId", appId}, {L"SteamGameId", appId},
                 {L"XBOX_WIN32_DOCUMENTS", shadowDocumentsPath},
+                {L"XBOX_WIN32_ROAMING_APPDATA", shadowRoamingAppData ? shadowRoaming : std::wstring{}},
                 {L"XBOX_WIN32_LOCAL_LOW", shadowLow},
                 {L"XBOX_WIN32_PREFS_KEY", shadowPrefsKey}, {L"XBOX_WIN32_PREFS_HIVE", shadowPrefsHive},
-                {L"XBOX_WIN32_HOST_XINPUT", shadowHostedXInput ? L"1" : L""},
+                // XBOX_WIN32_HOST_XINPUT marks the hosted pad as the title's only controller: the
+                // loader trace reports an empty DirectInput and no Steam Input controllers, and
+                // the Steam SDK handoff withdraws Steam's controller ignore lists.
+                {L"XBOX_WIN32_HOST_XINPUT", shadowHostedPadOnly ? L"1" : L""},
                 // The host owns the console controller and republishes it as hosted XInput user 0.
                 // SDL's other joystick backends can see the physical pad, claim the XInput
                 // device and then never deliver its input, so they are off for these titles.
-                {L"SDL_JOYSTICK_WGI", shadowHostedXInput ? L"0" : L""},
-                {L"SDL_JOYSTICK_GAMEINPUT", shadowHostedXInput ? L"0" : L""},
-                {L"SDL_JOYSTICK_HIDAPI", shadowHostedXInput ? L"0" : L""},
-                {L"SDL_JOYSTICK_RAWINPUT", shadowHostedXInput ? L"0" : L""},
+                {L"SDL_JOYSTICK_WGI", shadowHostedPadOnly ? L"0" : L""},
+                {L"SDL_JOYSTICK_GAMEINPUT", shadowHostedPadOnly ? L"0" : L""},
+                {L"SDL_JOYSTICK_HIDAPI", shadowHostedPadOnly ? L"0" : L""},
+                {L"SDL_JOYSTICK_RAWINPUT", shadowHostedPadOnly ? L"0" : L""},
                 {L"XBOX_WIN32_LOADER_TRACE", trace}, {L"XBOX_WIN32_CRASH_REPORT", crashReport},
                 // Diagnostic: CoreCLR's EventPipe records each method it compiles with a
                 // timestamp (JIT keyword 0x10, verbose), so first-use stalls can be matched
@@ -3404,28 +3560,40 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_D3D12_DEFAULT_ADAPTER", shadowD3d12DefaultAdapter ? L"1" : L""},
                 {L"XBOX_WIN32_STREAMLINE_UNAVAILABLE", shadowStreamlineUnavailable ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_WINDOW_FRAME", shadowWindowFrame && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_KEYBOARD", shadowHostedKeyboard && hostedSdl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_WGL", shadowWgl ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_XINPUT", shadowHostedXInput || shadowHostedPadOnly ? L"1" : L""},
+                {L"XBOX_WIN32_HOSTED_CONTROLLER_NOTIFY", shadowHostedControllerNotify ? L"1" : L""},
+                {L"XBOX_WIN32_DEFAULT_AUDIO", shadowDefaultAudio ? L"1" : L""},
                 {L"XBOX_STEAM_HANDOFF_SDK", shadowSteamSdkPath}, {L"XBOX_STEAM_HANDOFF_HIVE", discoveryHive},
                 {L"XBOX_STEAM_HANDOFF_LEGACY", shadowLegacySteamSdk ? L"1" : L""},
                 {L"XBOX_STEAM_HANDOFF_PID", std::to_wstring(GetCurrentProcessId())},
                 {L"XBOX_WIN32_HOST_START_TIME", hostStartTime},
                 {L"XBOX_STEAM_HANDOFF_ACCOUNT", std::to_wstring(shadowOwner)}
             };
+            if (shadowWgl) {
+                variables.emplace_back(L"SDL_VIDEO_DRIVER", L"windows");
+                variables.emplace_back(L"SDL_OPENGL_LIBRARY", L"OPENGL32.DLL");
+            }
+            if (shadowDisableSdlDirectInput) {
+                variables.emplace_back(L"SDL_JOYSTICK_DIRECTINPUT", L"0");
+                report += L"steam_shadow_sdl_directinput=disabled\r\n";
+            }
             // Steam publishes the controllers it virtualizes for SDL titles to ignore. The hosted
             // pad is not one of them, so a hosted-XInput title must not inherit those lists;
             // SteamChildEnvironment removes a variable listed with an empty value.
-            const std::pair<std::wstring, std::wstring> hostedPadVariables[] = {
-                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES", L""},
-                {L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", L""},
-                {L"SteamVirtualGamepadInfo", L""},
-            };
-            std::vector<std::pair<std::wstring, std::wstring>> childVariables(std::begin(variables), std::end(variables));
-            if (shadowHostedXInput)
-                childVariables.insert(childVariables.end(), std::begin(hostedPadVariables), std::end(hostedPadVariables));
+            if (shadowHostedPadOnly) {
+                variables.emplace_back(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", L"");
+                variables.emplace_back(L"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", L"");
+                variables.emplace_back(L"SteamVirtualGamepadInfo", L"");
+            }
             // Titles started through apphost run the same assembly as a startup hook; native
             // hosts such as Godot never run startup hooks and are started by the Win32 layer.
             if (!shadowManagedWarmup.empty())
-                childVariables.emplace_back(L"DOTNET_STARTUP_HOOKS", managedWarmup);
-            auto environment = SteamChildEnvironment(childVariables);
+                variables.emplace_back(L"DOTNET_STARTUP_HOOKS", managedWarmup);
+            auto environment = SteamChildEnvironment(variables);
             if (environment.empty()) {
                 co_return winrt::hstring(report + L"steam_launch=shadow-environment-error\r\n");
             }
@@ -3453,11 +3621,16 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
             report += L"steam_shadow_build=" + shadowBuild + L"\r\nsteam_shadow_renderer=" + (mode.empty() ? L"default" : mode) +
                 L"\r\nsteam_shadow_child=created\r\n";
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";
+            if (shadowWgl) report += L"steam_shadow_wgl=hosted\r\n";
+            if (shadowDxgiOutput) report += L"steam_shadow_dxgi_output=hosted-fallback\r\n";
+            if (shadowWindowFrame) report += L"steam_shadow_window_frame=hosted\r\n";
+            if (shadowHostedKeyboard) report += L"steam_shadow_keyboard=hosted\r\n";
             if (shadowDocuments) report += L"steam_shadow_documents=profile\r\n";
+            if (shadowRoamingAppData) report += L"steam_shadow_roaming_appdata=profile\r\n";
             if (shadowLocalCrashReports) report += L"steam_shadow_crash_reporting=local\r\n";
             if (shadowLocalLow) report += L"steam_shadow_local_low=account-scoped\r\n";
             if (!shadowPrefsKey.empty()) report += L"steam_shadow_player_prefs=account-scoped\r\n";
-            if (shadowHostedXInput) report += L"steam_shadow_xinput=hosted-lookup\r\n";
+            if (shadowHostedXInput || shadowHostedPadOnly) report += L"steam_shadow_xinput=hosted-lookup\r\n";
             if (!shadowManagedWarmup.empty()) report += L"steam_shadow_managed_warmup=selected\r\n";
         } else {
             call = reinterpret_cast<Launch>(methods[2])(manager, &gameId, launchOption, 0, "");

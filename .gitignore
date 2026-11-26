@@ -7,3 +7,4 @@ __pycache__/
 /big-picture-signed/
 runtime/**/bin/
 runtime/**/obj/
+.claude/xbox-portal-pin.log

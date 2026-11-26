@@ -1,10 +1,11 @@
 LIBRARY XboxWin32Dxgi.dll
 EXPORTS
-    CreateDXGIFactory=XboxCreateDXGIFactory
-    CreateDXGIFactory1=XboxCreateDXGIFactory1
-    CreateDXGIFactory2=XboxCreateDXGIFactory2
-    XboxGetOutputMonitorRect
-    D3DReflect=XboxD3DReflect
-    D3DGetInputSignatureBlob=XboxD3DGetInputSignatureBlob
-    DCompositionCreateDevice=XboxDCompositionCreateDevice
-    XboxInstallGpuMemoryBudget
+    CreateDXGIFactory=XboxCreateDXGIFactory @1
+    CreateDXGIFactory1=XboxCreateDXGIFactory1 @2
+    CreateDXGIFactory2=XboxCreateDXGIFactory2 @3
+    D3DGetInputSignatureBlob=XboxD3DGetInputSignatureBlob @4
+    D3DReflect=XboxD3DReflect @5
+    XboxGetOutputMonitorRect @6
+    D3D11CreateDeviceAndSwapChain=XboxD3D11CreateDeviceAndSwapChain @7
+    DCompositionCreateDevice=XboxDCompositionCreateDevice @8
+    XboxInstallGpuMemoryBudget @9

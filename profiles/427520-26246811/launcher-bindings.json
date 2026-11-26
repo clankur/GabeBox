@@ -1,0 +1,35 @@
+{
+  "gdiplus.dll": {
+    "GdipAlloc": "XboxWin32GdiPlus.dll",
+    "GdipBitmapLockBits": "XboxWin32GdiPlus.dll",
+    "GdipBitmapUnlockBits": "XboxWin32GdiPlus.dll",
+    "GdipCloneImage": "XboxWin32GdiPlus.dll",
+    "GdipCreateBitmapFromScan0": "XboxWin32GdiPlus.dll",
+    "GdipCreateBitmapFromStream": "XboxWin32GdiPlus.dll",
+    "GdipDisposeImage": "XboxWin32GdiPlus.dll",
+    "GdipFree": "XboxWin32GdiPlus.dll",
+    "GdipGetImageEncoders": "XboxWin32GdiPlus.dll",
+    "GdipGetImageEncodersSize": "XboxWin32GdiPlus.dll",
+    "GdipGetImageHeight": "XboxWin32GdiPlus.dll",
+    "GdipGetImageWidth": "XboxWin32GdiPlus.dll",
+    "GdipSaveImageToStream": "XboxWin32GdiPlus.dll",
+    "GdiplusShutdown": "XboxWin32GdiPlus.dll",
+    "GdiplusStartup": "XboxWin32GdiPlus.dll"
+  },
+  "imm32.dll": {
+    "ImmGetIMEFileNameA": "XboxWin32Input.dll"
+  },
+  "shell32.dll": {
+    "SHGetFolderPathW": "XboxWin32Desktop.dll"
+  },
+  "kernel32.dll": {
+    "GetModuleFileNameW": "XboxWin32LoaderTrace.dll",
+    "GetProcAddress": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryA": "XboxWin32LoaderTrace.dll",
+    "LoadLibraryW": "XboxWin32LoaderTrace.dll"
+  },
+  "user32.dll": {
+    "CreateIconFromResourceEx": "XboxWin32Input.dll",
+    "GetRawInputBuffer": "XboxWin32Input.dll"
+  }
+}
