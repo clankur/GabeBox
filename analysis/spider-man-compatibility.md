@@ -304,6 +304,16 @@ python3 profiles/1817070/23986256/prepare-mip-overlay.py \
 
 Omit the archive filter for the full texture set. Add `--with-model-lod` to also generate `local_model1356_lod3_20260916.dsar` and include its verified routes in the same generated TOC. The model preparation retains authored geometry and checks both input and output SHA-256 for every selected asset.
 
+`prepare-texture-restore.py` rebuilds the reference's texture-restore archives. It joins each texture's HD and base mip chains and drops mips above the recipe's 512- or 1024-pixel cap. It checks every source, HD and output SHA-256 and each archive's logical SHA-256 in `batch.tsv`. It extends an existing overlay TOC (`--base-toc`), which must equal the original apart from routes into added archives. The reference routes the 242 restored assets to the restore archives and not to the mip archive, so the restore routes win. `local_street12_sd512` is verified only, because `local_ground29_1024` supersedes all 12 of its routes in both reference TOCs. The diagnostic loader routes only `toc`, `local_mip256_hdclosed.dsar` and `local_model1356_lod3_20260916.dsar`. Use `--append-to` with the trial's model archive to add the restored textures to that slot instead of new archive files. Add `--remote-archives --portal-env` to read source and HD ranges from the Xbox install, and `--cache` to reuse them. [Texture restore tool](../profiles/1817070/23986256/prepare-texture-restore.py)
+
+```sh
+python3 profiles/1817070/23986256/prepare-texture-restore.py \
+  "$owned_game/asset_archive" "$reference/asset-preparation/recipes" "$trial/restored" \
+  --base-toc "$layout/owned-mip-overlay/toc" \
+  --append-to "$layout/owned-mip-overlay/local_model1356_lod3_20260916.dsar" \
+  --cache "$ranges" --remote-archives --portal-env "$xbox_env"
+```
+
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
 
 After running `python3 -m build_tools.verify_win32_source --build 23986256` against an owned local installation, use `python3 -m build_tools.redirect_pe_imports --recipe --signed-source-sha256` with each image's fingerprint from the source list. Use `launcher-bindings.json` for `Spider-Man.exe` and save its recipe as `steam-win32-shadow-1817070.xwp`. Include `controller-init-overlay.json` in the executable recipe's `--overlays` manifest when testing the hosted XInput path. Copy `steam-win32-adapters-1817070.json` into the profile directory. It requires `XboxWin32XInput910.dll` from the checksum-pinned Steam Core artifact. Use `crashpad-bindings.json` for `crs-client.dll` and save its recipe as `steam-win32-shadow-1817070-crashpad.xwp`. Use `bink-bindings.json` for `bink2w64.dll` and save its recipe as `steam-win32-shadow-1817070-bink.xwp`. Supply the directory as `--win32-trial-profile 1817070=DIR` and select the hosted player with `--surfaceless-profile 1817070=23986256`. [Build profile](../profiles/1817070/23986256) · [Package builder](../build_tools/prepare_big_picture_library.py)
@@ -418,7 +428,7 @@ Still unknown:
 
 The bound on the frame is unresolved.
 
-**Missing surface textures.** The hero is drawn as an untextured silhouette, and road surfaces show a mirrored sky. The recipe caps every routed texture at 256 pixels. The reference also applies eight texture-restore recipes, which `prepare-mip-overlay.py` does not support yet:
+**Missing surface textures.** The hero is drawn as an untextured silhouette, and road surfaces show a mirrored sky. The recipe caps every routed texture at 256 pixels. The reference also applies eight texture-restore recipes, which `prepare-texture-restore.py` now generates (untested on Xbox):
 
 - `local_ground29_1024`
 - `local_street12_sd512`
