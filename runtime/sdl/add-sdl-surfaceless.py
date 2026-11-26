@@ -18,7 +18,7 @@ def add_surfaceless(tree):
         shutil.copyfile(Path(__file__).with_name(filename), offscreen / filename)
 
     shared = Path(__file__).resolve().parent.parent / 'shared'
-    for filename in ('sdl-gpu-protocol.h', 'sdl-swap-clock.h'):
+    for filename in ('sdl-gpu-protocol.h', 'sdl-gpu-probe.h', 'sdl-gpu-probe-stats.h', 'sdl-swap-clock.h'):
         shutil.copyfile(shared / filename, offscreen / filename)
 
     cmake = tree / 'CMakeLists.txt'

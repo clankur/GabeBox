@@ -49,6 +49,12 @@ def frame(launch, magic=0x31444846):
             + diagnostics.PRESENT.pack(120, 42, 1, 2))
 
 
+def flash_probe(launch):
+    from tools import flash_probe as probe
+    return (probe.HEADER.pack(probe.MAGIC, 1, 10_000_000, diagnostics.FILETIME_EPOCH + launch * 10_000, 12, 16, 32, 235, 0)
+            + probe.RECORD.pack(120, 42, 2, 0, 0, 40 * 256, 0, 512, 30, 50, 7))
+
+
 def stage(name, created_ms):
     return {'Name': name, 'DateCreated': diagnostics.FILETIME_EPOCH + created_ms * 10_000}
 
@@ -207,7 +213,8 @@ class ObserverTests(unittest.TestCase):
                  b'added=utility:52 removed=-\r\n'
                  b'webview2 processes env=1 path=C:\\private-secret\r\n'
                  b'webview2 processes env=1 utc=2026-11-26T04:01:47.000Z tick_ms=106650 error=0x80004005\r\n',
-             'fhd-present-times.bin': frame(launch)},
+             'fhd-present-times.bin': frame(launch),
+             'fhd-flash-probe.bin': flash_probe(launch) + b'partial'},
         ], stages=[
             [{'Name': 'SteamWin32Trial', 'DateCreated': 1}],
             [],
@@ -227,6 +234,7 @@ class ObserverTests(unittest.TestCase):
                              'Version:  Direct3D 11.0 [level 11.0]\n'
                              'Trying to allocate: 32722834112B with 16 alignment. MemoryLabel: TempOverflow\n')
             self.assertEqual((output / 'fhd-present-times.bin').read_bytes(), frame(launch))
+            self.assertEqual((output / 'fhd-flash-probe.bin').read_bytes(), flash_probe(launch))
             self.assertEqual((output / 'bootstrap.bmp').read_bytes(), bmp())
             self.assertEqual((output / 'webview2-processes.txt').read_text(), (
                 'webview2 environment env=1 utc=2026-11-26T04:00:01.250Z tick_ms=900 arguments=package-file '

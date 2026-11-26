@@ -659,6 +659,20 @@ extern "C" HRESULT FhdPanelStatus(HSTRING* out) noexcept {
         field(L"gpu_wait_producer", exchange.notReady); field(L"gpu_held", exchange.held);
         field(L"gpu_released_unshown", exchange.released); field(L"gpu_drawn", exchange.drawn);
         field(L"gpu_ready_fence", exchange.readyValue); field(L"gpu_done_fence", exchange.doneValue);
+        // The opt-in white-flash probe (flash-probe.h), only when fhd-flash-probe.txt enables it.
+        if (const auto &flash = exchange.flash; flash.enabled) {
+            field(L"flash_probe", 1); field(L"flash_producer", flash.producer);
+            field(L"flash_frames", flash.frames); field(L"flash_output_frames", flash.outputFrames);
+            field(L"flash_game_frames", flash.gameFrames); field(L"white_frames", flash.white);
+            field(L"white_runs", flash.runs); field(L"white_output_frames", flash.whiteOutput);
+            field(L"white_game_frames", flash.whiteGame); field(L"flash_matched", flash.matched);
+            field(L"flash_mismatched", flash.mismatched); field(L"flash_skipped", flash.skipped);
+            field(L"flash_game_skipped", flash.gameSkipped); field(L"flash_game_lost", flash.gameLost);
+            field(L"flash_captures", flash.captures);
+            WCHAR first[32];
+            FhdUtcText(flash.firstUtc, first);
+            if (first[0]) { text += L"white_first_utc="; text += first; text += L"\r\n"; }
+        }
         field(L"panel_hidden", s.hidden); field(L"panel_hidden_shell", s.hiddenShell);
         field(L"panel_hidden_panel", s.hiddenPanel); field(L"panel_hidden_window", s.hiddenWindow);
         field(L"panel_uncovered", s.uncovered); field(L"panel_reordered", s.reordered);

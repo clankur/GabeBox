@@ -11,7 +11,38 @@
 // drawn: frames drawn after a GPU wait on their ready fence.
 // readyValue/doneValue: the drawn slot's completed producer fence when it was polled,
 //   and the consumer fence value signalled for it (the drawn sequence).
-struct HostedGpuCounters { UINT64 notReady, held, released, drawn, readyValue, doneValue; };
+// The opt-in white-flash probe (flash-probe.h), all zero unless fhd-flash-probe.txt is in the
+// package root. frames/outputFrames/gameFrames count sampled frames of the exchange texture, the
+// presenter's output and the game's renderbuffer (from the producer). white/whiteOutput/whiteGame
+// count those flagged as a flash or uniformly white, runs counts white runs of exchange frames.
+// matched/mismatched compare the game and exchange hashes of one sequence. producer is 0 before
+// a producer reads the probe sidecar, 1 while it samples, else its failed setup HRESULT.
+// firstUtc is the FILETIME of the first white frame from any source.
+struct HostedFlashCounters {
+    UINT64 enabled, producer, frames, outputFrames, gameFrames, white, runs, whiteOutput, whiteGame;
+    UINT64 matched, mismatched, skipped, gameSkipped, gameLost, captures, firstUtc;
+};
+struct HostedGpuCounters { UINT64 notReady, held, released, drawn, readyValue, doneValue; HostedFlashCounters flash; };
+
+// ISO 8601 UTC with milliseconds, or an empty string for 0.
+inline void FhdUtcText(UINT64 filetime, WCHAR (&out)[32]) {
+    out[0] = 0;
+    FILETIME value{static_cast<DWORD>(filetime), static_cast<DWORD>(filetime >> 32)};
+    SYSTEMTIME t{};
+    if (!filetime || !FileTimeToSystemTime(&value, &t)) return;
+    const UINT fields[] = {t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds};
+    const UINT widths[] = {4, 2, 2, 2, 2, 2, 3};
+    const WCHAR separators[] = {L'-', L'-', L'T', L':', L':', L'.', L'Z'};
+    UINT n = 0;
+    for (UINT i = 0; i < 7; ++i) {
+        for (UINT d = widths[i], v = fields[i]; d; --d) { out[n + d - 1] = static_cast<WCHAR>(L'0' + v % 10); v /= 10; }
+        n += widths[i];
+        out[n++] = separators[i];
+    }
+    out[n] = 0;
+}
+
+class FhdFlashProbe;
 
 // Use on the thread owning the dedicated presentation context; drawing replaces its pipeline state.
 class HostedGpuReceiver {
@@ -32,11 +63,12 @@ public:
     const char *Stage() const { return stage_; }
     bool Active() const;
     UINT64 ProducerSequence() const;
-    HostedGpuCounters Counters() const { return counters_; }
+    HostedGpuCounters Counters() const;
     void Close();
 private:
     struct Resources;
     Resources *resources_ = nullptr, *cpu_ = nullptr;
+    FhdFlashProbe *probe_ = nullptr;
     HostedGpuCounters counters_{};
     UINT lastWidth_=0, lastHeight_=0;
     SdlGpuMailbox *mailbox_ = nullptr;

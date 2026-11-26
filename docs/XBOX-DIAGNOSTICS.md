@@ -153,6 +153,63 @@ The presenter counts what the panel went through, and reports the totals in the 
 
 During steady gameplay, `added` should show no hides, shows or reorders. A flicker with rising `panel_hidden_window` points at the view's activation. Rising `panel_hidden_shell` points at Big Picture's foreground state. Rising `panel_reordered` points at a layer moving over the game. If all of them stay at zero while the flicker is visible, the cause is inside the frames themselves.
 
+### White-flash probe
+
+Device Portal screenshots cannot catch the flash in [#89](https://github.com/clankur/GabeBox/issues/89). Each one stalls presentation for about half a second and may read a different surface: a 150-shot burst flagged no white frame. The presenter can instead measure every shared-texture frame it draws, on the GPU, without making the CPU wait. To turn it on, put an empty `fhd-flash-probe.txt` in the package root before packing and signing. Add `fhd-measure.txt` as well to tie flashes to presents. Without the marker nothing is created and nothing is sampled.
+
+The probe reads the same 16 full-width rows of each frame in three places. Row `r` is texture row `(2r+1)·height/32`, counted from the top of the raw texture before `flip_y`. Each row is split into 32 cells. The rows are 67 lines apart at 1080 lines, so a white block shorter than that can fall between them; a whole-screen flash or a card-sized block cannot.
+
+| Source | Where | Copied |
+| --- | --- | --- |
+| `game` | the game's renderbuffer, before the producer's copy into the exchange texture | on Mesa's queue, in the same command list as the copy, into a readback buffer ([producer](../runtime/sdl/sdl-gpu-producer.cpp)) |
+| `exchange` | the exchange texture the presenter draws | after the presenter's GPU wait on the slot's ready fence and before its done signal |
+| `output` | the presenter's render target after its draw, cursor included | in the same frame |
+
+The presenter copies its rows into staging textures and maps them a few frames later with `D3D11_MAP_FLAG_DO_NOT_WAIT`. The producer reads its readback buffer once the slot's ready fence has passed. Each side keeps four readbacks in flight. When all four are still busy, that frame is skipped and counted, never waited for. The producer publishes its records through `<mailbox>.probe`, a 2 KiB sidecar that the presenter creates beside `<mailbox>.gpu` only when the marker is present ([sidecar](../runtime/shared/sdl-gpu-probe.h)). Each record carries the mean luma, the number of near-white cells (cell mean luma ≥ 235), the lowest and highest cell means, and an FNV-1a hash of the sampled pixels. For one sequence, equal `game` and `exchange` hashes mean the exchange delivered the game's pixels unchanged.
+
+A frame is flagged as a flash when it is brighter than the median of up to eight earlier frames from the same source, and one of the next three frames is back near that median. Brighter means at least 40 levels of mean luma (to at least 128), or at least `max(8, cells/64)` more near-white cells. A brighter level that lasts longer is a scene change and is not flagged. A frame whose every cell is near white is flagged `uniform_white` on its own. The rule is in [`flash-detector.h`](../runtime/presenter/flash-detector.h), and [`tools/flash_probe.py`](../tools/flash_probe.py) applies the same rule.
+
+Files in the package's `LocalState`:
+
+| File | Contents |
+| --- | --- |
+| `fhd-flash-probe.bin` | 48-byte header (magic `FHDF`, version 1, QPC frequency, UTC and QPC at open, rows, cells, white threshold), then 32-byte records: QPC, sequence, source (1 game, 2 exchange, 3 output, 4 capture), slot, flags (1 flash, 2 uniform white, 4 hash differs from the other side), mean luma × 256, white cells, cells, lowest and highest cell luma, hash. Batches are written every two seconds and at once for a white frame. |
+| `fhd-flash-summary.txt` | The counters below, rewritten at most once a second |
+| `fhd-flash-<utc>-<event>-<role>-<sequence>.bmp` | 480 × 270 copies of the exchange texture. Event 0 is a `baseline` frame about ten seconds in, so the capture path is known to work. Events 1–3 are the first frame of the first three white runs (`flash`) and the frame drawn before each (`before`). The presenter keeps a ring of twelve thumbnails so the frame is still there when its readback reports it. |
+
+The panel status, the hosted session report and the `game_frame_media` line of the Big Picture report carry the same counters while the probe is on:
+
+| Field | Meaning |
+| --- | --- |
+| `flash_probe` | 1 when the marker enabled the probe |
+| `flash_producer` | 0 before a producer opened the sidecar, 1 while it samples, otherwise its failed setup HRESULT |
+| `flash_frames`, `flash_output_frames`, `flash_game_frames` | sampled `exchange`, `output` and `game` frames |
+| `white_frames`, `white_runs` | `exchange` frames flagged as a flash or uniformly white, and runs of them |
+| `white_output_frames`, `white_game_frames` | the same for `output` and `game` |
+| `flash_matched`, `flash_mismatched` | sequences whose `game` and `exchange` hashes matched or differed |
+| `flash_skipped`, `flash_game_skipped`, `flash_game_lost` | presenter readbacks skipped while busy, producer frames skipped while busy, producer records lost before the presenter read them |
+| `flash_captures` | bitmaps written |
+| `white_first_utc` | the first white frame from any source |
+
+Cost per frame: 32 one-row copies (about 250 KB at 1920 wide) and one 480 × 270 draw on the presenter's GPU, 16 one-row copies on the game's queue, and the reduction of about 30,000 pixels on each side's CPU, tens of microseconds. Memory: about 1 MiB of staging, 6 MiB of thumbnails and 0.5 MiB of readback. The record file grows by about 6 KB per second. Writing a bitmap takes one synchronous 389 KB write on the UI thread, at most seven times per run. Shared-texture frames are measured, CPU-upload frames are not. Only the Mesa SDL producer samples the `game` side. For a game that publishes through DXGI ([`dxgi-frame.cpp`](../runtime/win32/dxgi-frame.cpp)), only `exchange` and `output` are recorded, and every flash is reported as `unattributed`.
+
+`observe --app-id --output …` copies `fhd-flash-probe.bin` along with `fhd-present-times.bin`, up to 16 MiB (about 45 minutes). For a longer run, copy it with `get-file`. Copy the summary and the bitmaps with `get-file`, then list the white frames:
+
+```sh
+python3 -m tools.xbox_deploy get-file '\LocalState' fhd-flash-summary.txt --output flash-run/fhd-flash-summary.txt
+python3 -m tools.xbox_deploy list-files '\LocalState' --since-utc "$launch_utc"   # fhd-flash-*.bmp
+python3 -m tools.flash_probe flash-run/fhd-flash-probe.bin --present-trace flash-run/fhd-present-times.bin
+```
+
+The report counts each source's frames and white frames. For every white `exchange` or `output` frame it gives the UTC time, the three sources' statistics for that sequence and the present index. It names the `origin`:
+
+- `game`: the game's renderbuffer already held these pixels before the copy. The white comes from the game or Mesa.
+- `exchange`: the pixels changed between the renderbuffer and the exchange texture. The fault is in the copy or the slot protocol.
+- `presenter-draw`: the exchange texture was normal but the presenter's output was white.
+- `unattributed`: no `game` record for that sequence.
+
+`game_only_white_frames` lists white game frames that were never drawn, or that were drawn without being white. `hash_mismatches` counts sequences whose hashes differ even when nothing was white. A flash seen at the console with no white record from any source happened after the presenter's draw, in composition or display. The [panel composition counters](#panel-composition-counters) cover that path.
+
 ## Drive a hosted game with remote input
 
 `python3 -m tools.xbox_remote_input` sends controller, keyboard and mouse input through Device Portal's `/ext/remoteinput` WebSocket. The presenter merges the controller presses into the hosted pad, so games reading hosted XInput receive them as controller input. Each step can be followed by a screenshot:
@@ -230,6 +287,7 @@ The runtime deletes the staging folder, and its raw `loader-trace.txt`, when the
 | `loader-trace.txt` | Filtered loader records from the launch report, the child exit report, or a uniquely matched new staging folder |
 | `loader-diagnostics.txt` | Every audio meter, pipeline timing and device-removed record copied from the live staging folder, in order |
 | `fhd-present-times.bin` | Native frame timestamps whose header belongs to the observed game launch window |
+| `fhd-flash-probe.bin` | White-flash probe records whose header belongs to the observed game launch window, cut to whole records ([white-flash probe](#white-flash-probe)) |
 | `bootstrap.bmp` | Optional startup image requested with `--bootstrap-frame` |
 
 The native launch and exit reports retain up to 24 KiB of complete allowlisted records from the last 28 KiB of the loader trace. With `--output`, for a launch that reports `steam_shadow_stage=verified-local-copy`, the observer copies the live trace on every poll while the game runs, up to 1 MiB, so the copy survives the staging folder's removal at exit. A new observation selects the one staging folder that was not present at its baseline. With `--run-id`, it selects the one folder created within five minutes of that launch. `live_loader` in the result names the folder, the number of successful reads, and the time and size of the last read. Records written after the last read, normally less than a few seconds before exit, are not copied. `loader-trace.txt` keeps up to 128 recent distinct general records. `loader-diagnostics.txt` keeps up to 4096 measurement records without merging repeats. After a named child exit, the observer allows up to three seconds within its existing deadline for the terminal trace to appear.

@@ -811,6 +811,20 @@ test("the game frame report keeps the shared-texture exchange counters", async (
         "gpu_done_fence=1803\r\n"));
 });
 
+test("the game frame report keeps the white-flash probe counters", async () => {
+    // clankur/GabeBox#89: the opt-in probe's counters and the first white frame's time reach
+    // the report; a malformed time does not.
+    const appId = 2868840, {app} = await playingPrimaryGame(appId);
+    app.shell.recordGameFrame(appId, "media", "primary_panel=1\r\nflash_probe=1\r\nflash_producer=1\r\n" +
+        "flash_frames=1800\r\nflash_game_frames=1795\r\nwhite_frames=2\r\nwhite_runs=1\r\n" +
+        "flash_mismatched=0\r\nflash_captures=3\r\nwhite_first_utc=2026-11-26T09:36:55.123Z\r\n" +
+        "white_first_utc=yesterday\r\nflash_secret=1\r\n");
+    await drain();
+    assert.match(app.reports.at(-1), new RegExp("game_frame_media=appid=2868840 primary_panel=1 flash_probe=1 " +
+        "flash_producer=1 flash_frames=1800 flash_game_frames=1795 white_frames=2 white_runs=1 flash_mismatched=0 " +
+        "flash_captures=3 white_first_utc=2026-11-26T09:36:55\\.123Z\r\n"));
+});
+
 test("a confirmation detail outside the bounded field list is not written to the report", async () => {
     const appId = 42, {app} = await playingPrimaryGame(appId);
     const confirm = async () => ({ok: true, detail: "token=abc\r\nstatus=forged"});

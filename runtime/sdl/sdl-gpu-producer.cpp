@@ -9,6 +9,7 @@
 #include "SDL_loadso.h"
 #include "../../sdl-startup-trace.h"
 #include "sdl-gpu-protocol.h"
+#include "sdl-gpu-probe.h"
 #include "mesa-glinterop.h"
 
 namespace {
@@ -34,8 +35,22 @@ struct Slot {
         release(list); release(allocator); release(source); release(texture); release(ready); release(done);
     }
 };
+// One in-flight copy of the probe rows of a published frame (sdl-gpu-probe.h).
+struct ProbeReadback {
+    ID3D12Resource *buffer = nullptr;
+    const uint8_t *rows = nullptr; // persistently mapped readback memory
+    UINT64 sequence = 0;
+    INT64 counter = 0;
+    unsigned slot = 0;
+    bool pending = false;
+};
 struct Producer {
     SdlGpuMailbox *box = nullptr;
+    SdlGpuProbeMailbox *probe = nullptr;
+    ProbeReadback readback[SDL_GPU_PROBE_DEPTH];
+    DXGI_FORMAT probeFormat = DXGI_FORMAT_UNKNOWN;
+    UINT probePitch = 0, probeStride = 0;
+    LONG64 probeWritten = 0;
     void *display = nullptr, *context = nullptr;
     decltype(&MesaGLInteropEGLExportObject) export_object = nullptr;
     decltype(&MesaGLInteropEGLFlushObjects) flush_objects = nullptr;
@@ -61,6 +76,11 @@ struct Producer {
             if (s.submitted && s.ready->GetCompletedValue() < s.submitted)
                 s.ready->SetEventOnCompletion(s.submitted, nullptr);
         for (auto &s : slots) s.close();
+        for (auto &r : readback) {
+            if (r.rows) r.buffer->Unmap(0, nullptr);
+            release(r.buffer);
+        }
+        if (probe) UnmapViewOfFile(probe);
         if (box) UnmapViewOfFile(box);
         release(mesa.queue); release(mesa.device);
     }
@@ -164,6 +184,114 @@ HRESULT create_slot(Producer *p, Slot &s, D3D12_RESOURCE_DESC desc, unsigned i, 
     }
     return hr;
 }
+// The probe is opt-in: the presenter creates "<mailbox>.probe" only when the package enables it.
+// Any failure here leaves the exchange untouched and is reported through the sidecar.
+void open_probe(Producer *p, DXGI_FORMAT source_format) {
+    WCHAR path[1024];
+    DWORD n = GetEnvironmentVariableW(L"XBOX_SDL_HOST_MAILBOX", path, ARRAYSIZE(path));
+    if (!n || n + 7 > ARRAYSIZE(path)) return;
+    SDL_memcpy(path + n, L".probe", 7 * sizeof(WCHAR));
+    HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER size = {};
+    HANDLE mapping = GetFileSizeEx(file, &size) && size.QuadPart == sizeof(SdlGpuProbeMailbox)
+        ? CreateFileMappingFromApp(file, nullptr, PAGE_READWRITE, 0, nullptr) : nullptr;
+    CloseHandle(file);
+    if (!mapping) return;
+    auto *probe = static_cast<SdlGpuProbeMailbox *>(MapViewOfFileFromApp(mapping, FILE_MAP_WRITE, 0, sizeof(SdlGpuProbeMailbox)));
+    CloseHandle(mapping);
+    if (!probe) return;
+    if (InterlockedCompareExchange(&probe->magic, 0, 0) != SDL_GPU_PROBE_MAGIC) { UnmapViewOfFile(probe); return; }
+    p->probe = probe;
+    p->probeFormat = source_format;
+    p->probePitch = ((UINT)p->width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    p->probeStride = (p->probePitch + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+    p->probeWritten = InterlockedCompareExchange64(&probe->written, 0, 0);
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = (UINT64)p->probeStride * SDL_GPU_PROBE_ROWS;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    HRESULT hr = S_OK;
+    for (auto &r : p->readback) {
+        hr = p->mesa.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     nullptr, IID_PPV_ARGS(&r.buffer));
+        void *rows = nullptr;
+        if (SUCCEEDED(hr)) hr = r.buffer->Map(0, nullptr, &rows);
+        if (FAILED(hr)) break;
+        r.rows = static_cast<const uint8_t *>(rows);
+    }
+    if (FAILED(hr)) {
+        for (auto &r : p->readback) {
+            if (r.rows) r.buffer->Unmap(0, nullptr);
+            release(r.buffer);
+            r.rows = nullptr;
+        }
+        InterlockedExchange(&probe->producer, (LONG)hr);
+        UnmapViewOfFile(probe);
+        p->probe = nullptr;
+        XboxSdlTrace("sdl_gpu_probe=failed\n");
+        return;
+    }
+    InterlockedExchange(&probe->producer, 1);
+    XboxSdlTrace("sdl_gpu_probe=sampling\n");
+}
+// Appends finished readbacks to the sidecar in sequence order. Never waits on the GPU.
+void probe_collect(Producer *p) {
+    for (;;) {
+        ProbeReadback *next = nullptr;
+        for (auto &r : p->readback) {
+            if (!r.pending) continue;
+            const UINT64 completed = p->slots[r.slot].ready->GetCompletedValue();
+            if (completed == UINT64_MAX || completed < r.sequence) continue;
+            if (!next || r.sequence < next->sequence) next = &r;
+        }
+        if (!next) return;
+        next->pending = false;
+        SdlGpuProbeStats stats;
+        SdlGpuProbeMeasure(next->rows, p->probeStride, (unsigned)p->width, p->format == DXGI_FORMAT_B8G8R8A8_UNORM, &stats);
+        SdlGpuProbeRecord &record = p->probe->ring[p->probeWritten % SDL_GPU_PROBE_RING];
+        InterlockedExchange64(&record.sequence, 0);
+        record.counter = next->counter;
+        record.stats = stats;
+        record.slot = next->slot;
+        InterlockedExchange64(&record.sequence, (LONG64)next->sequence);
+        InterlockedExchange64(&p->probe->written, ++p->probeWritten);
+    }
+}
+// Records copies of the probe rows of source, which is in COPY_SOURCE state on this list.
+ProbeReadback *probe_record(Producer *p, ID3D12GraphicsCommandList *list, ID3D12Resource *source) {
+    ProbeReadback &r = p->readback[p->next % SDL_GPU_PROBE_DEPTH];
+    if (r.pending) {
+        InterlockedIncrement64(&p->probe->skipped);
+        return nullptr;
+    }
+    D3D12_TEXTURE_COPY_LOCATION from = {};
+    from.pResource = source;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    from.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION to = {};
+    to.pResource = r.buffer;
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint.Footprint.Format = p->probeFormat;
+    to.PlacedFootprint.Footprint.Width = (UINT)p->width;
+    to.PlacedFootprint.Footprint.Height = 1;
+    to.PlacedFootprint.Footprint.Depth = 1;
+    to.PlacedFootprint.Footprint.RowPitch = p->probePitch;
+    for (unsigned row = 0; row < SDL_GPU_PROBE_ROWS; ++row) {
+        const UINT y = SdlGpuProbeRowY(row, (unsigned)p->height);
+        const D3D12_BOX box = {0, y, 0, (UINT)p->width, y + 1, 1};
+        to.PlacedFootprint.Offset = (UINT64)row * p->probeStride;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+    }
+    return &r;
+}
+
 bool initialize(Producer *p, void *egl, void *display, void *context, void *flush, unsigned color, int w, int h, int *retry) {
     if (!egl || !display || !context || !flush) return fail(p, "context", E_NOINTERFACE);
     auto query = reinterpret_cast<decltype(&MesaGLInteropEGLQueryDeviceInfo)>(SDL_LoadFunction(egl, "MesaGLInteropEGLQueryDeviceInfo"));
@@ -180,6 +308,7 @@ bool initialize(Producer *p, void *egl, void *display, void *context, void *flus
     auto *source = export_color(p, color);
     if (!source) return fail(p, "mesa-renderbuffer", E_NOINTERFACE);
     D3D12_RESOURCE_DESC desc = source->GetDesc();
+    const DXGI_FORMAT source_format = desc.Format;
     desc.Format = exchange_format(desc.Format);
     if (desc.Format == DXGI_FORMAT_UNKNOWN || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
         desc.DepthOrArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1 ||
@@ -215,6 +344,7 @@ bool initialize(Producer *p, void *egl, void *display, void *context, void *flus
         HRESULT hr = create_slot(p, p->slots[i], desc, i, guid);
         if (FAILED(hr)) return fail(p, "share-slot", hr);
     }
+    open_probe(p, source_format);
     InterlockedExchange(&p->box->generation, p->generation);
     XboxSdlTrace("sdl_gpu_interop=published\n");
     return true;
@@ -291,6 +421,7 @@ extern "C" int XboxSdlGpuFrame(void *state, int host_bound, unsigned color, Uint
     Slot &s = p->slots[i];
     UINT64 ready = s.ready->GetCompletedValue(), done = s.done->GetCompletedValue();
     if (ready == UINT64_MAX || done == UINT64_MAX) return fail(p, "device-removed", DXGI_ERROR_DEVICE_REMOVED);
+    if (p->probe) probe_collect(p);
     if (ready < s.submitted || done < s.submitted)
         return InterlockedCompareExchange(&p->box->gpu_active, 0, 0) != 0;
     release(s.source);
@@ -325,6 +456,7 @@ extern "C" int XboxSdlGpuFrame(void *state, int host_bound, unsigned color, Uint
     transition(s.list, source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
     transition(s.list, s.texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
     s.list->CopyResource(s.texture, source);
+    ProbeReadback *sampled = p->probe && source_desc.Format == p->probeFormat ? probe_record(p, s.list, source) : nullptr;
     transition(s.list, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     transition(s.list, s.texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
     hr = s.list->Close();
@@ -333,6 +465,14 @@ extern "C" int XboxSdlGpuFrame(void *state, int host_bound, unsigned color, Uint
     p->mesa.queue->ExecuteCommandLists(1, lists);
     hr = p->mesa.queue->Signal(s.ready, p->next);
     if (FAILED(hr)) return fail(p, "signal", hr);
+    if (sampled) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        sampled->sequence = p->next;
+        sampled->counter = now.QuadPart;
+        sampled->slot = i;
+        sampled->pending = true;
+    }
     s.submitted = p->next++;
     auto &cursor = p->box->cursor[i];
     if (shape && cursor.shape != shape) {

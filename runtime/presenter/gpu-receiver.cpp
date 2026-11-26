@@ -1,6 +1,7 @@
 #include "gpu-receiver.h"
 #include "sdl-blit-shaders.h"
 #include "pointer-cursor.h"
+#include "flash-probe.h"
 #include <d3d12.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -13,6 +14,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 struct Vertex { float x,y,u,v; UINT color; };
 struct SharedSlot {
+    ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> srv;
     ComPtr<ID3D11Fence> ready, done;
     UINT64 retired = 0;
@@ -40,6 +42,7 @@ HRESULT openSlot(ID3D12Device *lookup, ID3D11Device5 *device, SharedSlot &slot,
             if (desc.Width!=width || desc.Height!=height || desc.Format!=format || desc.MipLevels!=1 ||
                     desc.ArraySize!=1 || desc.SampleDesc.Count!=1) return E_INVALIDARG;
             hr=device->CreateShaderResourceView(texture.Get(),nullptr,&slot.srv);
+            slot.texture=texture;
         } else {
             auto &fence = i==1 ? slot.ready : slot.done;
             hr=device->OpenSharedFence(handle.value,IID_PPV_ARGS(&fence));
@@ -181,9 +184,34 @@ struct HostedGpuReceiver::Resources {
         source=nullptr; context->PSSetShaderResources(0,1,&source);
         context->OMSetRenderTargets(0,nullptr,nullptr);
     }
+    // Stretches source over a whole render target, for the flash probe's thumbnails.
+    void blit(ID3D11RenderTargetView *target, UINT w, UINT h, ID3D11ShaderResourceView *source) {
+        const D3D11_VIEWPORT viewport{0.f,0.f,float(w),float(h),0.f,1.f};
+        context->OMSetRenderTargets(1,&target,nullptr);
+        context->OMSetBlendState(nullptr,nullptr,~0u);
+        context->RSSetState(nullptr);
+        context->RSSetViewports(1,&viewport);
+        context->IASetInputLayout(layout.Get());
+        UINT stride=sizeof(Vertex), offset=0;
+        context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context->VSSetShader(vertex.Get(),nullptr,0);
+        context->VSSetConstantBuffers(0,1,matrices.GetAddressOf());
+        context->PSSetShader(pixel.Get(),nullptr,0);
+        context->PSSetSamplers(0,1,sampler.GetAddressOf());
+        context->PSSetShaderResources(0,1,&source);
+        context->Draw(4,0);
+        source=nullptr; context->PSSetShaderResources(0,1,&source);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+    }
 };
 
 HostedGpuReceiver::~HostedGpuReceiver() { Close(); }
+HostedGpuCounters HostedGpuReceiver::Counters() const {
+    HostedGpuCounters counters=counters_;
+    if (probe_) counters.flash=probe_->counters();
+    return counters;
+}
 UINT64 HostedGpuReceiver::ProducerSequence() const {
     if (!mailbox_) return 0;
     const auto first = load64(&mailbox_->sequence[0]);
@@ -215,6 +243,8 @@ HRESULT HostedGpuReceiver::Open(const wchar_t *mailboxPath) {
     if (mapping.value) mailbox_=static_cast<SdlGpuMailbox*>(MapViewOfFileFromApp(mapping.value,FILE_MAP_WRITE,0,sizeof(SdlGpuMailbox)));
     if (!mailbox_) { auto hr=HRESULT_FROM_WIN32(GetLastError()); Close(); return hr; }
     if (!created && load(&mailbox_->magic)!=SDL_GPU_MAGIC) {Close();return E_INVALIDARG;}
+    // Before the magic below, so a producer that finds the exchange also finds the probe sidecar.
+    probe_=FhdFlashProbe::create(mailboxPath);
     InterlockedExchange(&mailbox_->supports_cursor,1);
     InterlockedExchange(&mailbox_->magic,SDL_GPU_MAGIC);
     counters_={};
@@ -227,10 +257,14 @@ bool HostedGpuReceiver::Active() const {
 void HostedGpuReceiver::Disconnect() {
     if (mailbox_ && accepted_) InterlockedCompareExchange(&mailbox_->accepted_generation,0,accepted_);
     accepted_=0;
-    if (resources_) {resources_->~Resources();HeapFree(GetProcessHeap(),0,resources_);resources_=nullptr;}
+    if (resources_) {
+        if (probe_) probe_->reset();
+        resources_->~Resources();HeapFree(GetProcessHeap(),0,resources_);resources_=nullptr;
+    }
 }
 void HostedGpuReceiver::Close() {
     Disconnect();
+    FhdFlashProbe::destroy(probe_); probe_=nullptr;
     if (mailbox_) { UnmapViewOfFile(mailbox_); mailbox_=nullptr; }
     if (file_!=INVALID_HANDLE_VALUE) { CloseHandle(file_); file_=INVALID_HANDLE_VALUE; }
     if (cpu_) {cpu_->~Resources();HeapFree(GetProcessHeap(),0,cpu_);cpu_=nullptr;}
@@ -288,6 +322,7 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
                                 UINT width, UINT height, UINT64 &sequence, LONG hostPointer) {
     sequence=0;
     if (!mailbox_ || !device || !context || !target || !width || !height) return S_FALSE;
+    if (probe_) probe_->poll(context);
     const LONG generation=load(&mailbox_->generation);
     if (generation!=accepted_) Disconnect();
     if (generation<=0 || (generation&1) || generation==failedGeneration_) return S_FALSE;
@@ -333,6 +368,12 @@ HRESULT HostedGpuReceiver::Draw(ID3D11Device *device, ID3D11DeviceContext *conte
             HRESULT cursorResult=r.prepareCursor(device,hostPointer,cursor);
             if (FAILED(cursorResult)) { stage_="cursor-upload"; failedGeneration_=generation; Disconnect(); return cursorResult; }
             r.draw(target,width,height,slot.srv.Get(),cursor,hostPointer);
+            // Still before the done signal below, so the producer cannot reuse the slot under these copies.
+            if (probe_) {
+                probe_->sample(device,context,slot.texture.Get(),static_cast<UINT>(i),seq[i],target);
+                if (auto *thumb=probe_->thumbnail(device,seq[i]))
+                    r.blit(thumb,FhdFlashProbe::ThumbWidth,FhdFlashProbe::ThumbHeight,slot.srv.Get());
+            }
         }
         HRESULT hr=r.fences->Signal(slot.done.Get(),seq[i]);
         if (FAILED(hr)) { stage_="consumer-fence-signal"; failedGeneration_=generation; Disconnect(); return hr; }

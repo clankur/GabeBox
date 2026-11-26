@@ -11,12 +11,15 @@ from probe.catalog import PROBE_REPORT, WEBVIEW_REPORT
 from probe.runner import report_fields as fields
 
 from .device_portal import CertificateChanged, PortalRetry, PortalUnavailable, utc_text
+from .flash_probe import HEADER as FLASH_HEADER, MAGIC as FLASH_MAGIC, RECORD as FLASH_RECORD
 from .measure import FILETIME_EPOCH, HEADER, PRESENT
 
 
 REPORT_LIMIT = 64 * 1024
 TRACE_LIMIT = 32 * 1024
 FRAME_LIMIT = 8 * 1024 * 1024
+# fhd-flash-probe.bin from the opt-in white-flash probe: about 6 KB per second of play.
+FLASH_PROBE_LIMIT = 16 * 1024 * 1024
 LIVE_LOADER_LIMIT = 1024 * 1024
 EXIT_TRACE_WAIT_SECONDS = 3
 TRIAL_CREATION_WINDOW_MS = 5 * 60 * 1000
@@ -181,6 +184,17 @@ def recent_trace(raw, launch_id):
     magic, version, frequency, utc, _ = HEADER.unpack_from(raw)
     return (magic == 0x31444846 and version in (1, 2) and frequency > 0
             and utc >= FILETIME_EPOCH + launch_id * 10_000)
+
+
+def recent_flash_probe(raw, launch_id):
+    """The whole records of a flash probe file opened for this launch, or None."""
+    if len(raw) < FLASH_HEADER.size:
+        return None
+    magic, version, frequency, utc, *_ = FLASH_HEADER.unpack_from(raw)
+    if magic != FLASH_MAGIC or version != 1 or not frequency or utc < FILETIME_EPOCH + launch_id * 10_000:
+        return None
+    # The presenter may be appending a batch while the file is read.
+    return raw[:FLASH_HEADER.size + (len(raw) - FLASH_HEADER.size) // FLASH_RECORD.size * FLASH_RECORD.size]
 
 
 def filtered_lines(report, pattern, count=128):
@@ -637,11 +651,15 @@ def collect_artifacts(report, blob, last_probe, launch_id, app_id, include_frame
     trace = blob('fhd-present-times.bin', FRAME_LIMIT) or b''
     if recent_trace(trace, launch_id):
         artifacts['fhd-present-times.bin'] = trace
+    flashes = recent_flash_probe(blob('fhd-flash-probe.bin', FLASH_PROBE_LIMIT) or b'', launch_id)
+    if flashes is not None:
+        artifacts['fhd-flash-probe.bin'] = flashes
 
     current_probe = fields(report(PROBE_REPORT) or '')
     if not matching_probe(current_probe, launch_id, app_id):
-        # The fixed frame filename is shared with a later launch and could have been reset.
+        # The fixed frame filenames are shared with a later launch and could have been reset.
         artifacts.pop('fhd-present-times.bin', None)
+        artifacts.pop('fhd-flash-probe.bin', None)
     if loader_lines:
         artifacts['loader-trace.txt'] = ('\n'.join(unique_loader_lines(loader_lines)) + '\n').encode()
     unity_log = last_probe.get('steam_shadow_unity_log', '')
