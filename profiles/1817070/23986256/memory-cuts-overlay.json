@@ -1,0 +1,42 @@
+[
+  {
+    "offset": 23951353,
+    "expected_sha256": "03f3791e33da0976cb4a058b029431a3112c682a593d4925c69810170d00eeb3",
+    "replacement": "memory-cut-file-system-asset-buffer-64mib-a.bin"
+  },
+  {
+    "offset": 23951478,
+    "expected_sha256": "f9457d0344b8b253d62c13853a6998341222d8bafc872f0d65d2f982fbb02c64",
+    "replacement": "memory-cut-file-system-asset-buffer-64mib-b.bin"
+  },
+  {
+    "offset": 26220936,
+    "expected_sha256": "b6141cc9cc0d829df3e0bf976dffea823a1b2d624d30cf05c039f0064cee94bf",
+    "replacement": "memory-cut-dx12-render-heap-32mib.bin"
+  },
+  {
+    "offset": 25794996,
+    "expected_sha256": "1e69c1e09fb524d2b66ab8071d59c186080ac7af5230e1eb0253bdcc980f71e4",
+    "replacement": "memory-cut-skinning-buffer-cpu-32mib.bin"
+  },
+  {
+    "offset": 23208214,
+    "expected_sha256": "5a40b402fb598488163b4eb152d5f2efa70f25b11547564e06bd4b013204b050",
+    "replacement": "memory-cut-asset-loader-temp-64mib-a.bin"
+  },
+  {
+    "offset": 23208241,
+    "expected_sha256": "5b9ef67ca473aa609bbc2732e516f45faf98e53241ae91e91bd56f968c86f85d",
+    "replacement": "memory-cut-asset-loader-temp-64mib-b.bin"
+  },
+  {
+    "offset": 24473142,
+    "expected_sha256": "0187c170ee3cce50357769e55abafd5504bfed85239d384aeeaaff729cafb535",
+    "replacement": "memory-cut-scratch-allocator-16mib.bin"
+  },
+  {
+    "offset": 24106826,
+    "expected_sha256": "820bcdfa422e70e0a2311f2409b593d7fdc1a33cb585e287c79f043a884961bd",
+    "replacement": "memory-cut-texture-alloc-8mib.bin"
+  }
+]
