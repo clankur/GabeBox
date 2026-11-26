@@ -632,3 +632,50 @@ The host app process (`SteamPrimary.exe`) used 0.0–0.4% CPU in these states an
 - Export `render_callbacks`, `source_empty_callbacks` and `present_busy_callbacks` to `fhd-panel-stats.txt`, to show whether the XAML `Rendering` callback itself runs at 30 Hz.
 
 The console was returned to the play configuration as `1.0.290.247`, without autoplay. The SteamCore package identity is shared with the STS2 session; this version replaces its `1.0.281.2`.
+
+### The world is frozen after entry (November 26, late afternoon)
+
+**This corrects the section above.** The host is not the limit, and the world is not playable on these builds.
+
+**The host shows every frame it receives.** A test-only change to the staged `steam-sdl-native-view.js` (build `1.0.290.249`) wrote `host.panelStatus()` to LocalState every 5 s. Over 30 s in the world:
+
+| Counter | Per second |
+| --- | --- |
+| XAML `Rendering` callbacks | 59.95 |
+| Panel presents | 25.6 |
+| Producer sequence (`gpu_sequence`) | 25.6 |
+| Empty-source callbacks | 34.3 |
+| Busy presents | 0 |
+| Released unshown | 0 |
+
+The adapter publishes 25–31 frames per second, and the panel presents all of them. Hiding the account page (`1.0.290.248`) left the rate at 32.5–33.3 and engine 5 near 90%. Engine 0, not engine 5, tracks this game's 3D load: 28–34% in the world and about 4% without the game.
+
+**What the adapter's present costs.** In clean runs, the `dxgi stall` breakdown of the game's present shows:
+
+- 8–9 ms in pacing and capture;
+- 16–18 ms in the native `Present` of the hidden virtual window.
+
+Two adapter experiments, both reverted:
+
+| Build | Change | Result |
+| --- | --- | --- |
+| `1.0.290.251` | Native present with `DXGI_PRESENT_DO_NOT_WAIT` | Never refused (no `native-present-skipped`) and still took 15–25 ms; 28–32 frames per second |
+| `1.0.290.252` | Native present skipped behind a marker | `native-present-skipped` traced and no hang; 29.5–30.9 frames per second |
+
+With the profiler DLL (`1.0.290.250`), the rate swung between 15 and 39. The 60/s window in the timeline run was transient.
+
+**The frames are identical.**
+
+- **Within one run.** On `1.0.290.252`, screenshots from first arrival in the world, 2 s apart, after 3 minutes, and after `RS_RIGHT`, `LS_UP` and `MENU` input all differed by 0.00–0.01% of pixels.
+- **Across runs.** Different runs freeze on different frames: 53–55% of pixels differ between runs.
+- **What the user saw.** The user reported the world "frozen in place" and the game unplayable on `1.0.290.251`.
+
+So after world entry the game keeps rendering and presenting the same scene at 25–31 frames per second, while its simulation, camera, pause menu and input never advance. Rendering continues: render-waits rise by about 1,800 per sample, and pipelines are still created. Earlier builds `1.0.230.315` and `1.0.232.15` turned the camera on right-stick input in the world, so the freeze is a regression in the current recipe. Its cause is not yet identified. Candidates:
+
+- the demand-committed pools;
+- a zone that never finishes streaming (one `zone-type-load-error` is traced per run);
+- a job the main thread waits on forever.
+
+The frame-rate work cannot be judged until gameplay advances.
+
+The console was returned to the play configuration as `1.0.290.253`, without autoplay.
