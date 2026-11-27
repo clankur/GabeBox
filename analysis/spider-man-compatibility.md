@@ -1020,3 +1020,47 @@ Replay plus placement add at most about 25 MiB.
 - **Where it happened.** Only that soak reached the tutorial reload (save control 36/37).
 - **What preceded it.** Video usage then rose from 2,422 to 2,550 MiB, followed by `DXGI_ERROR_DEVICE_HUNG`.
 - **Why commit is unproven.** About 110–134 MiB of commit was still available, and no allocation-failure lines were logged, so commit exhaustion is not proven.
+
+### Combined play build: gate runs and soaks (November 27)
+
+**Installed play build `1.0.60010.9`** (no autoplay). Recipe overlays:
+
+- `managed-buffer-448mib`
+- `model-skin-matrix-buffer-16mib`
+- `memory-cuts-loader`
+- the distant-light overlay, carried in `owned-mip-overlay` (toc `71e6fb76…`, dsar `499c845c…`)
+
+Recipe SHA-256: `da3d2173…`.
+
+**Loader.** `XboxWin32LoaderTrace.dll` (`c4266bb1…`) was built with `PLAY_BUILD LAZY_GENERAL MEM_CENSUS PROC_VIEW NO_PLACER HEAP_ADDR MC_NO_CENSUS` and includes the committed replay-ticket fix.
+
+**Gate runs.** Play loader; 30 s window from drive start +1 s; 1920×1080 internal and output; all shared GPU textures.
+
+| Build | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- |
+| `1.0.1990.2` | 59.93 | 59 | 16.69 / 18.20 / 21.7 ms | true |
+| `1.0.3010.2` | 59.83 | 57 | 16.70 / 18.09 / 34.4 ms | true |
+| `1.0.40010.2` | 59.80 | 56 | 16.69 / 18.39 / 36.4 ms | false (lowest second 56 is below 57) |
+| `1.0.50010.2` | 59.93 | 59 | 16.69 / 18.03 / 21.6 ms | true |
+
+Three of four pass. Peak commit in these runs was 4,658–4,715 MiB.
+
+`1.0.50010.2` averaged 53.95 FPS over its full 66 s drive. It ran at about 31–55 FPS from 35 to 58 s, after the measured window.
+
+**Soaks.** Census loader with screenshots about every 10 s. Many long frames follow a screenshot, so the stutter counts are inflated.
+
+| Build | Length | Peak commit | Frames over 33 ms per minute | Frames over 100 ms per minute | Average FPS | Crash |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1.0.1290.1` | 1,002 s | 4,741 MiB | 16.5 | 7.2 | 56.1 | none |
+| `1.0.50020.1` | 1,114 s | 4,765 MiB | 7.1 | 6.0 | 56.8 | none |
+| `1.0.50030.1` | 870 s | 4,867 MiB | 77.9 | 12.8 | 49.3 | none |
+
+- **The last soak degraded.** `1.0.50030.1` ran at 1–30 FPS for long stretches between 83 and 250 s.
+- **The crash sequence was only partly reached.** `1.0.50030.1` saved "control 36" but never reached "control 37" or the reload. The sequence that crashed before (control 36, reload, control 37, then `DXGI_ERROR_DEVICE_HUNG`) is still untested on this configuration.
+- **The installed play loader has not been soaked.** Only 66 s gate drives have used it.
+
+**Issues opened from hands-on play.**
+
+- Cutscene frame rate and delayed audio: clankur/GabeBox#92.
+- City traversal stutter: clankur/GabeBox#93.
+- Low texture and model detail: clankur/GabeBox#94.
