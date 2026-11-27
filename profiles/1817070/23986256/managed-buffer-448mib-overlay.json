@@ -1,0 +1,12 @@
+[
+  {
+    "offset": 25571700,
+    "expected_sha256": "d64d50fabf8b4aa3e61d9b2c4b636dbbcba42b7904120fb17b34ea4665c87fde",
+    "replacement": "managed-buffer-448mib-a.bin"
+  },
+  {
+    "offset": 25573866,
+    "expected_sha256": "c8abbd4cf68ec1c782fcdb9d1e6746b0ad16ae2bd6acb3fd813223a6896eda6a",
+    "replacement": "managed-buffer-448mib-b.bin"
+  }
+]

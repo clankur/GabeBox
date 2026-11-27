@@ -1,0 +1,7 @@
+[
+  {
+    "offset": 24658512,
+    "expected_sha256": "75308f3f240e1db25028960ec15e9a0e48dbe912989e490d4dc5ad892a194dcb",
+    "replacement": "model-skin-matrix-buffer-16mib.bin"
+  }
+]
