@@ -9,6 +9,7 @@
 #include "d3d12-fence-trace.h"
 #include "managed-warmup.h"
 #include "cpu-sets.h"
+#include "processor-view.h"
 #include <appmodel.h>
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
@@ -1021,6 +1022,75 @@ static BOOL DefaultD3D12AdapterEnabled(void) {
     WCHAR enabled[2];
     return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_DEFAULT_ADAPTER", enabled, ARRAYSIZE(enabled)) == 1 &&
         enabled[0] == L'1';
+}
+
+/* Processor topology limited to the process affinity mask (processor-view.h). A profile selects
+   it by binding these imports; the first call of each traces what the title was told. */
+static void TraceProcessorView(volatile LONG *traced, const char *api, DWORD processors, ULONG64 mask) {
+    if (InterlockedExchange(traced, 1)) return;
+    char line[120];
+    char *out = Text(Text(Text(line, "asset processor-view api="), api), " processors=0x");
+    out = Hex(out, processors, 2);
+    out = Hex(Text(out, " mask=0x"), (DWORD)mask, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static DWORD ProcessorViewCountEx(const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buffer, DWORD size, ULONG64 *mask) {
+    DWORD cores = 0;
+    for (DWORD offset = 0; offset + 8 <= size;) {
+        const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record =
+            (const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)((const BYTE *)buffer + offset);
+        if (!record->Size) break;
+        offset += record->Size;
+        if (record->Relationship != RelationProcessorCore) continue;
+        ++cores;
+        *mask |= (ULONG64)record->Processor.GroupMask[0].Mask;
+    }
+    return cores;
+}
+
+BOOL WINAPI XboxGetLogicalProcessorInformationEx(LOGICAL_PROCESSOR_RELATIONSHIP relation,
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX buffer, PDWORD length) {
+    static volatile LONG traced;
+    const BOOL result = XboxProcessorViewInformationEx(relation, buffer, length);
+    const DWORD error = GetLastError();
+    if (result && buffer) {
+        ULONG64 mask = 0;
+        const DWORD cores = ProcessorViewCountEx(buffer, *length, &mask);
+        if (cores) TraceProcessorView(&traced, "GetLogicalProcessorInformationEx-cores", cores, mask);
+    }
+    SetLastError(error);
+    return result;
+}
+
+BOOL WINAPI XboxGetLogicalProcessorInformation(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer, PDWORD length) {
+    static volatile LONG traced;
+    const BOOL result = XboxProcessorViewInformation(buffer, length);
+    const DWORD error = GetLastError();
+    if (result && buffer) TraceProcessorView(&traced, "GetLogicalProcessorInformation-records",
+        *length / (DWORD)sizeof(*buffer), XboxProcessorViewMask());
+    SetLastError(error);
+    return result;
+}
+
+void WINAPI XboxGetSystemInfo(LPSYSTEM_INFO info) {
+    static volatile LONG traced;
+    XboxProcessorViewSystemInfo(info, FALSE);
+    TraceProcessorView(&traced, "GetSystemInfo", info->dwNumberOfProcessors, info->dwActiveProcessorMask);
+}
+
+void WINAPI XboxGetNativeSystemInfo(LPSYSTEM_INFO info) {
+    static volatile LONG traced;
+    XboxProcessorViewSystemInfo(info, TRUE);
+    TraceProcessorView(&traced, "GetNativeSystemInfo", info->dwNumberOfProcessors, info->dwActiveProcessorMask);
+}
+
+DWORD WINAPI XboxGetActiveProcessorCount(WORD group) {
+    static volatile LONG traced;
+    const DWORD count = XboxProcessorViewActiveCount(group);
+    TraceProcessorView(&traced, "GetActiveProcessorCount", count, XboxProcessorViewMask());
+    return count;
 }
 
 static BOOL HostProcessorsDisabled(void) {
