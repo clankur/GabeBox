@@ -1,3 +1,6 @@
+#ifndef PSO_SLOTS
+#define PSO_SLOTS 1
+#endif
 /* An opt-in loader trace for unsigned, locally staged Windows images. */
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
@@ -1746,15 +1749,17 @@ UINT64 WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup, const D3D12_HEAP_DESC 
     if (caller == 0x018CE2D2u || caller == 0x018CE491u || caller == 0x018CE776u) {
         ID3D12Device *device = (ID3D12Device *)startup;
         const BOOL graphics = caller == 0x018CE2D2u;
-        /* Bound concurrent pipeline compiles instead of serializing them; XBOX_SPIDER_PSO_SLOTS overrides. */
+        /* Bounds concurrent pipeline compiles to PSO_SLOTS (build define, default 1). One slot was
+           introduced while the Xbox shader compiler faulted with tens of MB of commit headroom; on the
+           November 27 play configuration 4 slots cut launch-to-menu from 239 s to 107 s. */
         static HANDLE volatile pipelineSlots;
         if (!pipelineSlots) {
-            HANDLE created = CreateSemaphoreExW(NULL, 1, 1, NULL, 0, SEMAPHORE_ALL_ACCESS);
+            HANDLE created = CreateSemaphoreExW(NULL, PSO_SLOTS, PSO_SLOTS, NULL, 0, SEMAPHORE_ALL_ACCESS);
             if (created && InterlockedCompareExchangePointer((PVOID volatile *)&pipelineSlots, created, NULL))
                 CloseHandle(created);
             static volatile LONG traced;
             if (!InterlockedExchange(&traced, 1)) {
-                char line[64], *out = Text(line, "asset pso-parallel slots=1");
+                char line[64], *out = CensusDec(Text(line, "asset pso-parallel slots="), PSO_SLOTS);
                 CensusEmit(line, out);
             }
         }

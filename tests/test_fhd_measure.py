@@ -62,3 +62,30 @@ class StallDiagnosisTests(unittest.TestCase):
         self.assertEqual(report['output_resolution'], '1920x1080')
         self.assertEqual(report['startup'], {'trace_start_to_first_present_ms': 200, 'pre_scene_worst_frame_interval_ms': 1000})
         self.assertEqual(report['worst_ms'], 300)
+
+
+class StutterTests(unittest.TestCase):
+    # 1000 ticks per second; anchor 1000 is the trace epoch (UNIX time 0).
+    frames = trace([(1000 + 17 * i, i + 1, 2) for i in range(10)] +
+                   [(1323, 11, 2), (1340, 12, 2), (1500, 13, 2), (1540, 14, 2), (1557, 15, 2), (2100, 16, 2)])
+    log = ('asset pso-slow kind=graphics n=7 wait-ms=0 compile-ms=150 tid=0x0A04 hr=0x00000000 replay=1 qpc=1490\r\n'
+           'asset pso-slow kind=compute n=8 wait-ms=0 compile-ms=12 tid=0x0A04 hr=0x00000000 replay=1 qpc=1530\r\n')
+
+    def test_counts_long_frames_per_minute_without_a_log(self):
+        report = measure['stutter'](self.frames, 0, None, 1)
+        # 1153->1323 (170 ms), 1340->1500 (160 ms) and 1500->1540 (40 ms) exceed 33.3 ms.
+        self.assertEqual(report['over_33ms_per_minute'], 180)
+        self.assertEqual(report['over_100ms_per_minute'], 120)
+        self.assertIsNone(report['by_cause'])
+
+    def test_attributes_traced_compiles_and_excluded_windows(self):
+        from datetime import datetime, timezone
+        shot = (datetime.fromtimestamp(.2, timezone.utc), datetime.fromtimestamp(.25, timezone.utc))
+        report = measure['stutter'](self.frames, 0, None, 1, self.log, [shot])
+        causes = report['by_cause']
+        self.assertEqual(causes['pipeline_compile'], {'over_33ms': 1, 'over_100ms': 1, 'ms': 160})
+        self.assertEqual(causes['excluded'], {'over_33ms': 1, 'over_100ms': 1, 'ms': 170})
+        # The 12 ms compile is below the 30 ms record threshold, so its frame stays unattributed.
+        self.assertEqual(causes['unattributed'], {'over_33ms': 1, 'over_100ms': 0, 'ms': 40})
+        self.assertEqual(report['over_33ms_per_minute'], 120)
+        self.assertEqual(report['over_100ms_per_minute'], 60)

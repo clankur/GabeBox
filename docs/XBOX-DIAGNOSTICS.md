@@ -308,6 +308,13 @@ Add `--list-gaps 100` to list every presenter gap longer than 100 ms in the wind
 
 See the [native presentation measurement guide](GAME-LAUNCH.md#native-fullscreen-presentation) for the hardware and cadence checks.
 
+For stutter over a longer stretch, such as several minutes of traversal, add `--stutter`. It reports frames over 33 ms and over 100 ms per minute. With `--producer-log`, it attributes each long frame to a pipeline creation of at least 30 ms that the loader traced as `asset pso-slow … qpc=` and ended inside that frame. Pass each Device Portal screenshot as `--exclude-utc START/END`, because a screenshot stalls presentation for about half a second. Frames in these windows are reported separately and left out of the per-minute rates.
+
+```sh
+python3 -m tools.measure game-run/fhd-present-times.bin --start-utc "$traversal_start_utc" --duration 240 \
+    --stutter --producer-log game-run/loader-trace.txt
+```
+
 ## Sample processes, take screenshots and copy files
 
 These commands read from the console without controlling it. Each selects the installed Steam Core package, or the version passed with `--version`, and works for any title.
