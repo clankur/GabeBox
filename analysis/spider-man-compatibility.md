@@ -862,3 +862,48 @@ The world-loading fix adds about 700 models and raised p95 from 17.95 to 18.6–
 - **Thread placement.** Keeping the main and render threads on separate physical cores.
 - **Shared processors.** Adding the two shared processors.
 - **Cache seeding.** Seeding the pipeline database with more drives.
+
+### Reporting the real processor count passes the gate, but memory is now the risk (November 27)
+
+**What the game saw.** Spider-Man sized its job system for 8 logical and 4 physical processors (group mask `0xFF`) but runs with affinity `0xFC`. It reads `GetLogicalProcessorInformationEx` (`exe+0x01CF2C98`–`0x01CF2FB5`) and calls `GetSystemInfo` about 60 times (`exe+0x02B2C0FD`).
+
+**The processor view.** The new shared `runtime/win32/processor-view.h` filters these to the process affinity mask, keeping the system's buffer-size and error contract:
+
+- `GetLogicalProcessorInformation(Ex)`
+- `GetSystemInfo`
+- `GetNativeSystemInfo`
+- `GetActiveProcessorCount`
+
+**How it is wired.**
+
+- **Loader.** `loader-trace.c`/`.def` export the five functions (ordinals 24–28).
+- **Profile.** The Spider-Man profile binds the four kernel32 imports it uses (`launcher-bindings.json`).
+- **Effect on the game.** The game log then reports "Physical Core: 3, Logical Core: 6", and the game starts 33 rather than 37 trampoline threads.
+- **Heavy frames.** Frames of 20–34 ms that are not compiles fell from 37–80 per run to 10–28 in four of five runs.
+- **Not yet verified.** The console runs used a scratch loader that patches the import table at run time. The profile binding path is not yet regenerated, built by CI, or run on the console.
+
+**Gameplay windows including the first swing** (30 s from drive start +1 s, 1920×1080 internal and output, all shared GPU textures):
+
+| Run | Build | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| v1 | `1.0.510.2` (view) | **59.93** | **59** | **16.69 / 18.28 / 21.0 ms** | **true** |
+| v2 | `1.0.510.5` (view) | 59.87 | 57 | 18.07 p95 / 52.9 ms | true, then crashed at +36 s |
+| b1 | `1.0.510.6` (control, no view) | 56.17 | 13 | 18.79 / 784 ms | false, crashed at +33 s |
+| v3 | `1.0.510.7` (view) | 57.97 | 46 | 18.95 / 234 ms | false |
+| h1 | `1.0.510.9` (view + hot-thread ideal processors) | 59.70 | 53 | 18.19 / 117 ms | false |
+| h2 | `1.0.510.11` (view + hot-thread ideal processors) | 59.90 | 58 | 18.25 / 31.6 ms | true |
+| r1 | `1.0.510.12` (view + hot + `fhd-refresh-5994.txt`) | 59.27 | 45 | 18.57 / 167 ms | false |
+
+**Other levers.**
+
+- **Adding the shared processors.** A process mask cannot do it, because the child's default affinity is already `0xFF` and the scheduler keeps it off processors 0–1.
+- **Ideal processors for the two busiest threads.** No measurable gain.
+- **The 59.94 Hz pacing marker.** One run, with no gain.
+
+**Remaining limits.**
+
+1. **Commit headroom (new risk).** Combined runs peak at 5,032–5,073 MiB of 5,120 MiB, with 60–96 MiB free after loading. Two runs, one with the view and one without, crashed at drive +33–36 s with 6–19 MB of commit available. The rendering-only configuration peaked at 4,543 MiB, so about 500 MiB came back with the loader that adds processor placement and pipeline replay. Pipeline objects (about 0.3 MiB each, with about 1,760 recorded) are the main suspect; this is not yet proven.
+2. **First-use compiles.** Pipelines not yet recorded still compile on first use: 0–5 per window at 37–152 ms each.
+3. **Occasional CPU-bound stretches.** Some stretches run at 48 FPS (v3).
+
+**Installed build.** The console holds play build `1.0.510.13`: the combined configuration plus the view, without autoplay.

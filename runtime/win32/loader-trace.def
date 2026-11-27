@@ -23,3 +23,8 @@ EXPORTS
     VirtualAlloc=XboxTraceVirtualAlloc @21
     GetFileType=XboxGetFileType @22
     CoCreateInstance=XboxCoCreateInstance @23
+    GetLogicalProcessorInformationEx=XboxGetLogicalProcessorInformationEx @24
+    GetLogicalProcessorInformation=XboxGetLogicalProcessorInformation @25
+    GetSystemInfo=XboxGetSystemInfo @26
+    GetNativeSystemInfo=XboxGetNativeSystemInfo @27
+    GetActiveProcessorCount=XboxGetActiveProcessorCount @28

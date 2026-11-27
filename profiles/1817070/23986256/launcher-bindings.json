@@ -13,7 +13,11 @@
     "RaiseException": "XboxWin32LoaderTrace.dll",
     "GetStartupInfoW": "XboxWin32LoaderTrace.dll",
     "LoadLibraryExA": "XboxWin32LoaderTrace.dll",
-    "VirtualAlloc": "XboxWin32LoaderTrace.dll"
+    "VirtualAlloc": "XboxWin32LoaderTrace.dll",
+    "GetLogicalProcessorInformationEx": "XboxWin32LoaderTrace.dll",
+    "GetLogicalProcessorInformation": "XboxWin32LoaderTrace.dll",
+    "GetSystemInfo": "XboxWin32LoaderTrace.dll",
+    "GetNativeSystemInfo": "XboxWin32LoaderTrace.dll"
   },
   "shell32.dll": {
     "SHGetFolderPathW": "XboxWin32Desktop.dll"
