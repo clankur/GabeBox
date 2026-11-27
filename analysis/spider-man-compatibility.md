@@ -907,3 +907,75 @@ The world-loading fix adds about 700 models and raised p95 from 17.95 to 18.6–
 3. **Occasional CPU-bound stretches.** Some stretches run at 48 FPS (v3).
 
 **Installed build.** The console holds play build `1.0.510.13`: the combined configuration plus the view, without autoplay.
+
+### Lighting tint and game-side memory budgets (November 27)
+
+**Green and magenta lighting is a per-launch tint of the environment probes.**
+
+- **What tints.** Specular and ambient light on glass, cars, the hero's suit, roads and box-shaped volumes of facades turns saturated green or magenta. The probe images keep their structure; only the colour is wrong.
+- **It varies by launch, not by build.** The same build can be green, magenta or clean on different launches. Older screenshots show it as far back as `1.0.477` builds, before pipeline replay existed.
+- **Metric.** `light/hue.py` reports the share of saturated green or magenta pixels per screenshot (0–20%).
+
+**The probe system.**
+
+- **Probe cache.** A BC6H 256×256 cube array with 384 slices (64 probes) and 6 mips, plus one BC6H cube.
+- **How it is filled.** The cache is filled by 1,464 `CopyTextureRegion` calls per run from R32G32B32A32_UINT intermediates (`exe+0x018DD59E`).
+- **Who writes the intermediates.** The "CompressBC6h" pass writes them. The recipe replaces that compute shader.
+
+**What was ruled out.**
+
+| Candidate | Evidence |
+| --- | --- |
+| Replaced compression shaders (variants 0–3) | DXIL and DXBC interpreters matched each replacement to its original with 0 mismatches. The originals still remove the device (`0x887A0020`). |
+| World shader replacement | Without it, a run was still green (up to 19.8%). |
+| Anti-aliasing setting | TAA and SMAA were each clean in one run and tinted in another. |
+| Heap zero-fill | New and reused heaps read back 0 non-zero dwords. |
+| Asset pool failures | Only soundbank failures appeared; nothing lighting-related. |
+| A global UAV barrier before each probe copy | Clean in one run and green in another. |
+
+**Not yet located.** The first failing operation sits between the "Runtime EnvProbe" face render and lighting reading the probe array.
+
+**Next steps.**
+
+- Read back probe slots and intermediates on the GPU after load.
+- Capture one EnvProbe face render target.
+- Compare at least three launches per arm, because single runs are about 50% noise.
+
+**The rainbow cloud has not been reproduced.**
+
+**Game-side budgets.**
+
+- **Settings store.** The game reads its graphics settings from `Software\Insomniac Games\Marvel's Spider-Man Remastered` (`RegCreateKeyExA`). On this console the effective values are the defaults at `exe+0x1CFAD1E`–`0x1CFAE94`, which the recipe patches.
+- **Settings are not a memory lever.** A hidden "Lowest" tier (value 0) for Shadow, Level of Detail, Vehicle, Crowd and Hair changed no heap or pool size. Peak commit was 5,080 MiB.
+
+**Owners at about 5.06 GB.**
+
+| Owner | Size |
+| --- | --- |
+| D3D12 heaps | 1,726 MiB (ManagedBuffer 512, buffers 254, grow-on-demand 128, textures 296, render targets 458) |
+| Write-combined GPU commit outside those heaps | About 550 MiB |
+| Engine pools | About 916 MiB (AssetHeap 455 used of 828) |
+| General-heap blocks | 866 MiB committed, 559 MiB resident |
+
+The loader's general demand-commit (LAZY_GENERAL) cuts the general-heap blocks from 866 to 9 MiB recorded and lowers menu commit by about 400 MiB.
+
+**Kept.** ManagedBuffer 448 MiB (`managed-buffer-448mib-overlay.json`) and the ModelSkinMatrixBuffer pool at 16 MiB (`model-skin-matrix-buffer-16mib-overlay.json`, which patches `call GetPoolSize` at RVA `0x1784C50`).
+
+| Measure | Result |
+| --- | --- |
+| Peak commit | 4,985 MiB, from 5,080, with 138 MiB free at the minimum over an 11-minute soak |
+| Crash | None |
+| Rendering | Hero, street and props intact |
+| 30 s window including the first swing | 59.93 FPS, lowest 1 s 59, p95 18.81 ms, worst 21.7 ms, `gpu_60fps` true |
+
+**Gaps.** The soak's drive script got stuck on a rooftop, so it never reached the opening cutscene or the reload where the earlier soak crashed.
+
+**Further cuts proposed, not tried.**
+
+| Buffer | Committed | Resident |
+| --- | --- | --- |
+| TextureStream I/O buffers | 4 × 16 MiB | 0 |
+| AnimSystem scratch | 43 MiB | 4 MiB |
+| NavHeap | 16 MiB | 0 |
+| VFX bitset | 24 MiB | 3 MiB |
+| Scaleform | 96 MiB, proposed 80 | 65 MiB |
