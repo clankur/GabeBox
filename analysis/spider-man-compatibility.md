@@ -823,3 +823,42 @@ Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--
 - **Wavy facades on some buildings.** These look like impostor rendering. Reverting the 670 resampled impostor-zone routes ran out of commit.
 - **Missing audio banks.** Banks are rejected at the 128 MiB SoundBankAlloc cap: `veh_vehicles`, `amb_i20_city_global_bed`, `veh_helicopters`, `spid`, `yuri`, `otto`, `mtg1`, `mpd1/2` and others.
 - **Loader fixes split across builds.** The installed `1.0.499.1` uses this loader without the processor fix or pipeline replay, so the loader changes still have to be combined into one build and measured.
+
+### Combined build and the remaining frame-time limits (November 26, night)
+
+**Combined play build `1.0.500.8`** (no autoplay).
+
+- **Packaging.** The rendering configuration: `--recipe-overlay managed-buffer-512mib-overlay.json --recipe-overlay memory-cuts-loader-overlay.json`, plus the distant-light overlay. The recipe SHA-256 is `4c68372e…`.
+- **Loader.** One loader carries the processor placement, the pipeline replay, the on-demand commit for pools that are not 64 KiB multiples, and SoundBankAlloc and Physics at 128 MiB.
+- **Trace checks.** The trace shows `host-processors stage=applied` and `pso-replay open status=loaded`, with no `lazy-commit-failed` lines.
+
+**Gameplay windows that include the first swing** (30 s from drive start +1 s, 1920×1080, shared GPU textures):
+
+| Run | Configuration | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| `1.0.480.1` | Before the rendering fix, with profiler | 59.90 | 58 | 16.68 / 17.95 / 35.3 ms | true |
+| `1.0.500.3` | Combined | 57.97 | 9 | 16.68 / 18.76 / 849 ms | false |
+| `1.0.500.5` | Combined | 54.73 | 14 | 16.67 / 19.09 / 721 ms | false |
+| `1.0.500.6` | Combined | 57.13 | 17 | 16.69 / 19.38 / 718 ms | false |
+| `1.0.500.7` | Combined, with profiler | 59.53 | 55 | 16.68 / 19.14 / 84 ms | false |
+
+**Two causes, both measured.**
+
+1. **Pipelines not yet recorded still compile synchronously.** Each run met 4–12 new pipelines inside its window, at 30–850 ms each. The database grew from 1,601 to 1,702 entries over the runs; it converges slowly because each drive takes a different route.
+2. **Heavy scenes are CPU-bound in the game.** A thread sampler (every 2–4 ms) during a cluster of 29–38 ms frames recorded:
+   - **Game threads were busier.** The main thread was busy 0.72 of a core (0.58 when clean), and the render thread's driver time rose from 8.5% to 16.7%.
+   - **The present path sat idle.** Our swap-chain thread was waiting for a present request 60% of the time (21% when clean), and the submit thread was waiting for render commands 57% of the time (20%).
+   - **Overall load.** The process used 4.9–5.1 of the 6 processors it is given.
+
+The world-loading fix adds about 700 models and raised p95 from 17.95 to 18.6–19.4 ms.
+
+**Ruled out.** Timer granularity is already 1 ms. The presenter drops no frames (the sequence delta is always 1), the work is not GPU-bound, and there are no commit bursts.
+
+**Host refresh.** The host panel runs at 59.9394 Hz while the producer paces at 60.000 Hz. The `fhd-refresh-5994.txt` marker exists for this but has not been tested.
+
+**Untested levers.**
+
+- **Processor count.** The game sizes its job system for 8 logical processors and receives 6 (mask `0xFC`).
+- **Thread placement.** Keeping the main and render threads on separate physical cores.
+- **Shared processors.** Adding the two shared processors.
+- **Cache seeding.** Seeding the pipeline database with more drives.
