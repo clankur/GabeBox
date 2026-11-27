@@ -205,7 +205,7 @@ def stage_win32_trial_profiles(layout, profiles, package, source_profiles=()):
                 raise ValueError(f"The storage marker requires an empty file and a loader trace for AppID {app}.")
             files[storage_marker] = b""
             storage_trace = True
-        for option in ("d3d12-default-adapter", "streamline-unavailable", "d3d12-pipeline-replay"):
+        for option in ("d3d12-default-adapter", "streamline-unavailable", "d3d12-pipeline-replay", "demand-commit"):
             marker = f"steam-win32-{option}-{app}.txt"
             if (root / marker).is_file():
                 if (root / marker).stat().st_size or source_profile is None or fields[6:7] != ["loader-trace"]:

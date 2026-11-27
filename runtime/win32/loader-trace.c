@@ -10,6 +10,7 @@
 #include <dxgi1_2.h>
 #include <objbase.h>
 #include "d3d12-pipeline-replay.h"
+#include "demand-commit.h"
 
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
@@ -447,7 +448,47 @@ void WINAPI XboxRaiseException(DWORD code, DWORD flags, DWORD count, const ULONG
     RaiseException(code, flags, count, arguments);
 }
 
+static volatile LONG demandCommit; /* 0 unread, 1 off, 2 on */
+static volatile LONG demandCommitTraced;
+
+static BOOL DemandCommitEnabled(void) {
+    if (!demandCommit) {
+        WCHAR enabled[2];
+        const BOOL on = GetEnvironmentVariableW(L"XBOX_WIN32_DEMAND_COMMIT", enabled, ARRAYSIZE(enabled)) == 1 &&
+            enabled[0] == L'1';
+        InterlockedCompareExchange(&demandCommit, on ? 2 : 1, 0);
+    }
+    return demandCommit == 2;
+}
+
+/* With XBOX_WIN32_DEMAND_COMMIT=1 (the profile's demand-commit marker), a commit of 1 MiB or more into
+   a reservation the title already holds is committed on first touch (demand-commit.h). */
+static LPVOID DemandCommit(LPVOID address, SIZE_T bytes, DWORD type, DWORD protection, const void *caller) {
+    if (bytes < (1u << 20) || type != MEM_COMMIT || !address || protection != PAGE_READWRITE ||
+            !DemandCommitEnabled()) return NULL;
+    static volatile LONG wrapped;
+    if (!InterlockedExchange(&wrapped, 1)) {
+        const DWORD patched = XboxDemandCommitWrapImports(GetModuleHandleW(NULL), XDC_WRAP_READFILE);
+        char line[80];
+        char *out = Hex(Text(line, "asset demand-commit imports=0x"), patched, 2);
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    const LPVOID taken = XboxDemandCommitTake(address, bytes, type, protection, 1, AppendTrace);
+    if (taken && InterlockedIncrement(&demandCommitTraced) <= 16) {
+        char line[120];
+        char *out = Hex(Text(line, "asset demand-commit bytes=0x"), (DWORD)((UINT64)bytes >> 32), 8);
+        out = Hex(out, (DWORD)bytes, 8);
+        out = RecordImageAddress(out, caller);
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    return taken;
+}
+
 LPVOID WINAPI XboxTraceVirtualAlloc(LPVOID address, SIZE_T bytes, DWORD type, DWORD protection) {
+    const LPVOID demand = DemandCommit(address, bytes, type, protection, __builtin_return_address(0));
+    if (demand) return demand;
     const LPVOID allocation = VirtualAlloc(address, bytes, type, protection);
     if (allocation || !(type & MEM_COMMIT)) return allocation;
 

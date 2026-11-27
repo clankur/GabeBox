@@ -659,6 +659,8 @@ static BOOL XboxPipelineReplayLookup(ID3D12Device *device, BOOL graphics, const 
     ticket->outcome = XboxPipelineReplayMissUncached;
     ticket->record = FALSE;
     ticket->graphics = graphics;
+    ticket->root = NULL;
+    ticket->canonical = (XprWords){NULL, 0, FALSE}; /* finish frees it: set before any early return */
     if (!xprState.enabled || device != xprState.device || !object) return FALSE;
     ID3D12RootSignature *rootObject = graphics ?
         ((const D3D12_GRAPHICS_PIPELINE_STATE_DESC *)desc)->pRootSignature :
