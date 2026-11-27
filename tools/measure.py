@@ -144,6 +144,68 @@ def diagnose_stalls(trace, start, utc, duration, producer_log=None):
     return {'longest_gaps': result, 'producer_stall_records': len(producer) if producer_log is not None else None}
 
 
+PIPELINE_COMPILE = re.compile(
+    r'^(?:steam_shadow_loader=)?asset pso-slow kind=(graphics|compute) n=[0-9]+ wait-ms=([0-9]{1,9}) '
+    r'compile-ms=([0-9]{1,9}) .*?\bqpc=([0-9]{1,20})',
+    re.M,
+)
+
+
+def pipeline_compiles(log):
+    """Yields (end_qpc, wait_ms, compile_ms) for each slow pipeline creation the loader traced."""
+    for match in PIPELINE_COMPILE.finditer(log):
+        yield int(match[4]), int(match[2]), int(match[3])
+
+
+def stutter(trace, start, utc, duration, producer_log=None, excluded=()):
+    """Long frames per minute, each attributed to the first matching cause.
+
+    A frame interval is `excluded` when it overlaps an excluded UTC window (for example a Device
+    Portal screenshot), `pipeline_compile` when a traced pipeline creation of at least 30 ms ends
+    inside it (or within 2 ms after the next present), and `unattributed` otherwise.
+    """
+    _, frequency, anchor, _, _, _, frames, _, _ = presentation_window(trace, start, utc, duration)
+    epoch = (HEADER.unpack_from(trace)[3] - FILETIME_EPOCH) / 10_000_000
+    compiles = sorted(q for q, wait, compile in pipeline_compiles(producer_log or '') if wait + compile >= 30)
+    windows = [(anchor + (a.timestamp() - epoch) * frequency, anchor + (b.timestamp() - epoch) * frequency)
+               for a, b in excluded]
+    slack = frequency // 500
+    minutes = duration / 60
+    classes = {name: {'over_33ms': 0, 'over_100ms': 0, 'ms': 0.0} for name in ('pipeline_compile', 'excluded', 'unattributed')}
+    for left, right in zip(frames, frames[1:]):
+        begin, end = left[0], right[0]
+        gap = (end - begin) * 1000 / frequency
+        if gap <= 1000 / 30:
+            continue
+        first = bisect_left(compiles, begin)
+        if any(a <= end and begin <= b for a, b in windows):
+            name = 'excluded'
+        elif producer_log is not None and first < len(compiles) and compiles[first] <= end + slack:
+            name = 'pipeline_compile'
+        else:
+            name = 'unattributed'
+        classes[name]['over_33ms'] += 1
+        classes[name]['over_100ms'] += gap > 100
+        classes[name]['ms'] += gap
+    for entry in classes.values():
+        entry['ms'] = round(entry['ms'], 3)
+    counted = {key: sum(entry[key] for name, entry in classes.items() if name != 'excluded') for key in ('over_33ms', 'over_100ms')}
+    return {'duration_s': duration,
+            'over_33ms_per_minute': round(counted['over_33ms'] / minutes, 2),
+            'over_100ms_per_minute': round(counted['over_100ms'] / minutes, 2),
+            'by_cause': classes if producer_log is not None or windows else None}
+
+
+def utc_window(value):
+    try:
+        first, last = (datetime.fromisoformat(part.replace('Z', '+00:00')) for part in value.split('/'))
+    except ValueError:
+        raise argparse.ArgumentTypeError('Use START/END in ISO 8601 UTC, for example 2026-11-27T20:30:10Z/2026-11-27T20:30:11Z.')
+    if first.tzinfo is None or last.tzinfo is None or last < first:
+        raise argparse.ArgumentTypeError('Give both ends a UTC offset and end at or after the start.')
+    return first, last
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('trace', type=Path)
@@ -156,18 +218,24 @@ def main():
     parser.add_argument('--require-gpu-60', action='store_true', help='require sustained 60 fps on the verified hardware adapter')
     parser.add_argument('--diagnose-stalls', action='store_true', help='include source sequence changes at the longest presenter gaps')
     parser.add_argument('--producer-log', type=Path, help='correlate DXGI timings from the same Xbox run’s loader trace or saved report')
+    parser.add_argument('--stutter', action='store_true',
+                        help='count frames over 33 and 100 ms per minute; with --producer-log, attribute them to traced pipeline compiles')
+    parser.add_argument('--exclude-utc', type=utc_window, action='append', default=[], metavar='START/END',
+                        help='with --stutter, report long frames overlapping this UTC window separately (repeatable)')
     args = parser.parse_args()
     try:
         trace = args.trace.read_bytes()
         result = summarize(trace, args.start_offset_s, args.start_utc, args.duration,
                            internal_resolution=args.internal_resolution, output_resolution=args.output_resolution)
+        log = None
+        if args.producer_log:
+            raw = args.producer_log.read_bytes()
+            encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+            log = raw.decode(encoding, errors='replace')
         if args.diagnose_stalls or args.producer_log:
-            log = None
-            if args.producer_log:
-                raw = args.producer_log.read_bytes()
-                encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
-                log = raw.decode(encoding, errors='replace')
             result['stall_diagnostics'] = diagnose_stalls(trace, args.start_offset_s, args.start_utc, args.duration, log)
+        if args.stutter:
+            result['stutter'] = stutter(trace, args.start_offset_s, args.start_utc, args.duration, log, args.exclude_utc)
     except (OSError, ValueError, struct.error) as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2))

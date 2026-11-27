@@ -1064,3 +1064,51 @@ Three of four pass. Peak commit in these runs was 4,658–4,715 MiB.
 - Cutscene frame rate and delayed audio: clankur/GabeBox#92.
 - City traversal stutter: clankur/GabeBox#93.
 - Low texture and model detail: clankur/GabeBox#94.
+
+### Parallel pipeline compiles, sound-bank pool and stutter (November 27, evening)
+
+**Why compiles ran one at a time.**
+
+- Build `1.0.230.243` serialised pipeline compiles in the Spider-Man play loader after shader-compiler faults at `XBSC_XS.dll+0x9F5A0`, which occurred with only 6–24 MB of commit headroom.
+- The fault later recurred with one slot as well (`.305`, `.306`, `.308`).
+- The shared `runtime/win32` path never serialised compiles.
+- The slot count is now a build define, `PSO_SLOTS` (default 1), in `spider-man-diagnostic-loader/trace.c`. The earlier comment claimed `XBOX_SPIDER_PSO_SLOTS` overrode it, which was wrong.
+
+**Boot to menu ([#95](https://github.com/clankur/GabeBox/issues/95)).** All runs use the same save and the same pipeline-replay database. No run had a device removal, a failed commit or a crash.
+
+| Compile slots | Launch to menu | Total wait for a slot | Lowest available commit before the menu |
+| --- | --- | --- | --- |
+| 1 | 239–240 s | 953–966 s | 1,001–1,054 MiB |
+| 2 | 171 s | 538 s | 971 MiB |
+| 3 | 117 s | 248 s | 1,029 MiB |
+| 4 | 107 s | 144 s | 1,075 MiB |
+
+Each compile takes longer as slots are added, but overall throughput rises. The remaining time is mostly about 2,000 first-time compiles.
+
+**Traversal stutter ([#93](https://github.com/clankur/GabeBox/issues/93)).** 240 s of swinging with no screenshots, measured with `tools.measure --stutter --producer-log`.
+
+| Run | Average FPS | Lowest 1 s | Worst frame | Frames >33 ms per minute | Frames >100 ms per minute |
+| --- | --- | --- | --- | --- | --- |
+| a1: 1 slot, 128 MiB sound banks | 59.35 | 7 | 885 ms | 4.0 | 1.5 |
+| b1: 1 slot, 224 MiB | 58.70 | 8 | 868 ms | 11.25 | 2.0 |
+| c2: 2 slots, 224 MiB | 59.43 | 19 | 685 ms | 5.75 | 1.0 |
+| c3: 3 slots, 224 MiB | 59.93 | 58 | 35 ms | 0.75 | 0 |
+| c4: 4 slots, 224 MiB | 59.94 | 59 | 23.7 ms | 0 | 0 |
+
+- **c4 re-measured:** a 246 s window, 59.94 FPS, `gpu_60fps` true.
+- **Long frames:** every frame over 100 ms ended on a first-time pipeline compile.
+- **Not isolated:** the replay database grew from 2,518 to 2,631 pipelines over these runs, so the gain is not isolated to the slot count.
+
+**Sound-bank pool ([#92](https://github.com/clankur/GabeBox/issues/92)).**
+
+- **Rejected banks now load.** At 128 MiB the pool was full. At 224 MiB it grew to 176–192 MiB, so at least 48–64 MiB of previously rejected banks now load. Which banks they are is not yet logged.
+- **Memory cost.** The lowest available commit over a run fell from 364 MiB to 244–305 MiB. Peak commit was 4,814–4,875 MiB.
+
+**Still to measure.**
+
+- **Cutscene frame rate and delayed audio.** The Fisk Tower cutscene was not reached, so neither is re-measured.
+- **XAudio2 counters.** They showed 49–57 ms latency and no glitches, but they did not observe the game's mix.
+
+**Clean play build `1.0.63012.0`.** It has 4 compile slots, SoundBankAlloc 224 MiB, no autoplay and no per-second counters. Its loader SHA-256 begins `29c66e2a`. It was deployed but not launched. The play-loader source with these values is in the scratchpad (`play/perf/tb`), not in the repo.
+
+**Tooling.** `tools.measure` gains `--stutter` (frames over 33 ms and over 100 ms per minute), `--producer-log` attribution of stalls to traced pipeline compiles, and `--exclude-utc START/END` for screenshot windows.
