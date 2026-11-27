@@ -979,3 +979,44 @@ The loader's general demand-commit (LAZY_GENERAL) cuts the general-heap blocks f
 | NavHeap | 16 MiB | 0 |
 | VFX bitset | 24 MiB | 3 MiB |
 | Scaleform | 96 MiB, proposed 80 | 65 MiB |
+
+### Where the extra commit comes from (November 27)
+
+**The "+500 MiB from the loader" was a sampling artifact.**
+
+- **Why the earlier figures misled.** The `asset sampled-commit-kib` sampler stops after 215 samples, at the menu, before the world loads.
+- **Menu commit is the same across configurations.**
+
+| Configuration | Menu commit |
+| --- | --- |
+| Rendering-only (d11–d13) | 4,539–4,548 MiB |
+| Combined (`comb/run-c1`) | 4,536–4,549 MiB |
+
+- **The difference is the world load.** The combined run rises to 5,032 MiB after Continue.
+
+**Pipeline replay and processor placement are not the cause.** The game's own `[Render] Page file` figure, from runs before the world fix:
+
+| Runs | Replay | Placement | Page file |
+| --- | --- | --- | --- |
+| `fps/run-b`, `fps/run-c` | no | no | 4,664 / 4,669 MiB |
+| `fps/run-d` | no | yes | 4,683 MiB |
+| `pso/run-cold`, `pso/run-warm`, `pso/run-warm2`, `dip/run-p1` | yes | yes | 4,667–4,691 MiB |
+
+Replay plus placement add at most about 25 MiB.
+
+- **Replay precompiles few pipelines.** It builds 330–383 pipelines, and only 11–51 of them are never requested by the game. Its tables use 1–2 MiB, and the 21 MB database is a read-only mapping that does not count toward commit.
+
+**General-heap demand commit is the main lever.**
+
+- **Without it.** Engine commits were 887 MiB committed against 545 MiB resident, and one run crashed at 5,102 MiB.
+- **With it (LAZY_GENERAL).** Recorded commits fall to 9 MiB, peak commit falls to 4,724–4,832 MiB, and about 350–400 MiB is recovered.
+- **Shared version, not yet verified.** The shared form is `runtime/win32/demand-commit.h`, enabled by `XBOX_WIN32_DEMAND_COMMIT` through the marker `steam-win32-demand-commit-<app>.txt` (`ProbeNative.cpp`, `stage_profiles.py`). It is not yet built by CI or run on the console. Its selection policy is any commit of 1 MiB or more inside an existing reservation, which is broader than the console-verified policy, and the Spider-Man profile does not set the marker yet.
+- **Host process.** `SteamPrimary.exe` uses 135–144 MiB inside the same 5,120 MiB title budget.
+
+**Replay bug fixed.** When replay was disabled, `XboxPipelineReplayLookup` returned before initialising its ticket, and `XboxPipelineReplayFinish` then freed an uninitialised pointer. Both no-replay builds crashed at startup. The fixed build has not run yet.
+
+**The earlier soak crash is unexplained.**
+
+- **Where it happened.** Only that soak reached the tutorial reload (save control 36/37).
+- **What preceded it.** Video usage then rose from 2,422 to 2,550 MiB, followed by `DXGI_ERROR_DEVICE_HUNG`.
+- **Why commit is unproven.** About 110–134 MiB of commit was still available, and no allocation-failure lines were logged, so commit exhaustion is not proven.
