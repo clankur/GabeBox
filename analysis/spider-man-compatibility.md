@@ -1823,3 +1823,35 @@ Street, final-a (`1.0.63053.0`, same content):
 - **Loader.** `build.sh play` at `c6a75f9` (with `c79ef9f`), `68a5c5450be7d32b…`: SB128, hosted 1280×720, no per-second counters, no probe diagnostics, no warm-up skip.
 - **Content.** Recipe `748e3130…`, the `play-build.json` overlays (including light-grid cap 1024 and Texture Medium) plus the 242 restores. No autoplay.
 - **What was launched.** This exact content with autoplay was launched as p2. An earlier no-autoplay deploy (`1.0.63071.0`, #211) waited at Big Picture for **Play** and was stopped without starting the game.
+
+## Independent verification of the installed play build (November 28)
+
+**Build.** Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Installed package `1.0.63075.0` (the only SteamCore package listed). The local signed APPX has SHA-256 `cb7937e5…02272`, as claimed. Inside it, the loader is `68a5c5450be7d32b…`, the recipe is `748e3130…`, and `fhd-measure.txt` is present, so the play build does write `fhd-present-times.bin`. Lease #216, run folder `$S/verify/run1`. Play was pressed in Big Picture with remote keyboard input: Installed tab, Spider-Man, Enter on **Play**. Big Picture screenshots return HTTP 500, so the screens came from the package's `big-picture-surface.request` capture. The run continued the player's save, then walked the street (40 s), ran the 240 s traversal script and followed the objective marker for 7 minutes. It ended with Quit → Quit to Desktop.
+
+| Criterion | Verdict | Evidence |
+| --- | --- | --- |
+| Play → gameplay under 90 s | **fail as observed** (unattended metric passes) | Play `steam_launch_run_id` 12:01:05.437Z. The process ran within 5.4 s and the first present came at 7.7 s. The menu was ready at 69.0 s (trace) and on screen by 77.4 s. Two Continue presses, at +78.6 s and +84.0 s, were ignored; the third, at +89.0 s, was accepted. Steady gameplay began at **106.3 s** (presents); `tools.load_phases` gives 81.7 s unattended (`within_budget: true`), or about 86 s when measured from the accepted press. |
+| Consistent frame rate | **pass on street and traversal; Fisk not measured** | 8 of 9 settled 30 s windows pass `--require-gpu-60` (59.93–59.97 FPS, lowest second 59, worst ≤21.8 ms). The 12:06:00 window fails: 59.53 FPS, lowest second 50, with 12 frames of 33.5–34.1 ms within 1.5 s, unattributed. The 240 s traversal ran at 59.888 FPS with 12 frames over 33 ms. All frames were shared GPU textures at 1280×720 → 1920×1080. |
+| No lighting artefacts | **pass where seen; atrium unchecked** | 31 gameplay captures, including the street, sky, rooftop, mid-air and building faces. `hue.py`: green 0.00%, magenta ≤0.01%. By eye, the clouds are normal, with no grid and no tint. `sac-install` is in the trace. |
+| Controller input | **pass** | `inspect-input`: `host-activity`, serial 18 acknowledged with LS held and serial 22 with RS held. The character moved from the crosswalk to the police car. Pause and quit menus responded. |
+| Audio | **unobserved** | XAudio2.7 loaded, `xaudio27-initialize` and `create-mastering-voice` succeeded, and the 128 MiB `SoundBankAlloc` pool was taken. The game log says `[Audio] Device (re)initialized 0x0`. No sound-bank errors. No audible signal can be measured remotely. |
+| Stability, ~15 min | **pass** | 15.1 min of gameplay (12:02:52–12:18:00). No crash or hang, and no `0x887A0005`. Spider-Man commit was 4.70–4.78 GiB; the lowest loader-recorded available commit was 343 MiB. |
+| Return to library | **pass** | Pause → Quit → main menu → Quit Game → Quit to Desktop. The process exited 3.3 s after confirming, and the Big Picture library returned and responded to input (Installed tab). |
+| Save and reload | **gap** | Not tested, to protect the player's run. The existing save did load through Continue, and the game autosaved (`slot0` became `412768f4…`). The saves were restored and checked: `slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`. |
+
+**Frame-rate notes.**
+
+- Every gameplay gap over 100 ms lines up with a Device Portal screenshot. The console clock runs 1.29 s behind the Mac's, and each stall lasts 0.52–0.55 s. In the objective-following windows, which had one screenshot every 10 s, the average was 56.7–56.9 FPS. With the screenshot intervals excluded, 13 of 14 windows had no frames over 33 ms. The 12:10:30 window had 5 frames over 33 ms (180 ms in total), unattributed.
+- No pipeline-compile stalls on the render thread occurred in gameplay. Worker-thread compiles counted 73, the worst 4,927 ms, and none showed up as a hitch.
+- The game log's per-minute counter reads 58.95–60.0 on the street and 55.9–56.9 while screenshots were taken.
+
+**Differences from the p2 claim.** p2 reported "8/8; 235 s: 59.94 FPS, lowest 1 s 59, worst 20.6 ms, 0 frames over 33 ms". This run's 240 s traversal on the same content measured 59.888 FPS, lowest second 50, worst 34.1 ms and 12 frames over 33 ms, with one window failing.
+
+**Open.**
+
+- The objective route did not reach Fisk Tower: the player looped on a ledge outside the mission area. The 38–41 FPS tower limit is neither confirmed nor refuted, and the atrium glass is still unchecked.
+- The menu ignores early Continue presses. Whether a physical controller's first press is accepted earlier is unverified.
+- `[Save] Request type 3 failed with code 0x00000002` appears 8 times at boot.
+- Audio and save/reload need a person at the console.
+
+The title cannot be counted yet.
