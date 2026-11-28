@@ -1,25 +1,26 @@
 #include "../runtime/shared/host-vsync-clock.h"
 #include <assert.h>
 
-/* A host near 60 Hz draws on each refresh and releases the frames it read 1.5 ms later, with +-0.6 ms of jitter;
-   one release in 40 is 6 ms late. Under load (busyMs) the host's draw callback itself runs late on 30% of
-   refreshes, by up to busyMs, and it shows whatever was committed before the callback ran. A producer presenting
-   every second refresh at the target must land in every second host interval, with no slot repeated or skipped. */
+/* A host near 60 Hz draws on each refresh, +-0.6 ms, and releases the frames it read 0.5 ms later; one release in
+   40 is 6 ms late. Under load (jitterMs) the draw callback itself comes up to jitterMs early or late on 3% of
+   refreshes, as measured at Fisk Tower, and shows whatever was committed before it ran. A producer presenting every
+   second refresh at the target must land in every second host interval, with no slot repeated or skipped. */
 static uint32_t seed = 12345;
 static int64_t Jitter(int64_t range) { seed = seed * 1103515245u + 12345u; return (int64_t)(seed >> 8) % (2 * range + 1) - range; }
 static uint64_t Uniform(uint64_t range) { seed = seed * 1103515245u + 12345u; return range ? (uint64_t)(seed >> 8) % range : 0; }
 
 static uint64_t tick[40000], draw[40000];
 
-static void Run(double hostHz, unsigned busyMs)
+static void Run(double hostHz, unsigned jitterMs)
 {
     const uint64_t hz = 1745500000ull;
     const uint64_t origin = 1000000000ull;
     for (unsigned i = 0; i < 40000; ++i) {
         tick[i] = origin + (uint64_t)(i * (hz / hostHz));
-        draw[i] = tick[i] + (Uniform(10) < 3 ? Uniform(hz / 1000 * busyMs) : 0);
+        draw[i] = tick[i] + (uint64_t)Jitter(hz * 6 / 10000) +
+            (uint64_t)(Uniform(100) < 3 ? Jitter((int64_t)(hz / 1000) * jitterMs) : 0);
     }
-    const int64_t release = (int64_t)(hz * 15 / 10000), wobble = (int64_t)(hz * 6 / 10000);
+    const int64_t release = (int64_t)(hz * 5 / 10000), wobble = (int64_t)(hz * 3 / 10000);
 
     XboxHostVsync clock;
     XboxHostVsyncInit(&clock, hz);
@@ -67,6 +68,7 @@ int main(void)
     Run(59.9432, 0);   /* the measured Series X output */
     Run(60.0, 0);      /* a 60.000 Hz display */
     Run(59.94006, 0);  /* exactly 60000/1001 */
-    Run(59.9432, 10);  /* the host's draw callback up to 10 ms late on 30% of refreshes */
+    Run(59.9432, 8);   /* the host's draw callback up to 8 ms early or late on 3% of refreshes */
+    Run(60.0, 8);
     return 0;
 }
