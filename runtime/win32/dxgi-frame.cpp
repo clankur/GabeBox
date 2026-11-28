@@ -58,6 +58,16 @@ struct HostRelease {
     volatile LONG state = 0; // 0 not started, 1 starting, 2 running, 3 unavailable
 } hostRelease;
 
+constexpr unsigned hostLogSize = 8192;
+UINT64 hostLog[hostLogSize];
+volatile LONG hostLogCount = -1; // -1 off; counts up to hostLogSize
+
+void HostLogAdd(UINT64 qpc, unsigned kind) {
+    if (InterlockedCompareExchange(&hostLogCount, 0, 0) < 0) return;
+    const LONG slot = InterlockedIncrement(&hostLogCount) - 1;
+    if (slot >= 0 && static_cast<unsigned>(slot) < hostLogSize) hostLog[slot] = qpc << 1 | kind;
+}
+
 DWORD WINAPI WatchHostRelease(void*) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     for (;;) {
@@ -68,6 +78,7 @@ DWORD WINAPI WatchHostRelease(void*) {
         AcquireSRWLockExclusive(&hostRelease.lock);
         XboxHostVsyncObserve(&hostRelease.clock, static_cast<UINT64>(now.QuadPart));
         ReleaseSRWLockExclusive(&hostRelease.lock);
+        HostLogAdd(static_cast<UINT64>(now.QuadPart), 1);
     }
 }
 
@@ -390,12 +401,28 @@ void DxgiFramePublisher::Commit(unsigned index) {
     InterlockedExchange64(&gpu_->sequence[index], static_cast<LONG64>(slot.submitted));
     InterlockedExchange(&gpu_->gpu_active, 1);
     InterlockedExchange(&base_->frame_sequence, 1);
+    if (InterlockedCompareExchange(&hostLogCount, 0, 0) >= 0) {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        HostLogAdd(static_cast<UINT64>(now.QuadPart), 0);
+    }
     if (StartHostRelease()) {
         const DWORD error = GetLastError();
         if (slot.done12) slot.done12->SetEventOnCompletion(slot.submitted, hostRelease.events[index]);
         else if (slot.done) slot.done->SetEventOnCompletion(slot.submitted, hostRelease.events[index]);
         SetLastError(error);
     }
+}
+
+void DxgiFramePublisher::HostLogStart() {
+    InterlockedCompareExchange(&hostLogCount, 0, -1);
+}
+
+const UINT64* DxgiFramePublisher::HostLogFull(unsigned& count) {
+    const LONG value = InterlockedCompareExchange(&hostLogCount, 0, 0);
+    if (value < static_cast<LONG>(hostLogSize)) return nullptr;
+    count = hostLogSize;
+    return hostLog;
 }
 
 bool DxgiFramePublisher::HostVsync(UINT64 now, XboxHostVsync& out) {

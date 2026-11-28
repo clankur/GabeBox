@@ -21,6 +21,9 @@ public:
     HRESULT Reset();
     // The host's display cadence, estimated from when it releases committed frames (done fences). True when locked.
     static bool HostVsync(UINT64 now, XboxHostVsync& out);
+    // Measurement only: records the next 8192 host releases (odd) and commits (even) as QPC << 1 | kind.
+    static void HostLogStart();
+    static const UINT64* HostLogFull(unsigned& count);
 
 private:
     struct Slot {
