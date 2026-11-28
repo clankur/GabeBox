@@ -47,6 +47,11 @@ class CompileSlotPolicyTests(unittest.TestCase):
         self.assertLess(thread.index('InterlockedDecrement(&xprState.threadsLive) > 0'),
                         thread.index('asset pso-replay done'))
         self.assertIn('xprState.threadCount = threads < 1 ? 1 : threads > 16 ? 16 : threads;', replay)
+        # A thread reserves an entry before waiting for a slot, and a rootless entry takes no slot.
+        reserve = thread.index('InterlockedCompareExchange(&entry->reserved, 1, 0)')
+        rooted = thread.index('if (!rooted)')
+        self.assertLess(reserve, rooted)
+        self.assertLess(rooted, thread.index('xprState.slot(TRUE)'))
 
     def test_replay_claims_an_entry_only_after_admission(self):
         replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()

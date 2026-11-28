@@ -106,6 +106,7 @@ typedef struct XprEntry {
     volatile LONG state;          /* XprPending, XprCompiling, XprReady, XprDone */
     ID3D12PipelineState *object;  /* while ready: our reference */
     ID3D12RootSignature *root;    /* object it was compiled with */
+    volatile LONG reserved;       /* a replay thread is admitting it; others skip it */
 } XprEntry;
 
 enum { XprPending = 0, XprCompiling = 1, XprReady = 2, XprDone = 3 };
@@ -1003,6 +1004,9 @@ static DWORD WINAPI XprReplayThread(void *unused) {
         for (UINT32 i = 0; i < xprState.entryCount; ++i) {
             XprEntry *entry = &xprState.entries[i];
             if (entry->state != XprPending) continue;
+            /* Each pending entry goes to one replay thread; the others move on instead of waiting
+               for a compile slot only to find the entry taken. */
+            if (InterlockedCompareExchange(&entry->reserved, 1, 0)) continue;
             XprReader in = {entry->words, entry->wordCount, 0, FALSE};
             D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics;
             D3D12_COMPUTE_PIPELINE_STATE_DESC compute;
@@ -1011,6 +1015,17 @@ static DWORD WINAPI XprReplayThread(void *unused) {
             const BOOL decoded = entry->graphics ? XprDecodeGraphics(&in, &graphics, elements, &rootHash) :
                 XprDecodeCompute(&in, &compute, &rootHash);
             if (decoded && xprState.rootDedup == 1) XprEnsureRoot(rootHash);
+            if (decoded) {
+                /* No root signature yet: retry on a later pass without taking a slot. */
+                AcquireSRWLockShared(&xprState.lock);
+                const BOOL rooted = XprRootByHash(rootHash) != NULL;
+                ReleaseSRWLockShared(&xprState.lock);
+                if (!rooted) {
+                    ++deferred;
+                    InterlockedExchange(&entry->reserved, 0);
+                    continue;
+                }
+            }
             if (xprState.slot) xprState.slot(TRUE);
             AcquireSRWLockExclusive(&xprState.lock);
             XprRoot *root = decoded ? XprRootByHash(rootHash) : NULL;
@@ -1027,6 +1042,7 @@ static DWORD WINAPI XprReplayThread(void *unused) {
             ReleaseSRWLockExclusive(&xprState.lock);
             if (!take) {
                 if (xprState.slot) xprState.slot(FALSE);
+                InterlockedExchange(&entry->reserved, 0);
                 continue;
             }
             if (entry->graphics) graphics.pRootSignature = entry->root;
