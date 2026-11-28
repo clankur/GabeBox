@@ -1741,3 +1741,85 @@ Street, final-a (`1.0.63053.0`, same content):
 - **Not measured at the tower:** native 1080p with the frame diagnostics, the Lowest tier, and a second confirming run.
 - **Diagnostic perturbation:** the wait profiler suspends two threads about 500 times a second; the per-pipeline profiler adds work to every command list (fisk2 shows more street stutter than fisk1).
 - **The gate windows at the tower include nav screenshots;** their gaps are excluded by UTC window.
+
+## Rainbow sky and lighting tint: small texture-array copies (issue #94, November 28)
+
+**Result.** The rainbow sky grid, the green/magenta lighting and the green reflections have one cause: an Xbox D3D12 fault in `CopyTextureRegion` into small subresources of 2D texture arrays. `runtime/win32/d3d12-small-array-copy.h` works around it in the shared layer, and the Spider-Man play loader installs it (commit `c79ef9f`). Every verification launch since then was clean at the start street and on the Fisk Tower route.
+
+**What the artefact is.**
+
+- **Rainbow sky.** The sky, fog and probe faces sample a 64×64×6 R11G11B10 fog-colour cube (4 mips). `CS_BlendFogColorMaps` (DXBC checksum word `0x39BBAB53`) writes it: 4 dispatches of (size/8, size/8, 6), blending the weather keyframe cubes `g_TexCubeMisc0..3` (t5–t8). Each keyframe cube is a 32×32×6 BC6H texture with 3 mips, placed in a 16 MiB asset heap and uploaded on the **copy queue** by the asset uploader (`exe+0x18FDDBB`, footprints from `GetCopyableFootprints`).
+- **Where the faces go wrong.** On the console, faces 2–5 of those keyframe cubes read zero in shaders. Later they read the neighbouring asset's bytes, which is the deterministic garbage. A `CopyTextureRegion` readback of the same texture shows all six faces filled.
+- **How it shows.** Faces 2–5 of the first blend were empty in every launch before the fix (mean 0.008–0.014 against 0.98/1.93 for faces 0–1). In 4 of 10 launches (d1, d5, g1, h1), later blends filled them with 8×8 tiles of garbage (mean up to 1,338, 21–26% of texels above 64). The bad result persists because the blend reruns only when its input hash changes (`0x141632c40`).
+- **Lighting tint.** The probe cache is a placed 256×256×384 BC6H array with 6 mips in a texture-only heap. Its mips 3–5 (8×8 blocks or fewer) are small subresources of the same kind. They are filled on the direct queue from R32G32B32A32_UINT intermediates, and they are the per-launch green and magenta.
+- **Ray tracing is not involved.** RT is off on this console: no SM 6.6 and no DXR 1.1.
+
+**First wrong operation.** `CopyTextureRegion` into an array subresource of about 1 KiB or less. Slices 0–1 survive. Later slices are invisible to shader views, while copy readback returns the data. Console controls, run in-process on the game's own device (scratchpad `sky/run-h2`–`run-h8`, leases #182–#194):
+
+| Control | Result |
+| --- | --- |
+| h2/h3: 32×32×6 BC6H cube, upload on the copy or direct queue, committed or placed, 4 KiB or 64 KiB alignment, texture-to-texture copy | slices 2–5 read 0 in an SRV |
+| h2/h3: 64×64 BC6H mip 0, or 256×12 slices at mips 0–2 | correct |
+| h5: R32G32B32A32_UINT array, direct queue, explicit NON_PIXEL transitions | correct |
+| h6: float formats, direct queue, explicit transitions | correct; BC6H wrong in every direct-queue variant |
+| h7 v0 / h8 v1, v2, v6: BC6H bytes written through a placed R32G32B32A32_UINT alias at the same heap offset, direct queue (footprint copy or UINT twin, explicit or implicit state) | correct (faces 2–5 = 26/0/77187, 394/1/9429, 5808/3/1151, 84937/7/140, matching the reference) |
+| h7 v1, h8 v0/v3/v4/v5: any format on the copy queue, with or without explicit COMMON↔COPY_DEST barriers or the alias | wrong (0, or RGBA16F mip 2 faces 4–5 = 0) |
+
+**Hypotheses ruled out.**
+
+- **DXIL replacement of `CS_BlendDefaultEnvProbeTextures`.** Wrong shader.
+- **Lowering DXBC `switch` to if-chains.** A switch-to-if rewriter, byte-identical in C and Python, was applied to 8 game shaders in run g1; the sky was still bad. The code was not kept.
+- **Upload race.** In e1 the upload fence had completed before the blend.
+- **Overlapping placed resources.** e1 and d6 logged every placement and found no overlap.
+- **Face-ID shader.** In h1, writes to all six output faces worked; only the inputs were wrong.
+
+**Fix.** `runtime/win32/d3d12-small-array-copy.h`:
+
+- **Scope.** It covers copies into 2D texture arrays (ArraySize ≥ 2, no render-target or depth flags, single-sample) whose subresource is 2 KiB or less.
+- **Copy-queue lists.** The title's copy still runs and is also recorded. When the title submits the list, the copies are replayed on a private direct queue:
+  - copy queue `Signal(copyDone)`;
+  - direct queue `Wait`, then replay, then `Signal(replayDone)`;
+  - copy queue `Wait(replayDone)`.
+
+  This happens inside `ExecuteCommandLists`, before the title's own signal, so the title's upload fence completes only after the corrected data is in place.
+- **Direct-queue lists.** A copy into a small block-compressed subresource is rewritten in place to go through the alias.
+- **Block-compressed formats.** They go through a placed UINT alias (R32G32B32A32_UINT for 16-byte blocks, R32G32_UINT for 8-byte), at block resolution and the same heap offset, bracketed by aliasing barriers. The alias is created in the `CreatePlacedResource` hook and owned by the texture through `SetPrivateDataInterface`.
+- **Command lists and queues.** Originals are kept per implementation: copy lists on Xbox have their own vtable (`sac-list-vtable n=1 value=3`). Hooks cover `CreateCommandList`, `CreateCommandList1` and `CreateCommandQueue`.
+- **Trace lines.** `asset sac-install`, `sac-alias`, `sac-replay` and `sac-inline` (sampled at powers of two).
+
+**Verification.**
+
+| Run | Package, lease | Loader | Fog cube faces 2–5, first blend | Street (6 shots) green / magenta | Fisk route (5 shots) green / magenta | Gate windows (30 s, `--require-gpu-60`) | Peak commit / lowest free |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| s1 | `1.0.63058.0`, #196 | diagnostic readback (`PROBE_DIAG`), Low textures | **filled**: mean 1.29 / 1.18 / 1.28 / 1.33, garbage 0 (before the fix: 0.008–0.014, or garbage) | 0.00 / 0.00 | — | — | — |
+| m1 | `1.0.63060.0`, #198 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 | 7/8 (one 184 ms hitch) | 4,811 / 308 MiB |
+| m2 | `1.0.63063.0`, #203 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 (off-route alley) | 6/8 (852 ms gap, attributed to a pipeline compile) | 4,819 / 300 MiB |
+| m3 | `1.0.63066.0`, #206 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 | 8/8 | 4,789 / 330 MiB |
+| m4 (45 nav cycles) | `1.0.63069.0`, #209 | measure `a0dafc85…` | — | 0.00 / 0.00 (one shot 0.01 magenta) | 0.00 / 0.00 | 7/8 | 4,793 / 326 MiB |
+| p2 | `1.0.63073.0`, #213 | play `68a5c545…` (HEAD `c6a75f9`) | — | 0.00 / 0.00 | 0.00 / 0.00 (glass curtain walls, neutral) | 8/8; 235 s: 59.94 FPS, lowest 1 s 59, worst 20.6 ms, 0 frames over 33 ms | (play loader has no counters) |
+
+- **Saves.** Every run ended with saves restored and checked: `slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`.
+- **Frames.** All frames were shared GPU textures (0 CPU uploads). Internal 1280×720, output 1920×1080.
+- **Memory.** Peak commit was 4,789–4,819 MiB and lowest free 300–330 MiB, against 4,786–4,807 / 312–333 MiB for final-a/final-b without the fix. The extra objects are 8 direct command lists and allocators, one queue and two fences; the aliases are placed and use no memory.
+- **Counters per launch.** The trace logs at least 128 aliases, at least 64 copy-queue replay batches, and at least 1,024 inline BC rewrites (s1) or 16,384 (m1–m3). The counters are sampled at powers of two, so these are lower bounds.
+- **Screenshot sheets.** `run-*/sheet.png` (street) and `run-*/fisk-sheet.png` in the scratchpad `sky/` run folders. The metric is `light/hue.py`: the share of saturated green or magenta pixels.
+
+**Before the fix**, for comparison:
+
+- d1, d5, g1 and h1: magenta 2–12% and green up to 3.7% at the street, with the rainbow cloud grid.
+- d2, d3, d6, d7 and e1: under 0.03%, but with dark faces 2–5 on the first blend.
+
+**Fallback.** No graphics setting was needed. Ray tracing was already off.
+
+**Not covered or not verified.**
+
+- **Fisk Tower atrium.** None of the six launches reached the atrium: the automated route ends on facades near the tower. The atrium glass that the variants agent saw green and yellow is unchecked with the fix.
+- **Committed block-compressed arrays.** They get no alias, so their small copies are only counted as `unsupported`. Spider-Man's affected textures are all placed.
+- **Block-compressed sources.** BC-to-BC texture copies and BC mips below 4×4 texels are not rewritten.
+- **Other titles.** No second title was tested. The fault is in the console driver, so other titles that upload small array slices on a copy queue should need the same header.
+
+**Installed play build.** `1.0.63075.0`, appx SHA-256 `cb7937e514a22cc6…`, deployed under lease #215 without launching. It is the only SteamCore package listed.
+
+- **Loader.** `build.sh play` at `c6a75f9` (with `c79ef9f`), `68a5c5450be7d32b…`: SB128, hosted 1280×720, no per-second counters, no probe diagnostics, no warm-up skip.
+- **Content.** Recipe `748e3130…`, the `play-build.json` overlays (including light-grid cap 1024 and Texture Medium) plus the 242 restores. No autoplay.
+- **What was launched.** This exact content with autoplay was launched as p2. An earlier no-autoplay deploy (`1.0.63071.0`, #211) waited at Big Picture for **Play** and was stopped without starting the game.
