@@ -28,7 +28,7 @@
 #ifndef XBOX_SAC_SMALL_BYTES
 #define XBOX_SAC_SMALL_BYTES 2048u   /* subresources up to this size are corrected (1 KiB failed; 4 KiB BC6H passed) */
 #endif
-#define XBOX_SAC_PENDING 4096u         /* copies recorded on copy lists and not yet submitted */
+#define XBOX_SAC_PENDING 4096u         /* copies recorded on open or closed copy lists, kept until each list is reset */
 #define XBOX_SAC_SLOTS 8u              /* replay command lists in flight */
 #define XBOX_SAC_VTABLES 4u            /* distinct command list / queue implementations hooked */
 
@@ -60,6 +60,7 @@ typedef struct {
     ID3D12Resource *dst; UINT sub, x, y, z;
     D3D12_TEXTURE_COPY_LOCATION src;
     D3D12_BOX box; BOOL hasBox;
+    BOOL executed;                 /* submitted at least once; kept until the list is reset */
 } XboxSacPending;
 
 static struct {
@@ -250,10 +251,20 @@ static void STDMETHODCALLTYPE XboxSacCopyHook(ID3D12GraphicsCommandList *list, c
         /* keep the title's copy; replay it on the direct queue when the list is submitted */
         copy(list, dst, x, y, z, src, box);
         AcquireSRWLockExclusive(&xboxSac.lock);
+        if (xboxSac.pendingCount == XBOX_SAC_PENDING) {
+            /* full: give up the oldest copy that was already submitted (its list may never be reset) */
+            UINT oldest = 0;
+            while (oldest < xboxSac.pendingCount && !xboxSac.pending[oldest].executed) ++oldest;
+            if (oldest < xboxSac.pendingCount) {
+                for (UINT i = oldest + 1; i < xboxSac.pendingCount; ++i) xboxSac.pending[i - 1] = xboxSac.pending[i];
+                --xboxSac.pendingCount;
+                InterlockedIncrement(&xboxSac.dropped);
+            }
+        }
         if (xboxSac.pendingCount < XBOX_SAC_PENDING) {
             XboxSacPending *p = &xboxSac.pending[xboxSac.pendingCount++];
             p->list = list; p->dst = dst->pResource; p->sub = dst->SubresourceIndex; p->x = x; p->y = y; p->z = z;
-            p->src = *src; p->hasBox = box != NULL;
+            p->src = *src; p->hasBox = box != NULL; p->executed = FALSE;
             if (box) p->box = *box;
         } else {
             InterlockedIncrement(&xboxSac.dropped);
@@ -271,7 +282,7 @@ static void STDMETHODCALLTYPE XboxSacCopyHook(ID3D12GraphicsCommandList *list, c
 }
 
 static HRESULT STDMETHODCALLTYPE XboxSacResetHook(ID3D12GraphicsCommandList *list, ID3D12CommandAllocator *allocator, ID3D12PipelineState *pso) {
-    AcquireSRWLockExclusive(&xboxSac.lock);   /* a list reset before submission discards its recorded copies */
+    AcquireSRWLockExclusive(&xboxSac.lock);   /* a reset discards the list's recorded copies, submitted or not */
     UINT kept = 0;
     for (UINT i = 0; i < xboxSac.pendingCount; ++i) if (xboxSac.pending[i].list != list) xboxSac.pending[kept++] = xboxSac.pending[i];
     xboxSac.pendingCount = kept;
@@ -298,16 +309,18 @@ static void STDMETHODCALLTYPE XboxSacExecuteHook(ID3D12CommandQueue *queue, UINT
         ID3D12GraphicsCommandList *replay = xboxSac.lists[slot];
         allocator->lpVtbl->Reset(allocator);
         XboxSacList(replay)->reset(replay, allocator, NULL);
-        UINT kept = 0, done = 0;
+        /* A closed list can be submitted again: its copies stay recorded until the list is reset, so every
+           submission gets the correction, not only the first. */
+        UINT done = 0;
         for (UINT i = 0; i < xboxSac.pendingCount; ++i) {
             XboxSacPending *p = &xboxSac.pending[i];
             BOOL submitted = FALSE;
             for (UINT k = 0; k < count; ++k) if ((void *)p->list == (void *)lists[k]) { submitted = TRUE; break; }
-            if (!submitted) { xboxSac.pending[kept++] = *p; continue; }
+            if (!submitted) continue;
             if (XboxSacRecordFixed(replay, p->dst, p->sub, p->x, p->y, p->z, &p->src, p->hasBox ? &p->box : NULL, D3D12_RESOURCE_STATE_COMMON)) ++done;
-            else InterlockedIncrement(&xboxSac.unsupported);
+            else if (!p->executed) InterlockedIncrement(&xboxSac.unsupported);
+            p->executed = TRUE;
         }
-        xboxSac.pendingCount = kept;
         replay->lpVtbl->Close(replay);
         /* copy queue -> replay on the private direct queue -> copy queue resumes (the title's next signal follows) */
         const XboxSacQueueOps *title = XboxSacQueue(queue), *own = XboxSacQueue(xboxSac.queue);
@@ -377,10 +390,22 @@ static void XboxSacPatchDevice(void **vtable, unsigned slot, void *hook, void **
     XboxSacWrite(&vtable[slot], hook);
 }
 
+/* A new list can reuse the address of one released without a reset: forget copies recorded under it. */
+static void XboxSacForget(void *list) {
+    AcquireSRWLockExclusive(&xboxSac.lock);
+    UINT kept = 0;
+    for (UINT i = 0; i < xboxSac.pendingCount; ++i) if ((void *)xboxSac.pending[i].list != list) xboxSac.pending[kept++] = xboxSac.pending[i];
+    xboxSac.pendingCount = kept;
+    ReleaseSRWLockExclusive(&xboxSac.lock);
+}
+
 static HRESULT STDMETHODCALLTYPE XboxSacCreateListHook(ID3D12Device *device, UINT mask, D3D12_COMMAND_LIST_TYPE type,
         ID3D12CommandAllocator *allocator, ID3D12PipelineState *pso, REFIID iid, void **out) {
     const HRESULT hr = xboxSac.createList(device, mask, type, allocator, pso, iid, out);
-    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_BUNDLE) XboxSacPatchList((ID3D12GraphicsCommandList *)*out);
+    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+        XboxSacForget(*out);
+        XboxSacPatchList((ID3D12GraphicsCommandList *)*out);
+    }
     return hr;
 }
 
@@ -388,7 +413,10 @@ static HRESULT STDMETHODCALLTYPE XboxSacCreateListHook(ID3D12Device *device, UIN
 static HRESULT STDMETHODCALLTYPE XboxSacCreateList1Hook(ID3D12Device *device, UINT mask, D3D12_COMMAND_LIST_TYPE type, UINT flags,
         REFIID iid, void **out) {
     const HRESULT hr = xboxSac.createList1(device, mask, type, flags, iid, out);
-    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_BUNDLE) XboxSacPatchList((ID3D12GraphicsCommandList *)*out);
+    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+        XboxSacForget(*out);
+        XboxSacPatchList((ID3D12GraphicsCommandList *)*out);
+    }
     return hr;
 }
 

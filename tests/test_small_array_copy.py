@@ -26,6 +26,21 @@ class SmallArrayCopyTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertLess(execute.index('->execute(queue, count, lists)'), positions[0])
 
+    def test_copies_stay_recorded_until_the_list_is_reset(self):
+        # A closed copy list submitted again must be corrected again: execution keeps the recorded copies,
+        # only a reset (or a new list at a reused address) forgets them.
+        execute = self.header[self.header.index('static void STDMETHODCALLTYPE XboxSacExecuteHook'):]
+        execute = execute[:execute.index('\n}\n')]
+        self.assertNotIn('xboxSac.pendingCount = kept', execute)
+        self.assertIn('p->executed = TRUE;', execute)
+        reset = self.header[self.header.index('static HRESULT STDMETHODCALLTYPE XboxSacResetHook'):]
+        reset = reset[:reset.index('\n}\n')]
+        self.assertIn('xboxSac.pending[i].list != list', reset)
+        for hook in ('XboxSacCreateListHook', 'XboxSacCreateList1Hook'):
+            body = self.header[self.header.index('static HRESULT STDMETHODCALLTYPE ' + hook):]
+            body = body[:body.index('\n}\n')]
+            self.assertLess(body.index('XboxSacForget(*out);'), body.index('XboxSacPatchList('))
+
     def test_play_loader_installs_it(self):
         trace = (ROOT / 'analysis/spider-man-play-loader/trace.c').read_text()
         allocs = (ROOT / 'analysis/spider-man-play-loader/allocs.h').read_text()

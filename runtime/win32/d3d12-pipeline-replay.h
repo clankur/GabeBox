@@ -170,6 +170,12 @@ typedef struct XprState {
 static XprState xprState;
 
 /* Hosts may link no C runtime, so the header copies and compares by itself. */
+/* The adapters link without a C runtime, and clang turns a zeroed aggregate into a
+   memset call, so clear descriptions with the string instruction directly. */
+static void XprZero(void *to, SIZE_T size) {
+    __asm__ volatile("rep stosb" : "+D"(to), "+c"(size) : "a"(0) : "memory");
+}
+
 static void XprCopy(void *to, const void *from, SIZE_T size) {
     BYTE *out = (BYTE *)to;
     const BYTE *in = (const BYTE *)from;
@@ -460,7 +466,7 @@ static void XprGetStencil(XprReader *in, D3D12_DEPTH_STENCILOP_DESC *face) {
 /* Rebuilds a description from canonical words. Element names point into the words. */
 static BOOL XprDecodeGraphics(XprReader *in, D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
         D3D12_INPUT_ELEMENT_DESC *elements, UINT64 *rootHash) {
-    *desc = (__typeof__(*desc)){0};
+    XprZero(desc, sizeof(*desc));
     if (XprGet(in) != 1) return FALSE;
     *rootHash = XprGet64(in);
     desc->VS = XprGetShader(in);
@@ -536,7 +542,7 @@ static BOOL XprDecodeGraphics(XprReader *in, D3D12_GRAPHICS_PIPELINE_STATE_DESC 
 }
 
 static BOOL XprDecodeCompute(XprReader *in, D3D12_COMPUTE_PIPELINE_STATE_DESC *desc, UINT64 *rootHash) {
-    *desc = (__typeof__(*desc)){0};
+    XprZero(desc, sizeof(*desc));
     if (XprGet(in) != 2) return FALSE;
     *rootHash = XprGet64(in);
     desc->CS = XprGetShader(in);

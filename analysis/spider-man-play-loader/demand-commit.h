@@ -18,7 +18,11 @@
      kernel writers (ReadFileScatter, DeviceIoControl output, socket receives) are not covered, so a
      host selects only commits whose buffers those calls do not target.
    - VirtualFree drops a range when a decommit covers all of it or its reservation is released, and
-     the slot is reused. A new selected commit over a dropped or stale range starts a fresh range.
+     the slot is reused. A new selected commit over a dropped or stale range starts a fresh range;
+     one inside a live range returns at once, and one crossing a live range's edge is left to the
+     title, so a recommit never drops pages already promised.
+   - The handler retries a fault only when committing made the page accessible; protection and
+     execute violations go to the title's own handlers.
    - If the console refuses a chunk, the fault continues to the normal handlers, as it would for a
      commit the title never made. If the ends cannot be committed, the host falls back to the
      title's own full commit.
@@ -38,6 +42,7 @@ typedef struct XdcRange {
     volatile ULONG_PTR base, end;   /* end == base: free slot */
     volatile LONG64 committed, reported;
     DWORD kind;                     /* host-defined; growth of kind 0 is traced every 16 MiB */
+    ULONG_PTR allocation;           /* AllocationBase of the reservation the range lies in */
 } XdcRange;
 
 typedef struct XdcState {
@@ -121,15 +126,33 @@ static BOOL XdcCommit(XdcRange *range, ULONG_PTR address, SIZE_T bytes) {
     return TRUE;
 }
 
+/* TRUE when the page holding address is committed and allows the faulting access (0 read, 1 write). */
+static BOOL XdcAllows(ULONG_PTR address, ULONG_PTR access) {
+    MEMORY_BASIC_INFORMATION region;
+    if (VirtualQuery((LPCVOID)address, &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT ||
+            (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        return FALSE;
+    const DWORD protect = region.Protect & 0xFF;
+    if (access != 1) return TRUE;
+    return protect == PAGE_READWRITE || protect == PAGE_WRITECOPY || protect == PAGE_EXECUTE_READWRITE ||
+        protect == PAGE_EXECUTE_WRITECOPY;
+}
+
 static LONG WINAPI XdcFault(EXCEPTION_POINTERS *exception) {
     const EXCEPTION_RECORD *fault = exception->ExceptionRecord;
     if (fault->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || fault->NumberParameters < 2 || !xdcState.live)
         return EXCEPTION_CONTINUE_SEARCH;
+    /* Execute (DEP) violations are never a missing commit. */
+    const ULONG_PTR access = fault->ExceptionInformation[0];
+    if (access == 8) return EXCEPTION_CONTINUE_SEARCH;
     const ULONG_PTR address = fault->ExceptionInformation[1];
     const DWORD error = GetLastError();
     AcquireSRWLockShared(&xdcState.lock);
     XdcRange *range = XdcFindLocked(address);
-    const BOOL committed = range && XdcCommit(range, address, 1);
+    /* Retry only when the page is now committed with an access the fault needs. A fault on a page
+       that was already committed (the title made it read-only, say) is not ours: retrying would
+       loop, so it goes to the title's own handlers. */
+    const BOOL committed = range && XdcCommit(range, address, 1) && XdcAllows(address, access);
     ReleaseSRWLockShared(&xdcState.lock);
     if (committed) InterlockedIncrement(&perfFaults);
     SetLastError(error);
@@ -166,15 +189,41 @@ static LPVOID XboxDemandCommitTake(LPVOID address, SIZE_T bytes, DWORD type, DWO
     if (xdcState.handler != 3) return NULL;
     const ULONG_PTR from = (ULONG_PTR)address & ~(ULONG_PTR)0xFFF;
     const ULONG_PTR to = ((ULONG_PTR)address + bytes + 0xFFF) & ~(ULONG_PTR)0xFFF;
+    ULONG_PTR allocation;
     {
         /* Only inside one reservation, as a plain commit requires. */
         MEMORY_BASIC_INFORMATION first, last;
         if (VirtualQuery((LPCVOID)from, &first, sizeof(first)) != sizeof(first) || first.State == MEM_FREE ||
                 VirtualQuery((LPCVOID)(to - 1), &last, sizeof(last)) != sizeof(last) || last.State == MEM_FREE ||
                 first.AllocationBase != last.AllocationBase) return NULL;
+        allocation = (ULONG_PTR)first.AllocationBase;
     }
     AcquireSRWLockExclusive(&xdcState.lock);
-    XdcDropLocked(from, to, TRUE);
+    /* A range whose reservation was released and replaced behind VirtualFree's back is stale. A live
+       range overlapping the commit keeps serving its other pages: recommitting committed memory is
+       valid and must not take away pages the title was promised. Inside one range the pages are
+       already promised; across a range edge the title makes its own commit, and the range skips
+       chunks that are already committed. */
+    BOOL overlaps = FALSE;
+    for (LONG index = 0; index < xdcState.count && index < XDC_SLOTS; ++index) {
+        XdcRange *live = &xdcState.ranges[index];
+        if (live->end == live->base || live->end <= from || live->base >= to) continue;
+        if (live->allocation != allocation) {
+            live->end = live->base;
+            InterlockedDecrement(&xdcState.live);
+            InterlockedIncrement(&xdcState.dropped);
+            continue;
+        }
+        if (live->base <= from && to <= live->end) {
+            ReleaseSRWLockExclusive(&xdcState.lock);
+            return (LPVOID)from;
+        }
+        overlaps = TRUE;
+    }
+    if (overlaps) {
+        ReleaseSRWLockExclusive(&xdcState.lock);
+        return NULL;
+    }
     XdcRange *range = NULL;
     for (LONG index = 0; index < xdcState.count && index < XDC_SLOTS; ++index)
         if (xdcState.ranges[index].end == xdcState.ranges[index].base) { range = &xdcState.ranges[index]; break; }
@@ -191,6 +240,7 @@ static LPVOID XboxDemandCommitTake(LPVOID address, SIZE_T bytes, DWORD type, DWO
     range->committed = probe.committed;
     range->reported = 0;
     range->kind = kind;
+    range->allocation = allocation;
     range->base = from;
     range->end = to;
     if (range == &xdcState.ranges[xdcState.count]) InterlockedIncrement(&xdcState.count);
