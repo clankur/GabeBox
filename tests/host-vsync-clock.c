@@ -26,17 +26,18 @@ static void Run(double hostHz, unsigned busyMs)
     assert(clock.period16 > 0);
     assert(!XboxHostVsyncLocked(&clock, origin, hz));
 
-    /* Free-running 30 Hz producer: the host releases every second refresh. */
-    for (unsigned i = 0; i < 80; i += 2) {
+    /* Free-running 30 Hz producer: the host releases every second refresh; the very first release is 8 ms late. */
+    for (unsigned i = 0; i < 300; i += 2) {
         int64_t late = (i % 40 == 20) ? (int64_t)(hz * 6 / 1000) : 0;
-        XboxHostVsyncObserve(&clock, draw[i] + release + Jitter(wobble) + late);
+        XboxHostVsyncObserve(&clock, draw[i] + release + Jitter(wobble) + late + (i == 0 ? (int64_t)(hz / 1000 * 8) : 0));
+        if (i == 100) assert(!XboxHostVsyncLocked(&clock, tick[101], hz)); /* not before two seconds of refreshes */
     }
-    assert(XboxHostVsyncLocked(&clock, tick[79], hz));
+    assert(XboxHostVsyncLocked(&clock, tick[299], hz));
 
     /* Paced: each present is committed at the target; the host shows it on the first draw after the commit. */
     uint64_t deadline = 0;
     unsigned previousShown = 0, frames = 0, misses = 0;
-    for (unsigned i = 80; i < 39000;) {
+    for (unsigned i = 300; i < 39000;) {
         const uint64_t period = (uint64_t)(clock.period16 >> 16);
         const uint64_t earliest = deadline ? deadline + 2 * period - period / 2 : tick[i];
         deadline = XboxHostVsyncNext(&clock, earliest, XBOX_HOST_VSYNC_COMMIT16);
