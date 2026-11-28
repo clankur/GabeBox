@@ -4,6 +4,23 @@
 #ifndef PSO_SLOTS
 #define PSO_SLOTS 1
 #endif
+/* Extra compile slots while available commit is at least PSO_BOOST_MIN_AVAIL_MIB (boot has over
+   1 GiB; gameplay 60-400 MiB, so gameplay keeps PSO_SLOTS). 0 keeps the fixed pool. */
+#ifndef PSO_BOOST_SLOTS
+#define PSO_BOOST_SLOTS 0
+#endif
+#ifndef PSO_BOOST_MIN_AVAIL_MIB
+#define PSO_BOOST_MIN_AVAIL_MIB 768
+#endif
+/* PSO_PRIORITY=1: render- and main-thread compiles go first (and may use one slot above the limit
+   while at least PSO_URGENT_MIN_AVAIL_MIB is available); replay compiles run only when no title
+   compile is waiting. 0 keeps first-come admission for every compile. */
+#ifndef PSO_PRIORITY
+#define PSO_PRIORITY 0
+#endif
+#ifndef PSO_URGENT_MIN_AVAIL_MIB
+#define PSO_URGENT_MIN_AVAIL_MIB 256
+#endif
 /* An opt-in loader trace for unsigned, locally staged Windows images. */
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
@@ -1738,28 +1755,53 @@ HINSTANCE WINAPI XboxTraceShellExecuteW(HWND window, LPCWSTR verb, LPCWSTR file,
 #include "placer.h"
 #include "perfsec.h"
 
-/* One compile at a time: concurrent compiles faulted the Xbox shader compiler (see the note). */
-static HANDLE volatile pipelineSlots;
+#include "d3d12-compile-slots.h"
+
+/* The compile pool (d3d12-compile-slots.h). PSO_SLOTS bounds concurrent compiles: one at a time
+   was tried after shader-compiler faults with 6-24 MB of commit left (see the note). */
 static SRWLOCK pipelineReplaceLock = SRWLOCK_INIT;
 
-static HANDLE PipelineSlots(void) {
-    if (!pipelineSlots) {
-        HANDLE created = CreateSemaphoreExW(NULL, PSO_SLOTS, PSO_SLOTS, NULL, 0, SEMAPHORE_ALL_ACCESS);
-        if (created && InterlockedCompareExchangePointer((PVOID volatile *)&pipelineSlots, created, NULL))
-            CloseHandle(created);
-        static volatile LONG traced;
-        if (!InterlockedExchange(&traced, 1)) {
-            char line[64], *out = CensusDec(Text(line, "asset pso-parallel slots="), PSO_SLOTS);
-            CensusEmit(line, out);
-        }
-    }
-    return pipelineSlots;
+static void PipelineSlots(void) {
+    static volatile LONG configured;
+    if (InterlockedCompareExchange(&configured, 1, 0)) return;
+    XboxCompileSlotsConfigure(PSO_SLOTS, PSO_BOOST_SLOTS, PSO_BOOST_MIN_AVAIL_MIB,
+        PSO_PRIORITY ? PSO_URGENT_MIN_AVAIL_MIB : 0xFFFFFFFFu, AppendTrace);
+    char line[160], *out = CensusDec(Text(line, "asset pso-parallel slots="), PSO_SLOTS);
+    out = CensusDec(Text(out, " boost="), PSO_BOOST_SLOTS);
+    out = CensusDec(Text(out, " boost-min-mib="), PSO_BOOST_MIN_AVAIL_MIB);
+    out = CensusDec(Text(out, " priority="), PSO_PRIORITY);
+    CensusEmit(line, out);
 }
 
-/* The replay thread's compile: same slot as the game's requests. */
+/* The thread whose compiles stall frames: the render thread (build-matched address, as in
+   RenderThreadState) or the boot thread. */
+static int PipelineClass(void) {
+    if (!PSO_PRIORITY) return XboxCompileNormal;
+    static volatile LONG renderThread;
+    DWORD render = (DWORD)renderThread;
+    if (!render) {
+        struct { DWORD state, flags; UINT64 threadId; } info = {0};
+        SIZE_T read = 0;
+        if (ReadProcessMemory(GetCurrentProcess(), (const BYTE *)GetModuleHandleW(NULL) + 0x07A2FD68u, &info,
+                sizeof(info), &read) && read == sizeof(info) && info.threadId <= MAXDWORD) {
+            render = (DWORD)info.threadId;
+            if (render) InterlockedExchange(&renderThread, (LONG)render);
+        }
+    }
+    const DWORD self = GetCurrentThreadId();
+    return self == render || self == (DWORD)startupThread ? XboxCompileUrgent : XboxCompileNormal;
+}
+
+/* The replay thread's admission, before it claims an entry. */
+static void ReplaySlot(BOOL enter) {
+    static XboxCompileSlotTicket ticket; /* one replay thread */
+    if (enter) XboxCompileSlotsEnter(PSO_PRIORITY ? XboxCompileBackground : XboxCompileNormal, &ticket);
+    else XboxCompileSlotsLeave(&ticket);
+}
+
+/* The replay thread's compile; ReplaySlot already admitted it. */
 static HRESULT ReplayCompile(ID3D12Device *device, BOOL graphics, const void *desc, REFIID iid, void **object) {
-    HANDLE slots = PipelineSlots();
-    if (slots) WaitForSingleObjectEx(slots, INFINITE, FALSE);
+    PipelineSlots();
     LARGE_INTEGER frequency, before, after;
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&before);
@@ -1767,7 +1809,6 @@ static HRESULT ReplayCompile(ID3D12Device *device, BOOL graphics, const void *de
         ID3D12Device_CreateGraphicsPipelineState(device, (const D3D12_GRAPHICS_PIPELINE_STATE_DESC *)desc, iid, object) :
         ID3D12Device_CreateComputePipelineState(device, (const D3D12_COMPUTE_PIPELINE_STATE_DESC *)desc, iid, object);
     QueryPerformanceCounter(&after);
-    if (slots) ReleaseSemaphore(slots, 1, NULL);
     const unsigned long long ms = CensusMicros(before, after, frequency) / 1000;
     static volatile LONG replayLines;
     if (ms >= 30 && InterlockedIncrement(&replayLines) <= 4000) {
@@ -1789,6 +1830,8 @@ static void ReplayInstall(ID3D12Device *device) {
         CensusEmit(line, out);
         return;
     }
+    PipelineSlots();
+    XboxPipelineReplaySetSlot(ReplaySlot);
     XboxPipelineReplayInstall(device, path, ReplayCompile, FALSE, AppendTrace);
 }
 
@@ -1919,7 +1962,8 @@ UINT64 WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup, const D3D12_HEAP_DESC 
                 return (DWORD)replayed;
             }
         }
-        if (pipelineSlots) WaitForSingleObjectEx(pipelineSlots, INFINITE, FALSE);
+        XboxCompileSlotTicket slot;
+        XboxCompileSlotsEnter(PipelineClass(), &slot);
         QueryPerformanceCounter(&psoLocked);
         InterlockedExchange(&pipelineOwner, (LONG)GetCurrentThreadId());
         const LONG count = InterlockedIncrement(graphics ? &graphicsCalls : &computeCalls);
@@ -2001,7 +2045,7 @@ UINT64 WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup, const D3D12_HEAP_DESC 
             TraceDeviceRemoval(device, shader, __builtin_return_address(0));
         }
         InterlockedExchange(&pipelineOwner, 0);
-        if (pipelineSlots) ReleaseSemaphore(pipelineSlots, 1, NULL);
+        XboxCompileSlotsLeave(&slot);
         if (FAILED(result) || tracePipeline) {
             TraceRemainingCommit(graphics ? "asset graphics-pso-after bytes=0x" :
                 "asset compute-pso-after bytes=0x", shaderBytes, (DWORD)result, __builtin_return_address(0));

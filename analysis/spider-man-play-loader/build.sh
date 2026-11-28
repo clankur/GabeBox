@@ -3,8 +3,12 @@
 #
 #   analysis/spider-man-play-loader/build.sh OUTDIR [play|measure] [extra clang flags]
 #
-# play     (default) 4 pipeline-compile slots, SoundBankAlloc 224 MiB, no per-second counters.
+# play     (default) 4 pipeline-compile slots plus 2 while at least 768 MiB of commit is available (boot),
+#          render/main-thread compiles first and replay compiles only when no title compile waits,
+#          SoundBankAlloc 224 MiB, no per-second counters.
 # measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio).
+# The installed 1.0.63026.0 loader (29c66e2a) is play mode with -DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0 before
+# the compile pool moved to d3d12-compile-slots.h; append those flags to drop the boost and priority.
 #
 # Needs Apple/Homebrew clang, Homebrew mingw-w64 headers and import libraries, an lld-link (zig's
 # `zig lld-link` works) and llvm-dlltool (`zig dlltool`), and the UWP WindowsApp.lib from the Windows SDK.
@@ -20,8 +24,8 @@ MINGW=${MINGW:-/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32}
 LLD_LINK=${LLD_LINK:-lld-link}; DLLTOOL=${DLLTOOL:-llvm-dlltool}
 : "${WINDOWSAPP_LIB:?set WINDOWSAPP_LIB to the UWP WindowsApp.lib}"
 case $mode in
-    play) mode_flags="-DPSO_SLOTS=4 -DSOUNDBANK_MIB=224 -DNO_PERF_SEC" ;;
-    measure) mode_flags="-DPSO_SLOTS=4 -DSOUNDBANK_MIB=224" ;;
+    play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 -DSOUNDBANK_MIB=224 -DNO_PERF_SEC" ;;
+    measure) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 -DSOUNDBANK_MIB=224" ;;
     *) echo "mode must be play or measure" >&2; exit 2 ;;
 esac
 mkdir -p "$out"
