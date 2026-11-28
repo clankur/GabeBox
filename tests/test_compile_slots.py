@@ -44,7 +44,7 @@ class CompileSlotPolicyTests(unittest.TestCase):
 
     def test_warmup_list_never_writes_the_players_file_while_serving(self):
         warmup = (ROOT / 'analysis/spider-man-play-loader/pso-warmup.h').read_text()
-        body = warmup[warmup.index('static HANDLE WarmupListOpen'):]
+        body = warmup[warmup.index('HANDLE WarmupListOpen('):]
         # Writes go to the session list only once it has been served; otherwise the game's own file.
         self.assertIn('if (!warmupServingSession) return INVALID_HANDLE_VALUE;', body)
         self.assertLess(body.index('InterlockedExchange(&warmupServingSession, 1)'),
