@@ -4,7 +4,7 @@
 int main(void)
 {
     /* Spider-Man play loader: 4 slots, 2 more at >= 768 MiB, urgent overflow at >= 256 MiB. */
-    XboxCompileSlots s = {4, 2, 768, 256, 0, {0, 0, 0}};
+    XboxCompileSlots s = {4, 2, 768, 256, 0, {0, 0, 0}, 0};
 
     /* The boost applies only while commit is high. */
     assert(XboxCompileSlotLimit(&s, 1200) == 6);
@@ -47,8 +47,28 @@ int main(void)
     s.active = 4;
     assert(!XboxCompileSlotMayStart(&s, XboxCompileBackground, 200));
 
+    /* A background reserve leaves title requests free slots: with six slots and a reserve of two,
+       replay threads fill four and a title compile still starts at once. */
+    XboxCompileSlots reserved = {4, 2, 768, 256, 0, {0, 0, 0}, 2};
+    reserved.active = 3;
+    assert(XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 1000));
+    reserved.active = 4;
+    assert(!XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 1000));
+    assert(XboxCompileSlotMayStart(&reserved, XboxCompileNormal, 1000));
+    /* Below the boost threshold the limit is four, so background gets two. */
+    reserved.active = 2;
+    assert(!XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 400));
+    reserved.active = 1;
+    assert(XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 400));
+    /* A reserve at or above the limit still lets one background compile run, never more. */
+    reserved.backgroundReserve = 9;
+    reserved.active = 0;
+    assert(XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 400));
+    reserved.active = 1;
+    assert(!XboxCompileSlotMayStart(&reserved, XboxCompileBackground, 400));
+
     /* Without boost or urgency (PSO_BOOST_SLOTS=0, PSO_PRIORITY=0) the pool is a fixed semaphore. */
-    XboxCompileSlots fixed = {4, 0, 768, 0xFFFFFFFFu, 3, {0, 0, 0}};
+    XboxCompileSlots fixed = {4, 0, 768, 0xFFFFFFFFu, 3, {0, 0, 0}, 0};
     assert(XboxCompileSlotLimit(&fixed, 4000) == 4);
     assert(XboxCompileSlotMayStart(&fixed, XboxCompileNormal, 4000));
     fixed.active = 4;
@@ -56,7 +76,7 @@ int main(void)
     assert(!XboxCompileSlotMayStart(&fixed, XboxCompileUrgent, 4000));
 
     /* A zero base still admits one compile. */
-    XboxCompileSlots zero = {0, 0, 0, 0xFFFFFFFFu, 0, {0, 0, 0}};
+    XboxCompileSlots zero = {0, 0, 0, 0xFFFFFFFFu, 0, {0, 0, 0}, 0};
     assert(XboxCompileSlotLimit(&zero, 0) == 1);
     assert(XboxCompileSlotMayStart(&zero, XboxCompileNormal, 0));
     return 0;

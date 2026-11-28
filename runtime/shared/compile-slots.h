@@ -12,7 +12,10 @@
      limit, so it never waits behind a queue of bulk compiles.
    - normal: the title's own worker-thread compiles.
    - background: speculative work such as a pipeline-replay thread. It runs only when no title
-     request is waiting, so it never delays a compile the title is blocked on.
+     request is waiting, so it never delays a compile the title is blocked on. With a background
+     reserve of R, background work also leaves R slots of the limit free (it may always run one),
+     so a title request that arrives while several replay threads are busy starts at once instead
+     of waiting for a replay compile to finish.
 
    The policy is a pure function of the counters so it can be tested off-console. The caller
    holds its own lock and re-evaluates after every release and periodically, because the
@@ -31,6 +34,7 @@ typedef struct XboxCompileSlots {
     unsigned urgentMinMiB;  /* an urgent request may exceed the limit by one at or above this */
     unsigned active;        /* compiles in progress */
     unsigned waiting[3];    /* requests waiting, by class */
+    unsigned backgroundReserve; /* slots of the limit background work leaves free (0: none) */
 } XboxCompileSlots;
 
 static inline unsigned XboxCompileSlotLimit(const XboxCompileSlots *slots, unsigned availableMiB)
@@ -47,6 +51,10 @@ static inline int XboxCompileSlotMayStart(const XboxCompileSlots *slots, int kin
     if (kind == XboxCompileUrgent)
         return slots->active < limit + (availableMiB >= slots->urgentMinMiB ? 1u : 0u);
     if (slots->waiting[XboxCompileUrgent]) return 0;
-    if (kind == XboxCompileBackground && slots->waiting[XboxCompileNormal]) return 0;
+    if (kind == XboxCompileBackground) {
+        if (slots->waiting[XboxCompileNormal]) return 0;
+        const unsigned reserve = slots->backgroundReserve;
+        return slots->active < (limit > reserve ? limit - reserve : 1u);
+    }
     return slots->active < limit;
 }
