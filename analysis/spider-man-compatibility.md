@@ -1377,20 +1377,50 @@ No console time was used. The analysis is static, on the verified `Spider-Man.ex
 
   Base `ea4f057` reproduces `e6f1ff36`.
 
-**Expected result (not measured).**
+**Console result: the skip moves the world's compiles onto the render thread.** Do not ship it.
 
-- **Menu and world wait only for what they request.** The menu should wait only for the pipelines the boot screens and menu ask for, and Continue only for the world's. Today about 2,750 compiles finish before gameplay settles.
-- **Boot stops growing.** Boot time no longer depends on the size of `xbox0.pso`.
-- **Risk: late pipelines in gameplay.** A pipeline first needed in gameplay before replay reaches it is created on demand. The material readiness check suggests the object appears late (pop-in) rather than a render-thread stall. That needs confirming.
-- **Memory.** The game holds only the pipelines it requested. Replay holds the precompiled ones nobody has claimed yet, at most about the database size (2,845 entries, all of which the warm-up holds today). The net effect should be no worse than today, and needs measuring against the 250 MiB gameplay target.
+Two runs:
 
-**Still to run on the console** (piggybacked on the variants agent's next build, with `probe-report.txt` saved):
+- **`cand2skip`** (`1.0.63051.0`, lease #189, variants agent): the main menu was never left.
+- **`skip1`** (`1.0.63059.0`, lease #197, this pass): measure loader `d8033ff5` from `a247f3e` (720p, SB128, Medium textures, autoplay), built with `-DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2`.
 
-- `python3 -m tools.load_phases RUN` for Play→menu, Continue→gameplay and unattended Play→gameplay. Expect `game_warmup_pipelines` 0 and `replay_hits` per phase.
-- `pso-warmup hidden` and `session-open ok` records, plus the size of `xbox0.pso` before and after (it must not change).
-- Gameplay hitches per minute (`tools.measure --stutter --producer-log`) and visible pop-in in the first minute.
-- Lowest available commit before the menu and in gameplay.
-- No `XBSC_XS.dll` fault and no `0x887A0005` with replay on 4 concurrent threads.
+In both runs the trace has `pso-warmup hidden` and `session-open ok`, the game log says `File \xbox0.pso is missing, no pipelines read.`, and there was no crash, no `XBSC_XS.dll` fault and no `0x887A0005`.
+
+**`cand2skip` never left the main menu because of input timing, not the load.**
+- The lobby was ready 40 s after launch, before the intro logos ended. The menu screenshot taken 8 s later still shows the Nixxes logo.
+- The game logged the main menu's save-slot read at 23:43:17, about 67 s after launch. The script pressed A at about 60, 64 and 70 s.
+- The first press only connects the pad ("XInput controller connected"). The press 2 s after the menu appeared was ignored. There is no `[Save] Request save type 2`, which is the Continue.
+- The menu stayed responsive: the traversal inputs later moved through it to Quit.
+- `skip1` instead watched screenshots for the menu panel. The menu appeared at about +70 s. The first A connected the pad, the second (about 4 s after the menu appeared) was ignored, and the third was taken: `save type 2` at 00:28:43.7.
+
+**`skip1` measured** (`tools.load_phases`; the logos hold the visible menu until about Play+42 s):
+
+| Phase | `skip1` (warm-up hidden) | Warm-up kept (`var/run-*`) |
+| --- | --- | --- |
+| Play→lobby ready | 17.6 s | 65–69 s |
+| Play→menu on screen | about 42 s (intro logos) | the same as lobby ready |
+| Continue→gameplay | **195.8 s** | 11.6–17.9 s |
+| Render-thread compiles, Continue→gameplay | 682, 142 s of compile | 17, 7 s |
+| Render-thread compile stalls in gameplay | 4.7/min, up to 901 ms | 0 |
+| Present rate, 110–200 s | 0–12 fps | — |
+| Game "fps" lines | 37.5, 6.4, 15.3 | — |
+
+- **Why it is slow.** Without the list, the world's pipelines are not in the game's table, so the render thread creates each one itself, one at a time, when it first draws. The game's six creation threads are not used for them.
+- **Replay did not help.** It compiled in database order and covered few of them: `pso-replay done replayed=2514 hits=75 misses=1399`.
+- **Scale.** The boot screens, menu and world requested about 1,470 pipelines in all (362 before the lobby). That is far more than the menu alone, but still about 1,100 fewer than the warm-up list.
+- **Not measured on this build:** memory, and pop-in after the world settled. `skip1` dropped to 314–390 MiB of available commit in gameplay, but it ran on the 720p build, so it is not comparable with the 1080p runs above.
+
+**What this means.**
+- The warm-up is what keeps world pipelines off the render thread. Hiding it trades about 50 s at the menu for minutes at Continue.
+- `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off. The play build should carry none of them.
+- `a247f3e` stays: replay threads reserve an entry before waiting for a slot, and an entry with no root signature takes no slot. `cand2skip` made 14,336 slot entries for 461 replays.
+
+**Next step if load time needs more than today's 82–86 s unattended: order by demand.**
+- Record the order in which the title requests replay entries in a skip-warmup run, as a sidecar beside `d3d12-pipelines.xpr`.
+- On later runs, replay on six threads in that order, with no slot reserve. In skip mode the title's own requests come from the render thread, which already takes urgent slots.
+- About 1,470 entries at the measured 29 compiles/s take about 50 s, about the time the intro logos and menu take. The render thread would then mostly find replay hits, or wait on a compile already running, instead of compiling serially.
+- The first run without a sidecar would be as slow as `skip1`.
+- An alternative that keeps the warm-up is to serve the game a demand-first copy of `xbox0.pso`. That needs the file format reverse-engineered, and the file order must survive the game's load path. That has not been checked.
 
 ## Memory headroom variants (issue #96, November 28)
 
