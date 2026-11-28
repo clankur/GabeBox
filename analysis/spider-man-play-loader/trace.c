@@ -29,9 +29,13 @@
 #ifndef PSO_BG_RESERVE
 #define PSO_BG_RESERVE 0
 #endif
-/* PSO_SKIP_WARMUP=1: hide the game's pipeline warm-up list (pso-warmup.h). */
+/* PSO_SKIP_WARMUP=1: hide the game's pipeline warm-up list and record the run's pipelines in a session
+   list; PSO_WARMUP_LIST=1: warm up from that session list instead of the player's (pso-warmup.h). */
 #ifndef PSO_SKIP_WARMUP
 #define PSO_SKIP_WARMUP 0
+#endif
+#ifndef PSO_WARMUP_LIST
+#define PSO_WARMUP_LIST 0
 #endif
 /* An opt-in loader trace for unsigned, locally staged Windows images. */
 #define WIN32_LEAN_AND_MEAN
@@ -1793,6 +1797,7 @@ static void PipelineSlots(void) {
     out = CensusDec(Text(out, " replay-threads="), PSO_REPLAY_THREADS);
     out = CensusDec(Text(out, " bg-reserve="), PSO_BG_RESERVE);
     out = CensusDec(Text(out, " skip-warmup="), PSO_SKIP_WARMUP);
+    out = CensusDec(Text(out, " warmup-list="), PSO_WARMUP_LIST);
     CensusEmit(line, out);
 }
 
@@ -2675,6 +2680,13 @@ HANDLE WINAPI XboxTraceCreateFileW(LPCWSTR path, DWORD access, DWORD share, LPSE
         WarmupTrace("session-open", file != INVALID_HANDLE_VALUE, error, &warmupSessionCount);
         SetLastError(error);
         return file;
+    }
+#endif
+#if PSO_WARMUP_LIST
+    {
+        BOOL handled;
+        const HANDLE file = WarmupListOpen(path, access, share, security, creation, attributes, templateFile, &handled);
+        if (handled) return file;
     }
 #endif
     WCHAR local[256];
