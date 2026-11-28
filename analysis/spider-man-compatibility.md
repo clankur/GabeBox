@@ -1142,3 +1142,67 @@ The magenta roads seen in run A2 were the separate lighting-probe tint, not the 
 - a 512/1024 px cap and model LOD changes, for which there is no memory headroom;
 - a multi-launch tint control;
 - an independent verifier run.
+
+## Freeze in the Fisk Tower approach: commit exhaustion (November 27, night)
+
+**Report.** During Big Picture play, the player saw the game freeze in "the rainbow cloud area". The build was diagnostic package `1.0.63021.0`, which is not a play build: it used the probe-readback loader `probe-diag11` and had the light-grid slot cap reverted. The game was Steam AppID 1817070, build 23986256 (game log `v4.630.0.0`), on an Xbox Series X with OS `26100.9673 xb_flt_2610ge`. All reproductions below continued from the player's own save (slot0 SHA-256 `a69b5749…`), and the saves were restored and verified after every run.
+
+**What the live hang showed** (stage 279; no lease was needed for the reads, and lease #149 covered the stop):
+
+- **Render thread.** It spins at `exe+0x188F248`, a loop over query records that calls `[0x147A41430]->vtbl+0xE8` with `(query, &out, 8, 1)`. The object is the engine's D3D11-style context, and slot 0xE8 is `GetData` (vtables at `0x144E58028` and `0x144E58418`, body at `exe+0x18E2620`). `GetData` returns `S_FALSE` until the `ID3D12Fence` at `query+0x40` reports `GetCompletedValue() >= query+0x48`. So the render thread is waiting on GPU work that never completes.
+- **GPU.** Engine 5 stayed at 100% for over 40 minutes.
+- **Main thread.** It waits on render sync.
+- **Memory.** Commit peaked at 5,021 MiB, leaving 99 MiB free, just before the hang. A burst of first-use pipeline compiles came about 35 s earlier.
+- **Logging.** Neither the game nor the loader logged an error.
+
+**A/B runs from the player's save.** Each run did two 240 s scripted traversals and then 30 cycles of following the objective marker into the Fisk Tower atrium.
+
+| Run | Package | Configuration | Result | Peak commit / lowest free |
+| --- | --- | --- | --- | --- |
+| A2 | `1.0.63022.0` (lease #151) | `1.0.63021.0` plus autoplay: diag11 loader, light-grid cap 8191, Texture Low, SoundBank 128, 1 compile slot | `Spider-Man.exe` disappeared 1–2 min into the first traversal. There was no exception record or dump, and the last sample showed 154 MiB free. | 4,980 / 141 MiB |
+| B1 | `1.0.63023.0` (lease #151) | Clean play loader `29c66e2a`, cap 1024, Medium + 242 restores, SoundBank 224, 4 slots | Ran 14 minutes, including the atrium. The tint was present (green). | **5,060 / 60 MiB** |
+| C1 | `1.0.63024.0` (lease #152) | B1 with the cap reverted to 8191 | Commit was about 135 MiB higher from the start. Free commit fell to 14 MiB. The presenter then logged `dxgi gpu-frame-error result=0x887A0005` (`DXGI_ERROR_DEVICE_REMOVED`), and the game exited 24 s into the traversal. | 5,109 / **14 MiB** |
+| D1 | `1.0.63025.0` (lease #154) | B1 plus a loader change that serialises compiles below 384 MiB free | Ran 18 minutes. It serialised 256+ compiles but did not move the peak. | 5,058 / 61 MiB |
+
+**First failing operation.** In C1 it is the GPU device removal at 14 MiB of free commit. In the player's session it is a D3D12 fence that never completes, with 99 MiB free at the previous 2 s sample.
+
+**Conclusion.** Every run with the light-grid cap reverted failed within minutes. Both runs with the cap kept survived the same route. The cap is worth about 135 MiB of commit. The hang therefore came from the diagnostic build's cap revert pushing commit into exhaustion. It was not caused by the diagnostic hooks alone, and it is not a shader loop that we could fix.
+
+**Where the peaks come from.** In D1 the peaks (+80 to +120 MiB over a steady 4,936–4,960 MiB) come during streaming while swinging, with no compiles in flight. That is why the compile throttle was dropped.
+
+**Fix.**
+
+- `light-grid-slots-1024-overlay.json` / `.bin` now declares the cap in the build-matched profile: `mov r14d, 0x400` at RVA `0x17233A6`, the `LightGridManager` slot count. The base recipe carried it before, so a diagnostic package could silently drop it.
+- The overlay replaces the identical existing entry. The staged recipe is byte-identical (`748e3130…`), so the change is idempotent.
+- `tests/test_spider_profile_overlays.py` pins the offset and the patch bytes.
+- The play loader snapshot (`analysis/spider-man-play-loader/`, mode `play`) builds the installed loader `29c66e2a…`.
+
+**Installed play build.** `1.0.63026.0`, appx SHA-256 `6788e5f3…`:
+
+- no autoplay, no per-second counters and no probe diagnostics;
+- play loader with 4 compile slots and SoundBankAlloc 224 MiB;
+- ManagedBuffer 448, skin 16 and loader cuts;
+- Texture Quality Medium plus the 242 restores;
+- light-grid cap 1024.
+
+It is the B1 content without autoplay.
+
+**Gate (B1, the same content).** Window 03:20:00Z, 30 s, during the second traversal, with no screenshots:
+
+| Measure | Value |
+| --- | --- |
+| Average FPS | 59.93 |
+| Lowest rolling 1 s | 59 |
+| p50 / p95 / worst | 16.68 / 17.93 / 20.3 ms |
+| Frames | All 1,798 used shared GPU textures |
+| Resolution | 1920×1080 internal and output |
+| `gpu_60fps` | true |
+| Stutter | 0 frames over 33 ms per minute |
+
+The window at 03:16:00Z fails on one 818 ms first-use pipeline compile.
+
+**Open.**
+
+- **Memory headroom.** It is 60 MiB in the Fisk Tower approach, below the 250 MiB target. Earlier measurements put Texture Medium at about +90 MiB and SoundBank 224 at about +60 MiB, so reverting both would still leave roughly 200–250 MiB. Further cuts are needed: the non-loader buffer cuts stopped world loading earlier.
+- **Lighting tint.** The green and magenta tint persists with the cap at 1024, so the cap is not the tint's cause.
+- **No verifier yet.** No independent verifier has run on `1.0.63026.0`.
