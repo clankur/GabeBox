@@ -30,7 +30,8 @@ class CompileSlotPolicyTests(unittest.TestCase):
 
     def test_load_time_options_default_off(self):
         source = (ROOT / 'analysis/spider-man-play-loader/trace.c').read_text()
-        for define, default in (('PSO_REPLAY_THREADS', 1), ('PSO_BG_RESERVE', 0), ('PSO_SKIP_WARMUP', 0)):
+        for define, default in (('PSO_REPLAY_THREADS', 1), ('PSO_BG_RESERVE', 0), ('PSO_SKIP_WARMUP', 0),
+                                ('PSO_WARMUP_LIST', 0)):
             self.assertIn(f'#ifndef {define}\n#define {define} {default}\n#endif', source)
         self.assertIn('XboxPipelineReplaySetThreads(PSO_REPLAY_THREADS)', source)
         self.assertIn('XboxCompileSlotsReserveBackground(PSO_BG_RESERVE)', source)
@@ -40,6 +41,22 @@ class CompileSlotPolicyTests(unittest.TestCase):
         # Only read-only opens are hidden; writes go to the session file, never the player's list.
         self.assertIn('if (*creation == OPEN_EXISTING && !(access & writes)) return TRUE;', warmup)
         self.assertIn('L".session"', warmup)
+
+    def test_warmup_list_never_writes_the_players_file_while_serving(self):
+        warmup = (ROOT / 'analysis/spider-man-play-loader/pso-warmup.h').read_text()
+        body = warmup[warmup.index('static HANDLE WarmupListOpen'):]
+        # Writes go to the session list only once it has been served; otherwise the game's own file.
+        self.assertIn('if (!warmupServingSession) return INVALID_HANDLE_VALUE;', body)
+        self.assertLess(body.index('InterlockedExchange(&warmupServingSession, 1)'),
+                        body.index('if (!warmupServingSession)'))
+        self.assertIn('#error', warmup)
+
+    def test_replay_stops_creating_roots_the_title_does_not_share(self):
+        replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()
+        self.assertIn('reason=title-object-differs', replay)
+        ensure = replay[replay.index('static void XprEnsureRoot'):replay.index('static DWORD WINAPI XprReplayThread')]
+        self.assertIn('XprRegisterRoot((ID3D12RootSignature *)created', ensure)
+        self.assertIn(', TRUE);', ensure)
 
     def test_replay_threads_share_one_summary(self):
         replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()

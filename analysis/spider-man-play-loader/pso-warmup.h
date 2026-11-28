@@ -14,12 +14,30 @@
    left to the pipeline replay database, whose threads run only while no title compile waits.
 
    Records: "asset pso-warmup hidden" for each hidden open or attribute query (first 8), and
-   "asset pso-warmup session-open ok|error=0x..." for each redirected write open (first 8). */
+   "asset pso-warmup session-open ok|error=0x..." for each redirected write open (first 8).
+
+   Console result (run skip1): the lobby is ready 17.6 s after Play, but without the list the
+   render thread creates each world pipeline itself at first draw, and Continue to gameplay took
+   196 s. Use it only to record a session list for PSO_WARMUP_LIST.
+
+   PSO_WARMUP_LIST=1: keep the warm-up, but from the session list. A PSO_SKIP_WARMUP run leaves
+   `<file>.session` holding, in the order the game created them, only the pipelines that run asked
+   for: about 1,470 for boot, menu and the first world area, against 2,600+ in the player's list.
+   The read open of the list is answered with that file when it exists, so the game's six creation
+   threads warm exactly those, and the run's new pipelines are appended to it. When it does not
+   exist the open and the appends go to the player's file as usual. The player's file is never
+   written while the session list is served.
+
+   Records: "asset pso-warmup served=session ok" or "served=original" for each read open of the
+   list (first 8), and "asset pso-warmup session-open ..." for each redirected write. */
+#if PSO_SKIP_WARMUP && defined(PSO_WARMUP_LIST) && PSO_WARMUP_LIST
+#error "PSO_SKIP_WARMUP records the session list and PSO_WARMUP_LIST serves it; choose one"
+#endif
 #ifndef PSO_WARMUP_LEAF
 #define PSO_WARMUP_LEAF L"xbox0.pso"
 #endif
 
-static volatile LONG warmupHiddenCount, warmupSessionCount, warmupSessionStarted;
+static volatile LONG warmupHiddenCount, warmupSessionCount, warmupSessionStarted, warmupServedCount, warmupServingSession;
 
 static BOOL WarmupCacheFile(LPCWSTR path) {
     if (!path) return FALSE;
@@ -58,4 +76,45 @@ static BOOL WarmupRouteOpen(LPCWSTR path, DWORD access, DWORD *creation, WCHAR *
         *creation = CREATE_ALWAYS;
     *routed = session;
     return FALSE;
+}
+
+/* PSO_WARMUP_LIST: the session path for a warm-up file, or NULL. */
+static LPCWSTR WarmupSessionPath(LPCWSTR path, WCHAR *session, DWORD capacity) {
+    if (!WarmupCacheFile(path)) return NULL;
+    static const WCHAR suffix[] = L".session";
+    DWORD length = 0;
+    while (path[length]) ++length;
+    if (length + ARRAYSIZE(suffix) > capacity) return NULL;
+    for (DWORD i = 0; i < length; ++i) session[i] = path[i];
+    for (DWORD i = 0; i < ARRAYSIZE(suffix); ++i) session[length + i] = suffix[i];
+    return session;
+}
+
+/* PSO_WARMUP_LIST: returns the handle to use, or INVALID_HANDLE_VALUE with *handled FALSE to open
+   the requested path unchanged. */
+static HANDLE WarmupListOpen(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
+        DWORD creation, DWORD attributes, HANDLE templateFile, BOOL *handled) {
+    *handled = FALSE;
+    WCHAR session[1024];
+    if (!WarmupSessionPath(path, session, ARRAYSIZE(session))) return INVALID_HANDLE_VALUE;
+    const DWORD writes = GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE;
+    if (creation == OPEN_EXISTING && !(access & writes)) {
+        const HANDLE file = CreateFileW(session, access, share, security, creation, attributes, templateFile);
+        const DWORD error = GetLastError();
+        if (file != INVALID_HANDLE_VALUE) {
+            InterlockedExchange(&warmupServingSession, 1);
+            WarmupTrace("served=session", TRUE, 0, &warmupServedCount);
+            *handled = TRUE;
+            return file;
+        }
+        WarmupTrace("served=original", FALSE, error, &warmupServedCount);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!warmupServingSession) return INVALID_HANDLE_VALUE; /* no session list: the player's file as usual */
+    const HANDLE file = CreateFileW(session, access, share, security, creation, attributes, templateFile);
+    const DWORD error = GetLastError();
+    WarmupTrace("session-open", file != INVALID_HANDLE_VALUE, error, &warmupSessionCount);
+    SetLastError(error);
+    *handled = TRUE;
+    return file;
 }
