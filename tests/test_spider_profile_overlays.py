@@ -35,5 +35,14 @@ class SpiderProfileOverlayTests(unittest.TestCase):
         self.assertEqual((PROFILE / entries[0]['replacement']).read_bytes(), bytes.fromhex('c7475001000000'))
 
 
+    def test_light_grid_slot_cap_stays_at_1024(self):
+        entries = json.loads((PROFILE / 'light-grid-slots-1024-overlay.json').read_text(encoding='utf-8'))
+        self.assertEqual(len(entries), 1)
+        # mov r14d, 0x400 at RVA 0x17233A6: LightGridManager slot count min(requested, 1024) instead of 8191.
+        # Reverting it added about 135 MiB of commit and exhausted it in the Fisk Tower area (device removed).
+        self.assertEqual(entries[0]['offset'] + TEXT_FILE_OFFSET, 0x17233A6)
+        self.assertEqual((PROFILE / entries[0]['replacement']).read_bytes(), bytes.fromhex('41be00040000'))
+
+
 if __name__ == '__main__':
     unittest.main()
