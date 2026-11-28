@@ -18,6 +18,7 @@ typedef struct XboxHostVsync {
 } XboxHostVsync;
 
 #define XBOX_HOST_VSYNC_LOCK_SAMPLES 16u
+#define XBOX_HOST_VSYNC_PERIOD_TICKS 120u /* two seconds of host refreshes before the measured period is used */
 /* Where in the host's refresh a paced frame is committed, as a fraction of a period after the earliest release.
    Late: the host's draw callback can itself run late under load and must not catch a frame meant for the next
    refresh, while the earliest release still leaves time before that refresh. */
@@ -68,10 +69,10 @@ static inline void XboxHostVsyncObserve(XboxHostVsync *clock, uint64_t now)
     if (ticks < 1 && error16 >= 0) return; /* another slot released in the same host draw */
     clock->anchor += (uint64_t)XboxHostVsyncFloor16(ticks * clock->period16 + (error16 < 0 ? error16 / 2 : error16 / 64));
     clock->baseTicks += ticks;
-    /* The period is the mean over every tick counted since the base, from the raw release time, so release
-       lateness averages out as the count grows instead of feeding back through the anchor; it stays within 1% of
-       the nominal period. */
-    if (clock->baseTicks >= 8) {
+    /* The period is the mean over every tick counted since the base, from releases near the envelope only (within
+       an eighth of a period), so late releases cannot bias it. It is used from two seconds of counted ticks on and
+       stays within 1% of the nominal period. */
+    if (clock->baseTicks >= XBOX_HOST_VSYNC_PERIOD_TICKS && error16 < clock->period16 / 8) {
         int64_t period16 = (int64_t)(now - clock->base) * 65536 / clock->baseTicks;
         const int64_t limit = clock->nominal16 / 100;
         if (period16 > clock->nominal16 + limit) period16 = clock->nominal16 + limit;
@@ -89,7 +90,8 @@ static inline void XboxHostVsyncObserve(XboxHostVsync *clock, uint64_t now)
 /* True when the estimate has enough recent observations to pace by. */
 static inline int XboxHostVsyncLocked(const XboxHostVsync *clock, uint64_t now, uint64_t frequency)
 {
-    return clock->samples >= XBOX_HOST_VSYNC_LOCK_SAMPLES && now >= clock->last && now - clock->last < frequency / 2;
+    return clock->samples >= XBOX_HOST_VSYNC_LOCK_SAMPLES && clock->baseTicks >= XBOX_HOST_VSYNC_PERIOD_TICKS &&
+        now >= clock->last && now - clock->last < frequency / 2;
 }
 
 /* The first time at or after `earliest` that lies `fraction16`/65536 of a period after an estimated host tick. */

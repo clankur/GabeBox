@@ -201,7 +201,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
     UINT64 hostDeadline_ = 0;
-    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false, tracedHostPacing_ = false;
+    unsigned hostPaced_ = 0;
+    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedRejection_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
@@ -249,10 +250,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
             const UINT64 deadline = XboxHostVsyncNext(&host, earliest, XBOX_HOST_VSYNC_COMMIT16);
             hostDeadline_ = deadline;
             clock_.interval = 0;
-            if (!tracedHostPacing_) {
-                tracedHostPacing_ = true;
+            if (!(hostPaced_++ & 1023)) // the measured period when pacing starts and every 1024 frames after
                 Trace("host-vsync-pacing-period-ns", static_cast<HRESULT>(period * 1000000000ull / counterFrequency_));
-            }
             if (!waitUntil(deadline)) return interval;
             return 0;
         }
