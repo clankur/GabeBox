@@ -1774,6 +1774,9 @@ HINSTANCE WINAPI XboxTraceShellExecuteW(HWND window, LPCWSTR verb, LPCWSTR file,
 }
 
 #include "cpu-sets.h"
+#if PSO_REPLAY_THREADS > 1
+#define XPR_SERIAL_ROOTS 1   /* several replay threads: one root-signature creation at a time */
+#endif
 #include "d3d12-pipeline-replay.h"
 #include "hooks.h"
 #include "placer.h"

@@ -70,6 +70,14 @@ class CompileSlotPolicyTests(unittest.TestCase):
         self.assertLess(reserve, rooted)
         self.assertLess(rooted, thread.index('xprState.slot(TRUE)'))
 
+    def test_replay_serializes_its_root_creation_with_several_threads(self):
+        replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()
+        ensure = replay[replay.index('static void XprEnsureRoot'):replay.index('static DWORD WINAPI XprReplayThread')]
+        self.assertLess(ensure.index('AcquireSRWLockExclusive(&xprEnsureLock)'), ensure.index('const BOOL raced'))
+        self.assertEqual(ensure.count('ReleaseSRWLockExclusive(&xprEnsureLock)'), 2)
+        source = (ROOT / 'analysis/spider-man-play-loader/trace.c').read_text()
+        self.assertIn('#if PSO_REPLAY_THREADS > 1\n#define XPR_SERIAL_ROOTS 1', source)
+
     def test_replay_claims_an_entry_only_after_admission(self):
         replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()
         thread = replay[replay.index('static DWORD WINAPI XprReplayThread'):replay.index('static BOOL XprPatch')]

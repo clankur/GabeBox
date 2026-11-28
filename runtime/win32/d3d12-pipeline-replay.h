@@ -81,6 +81,10 @@ enum {
 #ifndef XPR_ROOT_TRACE
 #define XPR_ROOT_TRACE 0
 #endif
+/* 1: create replay's own root signatures one at a time (hosts that run several replay threads). */
+#ifndef XPR_SERIAL_ROOTS
+#define XPR_SERIAL_ROOTS 0
+#endif
 
 typedef struct XprHeader {
     UINT32 magic, version, imageStamp, imageSize, imageChecksum, reserved;
@@ -1039,11 +1043,29 @@ static BOOL XprOpen(const WCHAR *path, char **status) {
 
 /* Creates a recorded root signature that the title has not created yet. Only used when identical
    blobs return one object, so the title's own later creation yields the same pointer. */
+#if XPR_SERIAL_ROOTS
+/* Several replay threads can reach the same missing root at once. Two concurrent creations of one
+   blob returned two objects on the Xbox runtime (run rootdiag: root-dup by=replay prior=replay),
+   and the title's later creation returned the first while replay compiled against the second, so
+   every such pipeline missed (replay=3). One creation at a time, rechecked under the lock. */
+static SRWLOCK xprEnsureLock = SRWLOCK_INIT;
+#endif
+
 static void XprEnsureRoot(UINT64 hash) {
     AcquireSRWLockShared(&xprState.lock);
     const BOOL present = XprRootByHash(hash) != NULL;
     ReleaseSRWLockShared(&xprState.lock);
     if (present) return;
+#if XPR_SERIAL_ROOTS
+    AcquireSRWLockExclusive(&xprEnsureLock);
+    AcquireSRWLockShared(&xprState.lock);
+    const BOOL raced = XprRootByHash(hash) != NULL;
+    ReleaseSRWLockShared(&xprState.lock);
+    if (raced) {
+        ReleaseSRWLockExclusive(&xprEnsureLock);
+        return;
+    }
+#endif
     for (UINT32 i = 0; i < xprState.storedRootCount; ++i) {
         if (xprState.storedRoots[i].hash != hash) continue;
         void *created = NULL;
@@ -1054,8 +1076,11 @@ static void XprEnsureRoot(UINT64 hash) {
                 xprState.storedRoots[i].length, TRUE);
             ((IUnknown *)created)->lpVtbl->Release((IUnknown *)created);
         }
-        return;
+        break;
     }
+#if XPR_SERIAL_ROOTS
+    ReleaseSRWLockExclusive(&xprEnsureLock);
+#endif
 }
 
 static DWORD WINAPI XprReplayThread(void *unused) {
