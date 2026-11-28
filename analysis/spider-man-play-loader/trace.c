@@ -30,7 +30,8 @@
 #define PSO_BG_RESERVE 0
 #endif
 /* PSO_SKIP_WARMUP=1: hide the game's pipeline warm-up list and record the run's pipelines in a session
-   list; PSO_WARMUP_LIST=1: warm up from that session list instead of the player's (pso-warmup.h). */
+   list; PSO_WARMUP_LIST=1 warms up from that session list alone, =2 from the session list followed by
+   the player's list (pso-warmup.h). */
 #ifndef PSO_SKIP_WARMUP
 #define PSO_SKIP_WARMUP 0
 #endif

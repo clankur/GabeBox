@@ -20,16 +20,23 @@
    render thread creates each world pipeline itself at first draw, and Continue to gameplay took
    196 s. Use it only to record a session list for PSO_WARMUP_LIST.
 
-   PSO_WARMUP_LIST=1: keep the warm-up, but from the session list. A PSO_SKIP_WARMUP run leaves
+   PSO_WARMUP_LIST: keep the warm-up, but put the session list first. A PSO_SKIP_WARMUP run leaves
    `<file>.session` holding, in the order the game created them, only the pipelines that run asked
    for: about 1,470 for boot, menu and the first world area, against 2,600+ in the player's list.
-   The read open of the list is answered with that file when it exists, so the game's six creation
-   threads warm exactly those, and the run's new pipelines are appended to it. When it does not
-   exist the open and the appends go to the player's file as usual. The player's file is never
-   written while the session list is served.
+   The file is an 8-byte header {1, 4} followed by 0x588-byte records (an 8-byte hash and 0x580
+   bytes of description), as the game's write thread (exe+0x018CF9E0) appends them, and the
+   reader counts and skips duplicate hashes.
+   - 1 (prune): serve the session list alone.
+   - 2 (merge): serve the session list, then every record of the player's list; the reader drops
+     the duplicates, so the warm-up keeps every pipeline the player ever used.
+   At the first read open of the list the loader writes `<file>.served` from whole, validated
+   records and answers the open with it; the run's new pipelines are appended to `<file>.session`.
+   Without a valid session list nothing is redirected and the game uses the player's file as
+   before. The player's file is only read while the session list is served.
 
-   Records: "asset pso-warmup served=session ok" or "served=original" for each read open of the
-   list (first 8), and "asset pso-warmup session-open ..." for each redirected write. */
+   Records: "asset pso-warmup served=prune|merge records=N session=S original=O" (or
+   "served=original reason=...") for each read open (first 8), and "asset pso-warmup session-open"
+   for each redirected write. */
 #if PSO_SKIP_WARMUP && defined(PSO_WARMUP_LIST) && PSO_WARMUP_LIST
 #error "PSO_SKIP_WARMUP records the session list and PSO_WARMUP_LIST serves it; choose one"
 #endif
@@ -78,40 +85,100 @@ static BOOL WarmupRouteOpen(LPCWSTR path, DWORD access, DWORD *creation, WCHAR *
     return FALSE;
 }
 
-/* PSO_WARMUP_LIST: the session path for a warm-up file, or NULL. */
-static LPCWSTR WarmupSessionPath(LPCWSTR path, WCHAR *session, DWORD capacity) {
-    if (!WarmupCacheFile(path)) return NULL;
-    static const WCHAR suffix[] = L".session";
-    DWORD length = 0;
+/* PSO_WARMUP_LIST: <path><suffix>, or NULL when it does not fit. */
+static LPCWSTR WarmupSibling(LPCWSTR path, const WCHAR *suffix, WCHAR *out, DWORD capacity) {
+    DWORD length = 0, extra = 0;
     while (path[length]) ++length;
-    if (length + ARRAYSIZE(suffix) > capacity) return NULL;
-    for (DWORD i = 0; i < length; ++i) session[i] = path[i];
-    for (DWORD i = 0; i < ARRAYSIZE(suffix); ++i) session[length + i] = suffix[i];
-    return session;
+    while (suffix[extra]) ++extra;
+    if (length + extra + 1 > capacity) return NULL;
+    for (DWORD i = 0; i < length; ++i) out[i] = path[i];
+    for (DWORD i = 0; i <= extra; ++i) out[length + i] = suffix[i];
+    return out;
 }
 
-/* PSO_WARMUP_LIST: returns the handle to use, or INVALID_HANDLE_VALUE with *handled FALSE to open
-   the requested path unchanged. */
-static HANDLE WarmupListOpen(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
+#define WARMUP_RECORD 0x588u
+
+/* Reads a whole warm-up list. Returns the heap buffer and the number of whole records after a
+   valid {1, 4} header, or NULL. A partial last record (an interrupted append) is left out. */
+static BYTE *WarmupReadList(LPCWSTR path, DWORD *records) {
+    *records = 0;
+    const HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER size;
+    BYTE *data = NULL;
+    if (GetFileSizeEx(file, &size) && size.QuadPart >= 8 && size.QuadPart <= (64ll << 20)) {
+        data = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size.QuadPart);
+        DWORD read = 0;
+        if (data && (!ReadFile(file, data, (DWORD)size.QuadPart, &read, NULL) || read != (DWORD)size.QuadPart ||
+                ((const UINT32 *)data)[0] != 1 || ((const UINT32 *)data)[1] != 4)) {
+            HeapFree(GetProcessHeap(), 0, data);
+            data = NULL;
+        }
+        if (data) *records = (DWORD)((size.QuadPart - 8) / WARMUP_RECORD);
+    }
+    CloseHandle(file);
+    return data;
+}
+
+static void WarmupServedTrace(const char *mode, DWORD records, DWORD session, DWORD original) {
+    if (InterlockedIncrement(&warmupServedCount) > 8) return;
+    char line[160], *out = Text(Text(line, "asset pso-warmup served="), mode);
+    out = Hex(Text(out, " records=0x"), records, 8);
+    out = Hex(Text(out, " session=0x"), session, 8);
+    out = Hex(Text(out, " original=0x"), original, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+/* Writes <path>.served from the session list (and, when merging, the player's list). */
+static __attribute__((noinline)) BOOL WarmupBuildServed(LPCWSTR path, LPCWSTR served) {
+    WCHAR session[520];
+    if (!WarmupSibling(path, L".session", session, ARRAYSIZE(session))) return FALSE;
+    DWORD sessionRecords, originalRecords = 0;
+    BYTE *first = WarmupReadList(session, &sessionRecords);
+    if (!first || !sessionRecords) {
+        if (first) HeapFree(GetProcessHeap(), 0, first);
+        WarmupTrace(first ? "served=original reason=empty-session" : "served=original reason=no-session", FALSE, 0,
+            &warmupServedCount);
+        return FALSE;
+    }
+    BYTE *second = PSO_WARMUP_LIST == 2 ? WarmupReadList(path, &originalRecords) : NULL;
+    const HANDLE out = CreateFileW(served, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    BOOL ok = out != INVALID_HANDLE_VALUE;
+    DWORD written = 0;
+    if (ok) ok = WriteFile(out, first, 8 + sessionRecords * WARMUP_RECORD, &written, NULL);
+    if (ok && second && originalRecords)
+        ok = WriteFile(out, second + 8, originalRecords * WARMUP_RECORD, &written, NULL);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    HeapFree(GetProcessHeap(), 0, first);
+    if (second) HeapFree(GetProcessHeap(), 0, second);
+    if (ok) WarmupServedTrace(PSO_WARMUP_LIST == 2 ? "merge" : "prune", sessionRecords + originalRecords,
+        sessionRecords, originalRecords);
+    else WarmupTrace("served=original reason=write-failed", FALSE, GetLastError(), &warmupServedCount);
+    return ok;
+}
+
+/* PSO_WARMUP_LIST: returns the handle to use with *handled TRUE, or *handled FALSE to open the
+   requested path unchanged. */
+static __attribute__((noinline)) HANDLE WarmupListOpen(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
         DWORD creation, DWORD attributes, HANDLE templateFile, BOOL *handled) {
     *handled = FALSE;
-    WCHAR session[1024];
-    if (!WarmupSessionPath(path, session, ARRAYSIZE(session))) return INVALID_HANDLE_VALUE;
+    if (!WarmupCacheFile(path)) return INVALID_HANDLE_VALUE;
     const DWORD writes = GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE;
+    WCHAR other[520];
     if (creation == OPEN_EXISTING && !(access & writes)) {
-        const HANDLE file = CreateFileW(session, access, share, security, creation, attributes, templateFile);
-        const DWORD error = GetLastError();
-        if (file != INVALID_HANDLE_VALUE) {
-            InterlockedExchange(&warmupServingSession, 1);
-            WarmupTrace("served=session", TRUE, 0, &warmupServedCount);
-            *handled = TRUE;
-            return file;
-        }
-        WarmupTrace("served=original", FALSE, error, &warmupServedCount);
-        return INVALID_HANDLE_VALUE;
+        if (!WarmupSibling(path, L".served", other, ARRAYSIZE(other))) return INVALID_HANDLE_VALUE;
+        if (!WarmupBuildServed(path, other)) return INVALID_HANDLE_VALUE;
+        const HANDLE file = CreateFileW(other, access, share, security, creation, attributes, templateFile);
+        if (file == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+        InterlockedExchange(&warmupServingSession, 1);
+        *handled = TRUE;
+        return file;
     }
     if (!warmupServingSession) return INVALID_HANDLE_VALUE; /* no session list: the player's file as usual */
-    const HANDLE file = CreateFileW(session, access, share, security, creation, attributes, templateFile);
+    if (!WarmupSibling(path, L".session", other, ARRAYSIZE(other))) return INVALID_HANDLE_VALUE;
+    const HANDLE file = CreateFileW(other, access, share, security, creation, attributes, templateFile);
     const DWORD error = GetLastError();
     WarmupTrace("session-open", file != INVALID_HANDLE_VALUE, error, &warmupSessionCount);
     SetLastError(error);
