@@ -1291,3 +1291,103 @@ The five texture runs `tex/run-a0`–`g1` (1 slot) match a1: about 203 s from Pl
 - pre-menu and gameplay lowest available commit;
 - no `XBSC_XS.dll` compiler fault and no `0x887A0005` with 6 concurrent boot compiles;
 - render-thread compile stalls per minute in gameplay.
+
+### Notes: why the menu waits, and skipping the warm-up (November 28)
+
+No console time was used. The analysis is static, on the verified `Spider-Man.exe` (SHA-256 `e297d4d9…`), plus the runs already collected in the scratchpad (`play/perf/run-a1`–`c4`, `hang/run-b1`–`d1` and `var/run-*`). The run tables come from `tools.load_phases`.
+
+**Measured with the boost loader (4+2 slots, priority)** (`var/run-*`):
+
+| Run | Warm-up pipelines | First frame→menu | Play→menu | Continue→gameplay | Unattended | Render-thread stalls/min | Worst worker wait |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `run-low` | 2,538 | 61.3 s | 69.1 s | 11.6 s | 80.7 s | 0.0 | 4.2 s |
+| `run-sb128` | 2,531 | 59.3 s | 67.1 s | 16.1 s | 83.2 s | 0.0 | 4.2 s |
+| `run-fs720` | 2,542 | 59.7 s | 67.2 s | 16.4 s | 83.6 s | 0.0 | 4.5 s |
+| `run-host720` | 2,589 | 59.9 s | 67.2 s | 16.7 s | 83.9 s | 0.0 | 3.4 s |
+| `run-sb128low` | 2,616 | 60.1 s | 67.2 s | 17.9 s | 85.1 s | 0.0 | 3.8 s |
+| `run-h900sb128` | 2,618 | 62.0 s | 69.2 s | 16.0 s | 85.2 s | 0.0 | 4.0 s |
+| `run-sb128b` | 2,575 | 62.1 s | 69.3 s | 17.0 s | 86.3 s | 0.0 | 5.0 s |
+
+**The engine's own async creation is already on.**
+
+- `DX12EnableAsyncPipelineCreation` and `DX12MaxPipelineCreateThreads` are fields 4 and 5 of the reflected `DX12Settings` class. Its descriptor is at `exe+0x0626C190` and has 41 fields. The instance is at `exe+0x07A890C0`, and the async flag is at offset 4.
+- The defaults written at `exe+0x01B4D720` are: async creation 1, threads 6, `DX12ShowPipelineHitchMessage` 1 and `DX12RemoveDuplicateResourceBarriers` 1.
+- The pipeline cache starts min(`GetSystemInfo` processors, `DX12MaxPipelineCreateThreads`) creation threads (`exe+0x018CF31D`). That gives 6 on the console, which matches the six compiling thread IDs in every trace.
+- Nothing needs switching on. A cap above 6 only adds threads on 6 logical processors (3 physical). How the settings registry takes overrides was not traced.
+
+**The game's pipeline queue is FIFO.**
+
+- In async mode the request at `exe+0x018CF540` clears the pipeline's ready byte (`+0x280`) and appends `{5, pipeline}` to an array.
+- Each creation thread (`exe+0x018CD4E0`) pops the next item, compiles it through `exe+0x018CE400` and sets ready = 1. On failure that function logs the call text and calls the engine's device-error handler.
+- There is only one async caller: pipeline creation from a description at `exe+0x018F810E`.
+- Materials test readiness through `exe+0x01903890`. For example, `exe+0x0174C600` checks every pass of a material.
+- The warm-up list is `xbox0.pso`. It is read with `_wfopen "rb"` and logged at `exe+0x018D0666`. The write-disk thread appends new pipelines with `_wfopen "ab+"` (`exe+0x018CF9E0`). Nothing in the game ever rewrites or prunes the file.
+
+**What gates the menu: its pipelines wait behind most of the queue.** "Processed" below means title compiles (`perf-sec pso-n`) plus replay hits before `lobby-save-state=1`.
+
+| Run | Slots | Process CPU at boot | Processed before menu | Warm-up size | Compiles/s |
+| --- | --- | --- | --- | --- | --- |
+| `play/perf/run-a1` | 1 | ~0.9 of 6 | 1,843 | 2,210 | 9.6 |
+| `play/perf/run-c3` | 3 | | 1,700 | 2,324 | 23 |
+| `play/perf/run-c4` | 4 | 4.2 of 6 | 1,694 | 2,322 | 28 |
+| `var/run-low` | 4+2 | 5.9 of 6 | 1,810 | 2,538 | 29 |
+| `var/run-sb128` | 4+2 | 5.9 of 6 | 1,806 | 2,531 | 30 |
+
+- **Not CPU starvation.** With one slot the CPU was nearly idle, and the menu still came only after 1,843 entries had been processed.
+- **Not the whole warm-up.** Title compiles continue through the menu and Continue. In `run-low`, 357 slow compiles ran between the menu and Continue and 148 between Continue and gameplay. The last title compile was at 145 s, 7 s after gameplay began. With one slot (`run-a1`) the compiles ran on until 10 s after gameplay.
+- **The boost added CPU, not throughput.** It raised process CPU from 4.2 to 5.9 cores, but throughput stayed at about 29 compiles/s on 3 SMT cores. That is why the menu time did not move.
+- **The boot path follows the queue.** The boot slot moves 6→0 at 80 s and the lobby opens at 95 s (`run-low`). Both follow queue progress, not the intro.
+- **Continue→gameplay waits on the same queue.** After Continue, available commit falls below 768 MiB and the boost turns off. Game workers then waited 4–7 s per 2 s bucket from 126 to 136 s (`run-low`), behind the rest of the warm-up plus the world's own requests. The worst worker wait in gameplay was 3.4–5.0 s. All of these compiles are replay outcome 2 (recorded, claimed by the game). The phase is compile-bound; no streaming bottleneck shows in the records.
+
+**The warm-up list keeps growing.**
+
+- It was 871 pipelines on November 25. On November 28 it went from 2,521 (04:33) to 2,618 (07:07), about 12 per short run.
+- First frame→menu tracks it at roughly +1 s per 40 pipelines: 61 s at 2,322, and 64.6–67.3 s at 2,496 with 4 slots.
+- The file is append-only, so a player who explores more boots more slowly, without limit.
+- Pruning would cap it, but skipping the list removes the dependence altogether.
+
+**Options evaluated.**
+
+1. **An async proxy for the game's create calls.** Not built.
+   - It would need a COM proxy (refcount, `GetDevice`, private data) and an unwrap at every place a pipeline reaches the runtime: `SetPipelineState`, `Reset`, `ClearState`, `CreateCommandList` and bundles. A missed path hands a fake object to the Xbox runtime.
+   - Error behaviour could only be approximated: a failed deferred compile surfaces at a void call.
+   - It leaves the total compile work unchanged.
+   - Option 2 gets the same reordering from the game's own supported first-launch behaviour.
+2. **Skip the warm-up and precompile from the replay database.** Built as `PSO_SKIP_WARMUP`, below.
+3. **The engine keys.** Already on (see above).
+4. **Order by first use.** Deferred. Replay compiles in database (first-recorded) order. Title requests already go ahead of replay. First-use ordering only matters if skip-warmup shows late pipelines in gameplay.
+
+**The change.** Commits `75cd264`, `583f1cb` and `0807bde`. Every option is off by default.
+
+- **`-DPSO_SKIP_WARMUP=1`** (`analysis/spider-man-play-loader/pso-warmup.h`):
+  - A read-only `CreateFileW` or `GetFileAttributesW` of `xbox0.pso` returns `ERROR_FILE_NOT_FOUND`.
+  - Write opens go to `xbox0.pso.session`, truncated on the run's first open. The player's list is not touched, and removing the define restores the warm-up.
+  - Records: `asset pso-warmup hidden` and `asset pso-warmup session-open ok|error=`.
+- **`-DPSO_REPLAY_THREADS=N`.** Replay runs N below-normal threads. They claim entries under the existing lock, and the last one writes `pso-replay done … threads=N`.
+- **`-DPSO_BG_RESERVE=R`.** Background compiles leave R slots of the limit free, always allowing at least one. With 4+2 slots and R=2, replay uses up to 4 slots at boot and 2 in gameplay.
+- `asset pso-parallel` records `replay-threads`, `bg-reserve` and `skip-warmup`.
+- `load_phases` reports `replay_hits` and `perf_title_compiles` per phase. It gives `game_warmup_pipelines` 0 when the game found no list.
+- **Builds from HEAD** (`build.sh`, `/Brepro`):
+
+  | Build | SHA-256 begins |
+  | --- | --- |
+  | `play` | `25969cce` |
+  | `play -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2` | `afd65b01` |
+  | `measure` with the same flags | `4a8a5bb1` |
+
+  Base `ea4f057` reproduces `e6f1ff36`.
+
+**Expected result (not measured).**
+
+- **Menu and world wait only for what they request.** The menu should wait only for the pipelines the boot screens and menu ask for, and Continue only for the world's. Today about 2,750 compiles finish before gameplay settles.
+- **Boot stops growing.** Boot time no longer depends on the size of `xbox0.pso`.
+- **Risk: late pipelines in gameplay.** A pipeline first needed in gameplay before replay reaches it is created on demand. The material readiness check suggests the object appears late (pop-in) rather than a render-thread stall. That needs confirming.
+- **Memory.** The game holds only the pipelines it requested. Replay holds the precompiled ones nobody has claimed yet, at most about the database size (2,845 entries, all of which the warm-up holds today). The net effect should be no worse than today, and needs measuring against the 250 MiB gameplay target.
+
+**Still to run on the console** (piggybacked on the variants agent's next build, with `probe-report.txt` saved):
+
+- `python3 -m tools.load_phases RUN` for Play→menu, Continue→gameplay and unattended Play→gameplay. Expect `game_warmup_pipelines` 0 and `replay_hits` per phase.
+- `pso-warmup hidden` and `session-open ok` records, plus the size of `xbox0.pso` before and after (it must not change).
+- Gameplay hitches per minute (`tools.measure --stutter --producer-log`) and visible pop-in in the first minute.
+- Lowest available commit before the menu and in gameplay.
+- No `XBSC_XS.dll` fault and no `0x887A0005` with replay on 4 concurrent threads.
