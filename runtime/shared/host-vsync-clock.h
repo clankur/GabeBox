@@ -21,11 +21,12 @@ typedef struct XboxHostVsync {
 #define XBOX_HOST_VSYNC_LOCK_SAMPLES 16u
 #define XBOX_HOST_VSYNC_PERIOD_TICKS 120u /* two seconds of host refreshes before the measured period is used */
 /* Where in the host's refresh a paced frame is committed, as a fraction of a period after the estimated release.
-   Releases follow the host's draw callback within about half a millisecond, but under load the callback itself
-   comes up to 8 ms early or late on 1-2% of refreshes (Fisk Tower). Committing mid-refresh leaves that margin on
-   both sides: an early callback cannot miss the frame and a late one cannot show it a refresh early. The release
-   trails the callback, so the middle of the refresh is slightly before half a period after it. */
-#define XBOX_HOST_VSYNC_COMMIT16 29491u /* 0.45 */
+   Releases follow the host's draw callback within about half a millisecond; the callback itself is within about
+   +-2.5 ms of the refresh on 98% of refreshes (Fisk Tower; the rest reach +-8 ms). Early in the refresh leaves the
+   most room for a game frame that finishes after its target (at Fisk Tower the game's own frame is 25-33 ms), while
+   still clearing a callback up to about 5 ms late. Measured at Fisk Tower: 0.3 missed 12 slots a minute, 0.45 28
+   and 0.7 14; on the street 0.3 missed none. */
+#define XBOX_HOST_VSYNC_COMMIT16 19661u /* 0.3 */
 
 /* Starts from 60000/1001 Hz, the console's usual output rate; the loop corrects the period from observations. */
 static inline void XboxHostVsyncInit(XboxHostVsync *clock, uint64_t frequency)

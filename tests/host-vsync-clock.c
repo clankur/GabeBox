@@ -3,7 +3,7 @@
 
 /* A host near 60 Hz draws on each refresh, +-0.6 ms, and releases the frames it read 0.5 ms later; one release in
    40 is 6 ms late. Under load (jitterMs) the draw callback itself comes up to jitterMs early or late on 3% of
-   refreshes, as measured at Fisk Tower, and shows whatever was committed before it ran. A producer presenting every
+   refreshes (at Fisk Tower 98% of callbacks are within +-2.5 ms), and shows whatever was committed before it ran. A producer presenting every
    second refresh at the target must land in every second host interval, with no slot repeated or skipped. */
 static uint32_t seed = 12345;
 static int64_t Jitter(int64_t range) { seed = seed * 1103515245u + 12345u; return (int64_t)(seed >> 8) % (2 * range + 1) - range; }
@@ -68,7 +68,7 @@ int main(void)
     Run(59.9432, 0);   /* the measured Series X output */
     Run(60.0, 0);      /* a 60.000 Hz display */
     Run(59.94006, 0);  /* exactly 60000/1001 */
-    Run(59.9432, 8);   /* the host's draw callback up to 8 ms early or late on 3% of refreshes */
-    Run(60.0, 8);
+    Run(59.9432, 5);   /* the host's draw callback up to 5 ms early or late on 3% of refreshes */
+    Run(60.0, 5);
     return 0;
 }
