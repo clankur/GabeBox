@@ -146,10 +146,14 @@ static HRESULT STDMETHODCALLTYPE AllocRemovedCached(ID3D12Device *self) {
 #include "gpuprof.h"
 
 static void AllocInstall(ID3D12Device *device) {
-#ifdef PLAY_BUILD
+#if defined(PLAY_BUILD) && !defined(GPU_PROF)
     static const unsigned slots[] = {27, 28, 29, 53, 54, 37};
 #else
+    #ifdef NO_LISTPROF
+    static const unsigned slots[] = {27, 28, 29, 53, 54, 37, 8};
+#else
     static const unsigned slots[] = {27, 28, 29, 53, 54, 37, 8, 12};
+#endif
 #endif
     void *const replacements[] = {(void *)AllocCommitted, (void *)AllocHeap, (void *)AllocPlaced,
         (void *)AllocCommitted1, (void *)AllocHeap1, (void *)AllocRemovedCached, (void *)GpuCreateQueue, (void *)ListCreate};
