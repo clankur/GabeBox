@@ -1,0 +1,7 @@
+[
+  {
+    "offset": 30384926,
+    "expected_sha256": "5315926cb74ce49db00b619eada1b51fb592075b9c4f837e4f4ea3528af639af",
+    "replacement": "texture-quality-medium.bin"
+  }
+]

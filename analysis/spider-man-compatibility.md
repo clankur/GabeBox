@@ -1112,3 +1112,33 @@ Each compile takes longer as slots are added, but overall throughput rises. The 
 **Clean play build `1.0.63012.0`.** It has 4 compile slots, SoundBankAlloc 224 MiB, no autoplay and no per-second counters. Its loader SHA-256 begins `29c66e2a`. It was deployed but not launched. The play-loader source with these values is in the scratchpad (`play/perf/tb`), not in the repo.
 
 **Tooling.** `tools.measure` gains `--stutter` (frames over 33 ms and over 100 ms per minute), `--producer-log` attribution of stalls to traced pipeline compiles, and `--exclude-utc START/END` for screenshot windows.
+
+## Texture Quality default and restored textures (issue #94, November 27)
+
+**Cause.** The game's default Texture Quality is Low. This setting is stored at `[this+0x444]` and applied at exe+0x18911A9. At Low, the game drops three mip levels from every streamed texture, so most world textures reached the GPU at 32 px. Our own 256 px cap was not the limiting factor.
+
+**Profile change.** `texture-quality-medium-overlay.json` / `.bin` change the default at RVA 0x1CFAD1E to 1 (Medium), on top of the 242 restored textures. `tests/test_spider_profile_overlays.py` checks the overlay manifests and the patch bytes.
+
+**Memory**, from one traversal:
+
+| Setting | Peak commit | Lowest free commit |
+| --- | --- | --- |
+| Medium + restores | 4,834 MiB | 285 MiB |
+| High | — | about 111 MiB |
+
+High doesn't fit within the 250 MiB headroom. On the longer soak5 route, Low peaked at 4,867 MiB, and Medium adds about 90 MiB, which could leave about 170 MiB free. That route is unmeasured with Medium.
+
+**Gate (G1).** The window starting 31 s into the run passes. The window starting 1 s in fails on one 800 ms gap, caused by a first-use pipeline compile that wasn't in the replay database (`pso-slow n=2234 compile-ms=789 replay=1`). Both windows used only shared GPU textures. The A0–A4 windows can't be used for FPS because of the drive script's Device Portal screenshots.
+
+**Visible result.**
+- Roads and kerbs show asphalt detail instead of a smooth blur.
+- The hero's suit shows its web lines, which are flat at Low.
+
+The magenta roads seen in run A2 were the separate lighting-probe tint, not the restores.
+
+**Build.** Clean play build `1.0.63018.0` has Medium + restores with the original play loader. It doesn't yet include 4 compile slots or SoundBankAlloc 224.
+
+**Not yet tested:**
+- a 512/1024 px cap and model LOD changes, for which there is no memory headroom;
+- a multi-launch tint control;
+- an independent verifier run.
