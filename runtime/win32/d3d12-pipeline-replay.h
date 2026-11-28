@@ -45,6 +45,10 @@ static const IID xprPipelineStateIid = {0x765A30F3, 0xF624, 0x4C6F, {0xA8,0x28,0
 typedef HRESULT (*XboxPipelineCompileFn)(ID3D12Device *device, BOOL graphics, const void *desc, REFIID iid,
     void **object);
 typedef void (*XboxPipelineTraceFn)(const char *line, DWORD size);
+/* Optional: called with TRUE before the replay thread claims an entry and FALSE after its compile,
+   so a host can admit replay compiles at a lower priority. The entry is claimed only once the
+   host admits it, so a title request never waits on a replay compile that has not started. */
+typedef void (*XboxPipelineSlotFn)(BOOL enter);
 
 enum {
     XboxPipelineReplayMissUncached = 0, /* not representable (stream output, cached blob, unknown root) */
@@ -105,6 +109,7 @@ typedef struct XprState {
     ID3D12Device *device;
     XboxPipelineCompileFn compile;
     XboxPipelineTraceFn trace;
+    XboxPipelineSlotFn slot;
     HANDLE file;
     const BYTE *view;
     UINT64 viewSize;
@@ -999,6 +1004,7 @@ static DWORD WINAPI XprReplayThread(void *unused) {
             const BOOL decoded = entry->graphics ? XprDecodeGraphics(&in, &graphics, elements, &rootHash) :
                 XprDecodeCompute(&in, &compute, &rootHash);
             if (decoded && xprState.rootDedup == 1) XprEnsureRoot(rootHash);
+            if (xprState.slot) xprState.slot(TRUE);
             AcquireSRWLockExclusive(&xprState.lock);
             XprRoot *root = decoded ? XprRootByHash(rootHash) : NULL;
             BOOL take = FALSE;
@@ -1012,7 +1018,10 @@ static DWORD WINAPI XprReplayThread(void *unused) {
                 }
             }
             ReleaseSRWLockExclusive(&xprState.lock);
-            if (!take) continue;
+            if (!take) {
+                if (xprState.slot) xprState.slot(FALSE);
+                continue;
+            }
             if (entry->graphics) graphics.pRootSignature = entry->root;
             else compute.pRootSignature = entry->root;
             ID3D12PipelineState *object = NULL;
@@ -1022,6 +1031,7 @@ static DWORD WINAPI XprReplayThread(void *unused) {
                 entry->graphics ? (const void *)&graphics : (const void *)&compute, &xprPipelineStateIid,
                 (void **)&object);
             QueryPerformanceCounter(&after);
+            if (xprState.slot) xprState.slot(FALSE);
             compileTicks += (unsigned long long)(after.QuadPart - before.QuadPart);
             AcquireSRWLockExclusive(&xprState.lock);
             if (SUCCEEDED(result) && object) {
@@ -1138,6 +1148,11 @@ static BOOL XboxPipelineReplayInstall(ID3D12Device *device, const WCHAR *path, X
         if (thread) CloseHandle(thread);
     }
     return ok;
+}
+
+/* Sets the replay thread's admission hook. Call before XboxPipelineReplayInstall. */
+static inline void XboxPipelineReplaySetSlot(XboxPipelineSlotFn slot) {
+    xprState.slot = slot;
 }
 
 /* Default location: beside the hosted title's Documents folder, which the host scopes to the
