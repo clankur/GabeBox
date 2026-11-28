@@ -76,6 +76,11 @@ enum {
 #define XPR_MAX_ROOTS 4096u
 #define XPR_MAX_FILE (512ull << 20)
 #define XPR_MAX_WORDS 1024u
+/* 1: trace duplicate root-signature objects and replay root misses (diagnostic builds only;
+   play builds compile none of it). */
+#ifndef XPR_ROOT_TRACE
+#define XPR_ROOT_TRACE 0
+#endif
 
 typedef struct XprHeader {
     UINT32 magic, version, imageStamp, imageSize, imageChecksum, reserved;
@@ -145,7 +150,9 @@ typedef struct XprState {
     CRITICAL_SECTION writer;
     volatile LONG hits, waitedHits, misses, recorded, uncached, rootMisses;
     volatile LONG replayed, replayFailed;
+#if XPR_ROOT_TRACE
     volatile LONG rootDuplicates;  /* root objects registered for a blob that already had one */
+#endif
     UINT32 threadCount;           /* replay threads to start, 1 unless the host sets more */
     volatile LONG threadsLive;    /* the last thread to finish writes the summary */
     volatile LONG64 compileTicks; /* summed over the replay threads */
@@ -720,9 +727,10 @@ static BOOL XboxPipelineReplayLookup(ID3D12Device *device, BOOL graphics, const 
         entry->state = XprDone;
     } else if (entry->state == XprReady) {
         ticket->outcome = XboxPipelineReplayMissRoot;
+#if XPR_ROOT_TRACE
         const LONG misses = InterlockedIncrement(&xprState.rootMisses);
-        const XprRoot *compiled = XprRootByObject(entry->root);
         if (misses <= 16) {
+            const XprRoot *compiled = XprRootByObject(entry->root);
             char line[160], *out = XprText(line, "asset pso-replay miss-root compiled-with=");
             out = XprText(out, compiled && compiled->replayMade ? "replay-root" : "title-root");
             out = XprDec(XprText(out, " root-index="), compiled ? (unsigned long long)(compiled - xprState.roots) : 9999);
@@ -730,6 +738,9 @@ static BOOL XboxPipelineReplayLookup(ID3D12Device *device, BOOL graphics, const 
             out = XprDec(XprText(out, " roots="), xprState.rootCount);
             XprEmit(line, out);
         }
+#else
+        InterlockedIncrement(&xprState.rootMisses);
+#endif
     } else {
         entry->state = XprDone; /* pending: the caller compiles it and replay skips it */
         ticket->outcome = XboxPipelineReplayMissClaimed;
@@ -779,9 +790,23 @@ static BOOL XprRegisterRoot(ID3D12RootSignature *root, const void *blob, SIZE_T 
     BOOL shared = TRUE;
     AcquireSRWLockExclusive(&xprState.lock);
     XprRoot *known = XprRootByObject(root);
+    if (!known && !replayMade) {
+        const XprRoot *made = XprRootByHash(hash);
+        if (made && made->replayMade) shared = FALSE;
+    }
+#if XPR_ROOT_TRACE
+    /* A second object for one blob: replay's pipelines for it can only match one of them. */
     const XprRoot *prior = known ? NULL : XprRootByHash(hash);
-    if (!known && !replayMade && prior && prior->replayMade) shared = FALSE;
-    const BOOL priorByReplay = prior && prior->replayMade;
+    if (prior && InterlockedIncrement(&xprState.rootDuplicates) <= 16) {
+        char line[160], *out = XprText(line, "asset pso-replay root-dup by=");
+        out = XprText(out, replayMade ? "replay" : "title");
+        out = XprText(XprText(out, " prior="), prior->replayMade ? "replay" : "title");
+        out = XprHex(XprText(out, " hash=0x"), (unsigned long)(hash >> 32), 8);
+        out = XprHex(out, (unsigned long)hash, 8);
+        out = XprDec(XprText(out, " roots="), xprState.rootCount);
+        XprEmit(line, out);
+    }
+#endif
     if (!known && xprState.rootCount < XPR_MAX_ROOTS) {
         BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
         if (copy) {
@@ -792,16 +817,6 @@ static BOOL XprRegisterRoot(ID3D12RootSignature *root, const void *blob, SIZE_T 
     }
     WakeAllConditionVariable(&xprState.changed);
     ReleaseSRWLockExclusive(&xprState.lock);
-    /* A second object for one blob: replay's pipelines for it can only match one of them. */
-    if (prior && InterlockedIncrement(&xprState.rootDuplicates) <= 16) {
-        char line[160], *out = XprText(line, "asset pso-replay root-dup by=");
-        out = XprText(out, replayMade ? "replay" : "title");
-        out = XprText(XprText(out, " prior="), priorByReplay ? "replay" : "title");
-        out = XprHex(XprText(out, " hash=0x"), (unsigned long)(hash >> 32), 8);
-        out = XprHex(out, (unsigned long)hash, 8);
-        out = XprDec(XprText(out, " roots="), xprState.rootCount);
-        XprEmit(line, out);
-    }
     return shared;
 }
 
@@ -1140,7 +1155,7 @@ static DWORD WINAPI XprReplayThread(void *unused) {
     QueryPerformanceCounter(&now);
     GlobalMemoryStatusEx(&memory);
     const unsigned long long compileTicks = (unsigned long long)xprState.compileTicks;
-    char line[400], *out = XprText(line, "asset pso-replay done replayed=");
+    char line[XPR_ROOT_TRACE ? 400 : 340], *out = XprText(line, "asset pso-replay done replayed=");
     out = XprDec(out, (unsigned long long)xprState.replayed);
     out = XprDec(XprText(out, " failed="), (unsigned long long)xprState.replayFailed);
     out = XprDec(XprText(out, " deferred="), deferred);
@@ -1151,8 +1166,10 @@ static DWORD WINAPI XprReplayThread(void *unused) {
     out = XprDec(XprText(out, " wall-ms="), frequency.QuadPart ?
         (unsigned long long)(now.QuadPart - xprState.startedQpc) * 1000 / (unsigned long long)frequency.QuadPart : 0);
     out = XprDec(XprText(out, " threads="), xprState.threadCount);
+#if XPR_ROOT_TRACE
     out = XprDec(XprText(out, " root-misses="), (unsigned long long)xprState.rootMisses);
     out = XprDec(XprText(out, " root-dups="), (unsigned long long)xprState.rootDuplicates);
+#endif
     out = XprDec(XprText(out, " commit-avail-kib-before="), xprState.commitBeforeKib);
     out = XprDec(XprText(out, " after="), (unsigned long long)(memory.ullAvailPageFile >> 10));
     out = XprDec(XprText(out, " qpc="), (unsigned long long)now.QuadPart);
