@@ -21,6 +21,18 @@
 #ifndef PSO_URGENT_MIN_AVAIL_MIB
 #define PSO_URGENT_MIN_AVAIL_MIB 256
 #endif
+/* Pipeline replay threads (1 keeps the single below-normal thread). PSO_BG_RESERVE leaves that many
+   compile slots free of replay work, so a title compile starts at once. */
+#ifndef PSO_REPLAY_THREADS
+#define PSO_REPLAY_THREADS 1
+#endif
+#ifndef PSO_BG_RESERVE
+#define PSO_BG_RESERVE 0
+#endif
+/* PSO_SKIP_WARMUP=1: hide the game's pipeline warm-up list (pso-warmup.h). */
+#ifndef PSO_SKIP_WARMUP
+#define PSO_SKIP_WARMUP 0
+#endif
 /* An opt-in loader trace for unsigned, locally staged Windows images. */
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
@@ -1766,10 +1778,14 @@ static void PipelineSlots(void) {
     if (InterlockedCompareExchange(&configured, 1, 0)) return;
     XboxCompileSlotsConfigure(PSO_SLOTS, PSO_BOOST_SLOTS, PSO_BOOST_MIN_AVAIL_MIB,
         PSO_PRIORITY ? PSO_URGENT_MIN_AVAIL_MIB : 0xFFFFFFFFu, AppendTrace);
-    char line[160], *out = CensusDec(Text(line, "asset pso-parallel slots="), PSO_SLOTS);
+    XboxCompileSlotsReserveBackground(PSO_BG_RESERVE);
+    char line[220], *out = CensusDec(Text(line, "asset pso-parallel slots="), PSO_SLOTS);
     out = CensusDec(Text(out, " boost="), PSO_BOOST_SLOTS);
     out = CensusDec(Text(out, " boost-min-mib="), PSO_BOOST_MIN_AVAIL_MIB);
     out = CensusDec(Text(out, " priority="), PSO_PRIORITY);
+    out = CensusDec(Text(out, " replay-threads="), PSO_REPLAY_THREADS);
+    out = CensusDec(Text(out, " bg-reserve="), PSO_BG_RESERVE);
+    out = CensusDec(Text(out, " skip-warmup="), PSO_SKIP_WARMUP);
     CensusEmit(line, out);
 }
 
@@ -1792,11 +1808,17 @@ static int PipelineClass(void) {
     return self == render || self == (DWORD)startupThread ? XboxCompileUrgent : XboxCompileNormal;
 }
 
-/* The replay thread's admission, before it claims an entry. */
+/* A replay thread's admission, before it claims an entry. Each replay thread keeps its own ticket. */
 static void ReplaySlot(BOOL enter) {
-    static XboxCompileSlotTicket ticket; /* one replay thread */
-    if (enter) XboxCompileSlotsEnter(PSO_PRIORITY ? XboxCompileBackground : XboxCompileNormal, &ticket);
-    else XboxCompileSlotsLeave(&ticket);
+    static struct { volatile LONG owner; XboxCompileSlotTicket ticket; } tickets[16];
+    const LONG self = (LONG)GetCurrentThreadId();
+    UINT i = 0;
+    while (i < ARRAYSIZE(tickets) && tickets[i].owner != self) ++i;
+    if (i == ARRAYSIZE(tickets))
+        for (i = 0; i < ARRAYSIZE(tickets) && InterlockedCompareExchange(&tickets[i].owner, self, 0); ++i) {}
+    if (i == ARRAYSIZE(tickets)) i = 0; /* more threads than tickets: XboxPipelineReplaySetThreads caps at 16 */
+    if (enter) XboxCompileSlotsEnter(PSO_PRIORITY ? XboxCompileBackground : XboxCompileNormal, &tickets[i].ticket);
+    else XboxCompileSlotsLeave(&tickets[i].ticket);
 }
 
 /* The replay thread's compile; ReplaySlot already admitted it. */
@@ -1832,6 +1854,7 @@ static void ReplayInstall(ID3D12Device *device) {
     }
     PipelineSlots();
     XboxPipelineReplaySetSlot(ReplaySlot);
+    XboxPipelineReplaySetThreads(PSO_REPLAY_THREADS);
     XboxPipelineReplayInstall(device, path, ReplayCompile, FALSE, AppendTrace);
 }
 
@@ -2602,8 +2625,26 @@ static void RecordPreparedAssetOpen(int kind, BOOL success, DWORD error) {
     AppendTrace(line, (DWORD)(out - line));
 }
 
+#include "pso-warmup.h"
+
 HANDLE WINAPI XboxTraceCreateFileW(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
         DWORD creation, DWORD attributes, HANDLE templateFile) {
+#if PSO_SKIP_WARMUP
+    WCHAR session[1024];
+    LPCWSTR routed;
+    if (WarmupRouteOpen(path, access, &creation, session, ARRAYSIZE(session), &routed)) {
+        WarmupTrace("hidden", FALSE, 0, &warmupHiddenCount);
+        SetLastError(ERROR_FILE_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (routed) {
+        const HANDLE file = CreateFileW(routed, access, share, security, creation, attributes, templateFile);
+        const DWORD error = GetLastError();
+        WarmupTrace("session-open", file != INVALID_HANDLE_VALUE, error, &warmupSessionCount);
+        SetLastError(error);
+        return file;
+    }
+#endif
     WCHAR local[256];
     const LPCWSTR mapped = LocalPipePath(path, local, ARRAYSIZE(local));
     WCHAR prepared[1024];
@@ -2630,6 +2671,13 @@ HANDLE WINAPI XboxTraceCreateFileA(LPCSTR path, DWORD access, DWORD share, LPSEC
 }
 
 DWORD WINAPI XboxTraceGetFileAttributesW(LPCWSTR path) {
+#if PSO_SKIP_WARMUP
+    if (WarmupCacheFile(path)) {
+        WarmupTrace("hidden", FALSE, 0, &warmupHiddenCount);
+        SetLastError(ERROR_FILE_NOT_FOUND);
+        return INVALID_FILE_ATTRIBUTES;
+    }
+#endif
     WCHAR prepared[1024];
     int asset = 0;
     DWORD result = GetFileAttributesW(RoutePreparedAsset(path, prepared, ARRAYSIZE(prepared), &asset));
