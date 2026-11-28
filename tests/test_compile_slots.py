@@ -28,6 +28,26 @@ class CompileSlotPolicyTests(unittest.TestCase):
         build = (ROOT / 'analysis/spider-man-play-loader/build.sh').read_text()
         self.assertIn('play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1', build)
 
+    def test_load_time_options_default_off(self):
+        source = (ROOT / 'analysis/spider-man-play-loader/trace.c').read_text()
+        for define, default in (('PSO_REPLAY_THREADS', 1), ('PSO_BG_RESERVE', 0), ('PSO_SKIP_WARMUP', 0)):
+            self.assertIn(f'#ifndef {define}\n#define {define} {default}\n#endif', source)
+        self.assertIn('XboxPipelineReplaySetThreads(PSO_REPLAY_THREADS)', source)
+        self.assertIn('XboxCompileSlotsReserveBackground(PSO_BG_RESERVE)', source)
+        hook = source[source.index('HANDLE WINAPI XboxTraceCreateFileW'):]
+        self.assertLess(hook.index('#if PSO_SKIP_WARMUP'), hook.index('WarmupRouteOpen'))
+        warmup = (ROOT / 'analysis/spider-man-play-loader/pso-warmup.h').read_text()
+        # Only read-only opens are hidden; writes go to the session file, never the player's list.
+        self.assertIn('if (*creation == OPEN_EXISTING && !(access & writes)) return TRUE;', warmup)
+        self.assertIn('L".session"', warmup)
+
+    def test_replay_threads_share_one_summary(self):
+        replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()
+        thread = replay[replay.index('static DWORD WINAPI XprReplayThread'):replay.index('static BOOL XprPatch')]
+        self.assertLess(thread.index('InterlockedDecrement(&xprState.threadsLive) > 0'),
+                        thread.index('asset pso-replay done'))
+        self.assertIn('xprState.threadCount = threads < 1 ? 1 : threads > 16 ? 16 : threads;', replay)
+
     def test_replay_claims_an_entry_only_after_admission(self):
         replay = (ROOT / 'runtime/win32/d3d12-pipeline-replay.h').read_text()
         thread = replay[replay.index('static DWORD WINAPI XprReplayThread'):replay.index('static BOOL XprPatch')]

@@ -9,6 +9,9 @@
 # measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio).
 # The installed 1.0.63026.0 loader (29c66e2a) is play mode with -DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0 before
 # the compile pool moved to d3d12-compile-slots.h; append those flags to drop the boost and priority.
+# Load-time trial (issue #95, off by default): -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2
+# hides the game's xbox0.pso warm-up list (pso-warmup.h) and precompiles the replay database on six
+# below-normal threads that leave two compile slots free for the game.
 #
 # Needs Apple/Homebrew clang, Homebrew mingw-w64 headers and import libraries, an lld-link (zig's
 # `zig lld-link` works) and llvm-dlltool (`zig dlltool`), and the UWP WindowsApp.lib from the Windows SDK.
