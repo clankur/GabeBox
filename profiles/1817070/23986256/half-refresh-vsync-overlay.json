@@ -1,0 +1,7 @@
+[
+  {
+    "offset": 30384745,
+    "expected_sha256": "b84dc6fc3e8f4e5194532e39727f8d51f4100fb42401349030d3c46c71ea8c45",
+    "replacement": "half-refresh-vsync.bin"
+  }
+]
