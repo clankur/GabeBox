@@ -2140,6 +2140,26 @@ UINT64 WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup, const D3D12_HEAP_DESC 
         end = Text(end, "\r\n");
         AppendTrace(line, (DWORD)(end - line));
         PerfStart((DWORD)thread);
+#if defined(HOSTED_RENDER_WIDTH) && defined(HOSTED_RENDER_HEIGHT)
+        /* Report a smaller hosted monitor (the game's only display mode) so the game renders below the
+           1920x1080 swap chain and upscales into it; the host presents the swap chain unchanged. */
+        {
+            WCHAR value[8]; char note[80], *e;
+            const UINT sizes[2] = { HOSTED_RENDER_WIDTH, HOSTED_RENDER_HEIGHT };
+            const WCHAR *names[2] = { L"XBOX_SDL_RENDER_WIDTH", L"XBOX_SDL_RENDER_HEIGHT" };
+            for (UINT i = 0; i < 2; ++i) {
+                UINT n = sizes[i], digits = 0; WCHAR tmp[8];
+                do { tmp[digits++] = (WCHAR)(L'0' + n % 10); n /= 10; } while (n && digits < 7);
+                for (UINT j = 0; j < digits; ++j) value[j] = tmp[digits - 1 - j];
+                value[digits] = 0;
+                SetEnvironmentVariableW(names[i], value);
+            }
+            e = CensusDec(Text(note, "asset hosted-render-size width="), HOSTED_RENDER_WIDTH);
+            e = CensusDec(Text(e, " height="), HOSTED_RENDER_HEIGHT);
+            e = Text(e, "\r\n");
+            AppendTrace(note, (DWORD)(e - note));
+        }
+#endif
         {
             /* Same placement as the shared loader trace: the host's reserved processors. */
 #ifndef PLACE_SPLIT

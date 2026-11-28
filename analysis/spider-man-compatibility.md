@@ -1391,3 +1391,142 @@ No console time was used. The analysis is static, on the verified `Spider-Man.ex
 - Gameplay hitches per minute (`tools.measure --stutter --producer-log`) and visible pop-in in the first minute.
 - Lowest available commit before the menu and in gameplay.
 - No `XBSC_XS.dll` fault and no `0x887A0005` with replay on 4 concurrent threads.
+
+## Memory headroom variants (issue #96, November 28)
+
+**Goal.** At least 250 MiB of free commit in the Fisk Tower atrium, where `1.0.63026.0` (B1 content) bottomed out at 60 MiB, with the best image and 60 FPS where possible. Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Every run continued from the player's save, and the saves were restored and verified after each run (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`).
+
+**Route.** One 240 s scripted traversal (the gate windows, no screenshots), then up to 45 cycles following the objective marker into the atrium. The scripted route is not deterministic: of 13 runs, 6 confirmed the atrium in screenshots. The atrium is the low point. Runs that missed it understate the worst case by about 70–120 MiB, so the table separates them.
+
+**Levers found in the executable.**
+
+- **Display settings struct** (`exe+0x1CFA9C0` sets the defaults; `exe+0x1CA87A0` logs them):
+
+  | Field | Meaning |
+  | --- | --- |
+  | `+0x38` | Half refresh rate |
+  | `+0x39` | VSync |
+  | `+0x4C` | Dynamic-resolution FPS target |
+  | `+0xBC` | Upscale method (None, IGTI, DLSS, FSR, XeSS) |
+  | `+0xC0` | Upscale quality |
+  | `+0xD8` | Resolution modifier |
+  | `+0x2C` / `+0x30` | Fullscreen width and height, picked from the display modes |
+
+- **The resolution modifier does not save memory.** Setting `+0xD8` to 2/3 at RVA `0x1CFADB1` made the game log "Resolution modifier 0.666667" and render visibly blockier. Render targets stay at full size: Video Usage stayed at 2,433 MB and the lowest free commit was unchanged.
+- **The fullscreen default alone does nothing.** Forcing it to 1280×720 at RVA `0x1CFAB64` had no effect: the only enumerated mode is 1920×1080, so the game picks it again.
+- **A smaller hosted monitor does work.** The play loader can set `XBOX_SDL_RENDER_WIDTH`/`HEIGHT` in the game process at boot, before the game queries displays (`-DHOSTED_RENDER_WIDTH/HEIGHT`). The shared window adapter (`runtime/win32/window-monitor.c`) then reports a 1280×720 monitor and mode, and the game renders 1280×720. The DXGI swap chain is still requested at 1920×1080 (`dxgi request-width 0x780`), so the game upscales into it and the presenter outputs 1920×1080 unchanged.
+- **The game's own 30 FPS cap works.** "Half refresh rate" with VSync on (`+0x38 = 0x0101` at RVA `0x1CFAC69`) makes the game present with SyncInterval 2 (`dxgi present-interval 0x2`), and the adapter paces to 30 Hz.
+- **Ray tracing is already off, and "BVH heaps" is not BVH memory.**
+  - On this console the game logs "RAY TRACING DISABLED … lack of Shader Model 6.6" and "No support for DXR 1.1". The DXR 1.1 gate is the device field `+0xD0`, filled by `exe+0x18F91C0` only when `RaytracingTier >= 1.1`. It is null here, so no BVH is built.
+  - The `[Render]` line's "BVH heaps: 80/100 MB" is entry 3 of the render allocator list (`exe+0x1418EC1C0`): the 20 MiB "Tex2D RTV" render-target heaps. The real BVH allocator ("Buf RT") sorts earlier, and 80/100 are multiples of 20 MiB.
+  - Hosted 720p lowered it to 60 MB. An RT-off setting therefore has nothing to free.
+
+**Results.** All runs use the 448 ManagedBuffer, skin 16, loader-cut and light-grid-1024 overlays and the 242 restored textures. Loaders were built from the play-loader snapshot. "Atrium" means the atrium was confirmed in screenshots.
+
+| Variant | Run, package, lease | Internal / output | Atrium | Lowest free commit (where) | Peak commit | Traversal gate windows passing | Traversal: FPS, worst frame, frames >33 ms per min |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Baseline: SB224, Medium, 60 FPS | B1, `1.0.63023.0`, #151 (previous pass) | 1920×1080 / 1920×1080 | yes | **60 MiB** (atrium) | 5,060 | 3/7 | 59.10, 818 ms, 9.96 |
+| Resolution modifier 2/3 | r720, `1.0.63028.0`, #158 | 1280×720 inside 1080p targets / 1920×1080 | yes | 69 (atrium) | 5,050 | 4/7 | 59.84, 118 ms, 2.81 |
+| SoundBankAlloc 128 MiB | sb128, `1.0.63034.0`, #165 | 1080p / 1080p | no | 249 (street) | 4,870 | 5/7 | 59.85, 169 ms, 0.77 |
+| SoundBankAlloc 128 MiB (rerun) | sb128b, `1.0.63040.0`, #176 | 1080p / 1080p | yes | **180** (atrium) | 4,939 | 4/7 | 59.39, 67 ms, 21.96 |
+| Texture Quality Low | low, `1.0.63036.0`, #168 | 1080p / 1080p | yes (traversal) | **74** (atrium) | 5,045 | 4/7 | 55.94, 167 ms, 80.3 (atrium in window) |
+| Fullscreen default 1280×720 (no effect) | fs720, `1.0.63038.0`, #172 | 1080p / 1080p | no | 84 (mission edge) | 5,035 | 2/7 | 59.12, 1,402 ms, 6.1 |
+| 30 FPS (game's half refresh) | fps30, `1.0.63042.0`, #179 | 1080p / 1080p | no | 115 (traversal) | 5,004 | 30 FPS: see below | 29.90, 785 ms |
+| Hosted 1280×720 render | host720, `1.0.63043.0`, #180 | 1280×720 / 1920×1080 | yes | **229** (mc-sample) / 238 (per-second) (atrium) | 4,890 | 5/7 | 59.24, 737 ms, 11.7 |
+| SB128 + Texture Low | sb128low, `1.0.63045.0`, #183 | 1080p / 1080p | no | 284 (street) | 4,835 | 6/7 | 59.92, 38.5 ms, 1.28 |
+| Hosted 1600×900 + SB128 | h900sb128, `1.0.63047.0`, #185 | 1600×900 / 1920×1080 | unconfirmed | 181 (near tower) | 4,938 | 4/7 | 59.37, 1,371 ms, 13.0 |
+| **Hosted 1280×720 + SB128 (chosen)** | cand720sb128, `1.0.63049.0`, #187 | 1280×720 / 1920×1080 | no | 291 (nav) | 4,828 | **7/7** | 59.82, 234 ms, 1.02 |
+| **Chosen, final loader** | final-a, `1.0.63053.0`, #191 | 1280×720 / 1920×1080 | no | 333 (traversal) | 4,786 | **7/7** | **59.93, 33.1 ms, 0** |
+| **Chosen, atrium route** | final-b, `1.0.63055.0`, #193 | 1280×720 / 1920×1080 | **yes** (Web Strike tutorial, FISK sign) | **312 MiB** (atrium) | 4,807 | (no traversal; nav screenshots) | — |
+| Chosen + warm-up skip (#95) | cand2skip, `1.0.63051.0`, #189 | 1280×720 / 1920×1080 | — | no gameplay (see below) | — | — | — |
+
+Every frame in every window used shared GPU textures (0 CPU uploads).
+
+**What each lever is worth in the atrium,** against the 60–69 MiB baseline:
+
+| Lever | Change in atrium free commit | Notes |
+| --- | --- | --- |
+| SoundBankAlloc 224 → 128 MiB | +111–120 MiB | The game's own "Page file" figure falls by 100–135 MB in every phase |
+| Hosted 1280×720 render | +160–170 MiB | Video Usage −138 MB; render-target heap 60 MB instead of 80–100 |
+| Texture Quality Medium → Low | about +5–15 MiB | Tex Usage −35 to −47 MB, inside run-to-run noise. Not worth its cost: the suit loses its web lines (`crop-low.png`) |
+| Hosted 1600×900 | about 0–20 MiB | The render-target heap stays at 80 MB in 20 MiB steps |
+| 30 FPS cap | none | Page file 4,781 MB, the same as at 60 FPS |
+
+No single variant reaches 250 MiB in the atrium. Hosted 720p comes closest at 229–238.
+
+**Chosen configuration: hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium with restores, 60 FPS.**
+
+- **Memory.** Lowest free commit is 312 MiB in the atrium (final-b, atrium confirmed) and 333 MiB over the traversal route (final-a). The peak is 4,807 MiB. This meets the 250 MiB target with about 60 MiB to spare.
+- **Gate.** 7/7 traversal windows pass in both chosen runs. Final loader, 235 s traversal: 59.93 FPS, lowest 1 s 57, p95 17.79 ms, worst 33.1 ms, no frame over 33 ms per minute, and no compile stall.
+
+**What it costs.**
+
+- **Resolution.** The image is rendered at 1280×720 and upscaled. Edges are visibly softer and stair-stepped (`crop-host720.png` against `crop-b1.png`). This misses the 1920×1080 native-resolution target. It is a limitation introduced by the compatibility layer and stays open.
+- **Audio.** SoundBankAlloc 128 MiB rejects the banks that previously needed 128–192 MiB. Which ones is not logged, and voice and audio presence could not be checked remotely: the game logs no bank errors, and the XAudio2 2.7 counters show 0 source voices in every run, including SB224. The earlier delayed-audio report (#92) may come back.
+
+**Native-1080p alternatives** for comparison:
+
+| Configuration | Atrium free commit | Measured or estimated |
+| --- | --- | --- |
+| SB128 + Medium | 180 MiB | Measured |
+| SB128 + Low | About 190–215 MiB | Estimated; this run missed the atrium |
+
+Both fall short of 250. Native 1080p would need about another 70 MiB from the engine pools or GPU heaps.
+
+**30 FPS lock (fps30).**
+
+- **Pacing.** p50 33.37 ms, with 95.6% of intervals between 30 and 37 ms. There were 36 missed 30 Hz slots per minute (about 50 ms frames, each followed by a short one) and one 785 ms first-use compile. It is not perfectly steady.
+- **Memory.** It does not lower commit.
+- **Availability.** It remains available as `half-refresh-vsync-overlay.json` but is not selected.
+
+**Frame-rate consistency.**
+
+- **Streets.** At 60 FPS the street windows pass.
+- **Remaining failures.**
+  - First-use pipeline compiles of 100–1,400 ms, in pipelines that are not yet in the replay database.
+  - The Fisk Tower area. Approaching and entering the atrium, the game drops to 45–48 FPS at both 1080p and 720p (`[Render] fps` 44.9–47.5), so it is not GPU-resolution bound.
+- **Not every settled window passes yet.**
+
+**Warm-up skip (#95) trial, cand2skip.**
+
+- **What the loader did.**
+  - It logged "pso-warmup hidden" and "session-open ok".
+  - `load_phases` reported `game_warmup_pipelines=0`.
+  - The menu appeared 49 s after launch, against 95–115 s.
+- **What happened next.**
+  - The scripted Continue logged a save-load request, but 70 s later the main menu was still on screen, with commit at about 4,900 MiB.
+  - The traversal inputs then selected Quit ("Quit requested from menu"). There was no crash, no `0x887A0005` and no `XBSC_XS` fault.
+- **Unmeasured.** Gameplay hitches, pop-in and lowest free commit could not be measured. It is left out of the play build until a run reaches gameplay.
+
+**Load phases.** Play → gameplay unattended was 82.4–86.3 s across these runs (`tools.load_phases`; boost loader `ea4f057` and later), within the 90 s budget. No 6-slot boot produced an `XBSC_XS` fault or `0x887A0005`.
+
+**Tint.** It appeared in most launches and varied by launch, independent of the variant:
+
+| Kind | Runs |
+| --- | --- |
+| Magenta or white sky glare at the start street | r720, sb128b, sb128low, cand720sb128 |
+| Cyan/magenta canopy glare | fs720 |
+| Green shopfronts and windows | fps30, sb128low, final-b |
+| Clean start street | sb128, low, fs720, host720, final-a |
+
+Each run folder has a `sky-sheet.png`.
+
+**Profile.** `play-build.json` declares the build's recipe overlays and loader budget. `build.sh play` and `measure` now pass `-DSOUNDBANK_MIB=128 -DHOSTED_RENDER_WIDTH=1280 -DHOSTED_RENDER_HEIGHT=720`; append `-USOUNDBANK_MIB -DSOUNDBANK_MIB=224 -UHOSTED_RENDER_WIDTH -UHOSTED_RENDER_HEIGHT` for the earlier budget. `tests/test_spider_profile_overlays.py` pins both, plus the optional 30 FPS overlay.
+
+**Installed play build.** `1.0.63057.0`, appx SHA-256 `ea8b6ee1f1ba5469…`, deployed under lease #195 without launching.
+
+- **Configuration.** It is the final-a/final-b content without autoplay:
+  - play loader `faed3258adfa51c0…` (`build.sh play` at `515cb3a` plus the hosted-render option; no per-second counters);
+  - recipe `748e3130…`, with the same overlays as `1.0.63026.0`;
+  - hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium plus 242 restores, light-grid cap 1024.
+- **Two versions listed.** Device Portal lists both `1.0.63056.0` (the tint agent's diagnostic) and `1.0.63057.0` in the same package family.
+- **Saves.** They read back as the player's `slot0 e3cfef672fa1`, `slot2 b5a997101896` and `userprefs 785ec4934744`.
+
+**Open.**
+
+- **Repeat the atrium.** The chosen content has one confirmed atrium run (312 MiB); repeat it for variance (run-to-run spread elsewhere was about 25 MiB).
+- **Shared marker.** Move the hosted render size from the title loader into a shared profile marker. `ProbeNative.cpp` currently hard-codes 1920×1080 for the SDL host.
+- **Native 1080p.** Find about 70 MiB more in engine pools or GPU heaps.
+- **Audio.** Confirm voice and audio by listening at SB128.
+- **Verifier.** Run an independent `xbox-game-verify` pass.
+- **Tint fix.** Fold in the sky agent's tint fix once it is committed. It is uncommitted in the shared worktree and is not in this build.

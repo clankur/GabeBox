@@ -5,8 +5,12 @@
 #
 # play     (default) 4 pipeline-compile slots plus 2 while at least 768 MiB of commit is available (boot),
 #          render/main-thread compiles first and replay compiles only when no title compile waits,
-#          SoundBankAlloc 224 MiB, no per-second counters.
+#          SoundBankAlloc 128 MiB, a 1280x720 hosted render size, no per-second counters.
 # measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio).
+# Memory budget (Fisk Tower headroom, analysis note "Memory headroom variants"): SoundBankAlloc 128 MiB and a
+# hosted monitor of 1280x720 (the game renders 1280x720 and upscales into the 1920x1080 swap chain) keep at
+# least 250 MiB of commit free. Append -USOUNDBANK_MIB -DSOUNDBANK_MIB=224 -UHOSTED_RENDER_WIDTH
+# -UHOSTED_RENDER_HEIGHT for the earlier native-1080p, 224 MiB sound-bank budget.
 # The installed 1.0.63026.0 loader (29c66e2a) is play mode with -DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0 before
 # the compile pool moved to d3d12-compile-slots.h; append those flags to drop the boost and priority.
 # Load-time trial (issue #95, off by default): -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2
@@ -26,9 +30,10 @@ out=$1; mode=${2:-play}; [ $# -ge 2 ] && shift 2 || shift 1
 MINGW=${MINGW:-/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32}
 LLD_LINK=${LLD_LINK:-lld-link}; DLLTOOL=${DLLTOOL:-llvm-dlltool}
 : "${WINDOWSAPP_LIB:?set WINDOWSAPP_LIB to the UWP WindowsApp.lib}"
+budget_flags="-DSOUNDBANK_MIB=128 -DHOSTED_RENDER_WIDTH=1280 -DHOSTED_RENDER_HEIGHT=720"
 case $mode in
-    play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 -DSOUNDBANK_MIB=224 -DNO_PERF_SEC" ;;
-    measure) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 -DSOUNDBANK_MIB=224" ;;
+    play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags -DNO_PERF_SEC" ;;
+    measure) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags" ;;
     *) echo "mode must be play or measure" >&2; exit 2 ;;
 esac
 mkdir -p "$out"
