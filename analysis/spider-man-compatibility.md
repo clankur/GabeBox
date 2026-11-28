@@ -1464,9 +1464,27 @@ In both runs the trace has `pso-warmup hidden` and `session-open ok`, the game l
 - **A cap needs per-record use.** It would mean marking which served records the game actually creates in a run, by matching the record hash at the game's create path. Then the list could be rewritten as the boot/menu head plus records used in the last N runs.
 - **Re-recording is not an option.** A fresh `PSO_SKIP_WARMUP` recording costs about 200 s at Continue.
 
-**Recommendation.**
-- Keep the play build without these flags until gameplay is hitch-free.
-- The next trial is prune with faster background replay of the remainder: `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`, which puts two replay compiles in gameplay instead of one. It is untested. Replay order would also matter: compile in the order of the player's list first.
+**Prune with three replay threads (`prune3`: 1.0.63068.0, same route, lease #208).**
+- **Build:** loader `807be1bf` (measure), with `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`.
+- **Served list:** 1,431 records, including prune1's appends.
+- **Replay order:** no new code. The replay database is append-only in first-creation order, as the player's list is, so replay already walks the remainder in roughly the player's order.
+
+| | Baseline | `prune1` (1 thread) | `prune3` (3 threads) |
+| --- | --- | --- | --- |
+| Play→lobby ready / Continue→gameplay | 66.5–67.1 / 15.4–15.5 s | 39.1 / 8.1 s | 39.1 / 8.7 s |
+| Unattended Play→gameplay | 81.9–82.6 s | 47.2 s | **47.8 s** |
+| Traversal frames over 100 ms per minute (worst frame) | 0 (33 ms) | 6.6 (1,002 ms) | 2.3 (885 ms) |
+| Render-thread compiles ≥100 ms per minute: traversal / Fisk route | 0 / 0 | 5.9 / 1.2 | 1.2 / 1.7 (worst 887 / 884 ms) |
+| Lowest available commit: pre-menu / gameplay | — | 1,291 / 325 MiB | 1,184 / 305 MiB |
+| Replay | — | 1,468 replayed, 187 hits | 1,254 replayed, **0 hits** |
+
+**Verdict: fails the acceptance criteria.** Those require 0 traversal frames over 100 ms and render-thread compiles at the baseline rate of about 0.
+- **Why the extra threads didn't help.** Running ahead, replay compiled against root-signature objects the game did not use. 19 of the 23 render-thread compiles were `replay=3` misses, and replay got no hits at all.
+- **The guard missed it.** The copy-blob dedup check in `ba00490` still read `same=1`. The guard (`title-object-differs`) never fired, because the game had created its roots before replay used them.
+- **What that suggests.** The game holds more than one root-signature object for some blobs, and replay picks the newest one with that blob. Fixing that needs replay to compile against the same object the game will use. That is not available from a blob hash, so replay cannot cover the pruned remainder.
+- **Saves.** `slot0` was autosaved during the run and restored from the backup. All three saves were verified unchanged afterwards.
+
+**Recommendation.** Keep the play build at the baseline warm-up. Its 82–86 s unattended meets the goal. `PSO_WARMUP_LIST`, `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off.
 
 ## Memory headroom variants (issue #96, November 28)
 
