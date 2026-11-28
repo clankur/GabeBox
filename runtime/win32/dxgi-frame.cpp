@@ -48,6 +48,49 @@ bool SupportedFrame(UINT64 width, UINT height, UINT samples, UINT layers, UINT l
         (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM);
 }
 
+// Times the host's release of each committed frame. The host signals a slot's done fence right after the draw
+// on its display's composition callback, so these times follow the display's refresh at a small offset.
+struct HostRelease {
+    SRWLOCK lock = SRWLOCK_INIT;
+    XboxHostVsync clock{};
+    HANDLE events[SDL_GPU_SLOTS]{};
+    UINT64 frequency = 0;
+    volatile LONG state = 0; // 0 not started, 1 starting, 2 running, 3 unavailable
+} hostRelease;
+
+DWORD WINAPI WatchHostRelease(void*) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    for (;;) {
+        const DWORD which = WaitForMultipleObjects(SDL_GPU_SLOTS, hostRelease.events, FALSE, INFINITE);
+        if (which >= WAIT_OBJECT_0 + SDL_GPU_SLOTS) return 0;
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        AcquireSRWLockExclusive(&hostRelease.lock);
+        XboxHostVsyncObserve(&hostRelease.clock, static_cast<UINT64>(now.QuadPart));
+        ReleaseSRWLockExclusive(&hostRelease.lock);
+    }
+}
+
+bool StartHostRelease() {
+    const LONG state = InterlockedCompareExchange(&hostRelease.state, 1, 0);
+    if (state) return state == 2;
+    const DWORD error = GetLastError();
+    LARGE_INTEGER frequency{};
+    bool ready = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0;
+    for (auto& event : hostRelease.events)
+        if (ready && !(event = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS))) ready = false;
+    if (ready) {
+        hostRelease.frequency = static_cast<UINT64>(frequency.QuadPart);
+        XboxHostVsyncInit(&hostRelease.clock, hostRelease.frequency);
+        HANDLE thread = CreateThread(nullptr, 0, WatchHostRelease, nullptr, 0, nullptr);
+        ready = thread != nullptr;
+        if (thread) CloseHandle(thread);
+    }
+    InterlockedExchange(&hostRelease.state, ready ? 2 : 3);
+    SetLastError(error);
+    return ready;
+}
+
 D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
         D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER barrier{};
@@ -347,4 +390,18 @@ void DxgiFramePublisher::Commit(unsigned index) {
     InterlockedExchange64(&gpu_->sequence[index], static_cast<LONG64>(slot.submitted));
     InterlockedExchange(&gpu_->gpu_active, 1);
     InterlockedExchange(&base_->frame_sequence, 1);
+    if (StartHostRelease()) {
+        const DWORD error = GetLastError();
+        if (slot.done12) slot.done12->SetEventOnCompletion(slot.submitted, hostRelease.events[index]);
+        else if (slot.done) slot.done->SetEventOnCompletion(slot.submitted, hostRelease.events[index]);
+        SetLastError(error);
+    }
+}
+
+bool DxgiFramePublisher::HostVsync(UINT64 now, XboxHostVsync& out) {
+    if (InterlockedCompareExchange(&hostRelease.state, 0, 0) != 2) return false;
+    AcquireSRWLockShared(&hostRelease.lock);
+    out = hostRelease.clock;
+    ReleaseSRWLockShared(&hostRelease.lock);
+    return XboxHostVsyncLocked(&out, now, hostRelease.frequency) != 0;
 }

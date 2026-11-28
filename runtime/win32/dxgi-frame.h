@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 #include "../shared/sdl-gpu-protocol.h"
 #include "../shared/sdl-host-protocol.h"
+#include "../shared/host-vsync-clock.h"
 
 class DxgiFramePublisher {
 public:
@@ -18,6 +19,8 @@ public:
     bool IsActive() const { return generation_ != 0 && status_ == S_OK; }
     const char* FailureStage() const { return failureStage_; }
     HRESULT Reset();
+    // The host's display cadence, estimated from when it releases committed frames (done fences). True when locked.
+    static bool HostVsync(UINT64 now, XboxHostVsync& out);
 
 private:
     struct Slot {
