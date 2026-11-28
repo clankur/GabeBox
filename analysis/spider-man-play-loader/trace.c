@@ -1599,6 +1599,13 @@ static DWORD WINAPI WatchLobbyMode(void *unused) {
 }
 
 #include "census.h"
+#include "d3d12-small-array-copy.h"
+static void SacTrace(const char *event, unsigned long long a, unsigned long long b) {
+    char line[120], *out = Text(Text(Text(line, "asset "), event), " n=");
+    out = CensusDec(out, a);
+    out = CensusDec(Text(out, " value="), b);
+    CensusEmit(line, out);
+}
 #include "allocs.h"
 #ifdef HEAP_ADDR
 #include "heapaddr.h"
@@ -2198,6 +2205,11 @@ UINT64 WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup, const D3D12_HEAP_DESC 
         out = Text(out, "\r\n");
         AppendTrace(line, (DWORD)(out - line));
         if (SUCCEEDED(result) && startupDevice) AllocInstall((ID3D12Device *)startupDevice);
+        if (SUCCEEDED(result) && startupDevice) {
+            xboxSacTrace = SacTrace;
+            const HRESULT sac = XboxSacInstall((ID3D12Device *)startupDevice, (XboxSacPlacedFn)allocOriginal[29]);
+            SacTrace("sac-install", (unsigned long long)(sac == S_OK), (unsigned long long)(DWORD)sac);
+        }
 #ifdef HEAP_ADDR
         if (SUCCEEDED(result) && startupDevice) HeapAddressInstall((ID3D12Device *)startupDevice);
 #endif

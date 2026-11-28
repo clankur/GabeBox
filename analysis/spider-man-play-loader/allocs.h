@@ -82,6 +82,10 @@ static HRESULT STDMETHODCALLTYPE AllocPlaced(ID3D12Device *self, ID3D12Heap *hea
         const DWORD error = GetLastError();
         AllocTrace("placed", result, desc, offset, 0, 0);
         SetLastError(error);
+    } else if (out && *out) {
+        const DWORD error = GetLastError();
+        XboxSacNotePlaced(heap, offset, desc, (ID3D12Resource *)*out);   /* small-array copy workaround */
+        SetLastError(error);
     }
     return result;
 }
