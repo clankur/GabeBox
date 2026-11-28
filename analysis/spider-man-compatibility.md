@@ -1737,10 +1737,65 @@ Street, final-a (`1.0.63053.0`, same content):
 ### Notes
 
 - **Bottleneck evidence** comes from fisk3, the only run that reached the tower with the frame diagnostics. The fisk4 second-level call sites are from the street, where the waits are rare; the Fisk waits share the same wrapper but their callers there are not sampled.
-- **Worker threads are not sampled.** Which job holds the chain at the tower is the next instrument: sample the job workers as well, or record the job system's per-job timing at `exe+0x01700C4F`.
+- **Worker threads:** sampled in the follow-up below (fisk5).
 - **Not measured at the tower:** native 1080p with the frame diagnostics, the Lowest tier, and a second confirming run.
 - **Diagnostic perturbation:** the wait profiler suspends two threads about 500 times a second; the per-pipeline profiler adds work to every command list (fisk2 shows more street stutter than fisk1).
 - **The gate windows at the tower include nav screenshots;** their gaps are excluded by UTC window.
+
+### Follow-up: the job chain at the tower and a host-paced 30 FPS lock (November 28, afternoon)
+
+Every run restored and verified the player's saves (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`). Tower A/B runs started from a throwaway save captured at the Fisk plaza (slot0 `e6c847dd01ae`), kept apart from the player's saves, and drove a scripted combat with no screenshots.
+
+**The job chain** (fisk5, `1.0.63074.0`, lease #214; `WAIT_PROF` now also samples every game thread):
+
+- **Two worker pools.** The game runs 8 job workers (start `exe+0x01BBF8B0`): 4 at priority +2 and 4 at 0. The +2 pool is sized as logical processors − 2: 4 with our 6-processor view, 6 with the system's 8 (trace `cpu/run-b1`).
+- **What the +2 workers do at the tower.** They are 52–55% busy each (32–36% on the street), mostly in the game's `exe+0x017897C0`, and idle about 45% of the time on the job queue (`exe+0x016FF5AE`). The priority-0 workers are 2–7% busy.
+- **Render thread.** 18% of its samples are in `exe+0x017897C0` and 14% are waits for jobs (`exe+0x01700C4F`).
+- **Main thread.** It waits for the render thread and for jobs (`exe+0x01700D4D`).
+- **The GPU is not the limit.** It is busy only 11–12.5 ms per frame at the tower.
+- **Nothing from the layer is on the path.** Our modules account for under 1% of samples, and no wait sits in any of them.
+
+**Worker count makes no difference** (tower combat, first 241 s, 1280×720):
+
+| Run | Processor view | +2 workers | FPS | p50 / p95 / p99 | Frames > 33.4 ms | Lowest 1 s | Lowest free commit | Each +2 worker busy |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| B, `1.0.63082.0`, #221 | ours (6) | 4 | 57.14 | 16.7 / 21.2 / 33.4 ms | 0.8% | 24 | 478 MiB | 50–54% |
+| C, `1.0.63083.0`, #222 | system (8) | 6 | 56.90 | 16.7 / 30.3 / 33.4 ms | 1.0% | 31 | 456 MiB | 29–35% |
+
+- Total worker CPU is the same (2.80 vs 2.63 processors): six workers only spread the same work thinner.
+- The processor view stays as it is, and the tower limit is recorded as the game's own job chain.
+- The scripted combat dips to 44–53 FPS in some 30 s windows. The approach swing in fisk3 went to 31–48.
+
+**Host-paced 30 FPS** (shared DXGI adapter; commits 6af1d25, 643c9a4, 4653b0a, 7b0f9d5, 1607d69):
+
+- **How it works.** The adapter times each committed frame's release from its done fence; the host signals it right after its draw. A phase-locked estimate (`runtime/shared/host-vsync-clock.h`, unit test `tests/host-vsync-clock.c`) gives the host's period and phase. Presents with SyncInterval 2 or more are committed a fixed fraction of a period after the estimated release.
+- **What a raw log showed** (#228; measurement packages log 8,192 releases and commits):
+  - releases follow the host's Present within about 0.5 ms;
+  - the host's draw callback is within ±2.5 ms of the refresh on 98% of refreshes and reaches ±8 ms on the rest;
+  - the period estimate converges to 16.684 ms.
+
+| Run | Commit point | Street, 235 s traversal | Fisk plaza combat (first 240 s / 486 s) |
+| --- | --- | --- | --- |
+| fps30, 60 Hz grid | — | 36.1 per min | — |
+| fps30b, 59.94 Hz marker | — | 9.2 per min | — |
+| A, #217 | 0.3, first loop | **0 per min**, 99.9% in 30–37 ms, worst 37.9 ms | — |
+| A′, #223 | 0.3, first loop | — | **12.0 / 8.5 per min** |
+| #226 | 0.7, envelope loop | — | 22.8 / 19.1 (period locked at the +1% bound) |
+| #227 | 0.7, envelope, near-envelope period | — | 14.2 / 14.5 |
+| #229 | 0.45, first loop | — | 28.3 / 29.3 |
+| fps30d, #230 | 0.3, final (`1607d69`) | **0 per min**, 99.6% in 30–37 ms, worst 38.3 ms | — |
+
+- **Late game frames dominate at the tower.** The tower's remaining misses are mostly game frames that finish after their target: the game's own frame there is 25–33 ms. An early commit point leaves the most room for them, so the shipped point is 0.3. With that point the unit model clears host callbacks up to about 5 ms late.
+- **Zero at the tower is out of reach by pacing.** Pacing cannot remove a frame that takes longer than 33 ms.
+- **The 30 FPS overlay stays optional.**
+- **The adapter must still be built by CI.** The packages carried a local mingw build of HEAD (`XboxWin32Dxgi.dll`; final `524190df…`). It also includes the adapter commits made after November 23 that the base APPX's adapter predates.
+
+**Installed play build: `1.0.63097.0`.** It was deployed without launching (lease #231). APPX SHA-256 `18b5909158f733b7…`.
+
+- Play loader `68a5c545…`. HEAD now builds `7ea05023…` after commit 1f4be52.
+- Recipe `748e3130…`.
+- The 242 restores (`tex/ov-restore-all`, toc `af93da80…`).
+- 60 FPS default, no autoplay, no counters.
 
 ## Rainbow sky and lighting tint: small texture-array copies (issue #94, November 28)
 
