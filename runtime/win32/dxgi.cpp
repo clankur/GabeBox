@@ -350,6 +350,9 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     ProducerCadenceTrace cadence_;
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
+    UINT64 hostDeadline_ = 0;
+    unsigned hostPaced_ = 0;
+    bool tracedHostLog_ = false;
     bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false, skipPublish_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedRejection_ = false;
 
@@ -378,12 +381,58 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         // The host owns display vsync. Keep the game's requested cadence
         // without waiting for a second flip queue on the virtual window.
         auto now = static_cast<UINT64>(counter.QuadPart);
-        const auto deadline = XboxSdlNextSwap(&clock_, now, static_cast<int>(interval));
-        while (now < deadline) {
-            SleepEx(static_cast<DWORD>(((deadline - now) * 1000 + counterFrequency_ - 1) / counterFrequency_), FALSE);
-            if (!QueryPerformanceCounter(&counter)) return interval;
-            now = static_cast<UINT64>(counter.QuadPart);
+        auto waitUntil = [&](UINT64 deadline) {
+            while (now < deadline) {
+                SleepEx(static_cast<DWORD>(((deadline - now) * 1000 + counterFrequency_ - 1) / counterFrequency_), FALSE);
+                if (!QueryPerformanceCounter(&counter)) return false;
+                now = static_cast<UINT64>(counter.QuadPart);
+            }
+            return true;
+        };
+        // Multi-refresh intervals (a game's 30 FPS lock) follow the host's measured refresh and phase: each frame is
+        // committed late in a host refresh (XBOX_HOST_VSYNC_COMMIT16 after the earliest release), so it is shown on
+        // the host's next refresh even when the host's draw callback runs late, and never on the one before. A
+        // nominal 60 Hz grid drifts across the host's refresh edge and alternates 50 and 17 ms frames near it.
+        XboxHostVsync host;
+        if (interval >= 2 && DxgiFramePublisher::HostVsync(now, host)) {
+            const UINT64 period = static_cast<UINT64>(host.period16 >> 16);
+            UINT64 earliest = hostDeadline_ ? hostDeadline_ + interval * period - period / 2 : now;
+            if (earliest + period < now) earliest = now;
+            const UINT64 deadline = XboxHostVsyncNext(&host, earliest, XBOX_HOST_VSYNC_COMMIT16);
+            hostDeadline_ = deadline;
+            clock_.interval = 0;
+            if (!(hostPaced_++ & 1023)) // the measured period when pacing starts and every 1024 frames after
+                Trace("host-vsync-pacing-period-ns", static_cast<HRESULT>(period * 1000000000ull / counterFrequency_));
+            if (cadence_.Enabled()) {
+                // Measurement packages log the first 8192 releases and commits of paced play, then write them once.
+                if (hostPaced_ == 1) DxgiFramePublisher::HostLogStart();
+                unsigned count = 0;
+                const UINT64* log = tracedHostLog_ ? nullptr : DxgiFramePublisher::HostLogFull(count);
+                if (log) {
+                    tracedHostLog_ = true;
+                    char text[2048];
+                    unsigned used = 0;
+                    for (unsigned i = 0; i < count; ++i) {
+                        char line[40], *out = line + sizeof(line);
+                        *--out = '\n'; *--out = '\r';
+                        UINT64 value = log[i] >> 1;
+                        do { *--out = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+                        *--out = '='; *--out = (log[i] & 1) ? 'r' : 'c'; *--out = ' ';
+                        static const char prefix[] = "dxgi host-log";
+                        for (unsigned k = sizeof(prefix) - 1; k;) *--out = prefix[--k];
+                        const unsigned size = static_cast<unsigned>(line + sizeof(line) - out);
+                        if (used + size > sizeof(text)) { AppendTrace(text, used); used = 0; }
+                        for (unsigned k = 0; k < size; ++k) text[used++] = out[k];
+                    }
+                    if (used) AppendTrace(text, used);
+                }
+            }
+            if (!waitUntil(deadline)) return interval;
+            return 0;
         }
+        hostDeadline_ = 0;
+        const auto deadline = XboxSdlNextSwap(&clock_, now, static_cast<int>(interval));
+        if (!waitUntil(deadline)) return interval;
         return 0;
     }
 

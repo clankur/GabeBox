@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "../shared/child-process.h"
+#include "../win32/cpu-sets.h"
 #include "../shared/pipe-protocol.h"
 #include "SteamChildExitTrace.h"
 #include "SteamSdlSurface.h"
@@ -2328,6 +2329,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
     // Diagnostic shift tests: milliseconds as decimal digits, or empty.
     std::wstring shadowSteamRelayDelay;
     std::wstring shadowSteamInitDelay;
+    bool shadowD3d12PipelineReplay = false;
+    bool shadowDemandCommit = false;
     bool shadowWorkingDirectory = false;
     bool shadowOriginalExecutable = false;
     bool shadowDynamicCompanions = false;
@@ -2487,6 +2490,22 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
                     }
                     shadowD3d12DefaultAdapter = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-d3d12-pipeline-replay-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowD3d12PipelineReplay = true;
+                }
+                if (const auto marker = co_await packageFolder.TryGetItemAsync(
+                        L"steam-win32-demand-commit-" + std::to_wstring(app) + L".txt")) {
+                    const auto file = marker.try_as<StorageFile>();
+                    if (!file || (co_await file.GetBasicPropertiesAsync()).Size()) {
+                        co_return winrt::hstring(L"steam_launch=shadow-profile-mismatch\r\n");
+                    }
+                    shadowDemandCommit = true;
                 }
                 if (const auto marker = co_await packageFolder.TryGetItemAsync(
                         L"steam-win32-streamline-unavailable-" + std::to_wstring(app) + L".txt")) {
@@ -2764,7 +2783,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                         (shadowDefaultAudio && (!shadowRecipe || !sourceProfile || !shadowTrace ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32DefaultAudio.dll") ||
                             !co_await packageFolder.TryGetItemAsync(L"XboxWin32LoaderTrace.dll"))) ||
-                        ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable || shadowSteamRelayStub ||
+                        ((shadowD3d12DefaultAdapter || shadowStreamlineUnavailable || shadowD3d12PipelineReplay ||
+                            shadowDemandCommit || shadowSteamRelayStub ||
                             shadowSteamCallbackTrace || shadowSteamRelayWorker || shadowSteamRelayStatus ||
                             !shadowSteamInitDelay.empty()) &&
                             (!shadowRecipe || !sourceProfile || !shadowTrace ||
@@ -3276,6 +3296,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 shadowOriginalExecutablePath = steam_win32_stage::SourceFile(source, shadowExecutable);
             }
             auto temporary = ApplicationData::Current().TemporaryFolder();
+            const auto staleStages = co_await steam_win32_stage::RemoveStaleStages(temporary);
+            if (staleStages) report += L"steam_shadow_stale_stages_removed=" + std::to_wstring(staleStages) + L"\r\n";
             shadowStage.folder = co_await temporary.CreateFolderAsync(L"SteamWin32Trial", CreationCollisionOption::GenerateUniqueName);
             co_await steam_win32_stage::ApplyRecipe(shadowRecipe, original, shadowStage.folder);
             if (shadowFiles) {
@@ -3710,6 +3732,8 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                 {L"XBOX_WIN32_STEAM_RELAY_STATUS", shadowSteamRelayStatus ? L"1" : L""},
                 {L"XBOX_WIN32_STEAM_RELAY_DELAY_MS", shadowSteamRelayDelay},
                 {L"XBOX_WIN32_STEAM_INIT_DELAY_MS", shadowSteamInitDelay},
+                {L"XBOX_WIN32_D3D12_PIPELINE_REPLAY", shadowD3d12PipelineReplay ? L"1" : L""},
+                {L"XBOX_WIN32_DEMAND_COMMIT", shadowDemandCommit ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI", shadowDxgi && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_HOSTED_DXGI_OUTPUT", shadowDxgiOutput && hostedSdl ? L"1" : L""},
                 {L"XBOX_WIN32_DXGI_ADAPTER_BUDGET", shadowDxgiAdapterBudget ? L"1" : L""},
@@ -3770,6 +3794,11 @@ static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> LaunchLocalSt
                     report += L"steam_cloud_sync_exit_watch=unavailable\r\n";
                 }
             }
+            // A child gets none of the title's reserved processors; give it the host's.
+            const auto processors = XboxShareReservedProcessors(GetCurrentProcess(), child.hProcess);
+            report += L"steam_shadow_processors=" + std::wstring(processors.stage, processors.stage + strlen(processors.stage)) +
+                L"\r\nsteam_shadow_processor_mask=" + Hex(static_cast<DWORD>(processors.applied ? processors.applied : processors.owner)) +
+                L"\r\n";
             report += L"steam_shadow_build=" + shadowBuild + L"\r\nsteam_shadow_renderer=" + (mode.empty() ? L"default" : mode) +
                 L"\r\nsteam_shadow_child=created\r\n";
             if (!shadowArguments.empty()) report += L"steam_shadow_arguments=profile\r\n";

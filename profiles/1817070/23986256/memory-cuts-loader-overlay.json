@@ -1,0 +1,22 @@
+[
+  {
+    "offset": 25794996,
+    "expected_sha256": "1e69c1e09fb524d2b66ab8071d59c186080ac7af5230e1eb0253bdcc980f71e4",
+    "replacement": "memory-cut-skinning-buffer-cpu-32mib.bin"
+  },
+  {
+    "offset": 23208214,
+    "expected_sha256": "5a40b402fb598488163b4eb152d5f2efa70f25b11547564e06bd4b013204b050",
+    "replacement": "memory-cut-asset-loader-temp-64mib-a.bin"
+  },
+  {
+    "offset": 23208241,
+    "expected_sha256": "5b9ef67ca473aa609bbc2732e516f45faf98e53241ae91e91bd56f968c86f85d",
+    "replacement": "memory-cut-asset-loader-temp-64mib-b.bin"
+  },
+  {
+    "offset": 24473142,
+    "expected_sha256": "0187c170ee3cce50357769e55abafd5504bfed85239d384aeeaaff729cafb535",
+    "replacement": "memory-cut-scratch-allocator-16mib.bin"
+  }
+]

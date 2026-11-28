@@ -299,6 +299,32 @@ class BigPicturePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot replace"):
             stage_profiles(self.layout, ["413150=123"])
 
+    def test_win32_demand_commit_marker_is_staged_only_when_empty(self):
+        self.layout.mkdir()
+        profile = self.work / "demand-commit-profile"
+        profile.mkdir()
+        app = "1817070"
+        build = "23986256"
+        (profile / f"steam-win32-shadow-{app}.txt").write_text(f"{build}\nGame.exe\n\n\n\n\nloader-trace\n")
+        (profile / f"steam-win32-shadow-{app}.xwp").write_bytes(
+            struct.pack("<8sQQII32s", b"XWPEV2\r\n", 512, 256, 64, 32, bytes(32)) + bytes(96))
+        (profile / f"steam-win32-source-{app}.json").write_text(json.dumps({build: [
+            {"path": "Game.exe", "size": 512, "sha256": "1" * 64}]}))
+        marker = f"steam-win32-demand-commit-{app}.txt"
+        (profile / marker).write_text("1\n")
+        template = self.work / "demand-commit-runtime.appx"
+        with ZipFile(template, "w") as archive:
+            archive.writestr("AppxManifest.xml", MANIFEST.replace(
+                b'Name="XboxPortabilityProbe.BigPicture"', b'Name="XboxPortabilityProbe.ChildProcess.SteamCore"'))
+            archive.writestr("ProbeNative.dll", "steam_source_check=steam_shadow_companion_hashes=verified".encode("utf-16le"))
+            for name in ("XboxProbe.Native.winmd", "XboxWin32Input.dll", "XboxWin32Desktop.dll", "XboxWin32LoaderTrace.dll"):
+                archive.writestr(name, b"runtime fixture")
+        with self.assertRaisesRegex(ValueError, "demand-commit option needs an empty marker"):
+            stage_trials(self.layout, [f"{app}={profile}"], template)
+        (profile / marker).write_bytes(b"")
+        stage_trials(self.layout, [f"{app}={profile}"], template)
+        self.assertEqual((self.layout / marker).read_bytes(), b"")
+
     def test_win32_legacy_steam_sdk_requires_a_matching_unmodified_staged_companion(self):
         self.layout.mkdir()
         profile = self.work / "legacy-sdk-profile"

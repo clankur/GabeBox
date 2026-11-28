@@ -429,6 +429,24 @@ static winrt::fire_and_forget RemoveStage(StorageFolder stage) {
     } catch (winrt::hresult_error const&) {}
 }
 
+// A stage is removed after its child exits, by the exit observer or the presenter. A host that is terminated
+// while the game runs (a package update, a crash) never reaches that step, and each leaked stage holds a full copy
+// of the executable and its companions. Only one launch stages at a time, so earlier stages are no longer in use;
+// a folder whose files are still open fails to delete and is kept.
+static IAsyncOperation<uint32_t> RemoveStaleStages(StorageFolder temporary) {
+    uint32_t removed = 0;
+    try {
+        for (auto const& folder : co_await temporary.GetFoldersAsync()) {
+            if (!std::wstring_view(folder.Name()).starts_with(L"SteamWin32Trial")) continue;
+            try {
+                co_await folder.DeleteAsync(StorageDeleteOption::PermanentDelete);
+                ++removed;
+            } catch (winrt::hresult_error const&) {}
+        }
+    } catch (winrt::hresult_error const&) {}
+    co_return removed;
+}
+
 static winrt::fire_and_forget RemoveStageAfterExit(StorageFolder stage, winrt::handle child) {
     if (child) co_await winrt::resume_on_signal(child.get());
     RemoveStage(stage);

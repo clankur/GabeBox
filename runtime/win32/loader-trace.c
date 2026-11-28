@@ -8,11 +8,15 @@
 #include "d3d12-residency.h"
 #include "d3d12-fence-trace.h"
 #include "managed-warmup.h"
+#include "cpu-sets.h"
+#include "processor-view.h"
 #include <appmodel.h>
 #include <d3dcommon.h>
 #include <dxgi1_2.h>
 #include <objbase.h>
 #include <mmdeviceapi.h>
+#include "d3d12-pipeline-replay.h"
+#include "demand-commit.h"
 
 static volatile LONG64 loaderEvents[128];
 static volatile LONG faultTraceStarted;
@@ -23,6 +27,7 @@ static volatile LONG originalImageObserved;
 static volatile LONG assetEvents;
 static volatile LONG deviceEvents;
 static volatile LONG devicePrimed;
+static volatile LONG processorsPlaced;
 static volatile LONG failedCommits;
 static DWORD faultTraceCount;
 static const DWORD delayModuleMissing = 0xC06D007E;
@@ -672,7 +677,47 @@ void WINAPI XboxRaiseException(DWORD code, DWORD flags, DWORD count, const ULONG
     RaiseException(code, flags, count, arguments);
 }
 
+static volatile LONG demandCommit; /* 0 unread, 1 off, 2 on */
+static volatile LONG demandCommitTraced;
+
+static BOOL DemandCommitEnabled(void) {
+    if (!demandCommit) {
+        WCHAR enabled[2];
+        const BOOL on = GetEnvironmentVariableW(L"XBOX_WIN32_DEMAND_COMMIT", enabled, ARRAYSIZE(enabled)) == 1 &&
+            enabled[0] == L'1';
+        InterlockedCompareExchange(&demandCommit, on ? 2 : 1, 0);
+    }
+    return demandCommit == 2;
+}
+
+/* With XBOX_WIN32_DEMAND_COMMIT=1 (the profile's demand-commit marker), a commit of 1 MiB or more into
+   a reservation the title already holds is committed on first touch (demand-commit.h). */
+static LPVOID DemandCommit(LPVOID address, SIZE_T bytes, DWORD type, DWORD protection, const void *caller) {
+    if (bytes < (1u << 20) || type != MEM_COMMIT || !address || protection != PAGE_READWRITE ||
+            !DemandCommitEnabled()) return NULL;
+    static volatile LONG wrapped;
+    if (!InterlockedExchange(&wrapped, 1)) {
+        const DWORD patched = XboxDemandCommitWrapImports(GetModuleHandleW(NULL), XDC_WRAP_READFILE);
+        char line[80];
+        char *out = Hex(Text(line, "asset demand-commit imports=0x"), patched, 2);
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    const LPVOID taken = XboxDemandCommitTake(address, bytes, type, protection, 1, AppendTrace);
+    if (taken && InterlockedIncrement(&demandCommitTraced) <= 16) {
+        char line[120];
+        char *out = Hex(Text(line, "asset demand-commit bytes=0x"), (DWORD)((UINT64)bytes >> 32), 8);
+        out = Hex(out, (DWORD)bytes, 8);
+        out = RecordImageAddress(out, caller);
+        out = Text(out, "\r\n");
+        AppendTrace(line, (DWORD)(out - line));
+    }
+    return taken;
+}
+
 LPVOID WINAPI XboxTraceVirtualAlloc(LPVOID address, SIZE_T bytes, DWORD type, DWORD protection) {
+    const LPVOID demand = DemandCommit(address, bytes, type, protection, __builtin_return_address(0));
+    if (demand) return demand;
     const LPVOID allocation = VirtualAlloc(address, bytes, type, protection);
     if (allocation || !(type & MEM_COMMIT)) return allocation;
 
@@ -996,15 +1041,113 @@ static BOOL SameAdapter(LUID left, LUID right) {
     return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
 }
 
+static BOOL PipelineReplayEnabled(void) {
+    WCHAR enabled[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_PIPELINE_REPLAY", enabled, ARRAYSIZE(enabled)) == 1 &&
+        enabled[0] == L'1';
+}
+
+// Records the title's pipelines and precompiles them on the next run (d3d12-pipeline-replay.h).
+static void InstallPipelineReplay(void *device) {
+    if (!device || !PipelineReplayEnabled()) return;
+    WCHAR path[1024];
+    if (!XboxPipelineReplayDefaultPath(path, ARRAYSIZE(path))) {
+        const char line[] = "asset pso-replay open status=no-path\r\n";
+        AppendTrace(line, sizeof(line) - 1);
+        return;
+    }
+    XboxPipelineReplayInstall((ID3D12Device *)device, path, NULL, TRUE, AppendTrace);
+}
+
 static BOOL DefaultD3D12AdapterEnabled(void) {
     WCHAR enabled[2];
     return GetEnvironmentVariableW(L"XBOX_WIN32_D3D12_DEFAULT_ADAPTER", enabled, ARRAYSIZE(enabled)) == 1 &&
         enabled[0] == L'1';
 }
 
+/* Processor topology limited to the process affinity mask (processor-view.h). A profile selects
+   it by binding these imports; the first call of each traces what the title was told. */
+static void TraceProcessorView(volatile LONG *traced, const char *api, DWORD processors, ULONG64 mask) {
+    if (InterlockedExchange(traced, 1)) return;
+    char line[120];
+    char *out = Text(Text(Text(line, "asset processor-view api="), api), " processors=0x");
+    out = Hex(out, processors, 2);
+    out = Hex(Text(out, " mask=0x"), (DWORD)mask, 8);
+    out = Text(out, "\r\n");
+    AppendTrace(line, (DWORD)(out - line));
+}
+
+static DWORD ProcessorViewCountEx(const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buffer, DWORD size, ULONG64 *mask) {
+    DWORD cores = 0;
+    for (DWORD offset = 0; offset + 8 <= size;) {
+        const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record =
+            (const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)((const BYTE *)buffer + offset);
+        if (!record->Size) break;
+        offset += record->Size;
+        if (record->Relationship != RelationProcessorCore) continue;
+        ++cores;
+        *mask |= (ULONG64)record->Processor.GroupMask[0].Mask;
+    }
+    return cores;
+}
+
+BOOL WINAPI XboxGetLogicalProcessorInformationEx(LOGICAL_PROCESSOR_RELATIONSHIP relation,
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX buffer, PDWORD length) {
+    static volatile LONG traced;
+    const BOOL result = XboxProcessorViewInformationEx(relation, buffer, length);
+    const DWORD error = GetLastError();
+    if (result && buffer) {
+        ULONG64 mask = 0;
+        const DWORD cores = ProcessorViewCountEx(buffer, *length, &mask);
+        if (cores) TraceProcessorView(&traced, "GetLogicalProcessorInformationEx-cores", cores, mask);
+    }
+    SetLastError(error);
+    return result;
+}
+
+BOOL WINAPI XboxGetLogicalProcessorInformation(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer, PDWORD length) {
+    static volatile LONG traced;
+    const BOOL result = XboxProcessorViewInformation(buffer, length);
+    const DWORD error = GetLastError();
+    if (result && buffer) TraceProcessorView(&traced, "GetLogicalProcessorInformation-records",
+        *length / (DWORD)sizeof(*buffer), XboxProcessorViewMask());
+    SetLastError(error);
+    return result;
+}
+
+void WINAPI XboxGetSystemInfo(LPSYSTEM_INFO info) {
+    static volatile LONG traced;
+    XboxProcessorViewSystemInfo(info, FALSE);
+    TraceProcessorView(&traced, "GetSystemInfo", info->dwNumberOfProcessors, info->dwActiveProcessorMask);
+}
+
+void WINAPI XboxGetNativeSystemInfo(LPSYSTEM_INFO info) {
+    static volatile LONG traced;
+    XboxProcessorViewSystemInfo(info, TRUE);
+    TraceProcessorView(&traced, "GetNativeSystemInfo", info->dwNumberOfProcessors, info->dwActiveProcessorMask);
+}
+
+DWORD WINAPI XboxGetActiveProcessorCount(WORD group) {
+    static volatile LONG traced;
+    const DWORD count = XboxProcessorViewActiveCount(group);
+    TraceProcessorView(&traced, "GetActiveProcessorCount", count, XboxProcessorViewMask());
+    return count;
+}
+
+static BOOL HostProcessorsDisabled(void) {
+    WCHAR value[2];
+    return GetEnvironmentVariableW(L"XBOX_WIN32_HOST_PROCESSORS", value, ARRAYSIZE(value)) == 1 && value[0] == L'0';
+}
+
 void WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup) {
     GetStartupInfoW(startup);
     const DWORD previous = GetLastError();
+    // The CRT asks for startup information before the game creates its worker threads.
+    if (!HostProcessorsDisabled() && InterlockedExchange(&processorsPlaced, 1) == 0) {
+        const XboxCpuSetResult placed = XboxUseHostProcessors();
+        char line[160];
+        AppendTrace(line, (DWORD)(XboxFormatProcessors(line, &placed) - line));
+    }
     if (DefaultD3D12AdapterEnabled() && InterlockedExchange(&devicePrimed, 1) == 0) {
         const HMODULE library = LoadLibraryW(L"d3d12.dll");
         const CreateD3D12Device create = library ?
@@ -1017,6 +1160,7 @@ void WINAPI XboxGetStartupInfoW(LPSTARTUPINFOW startup) {
         char *out = Hex(Text(line, "asset d3d12-crt-entry result=0x"), (DWORD)result, 8);
         out = Text(out, "\r\n");
         AppendTrace(line, (DWORD)(out - line));
+        if (SUCCEEDED(result)) InstallPipelineReplay(startupDevice);
     }
     SetLastError(previous);
 }
@@ -1127,6 +1271,7 @@ static HRESULT WINAPI TraceD3D12CreateDevice(IUnknown *adapter, UINT level, cons
     SetLastError(previous);
     const HRESULT result = create(useDefault ? NULL : adapter, level, iid, device);
     const DWORD error = GetLastError();
+    if (SUCCEEDED(result) && iid && device && *device) InstallPipelineReplay(*device);
     if (InterlockedIncrement(&deviceEvents) <= 16) {
         char line[170];
         char *out = Text(line, adapter && !useDefault ? "asset d3d12-create adapter=explicit level=0x" :

@@ -304,6 +304,16 @@ python3 profiles/1817070/23986256/prepare-mip-overlay.py \
 
 Omit the archive filter for the full texture set. Add `--with-model-lod` to also generate `local_model1356_lod3_20260916.dsar` and include its verified routes in the same generated TOC. The model preparation retains authored geometry and checks both input and output SHA-256 for every selected asset.
 
+`prepare-texture-restore.py` rebuilds the reference's texture-restore archives. It joins each texture's HD and base mip chains and drops mips above the recipe's 512- or 1024-pixel cap. It checks every source, HD and output SHA-256 and each archive's logical SHA-256 in `batch.tsv`. It extends an existing overlay TOC (`--base-toc`), which must equal the original apart from routes into added archives. The reference routes the 242 restored assets to the restore archives and not to the mip archive, so the restore routes win. `local_street12_sd512` is verified only, because `local_ground29_1024` supersedes all 12 of its routes in both reference TOCs. The diagnostic loader routes only `toc`, `local_mip256_hdclosed.dsar` and `local_model1356_lod3_20260916.dsar`. Use `--append-to` with the trial's model archive to add the restored textures to that slot instead of new archive files. Add `--remote-archives --portal-env` to read source and HD ranges from the Xbox install, and `--cache` to reuse them. With `--reference-toc runtime-toc.tsv`, base overlay routes that the reference's runtime index leaves on their original archives are reverted. These are 13 authored-LOD vehicle models, including police cars, trucks, boats, a helicopter and passenger jets. [Texture restore tool](../profiles/1817070/23986256/prepare-texture-restore.py)
+
+```sh
+python3 profiles/1817070/23986256/prepare-texture-restore.py \
+  "$owned_game/asset_archive" "$reference/asset-preparation/recipes" "$trial/restored" \
+  --base-toc "$layout/owned-mip-overlay/toc" \
+  --append-to "$layout/owned-mip-overlay/local_model1356_lod3_20260916.dsar" \
+  --cache "$ranges" --remote-archives --portal-env "$xbox_env"
+```
+
 The build profile contains the verified launch bindings for Steam discovery, Crashpad, early D3D12 device creation, the optional Streamline call, and hosted windowing. Copy the profile's `steam-win32-*.txt` files and the parent `source.json` into a temporary profile directory. Name the copied fingerprint list `steam-win32-source-1817070.json`.
 
 After running `python3 -m build_tools.verify_win32_source --build 23986256` against an owned local installation, use `python3 -m build_tools.redirect_pe_imports --recipe --signed-source-sha256` with each image's fingerprint from the source list. Use `launcher-bindings.json` for `Spider-Man.exe` and save its recipe as `steam-win32-shadow-1817070.xwp`. Include `controller-init-overlay.json` in the executable recipe's `--overlays` manifest when testing the hosted XInput path. Copy `steam-win32-adapters-1817070.json` into the profile directory. It requires `XboxWin32XInput910.dll` from the checksum-pinned Steam Core artifact. Use `crashpad-bindings.json` for `crs-client.dll` and save its recipe as `steam-win32-shadow-1817070-crashpad.xwp`. Use `bink-bindings.json` for `bink2w64.dll` and save its recipe as `steam-win32-shadow-1817070-bink.xwp`. Supply the directory as `--win32-trial-profile 1817070=DIR` and select the hosted player with `--surfaceless-profile 1817070=23986256`. [Build profile](../profiles/1817070/23986256) · [Package builder](../build_tools/prepare_big_picture_library.py)
@@ -320,3 +330,1643 @@ Use `python3 profiles/1817070/23986256/prepare-compression-shader.py` on the sec
 4. Run the verified Spider-Man build from **Play** and record first frame, controller input, audio, save and reload, and return to the library. Measure at least 30 seconds of settled gameplay with `python3 -m tools.measure --require-gpu-60`. Record the internal and output resolution, average FPS, slowest rolling second, and startup stalls.
 
 The build and checksum pins are diagnostic inputs. Launch bindings still depend on the stock failure and import control. Agility SDK behavior, shader and pipeline compatibility, and texture and model preparation under the Xbox memory budget remain open for the game.
+
+### In-process census on the world-entry recipe (November 25)
+
+Local build `1.0.260.201`, run `1795663267793`, reassembled the `.315` world-entry recipe with `build_tools/prepare_spider_world_recovery.py` and replaced only `XboxWin32LoaderTrace.dll` with the same diagnostic loader plus a census thread. The census records timer granularity, CPU sets and per-thread CPU time every 10 seconds, and a committed-memory breakdown once a minute. Controller **Continue** entered the world. The camera showed distant city lights with no ground, and the trace recorded 11 world-zone load callbacks with detail 2 at `Spider-Man.exe+0x01625EE3`, the rejected asset-buffer allocation described above.
+
+- **Timer granularity is not a limit.** Inside the game process the current timer resolution was already 1 ms. `Sleep(1)` averaged 1.98 ms and high-resolution waitable timers averaged 1.94 ms, before and after an explicit `timeBeginPeriod(1)`.
+- **No game thread is saturated.** In the world, the thread starting at `exe+0x03637C50` used 67% of one core and the startup thread 47%. Worker threads used 2–7% each, and the whole process used 130–192%. Every sampled thread had ideal processor 2 or 3. The process affinity mask was `0xFF`, and the CPU-set query marked processors 2–7 as allocated with none allocated to the process.
+- **Frame rate is lost to stalls.** Two 30-second in-world windows measured 45.3 and 49.6 FPS with zero CPU uploads, but the median interval was 16.7 ms and the worst intervals were 984 and 717 ms. The graphics pipeline count rose from 919 to 935 while in the world.
+- **Commit is attributed.** In the world the process held 4,637,948 KiB of private commit against the 5 GiB limit (388 MiB available). DXGI reported 2,030,432 KiB of local usage. The largest private allocations were an 830 MB general heap in a 2 GB reservation, the 336 MiB `AssetHeap`, a 187 MB growable heap, five 128 MiB pools, and write-combined buffers of 96, 80 and 77 MB.
+- **Device Portal GPU readings need care.** Engine 5 and the 512 MB dedicated segment read near 100% even while Slay the Spire 2 idles at 5% CPU, so they do not indicate Spider-Man's GPU load or video-memory pressure.
+
+The next trials time every pipeline creation, including the wait on the loader's pipeline serialization lock, and log each failed D3D12 resource or heap creation with the device-removed reason. They run the same recipe with `AssetHeap` at 336 MiB and at 368 MiB, which previously produced a black frame.
+
+Local build `1.0.261.202` used the same recipe with `AssetHeap` at 368 MiB. Its loader also timed each D3D12 pipeline creation and hooked the primed device's `CreateCommittedResource`, `CreateHeap`, `CreatePlacedResource`, `CreateCommittedResource1` and `CreateHeap1` methods. The hooks installed with status `S_OK`.
+
+- **Startup pipeline compilation is slow and serialized.** The 600 slowest startup pipeline creations came from seven threads. Their compile times had a median of 42 ms, a 90th percentile of 753 ms and a maximum of 3,138 ms. The loader's pipeline serialization lock added waits of up to 22,505 ms. These timings match the long black startup screens and the menu hitches observed at the console. The log cap was reached before the world loaded, so in-world compile times still need a run.
+- **The 368 MiB black frame is not a D3D12 failure.** In the world the device had created 2,309 heaps (1,820 MiB in total), 13,824 placed resources and 13 committed resources with zero failures. `GetDeviceRemovedReason` returned `S_OK`. Private commit was 4,820,104 KiB with 203,704 KiB available. The game's own log reported 42–47 FPS and rising texture use, and presents continued, but Device Portal screenshots stayed black and the pause menu did not appear after Menu was pressed.
+- **The larger arena did not load the missing zones.** Both the 336 MiB and 368 MiB runs recorded 12 zone load callbacks with detail 2.
+
+### Demand-committed engine pools restore the world (November 26)
+
+These runs use the same world-entry recipe and the diagnostic loader. They also substitute the presenter (`Fhd.Native.dll` and `.winmd`) from the STS2 branch's presenter CI run `45769234415` (commit `833dd583d`). The .323 presenter drops Device Portal remote controller input: `runtime/presenter/hosted-input.cpp` on `main` discards VK_GAMEPAD key events, and the fix that merges them into the hosted pad, `d682122`/`430f3a4`, exists only on the STS2 and UltraKill branches. With the substituted presenter, `tools.xbox_remote_input` drives **Continue** and gameplay without anyone at the console. The two presenters' metadata names are identical.
+
+**Memory owners.** Local build `1.0.271.208`, run `1795677675517`, attributed every VirtualAlloc commit from the game and every D3D12 heap to its calling code. In the world, private commit was 4,743,592 KiB:
+
+- **D3D12 heaps, ~1.7 GB.** Entering the world added about 480 MiB of GPU heaps, mostly render-target and depth heaps (heap flags `0x44`) and 64 MiB of upload heaps.
+- **The engine's general heap, 811 MiB committed in a 2 GB reservation.** It holds one-time buffers whose names sit next to the call sites in the verified executable:
+
+  | Size | Buffer |
+  | --- | --- |
+  | 96 MiB | `SkinningBuffer_CPU` |
+  | 96 MiB | Scaleform |
+  | 90 + 26 MiB | Asset Loader Temp Allocator |
+  | 66 MiB | Scratch Allocator |
+  | 64 MiB | TextureStream |
+  | 32 MiB | ModelSkinCache |
+
+- **The fixed pools.**
+- **About 1 GB that neither hook sees.**
+
+Frame rate without the ground was 54.3 FPS over 30 seconds: median 16.69 ms, worst 284 ms, 59 intervals over 33 ms, all shared-texture presents. No pipeline was compiled in the world.
+
+**On-demand commit for the asset pool.** The PC engine commits each fixed pool in full when it creates it. Local build `1.0.273.209` kept the engine's `AssetHeap` reservation at its original 828 MiB but committed only the first and last 64 KiB. A vectored exception handler commits each further 64 KiB chunk on first touch, and `ReadFile` destinations inside the range are committed before the kernel writes them. The engine still sees a successful commit of the whole pool. The pool grew linearly to 448 MiB during world entry. A 73 MiB render-target heap requested from the zone-loading path (`exe+0x01625E2C`) then failed with `E_OUTOFMEMORY` and 75,320 KiB available, and the game faulted on the null heap at `exe+0x01CBDD53`.
+
+**On-demand commit for every large fixed pool.** Local build `1.0.273.210` applied the same rule to every commit of 16 MiB or more made by the engine's pool constructor (`exe+0x01C64D22`).
+
+- Pools whose size is not a multiple of 64 KiB fell back to the engine's full commit.
+- In the world:
+  - `AssetHeap` used 472 MiB.
+  - One 64 MiB pool used 4.4 MiB and another 26.8 MiB.
+  - The 128 MiB sound-bank pool was fully used.
+- **No world zone reported detail 2.** The ground, buildings, street, traffic, pedestrians and Spider-Man all rendered.
+- Controller RT and the left stick swung and moved the hero through remote input.
+- Private commit was 4,846,536 KiB with 176,040 KiB available.
+
+Remaining problems on this build:
+
+- **Frame rate is capped at 30 FPS by a busy CPU thread.** Two 30-second in-world windows measured 27.9 and 27.7 FPS, with a 33.38 ms median and 604–610 intervals over 33 ms. All frames were shared-texture presents with no CPU uploads. One job-worker thread (start `exe+0x01BBF8B0`) used 94% of a core and the main thread 70%. Device Portal reported 11% on GPU engine 0.
+- **The street surface shows a sky reflection instead of road material.** The reference also prepares `local_ground29_1024`, which restores 29 ground textures to 1024 pixels. It is not part of this recipe yet.
+- **Headroom is about 170 MB.** Longer traversal still needs a soak.
+
+### Frame rate with the restored world (November 26)
+
+Builds `1.0.273.211` through `1.0.273.219` used the demand-committed pools and added profilers. They also reuse a successful `GetDeviceRemovedReason` result for up to 8 ms. The sources are in [spider-man-diagnostic-loader](spider-man-diagnostic-loader/README.md).
+
+**The engine spins on the device-removed check while waiting for GPU fences.** The render worker's samples resolve to `exe+0x018E2764`, next to the string `g_RenderDevice.GetDevice()->GetDeviceRemovedReason()`, inside a fence-wait loop. On Xbox each call is a kernel device-state query through `win32u`. Build `1.0.273.213` counted:
+
+| Measure | Count |
+| --- | --- |
+| `GetDeviceRemovedReason` calls in about 4 minutes | 76,092,618 |
+| Kernel queries after reusing an `S_OK` result for up to 8 ms | 30,989 (311 ms in total) |
+
+The frame rate moved from 27.8 to 31.0 FPS: 929 presents in 30 s, median 33.37 ms.
+
+**The world frame is held at about 30 FPS whatever the pacing settings.**
+
+- **VSync off.** With VSync off in the game's settings, a 30-second window measured 27.8 FPS with a 33.38 ms median.
+- **CPU placement.** The process used about 1.75 cores. Only two threads were busy: a job worker (start `exe+0x01BBF8B0`) spinning in the fence wait, and the main thread (start `exe+0x03637C50`), which mostly waits on jobs at `exe+0x01BBF3FA`. Widening every thread's affinity to the full process mask found no narrowed mask and left the frame rate at 31.4 FPS.
+- **GPU engine load.** Device Portal reported engine 5 at 76–90% in the world and 0% once the game had exited, so engine 5 measures this game's GPU load.
+- **Queue timestamps.** The game creates three direct queues and one copy queue, and no compute queue. Timestamps around each `ExecuteCommandLists` call on the direct queues added up to about 2.65 s of GPU time per 8.2–8.6 s span. The copy queue could not be timed because this console's D3D12 does not support copy-queue timestamps. The low direct-queue total does not match the engine 5 reading, so these timestamps may not measure execution time on this driver.
+
+**Changing settings in the world runs out of memory.** Changing the dynamic-resolution target in the world rebuilt render targets. A 10.5 MiB render-target heap then failed with 10,944 KiB available, and the game faulted at `exe+0x01CBDD53`. Setting the target to 60 at the main menu let the world load, but the game then faulted in Scaleform at `exe+0x0363E338` before a frame sample.
+
+**The ray-tracing manager cannot be skipped through its gate byte.** The engine sets the byte at `exe+0x07A89150` to 1 within 1.4 s of launch. Clearing it during startup crashed the game at `exe+0x018584B6` (null read) before the menu, so the BVH heaps cannot be removed that way.
+
+**Ruled out for the 30 FPS limit:**
+
+- **Copy queue.** Build `1.0.273.221` signaled a fence after every submission to the game's copy queue and timed its completion from the CPU. The copy queue received no submissions in the world.
+- **Process resources.** Microsoft's [UWP resource page](https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/system-resource-allocation) gives games "full access to available GPU cycles", "4 exclusive and 2 shared CPU cores", 5 GB of memory, and DirectX 12 at feature level 11.0 on Xbox Series X|S. The process used about 1.75 cores.
+- **Device-removed checks.** Caching the check only moved the frame rate to 31 FPS.
+
+Still unknown:
+
+- The direct-queue timestamps total about 2.6 s per window, whatever the window length. They may be written when the command processor reaches the query rather than after prior work finishes, so they could undercount.
+- Engine 5 also read 76% with only Big Picture showing after a crash, so it cannot be attributed to the game alone.
+
+The bound on the frame is unresolved.
+
+**Missing surface textures.** The hero is drawn as an untextured silhouette, and road surfaces show a mirrored sky. The recipe caps every routed texture at 256 pixels. The reference also applies eight texture-restore recipes, which `prepare-texture-restore.py` now generates (untested on Xbox):
+
+- `local_ground29_1024`
+- `local_street12_sd512`
+- `local_opening51_1024`
+- `local_openingroom36_1024`
+- `local_openingbroad111_512`
+- `local_openingbill3_1024`
+- `local_openingfinishes9_1024`
+- `local_openingscreen3_1024`
+
+These restore textures in the opening area to 512 or 1024 pixels.
+
+**Installed build.** The console holds `1.0.273.220`, built from the `1.0.273.213` configuration (demand-committed pools and the cached device-removed check) without autoplay.
+
+Open work:
+
+- Find what bounds the GPU frame. Candidates: shader codegen on the Xbox compiler, the replaced world shaders, and per-frame BVH or upload work.
+- Free memory so that settings changes and traversal survive. Start with the distant-light archive (about 210 MiB) and the temporary allocators.
+- Restore the road material. Candidate: the reference's `local_ground29_1024` recipe.
+- Clean up the roughly 175 `SteamWin32Trial (N)` staging folders left in the package TempState.
+- Move demand-committed pools into the shared runtime as a profile-selected component.
+- Run the independent `xbox-game-verify` pass. Coverage is not claimed.
+
+### Reference launcher tweaks and the full TempState volume (November 26)
+
+**Buffer cuts.** UWP-Spider-Launcher `0.6.0.57` patches six engine buffers through its `ModulePatch.json`. Commit `1865c24` matches the local snapshot. The patches map onto our verified executable at the same file offsets; their controller patch at file `0x1ce0698` is byte-identical to ours.
+
+[`memory-cuts-overlay.json`](../profiles/1817070/23986256/memory-cuts-overlay.json) records eight byte overlays from those patches. Every expected hash is checked by `read_overlays`.
+
+| Buffer | Before | After |
+| --- | --- | --- |
+| File System Asset Data Buffer | 112 MiB (our earlier overlay) | 64 MiB |
+| Default dx12 render heap | 64 MiB | 32 MiB |
+| `SkinningBuffer_CPU` | 96 MiB | 32 MiB |
+| Asset Loader Temp Allocator | 90 MiB | 64 MiB |
+| Scratch Allocator | 66 MiB | 16 MiB |
+| `TextureAlloc` | — | 8 MiB |
+
+Build `1.0.273.224` merged them into the `.315` shadow recipe as an `XWPEV3` overlay table: 797 entries, three of them replacing existing entries in place. The recipe passes `validate_patch_recipe`.
+
+**Reference pool caps.** The reference also runs larger pools than ours: DynamicHeap 208, ManagedBuffer 448, AssetHeap 576, SoundBankAlloc 224 and Physics 184 MiB. Its runtime adds decommit-on-free reclaim switches and graphics defaults with dynamic resolution off and a 1280×720 window. Its source does not explain the mirrored roads or the white-box hero. Issue #26 reports a white-cube character after an outfit change.
+
+**Routing.** The routing comparison against `runtime-toc.tsv` matches every asset except 13 vehicle LODs. Commit `fb53030` now follows the reference index. The roads already route to the reference's `local_ground29_1024` restores (`mo_asphalt_01` and `asphalt_alley` textures), and the mirrored sky persists with that routing in place. The white-box hero, mirrored roads and floating props are therefore not a routing difference.
+
+**Build `1.0.273.223`** (play loader with the 242 restores):
+
+- The trace confirmed 18 reads from the appended restore range.
+- The main-menu hero was textured, at low resolution.
+- In the world, roads still mirrored the sky and the hero appeared as a small white box.
+
+**TempState full.** Build `1.0.273.224` failed staging with `0x80070070` (`ERROR_DISK_FULL`). The package TempState held 180 `SteamWin32Trial (N)` stages, about 197 MiB each for Spider-Man. A stage is removed when its child exits, but a host terminated mid-game (a package update or crash) never reaches that step. Commit `4807c4c` sweeps stale stages before staging a new launch; it is not yet built, since the native component builds in CI. Deleting the existing stages on the console is waiting for the user's approval.
+
+**Ready to test.** Build `1.0.273.225`:
+
+- buffer cuts and restores, with routing that follows the reference index;
+- DynamicHeap 208, Physics 184 and SoundBankAlloc 224 MiB, committed on demand;
+- on-demand commit extended to pools whose size is not a multiple of 64 KiB.
+
+### Buffer-cut and placeholder bisect (November 26)
+
+Every run below continued from the main menu with the same trial save and was measured once the world was on screen.
+
+| Build | Configuration | Result |
+| --- | --- | --- |
+| `.225` | All six reference buffer cuts, pools raised to the reference caps, routing from the reference index | Stayed on the loading screen for over 14 minutes |
+| `.226` | Only the file-system, render-heap and skinning cuts | Stayed on the loading screen |
+| `.227` | `.223` plus the file-system, render-heap and skinning cuts | Stayed on the loading screen |
+| `.229` | `.223` plus the file-system 64 MiB and render-heap 32 MiB cuts | Stayed on the loading screen |
+| `.228` | Byte-identical to `.223` | Loaded; 23.2 FPS |
+| `.230` | `.228` with all 1,227 model-LOD routes reverted | Loaded; 24.6 FPS |
+| `.231` | Byte-identical to `.210` | Loaded; 27.5 FPS |
+
+- The File System Asset Data Buffer cut to 64 MiB, or the default dx12 render heap cut to 32 MiB, stops world loading on this recipe. The reference uses those values alongside runtime changes we do not have. Our earlier 112 MiB and 64 MiB values load.
+- The skinning, asset-loader-temp, scratch and TextureAlloc cuts have not been tested on their own.
+- In all three builds that loaded (`.228`, `.230` and `.231`), the hero appears as a grey placeholder cube, road surfaces mirror the sky, and small objects float. Reverting the model LODs (`.230`) and returning to the `.210` configuration (`.231`) did not change this, so the cause is in the shared base recipe or the trial save's state, not in the routing, restores or loader changes made since.
+- Reference issue #26 reports a white-cube character, so the reference port shows the same failure mode.
+
+The console now runs `1.0.273.232`: the play loader with the `.223` routing, without autoplay.
+
+**Frame rate does not depend on resolution.**
+
+- The hosted DXGI output offers only 1920×1080, so the display resolution cannot be lowered from the game's menu.
+- Build `1.0.275.233` (play configuration) set Windowed mode and a dynamic-resolution target of 60 at the main menu, so the game was free to lower its internal render resolution. The world loaded.
+- A 30-second window measured 23.3 FPS: 699 presents, median 49.9 ms, minimum 17 frames in one second. That matches 23.2 FPS at full resolution (`.228`).
+- The lower resolution added green streaks and ghosting, and the game later exited.
+
+So the about 30 FPS bound is not pixel or fill rate. The remaining candidates are:
+
+- per-draw CPU submission;
+- geometry or compute work;
+- a synchronization stall that scales with scene content (the world without ground reached 54–60 FPS).
+
+The trial profile's display settings were left at Windowed with a dynamic-resolution target of 60 and need restoring to Fullscreen and 30.
+
+**Fence-timed GPU work.** Build `1.0.276.234` signaled a per-queue fence after every `ExecuteCommandLists` call. A watcher thread recorded when each value completed, giving each submission's completion time minus the later of its submit time and the previous completion on the same queue.
+
+- The instrumentation itself cut the world to 4.8 FPS, so frame pacing in this run is not representative.
+- Busy time was 5.0–5.4 s per 30-second window over 143–400 presents. That is about 35–38 ms of GPU work per frame, consistent with the uninstrumented 23–31 FPS.
+- Most of it comes from submissions at `exe+0x018D8E15` (about 4.4 s per window, about 7 ms per batch). Submissions at `exe+0x018D8CBC` add about 1 s, and the presenter copy adds 9–237 ms.
+
+With the resolution result above, this puts the about 30 FPS bound in GPU work that does not scale with pixel count: geometry, compute, or fixed-resolution passes such as shadow maps. The next step is attributing GPU time to individual command lists, for example by counting draws and dispatches per list.
+
+The console was returned to the play configuration as `1.0.276.235`, without autoplay.
+
+**Per-command-list GPU cost.**
+
+- **What the build added.** Build `1.0.278.236` also hooked the game's graphics command lists: `CreateCommandList` and first submission patch slots 10, 12–14, 57 and 59. It counted draws, dispatches and `ExecuteIndirect` calls per list, and joined them with each submission's fence-timed GPU time.
+- **No pass names.** The game emits no `BeginEvent` markers, so passes are unnamed.
+- **World windows (30 s each, instrumented).**
+
+  | Submission site | Batches | Draws per batch | Dispatches per batch | Indirect per batch | GPU time per batch |
+  | --- | --- | --- | --- | --- | --- |
+  | `exe+0x018D8E15` | 409–930 | 25–40 | about 3 | about 0.6 | 5.5–7 ms |
+  | `exe+0x018D8CBC` | 620–1,390 | 55–65 | about 8 | about 0.8 | 3–5 ms |
+
+- **Per-draw cost.** That is roughly 50–150 µs of GPU time per draw or dispatch, independent of render resolution. Candidates:
+  - per-draw state or descriptor cost in the feature-level 11.0 D3D12 path on this console;
+  - heavy geometry per draw;
+  - barrier or cache flushes between draws.
+
+  Separating these needs per-draw GPU timing or a capture tool. The console now runs `1.0.278.237`, the play configuration without autoplay.
+
+**Per-list state counters.** Build `1.0.280.238` (lease #35) hooked 28 command-list slots: `Reset`, draws, dispatch, copies, `SetPipelineState`, `ResourceBarrier` (counted by barrier type), `ExecuteBundle`, `SetDescriptorHeaps`, both root-signature setters, all root descriptor-table and root-view setters, `OMSetRenderTargets`, the four clears, `BeginEvent` and `ExecuteIndirect`. Counters reset on `Reset` and are summed per `ExecuteCommandLists` call, then joined with the fence-timed busy time of that submission. The game reached the world, and the screenshot showed the city rendered.
+
+The table gives per-batch averages over two 30–32 s instrumented world windows (samples 66 and 69):
+
+| Per batch | `exe+0x018D8CBC` | `exe+0x018D8E15` |
+| --- | --- | --- |
+| Batches per window | 1,133–1,150 | 4,108–4,190 |
+| Draws (indexed + non-indexed) | about 365 (290 + 77) | about 950 (920 + 27) |
+| Dispatches | about 7 | about 5.4 |
+| `ExecuteIndirect` | 0 | about 2 |
+| Pipeline changes | about 266 | about 177 |
+| Root-signature changes | **about 57** | about 2.3 |
+| Root arguments | about 920 | about 1,230 |
+| Barrier calls / transitions / UAV | 12 / 16 / 6.4 | 19 / 31 / 7.6 |
+| Render-target sets / clears | 4.5 / 0.6 | 7.6 / 4.2 |
+| Fence-timed GPU time | **19.1–19.4 ms** | 1.5–1.7 ms |
+
+- **The slow lists are not the busy ones.** Submissions at `0x018D8CBC` run about 2.6 times fewer draws than those at `0x018D8E15` but take about 12 times longer: roughly 50 µs per draw against under 2 µs. Together they cover 28–29 s of fence-timed busy time per window.
+- **The slow lists switch root signatures constantly.** That is about 57 changes per batch against 2.3, together with interleaved dispatches and UAV barriers. This pattern alternates graphics and compute work on the direct queue. Each switch can drain the pipeline.
+- **No markers.** `BeginEvent` was never called, so the passes remain unnamed.
+- **Bundles and indirect work are negligible.** No bundles were executed, and the slow site issues no `ExecuteIndirect`. GPU-driven rendering does not hide work there.
+- **The two profilers disagree on draw counts.** These counts replace the 25–40 draws per batch recorded by `1.0.278.236`, which patched fewer slots. The difference is not yet explained.
+- **Pacing in this run is not representative.** The package did not write `fhd-present-times.bin`, and the presenter-copy site completed only 9–10 batches per window, so the instrumentation slowed presentation. 1,023 graphics pipelines were compiled during the run, most of them queued for about 10–11 s.
+
+Next step: put GPU timestamps around each pipeline (or root-signature) span inside `0x018D8CBC` lists and key them by pipeline. That will tell whether the cost lies in specific shaders or in the graphics-to-compute switches.
+
+The console was returned to the play configuration as `1.0.280.239`, without autoplay. The SteamCore package identity is shared with the STS2 session, whose `1.0.279.3` this version replaces.
+
+### Where the frame rate is lost (November 26, afternoon)
+
+**The game produces about 60 frames per second. The host panel shows about 31.**
+
+**Per-pipeline GPU time.** Build `1.0.282.240` put timestamps at `Reset`, before every `SetPipelineState` and at `Close` in every other direct or compute command list. It credited each span's GPU time to the bound pipeline (ordinal and shader digest).
+
+- In the world, the timed lists accounted for 3.5–4.8 s of GPU time per 30–34 s window. That is about 5.4 ms per frame for the timed half of the lists.
+- The largest single pipeline was a compute pass (ordinal 6, 62 KB shader) at about 0.7 ms per frame. No pipeline dominated.
+- The 19 ms per batch at `exe+0x018D8CBC` reported by fence timing was queue waiting, not shader work.
+
+**Queue timeline.** Build `1.0.290.242` recorded every submit, queue `Signal` and `Wait`, CPU fence call and completion for 2.5 s of a settled in-world window (5,258 events).
+
+- **Steady 16.7 ms cycle on the render thread.** Each cycle has four batches at `0x018D8E15`, the native `dxgi.dll` back-buffer `Wait`, and one batch at `0x018D8CBC`. Then our adapter's presenter thread copies the frame (`XboxWin32Dxgi+0x7706`) and signals the shared slot.
+- **Rates.** That is 141 render batches (56/s) and 150 presenter copies (60/s) in 2.5 s.
+- **The GPU keeps up.** Every batch of a frame, including the copy, completed within about 2–3 ms of submission.
+- **No CPU fence signals.** The game never calls `ID3D12Fence::Signal` or `SetEventOnCompletion`; it polls `GetCompletedValue`.
+- **Presents are accepted.** The adapter traced present interval 1, native interval 0 (it paces to 60 Hz itself), and no rejected present. So every copied frame is committed to the shared mailbox.
+
+**Delivered rate.** `panel_presented` in `fhd-panel-stats.txt` counts host panel presents of new producer frames (`panel_repeat_presents` stayed 0).
+
+| Build | What it adds | In-world panel presents per second |
+| --- | --- | --- |
+| `1.0.290.242` | Queue-timeline profiler | 25.6 |
+| `1.0.290.244` | None (play loader with autoplay) | 31.5 |
+| `1.0.290.246` | `.244` with the panel swap chain patched from 2 to 3 buffers (test-only binary patch of `Fhd.Native.dll`) | 31.2, 31.2 |
+
+A third buffer changed nothing, so `DXGI_ERROR_WAS_STILL_DRAWING` on a two-buffer chain is not the limit. Slay the Spire 2 holds 59.9 FPS through the same presenter.
+
+**The host app keeps GPU engine 5 busy by itself.** Device Portal `systemperf`, engine 5:
+
+| State | Engine 5 |
+| --- | --- |
+| Spider-Man in the world | 85–89% |
+| About 10–25 s after Spider-Man was ended, host app still running | 80–90% |
+| Host app at the idle Big Picture library, no game launched | 99.6–100% |
+| Same, after ending every `msedgewebview2.exe` | 98.6–98.8% |
+| Host app stopped (dashboard) | 0% |
+
+The host app process (`SteamPrimary.exe`) used 0.0–0.4% CPU in these states and Spider-Man 22–26% of total CPU, with the system 76% idle.
+
+**Interpretation:**
+
+- The 30 FPS world limit sits in the compatibility layer's host, not in the game.
+- The host app holds the 3D engine near saturation even without the Valve webview. The likely candidates are its remaining XAML content: the EdgeHTML account `WebView` running `steam-signin.html`, which stays composed at opacity 0, and the composition host.
+- That load would make the panel's draw and present miss every other vsync.
+- Not yet established: whether engine-5 utilization measures real work or queue occupancy, and which host element produces it.
+
+**Next steps.** Both need Windows CI builds of the host components (`SteamPrimary.exe`, `BigPictureView.Native.dll`, `Fhd.Native.dll`).
+
+- Remove or collapse host XAML content while a game is in the foreground (the account `WebView` and the composition host), and remeasure engine 5 and `panel_presented`.
+- Export `render_callbacks`, `source_empty_callbacks` and `present_busy_callbacks` to `fhd-panel-stats.txt`, to show whether the XAML `Rendering` callback itself runs at 30 Hz.
+
+The console was returned to the play configuration as `1.0.290.247`, without autoplay. The SteamCore package identity is shared with the STS2 session; this version replaces its `1.0.281.2`.
+
+### The world is paused by the swing tutorial (November 26, late afternoon)
+
+**Update:** this "freeze" is the game's own tutorial pause, not a compatibility bug. See [Holding RT resumes the tutorial](#holding-rt-resumes-the-tutorial) below. The host measurements in this section still stand.
+
+**This corrects the section above.** The host is not the limit.
+
+**The host shows every frame it receives.** A test-only change to the staged `steam-sdl-native-view.js` (build `1.0.290.249`) wrote `host.panelStatus()` to LocalState every 5 s. Over 30 s in the world:
+
+| Counter | Per second |
+| --- | --- |
+| XAML `Rendering` callbacks | 59.95 |
+| Panel presents | 25.6 |
+| Producer sequence (`gpu_sequence`) | 25.6 |
+| Empty-source callbacks | 34.3 |
+| Busy presents | 0 |
+| Released unshown | 0 |
+
+The adapter publishes 25–31 frames per second, and the panel presents all of them. Hiding the account page (`1.0.290.248`) left the rate at 32.5–33.3 and engine 5 near 90%. Engine 0, not engine 5, tracks this game's 3D load: 28–34% in the world and about 4% without the game.
+
+**What the adapter's present costs.** In clean runs, the `dxgi stall` breakdown of the game's present shows:
+
+- 8–9 ms in pacing and capture;
+- 16–18 ms in the native `Present` of the hidden virtual window.
+
+Two adapter experiments, both reverted:
+
+| Build | Change | Result |
+| --- | --- | --- |
+| `1.0.290.251` | Native present with `DXGI_PRESENT_DO_NOT_WAIT` | Never refused (no `native-present-skipped`) and still took 15–25 ms; 28–32 frames per second |
+| `1.0.290.252` | Native present skipped behind a marker | `native-present-skipped` traced and no hang; 29.5–30.9 frames per second |
+
+With the profiler DLL (`1.0.290.250`), the rate swung between 15 and 39. The 60/s window in the timeline run was transient.
+
+**The frames are identical.**
+
+- **Within one run.** On `1.0.290.252`, screenshots from first arrival in the world, 2 s apart, after 3 minutes, and after `RS_RIGHT`, `LS_UP` and `MENU` input all differed by 0.00–0.01% of pixels.
+- **Across runs.** Different runs freeze on different frames: 53–55% of pixels differ between runs.
+- **What the user saw.** The user reported the world "frozen in place" and the game unplayable on `1.0.290.251`.
+
+So after world entry the game keeps rendering and presenting the same scene at 25–31 frames per second, while its simulation, camera, pause menu and input never advance. Rendering continues: render-waits rise by about 1,800 per sample, and pipelines are still created. Earlier builds `1.0.230.315` and `1.0.232.15` turned the camera on right-stick input in the world, so the freeze is a regression in the current recipe. Its cause is not yet identified. Candidates:
+
+- the demand-committed pools;
+- a zone that never finishes streaming (one `zone-type-load-error` is traced per run);
+- a job the main thread waits on forever.
+
+The frame-rate work cannot be judged until gameplay advances.
+
+The console was returned to the play configuration as `1.0.290.253`, without autoplay.
+
+### Holding RT resumes the tutorial
+
+The current save continues at the opening dive of **Clearing the Way**. There the game pauses the world and shows "Hold RT to swing." until RT is held. Earlier probes sent only `RS_RIGHT`, `LS_UP` and `MENU`.
+
+Build `1.0.307.1` (lease #43) ran the play trace DLL, the STS2 presenter and `--autoplay`. Pixel differences between Device Portal screenshots (320 px, threshold 24):
+
+| Step | Change |
+| --- | --- |
+| No input, 5 s apart | 0.01%, 0.01% |
+| `hold:RS_RIGHT:1.5` before RT | 0.00% |
+| `hold:RT:3` | 76.90% |
+| Next two shots, no input | 56.12%, 16.39% |
+| `hold:RS_RIGHT:1.5` after RT | 87.68% (camera turns) |
+| `hold:LS_UP:2` | 73.55% (the hero walks; the next prompt is "Press A to jump, then hold RT to swing") |
+| `MENU` | 98.97% (pause menu: Resume, Restart Last Checkpoint, Manual Save, Photo Mode, Settings, Quit) |
+
+**Saves.** The save files' checksums were unchanged after the run.
+
+**The save changed, not the build.** Earlier builds such as `.231` and `.233` continued at street level. On the console, `slot0-s.save` was rewritten during the `.234` run (the game log records "Request save type 2"), and every run since lands on the dive. The `zone-type-load-error` line appears in working and paused runs alike.
+
+**Impact on measurements.** Automated drives must hold RT after Continue before sampling gameplay. The 25–31 frames per second recorded above were measured on the paused tutorial frame. They show how fast the render loop runs, but gameplay frame rate still has to be measured.
+
+**Rendering bugs are still present while moving.** After RT, the street surface shows the sky reflection and the hero is a white placeholder cube.
+
+### Hosted games ran on two of eight processors (November 26, evening)
+
+**Root cause of the ~30 FPS cap.**
+- **Who owns the processors.** The console reserves processors 2–7 (mask `0xFC`) for the title process, our host `SteamPrimary.exe`.
+- **The game inherits none of them.** The host starts `Spider-Man.exe` with `CreateProcessW`, and the scheduler kept the child on the system's processors 0–1.
+- **Probe on `1.0.317.1`.** Six spinning threads in the child got 498 ms of CPU in 250 ms of wall time, all on processors `0x3`.
+- **What changed nothing.** `SetProcessDefaultCpuSets` and `SetThreadSelectedCpuSets` with the host's CPU-set IDs succeeded and left the threads where they were.
+- **What worked.** A hard affinity mask of `0xFC` gave the six threads 250 ms each on processors 2–7.
+
+**The earlier pacing reading was wrong.** The console's QPC runs at 1,745,500,000 Hz, so the `dxgi stall` stages read earlier as 8–9 ms and 16–18 ms actually take 0.05–0.2 ms. The adapter's pacer and its native present were never the limit.
+
+**Fix (shared, no per-title values).**
+
+| File | Change |
+| --- | --- |
+| `runtime/win32/cpu-sets.h` (new) | Reads the owner process's reserved processors and sets them as the target's affinity mask. CPU-set functions are resolved at run time. Every failure leaves the target unchanged. |
+| `runtime/win32/loader-trace.c` | `XboxGetStartupInfoW` applies the mask once, before the game starts its workers, and traces `asset host-processors`. `XBOX_WIN32_HOST_PROCESSORS=0` turns it off. |
+| `runtime/steam/ProbeNative.cpp` | Applies the mask right after creating the shadow child, which would cover every hosted title. Not yet built by CI or run on the console. |
+
+**Measurements.**
+- **Method.** Each window is 30 s of gameplay after `hold:RT:3`, driven by a repeated swing, jump, run and turn script.
+- **Resolution and transport.** Internal and output resolution were both 1920×1080. Every frame was a shared GPU texture, with no CPU uploads.
+- **Command.** `python3 -m tools.measure <run>/fhd-present-times.bin --start-utc … --duration 30 --output-resolution 1920x1080 --require-gpu-60`.
+
+| Build | Processors | Avg FPS | Lowest 1 s | p50 / p95 | Worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1.0.317.1` | 0–1 | 24.1 | 9 | 33.4 / 66.7 ms | 634 ms | false |
+| `1.0.317.3` | 2–7 (probe) | 57.9 | 27 | 16.69 / 17.9 ms | 548 ms | false |
+| `1.0.317.4` | 2–7 (shipped header) | 56.5 | 10 | 16.68 / 18.5 ms | 818 ms | false |
+
+**Where the remaining frames go.**
+- **Screenshots (`1.0.317.3`).** The ~530 ms gaps matched Device Portal screenshots.
+- **Pipeline compiles (`1.0.317.4`).** The 818, 800, 715 and 200 ms stalls match `pso-slow` records with `wait-ms=0` and compile times of 523–786 ms.
+- **The game compiles pipelines synchronously on first use,** and no pipeline cache survives between runs.
+- **Seconds without a compile hold 59–60 frames.**
+- **The game's own counter** reads 54.5–60 in place of 25.6–36.
+
+**Open work.**
+- Remove first-use pipeline compiles, for example with a persistent pipeline cache or by compiling the 1,045-pipeline `xbox0.pso` set before world entry.
+- Build and test the host-side placement.
+- Run independent verification.
+
+**State left behind.**
+- **Saves.** The gameplay drives advanced the tutorial and autosaved. The changed save is backed up, and the earlier snapshot was restored with matching checksums.
+- **Console.** It holds `1.0.317.5`: the play configuration with the processor fix in the trace DLL.
+
+### Pipeline replay removes first-use compile stalls (November 26, evening)
+
+**The driver cache is not available.** On `1.0.340.1`, `D3D12_FEATURE_SHADER_CACHE` returned flags `0x63`, but `GetCachedBlob` and `CreatePipelineLibrary` both failed with `0x887A0005`. About 20 s later the probe run faulted at `exe+0x01CBCA70`, so neither method is used.
+
+**Record and replay.** The shared, title-independent `runtime/win32/d3d12-pipeline-replay.h` does the work.
+
+- **Recording.** It records each graphics and compute pipeline in a canonical, pointer-free form, with deduplicated shader bytecode and the root-signature blob. Records go to `d3d12-pipelines.xpr` beside the account- and AppID-scoped Documents folder, bound to the executable's header.
+- **Replay.** On the next launch a below-normal thread precompiles the recorded pipelines through the compile slot. A request whose description, shaders and root signature all match gets the precompiled object; anything else compiles normally.
+- **Root signatures.** On Xbox, identical root-signature blobs return the same object.
+- **Enabling it.** `XBOX_WIN32_D3D12_PIPELINE_REPLAY=1` enables it in `loader-trace.c`. The host sets that variable from the marker `steam-win32-d3d12-pipeline-replay-<app>.txt` (`ProbeNative.cpp`, `stage_profiles.py`).
+- **Not yet verified.** The shared path is not built by CI or run on the console. The measured builds carried it in the play loader DLL.
+
+**Measurements.** All runs: 30 s windows, 1920×1080 output and internal resolution, shared GPU textures, and no CPU uploads.
+
+| Run | Database | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| `1.0.317.4` (no replay) | none | 56.1 | 10 | 16.69 / 18.5 / 818 ms | false |
+| `1.0.340.1` cold | recorded | 59.73 | 53 | 16.69 / 18.53 / 33.9 ms | false |
+| `1.0.340.2` warm, window at drive +4 s | 1,515 pipelines | 59.77 | 55 | 16.69 / 17.98 / 37.6 ms | false |
+| `1.0.340.2` warm, window from 22:39:58 UTC (drive +8 s) | 1,515 pipelines | **59.93** | **59** | **16.69 / 17.92 / 20.9 ms** | **true** |
+| `1.0.401.1` warm, different route | 1,531 pipelines | 59.27 | 45 | 16.69 / 18.38 / 248.9 ms | false |
+
+- **Hits and commit.** On the warm run every in-world pipeline request was a replay hit: `replayed=334 failed=0 hits=73 waited-hits=247`. Gameplay commit stayed at 4,667–4,672 MiB, the same as cold.
+- **New pipelines.** The second warm run took a different route and compiled five unrecorded pipelines, which caused one 249 ms gap. They are now recorded; the database holds 1,574 pipelines in 17.5 MB.
+
+**Remaining limit: a dip after the first swing input.**
+
+- About 1.5–2 s after the first RT or A input, a cluster of six 33–37 ms frames recurs in every run, with no compile, heap or other traced event.
+- It fails windows that include the swing start; windows after it pass.
+- The cause is not identified. Per-frame timing of the main and render threads is the next instrument.
+
+### The hero, roads and props come back with room for geometry (November 26, evening)
+
+**Root cause.** The `.315` recipe caps the ManagedBuffer geometry heap at 128 MiB by overlaying both `GetPoolSize("ManagedBuffer")` calls with `mov eax,0x08000000` (RVAs 0x1863b74 and 0x18643ea).
+
+- **First failure.** A hook after `ManagedBuffer::Allocate` (`exe+0x01863ABC`) saw the first failure at about 151 MB used: size 0x1850, caller `exe+0x0176200A`.
+- **Volume.** Over the whole run: 726 allocation failures and 725 ModelManager load failures, covering building kits, props, sidewalks, bridges and collision models.
+- **How it becomes the white cubes.** The loader calls mark-error (`exe+0x01625A10`), which sets asset state 5 and copies the engine's "Asset Error Model Cube" into the model.
+- **How it becomes the mirrored-sky roads.** Zone geometry that fails at `exe+0x01A1F08D` is not drawn, so the sky shows through where the ground should be.
+- **Not the cause.** The 81 invalid-ID failures at boot are unrelated: missing configs, UI logos and test assets.
+
+**Raising the cap alone exhausts other pools.**
+
+| Build | Change | Result |
+| --- | --- | --- |
+| `1.0.315.1` | ManagedBuffer 256 MiB | Crashed on a null `ModelLook` allocation; DynamicHeap at its 144 MiB cap |
+| `1.0.315.2` | ManagedBuffer 320 MiB | A 73 MiB render-target heap returned `E_OUTOFMEMORY` |
+| `1.0.330.1` | DynamicHeap 400 MiB | Commit ran out at the menu |
+
+**What fixed it.**
+
+1. **Distant-light overlay.** It halves the five 812 × 1472 distant-light texture arrays and matches the reference `local_distant_xyhalf` recipe byte for byte. It cut peak commit by about 313 MiB. Generator: `prepare-distant-overlay.py`.
+2. **On-demand commit for pools that are not multiples of 64 KiB.** This is in the loader's `lazy.h`. DynamicHeap goes to 208 MiB.
+3. **ManagedBuffer at 512 MiB** (`managed-buffer-512mib-overlay.json`).
+4. **Four buffer cuts** from the reference (`memory-cuts-loader-overlay.json`): SkinningBuffer_CPU 96→32 MiB, Asset Loader Temp 90→64 MiB in two places, and Scratch 66→16 MiB. The file-system and render-heap cuts, which hung loading, are excluded.
+
+`prepare_spider_world_recovery.py` applies overlays with `--recipe-overlay`. `redirect_pe_imports.merge_recipe_overlays` replaces entries at the same offset and length.
+
+**Result on `1.0.477.1`** (run d12):
+
+- **No failures.** ManagedBuffer used about 432 MiB with 0 allocation failures and 0 model-load failures.
+- **Memory.** Peak commit was 4,543 MiB against the 5,120 MiB limit, leaving about 577 MiB of headroom.
+- **Picture.** After holding RT, the textured hero stood on an asphalt street with crosswalks, sidewalks, cars and pedestrians, and the floating white cubes were gone.
+- **Native 1080p kept.**
+
+**Remaining issues.**
+
+- **Magenta ground patches.** Small patches remain. Adding the 242 texture restores makes the close-up road heavily magenta, so the final configuration leaves them out. The cause is not identified; no asset or D3D12 error is logged.
+- **Wavy facades on some buildings.** These look like impostor rendering. Reverting the 670 resampled impostor-zone routes ran out of commit.
+- **Missing audio banks.** Banks are rejected at the 128 MiB SoundBankAlloc cap: `veh_vehicles`, `amb_i20_city_global_bed`, `veh_helicopters`, `spid`, `yuri`, `otto`, `mtg1`, `mpd1/2` and others.
+- **Loader fixes split across builds.** The installed `1.0.499.1` uses this loader without the processor fix or pipeline replay, so the loader changes still have to be combined into one build and measured.
+
+### Combined build and the remaining frame-time limits (November 26, night)
+
+**Combined play build `1.0.500.8`** (no autoplay).
+
+- **Packaging.** The rendering configuration: `--recipe-overlay managed-buffer-512mib-overlay.json --recipe-overlay memory-cuts-loader-overlay.json`, plus the distant-light overlay. The recipe SHA-256 is `4c68372e…`.
+- **Loader.** One loader carries the processor placement, the pipeline replay, the on-demand commit for pools that are not 64 KiB multiples, and SoundBankAlloc and Physics at 128 MiB.
+- **Trace checks.** The trace shows `host-processors stage=applied` and `pso-replay open status=loaded`, with no `lazy-commit-failed` lines.
+
+**Gameplay windows that include the first swing** (30 s from drive start +1 s, 1920×1080, shared GPU textures):
+
+| Run | Configuration | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| `1.0.480.1` | Before the rendering fix, with profiler | 59.90 | 58 | 16.68 / 17.95 / 35.3 ms | true |
+| `1.0.500.3` | Combined | 57.97 | 9 | 16.68 / 18.76 / 849 ms | false |
+| `1.0.500.5` | Combined | 54.73 | 14 | 16.67 / 19.09 / 721 ms | false |
+| `1.0.500.6` | Combined | 57.13 | 17 | 16.69 / 19.38 / 718 ms | false |
+| `1.0.500.7` | Combined, with profiler | 59.53 | 55 | 16.68 / 19.14 / 84 ms | false |
+
+**Two causes, both measured.**
+
+1. **Pipelines not yet recorded still compile synchronously.** Each run met 4–12 new pipelines inside its window, at 30–850 ms each. The database grew from 1,601 to 1,702 entries over the runs; it converges slowly because each drive takes a different route.
+2. **Heavy scenes are CPU-bound in the game.** A thread sampler (every 2–4 ms) during a cluster of 29–38 ms frames recorded:
+   - **Game threads were busier.** The main thread was busy 0.72 of a core (0.58 when clean), and the render thread's driver time rose from 8.5% to 16.7%.
+   - **The present path sat idle.** Our swap-chain thread was waiting for a present request 60% of the time (21% when clean), and the submit thread was waiting for render commands 57% of the time (20%).
+   - **Overall load.** The process used 4.9–5.1 of the 6 processors it is given.
+
+The world-loading fix adds about 700 models and raised p95 from 17.95 to 18.6–19.4 ms.
+
+**Ruled out.** Timer granularity is already 1 ms. The presenter drops no frames (the sequence delta is always 1), the work is not GPU-bound, and there are no commit bursts.
+
+**Host refresh.** The host panel runs at 59.9394 Hz while the producer paces at 60.000 Hz. The `fhd-refresh-5994.txt` marker exists for this but has not been tested.
+
+**Untested levers.**
+
+- **Processor count.** The game sizes its job system for 8 logical processors and receives 6 (mask `0xFC`).
+- **Thread placement.** Keeping the main and render threads on separate physical cores.
+- **Shared processors.** Adding the two shared processors.
+- **Cache seeding.** Seeding the pipeline database with more drives.
+
+### Reporting the real processor count passes the gate, but memory is now the risk (November 27)
+
+**What the game saw.** Spider-Man sized its job system for 8 logical and 4 physical processors (group mask `0xFF`) but runs with affinity `0xFC`. It reads `GetLogicalProcessorInformationEx` (`exe+0x01CF2C98`–`0x01CF2FB5`) and calls `GetSystemInfo` about 60 times (`exe+0x02B2C0FD`).
+
+**The processor view.** The new shared `runtime/win32/processor-view.h` filters these to the process affinity mask, keeping the system's buffer-size and error contract:
+
+- `GetLogicalProcessorInformation(Ex)`
+- `GetSystemInfo`
+- `GetNativeSystemInfo`
+- `GetActiveProcessorCount`
+
+**How it is wired.**
+
+- **Loader.** `loader-trace.c`/`.def` export the five functions (ordinals 24–28).
+- **Profile.** The Spider-Man profile binds the four kernel32 imports it uses (`launcher-bindings.json`).
+- **Effect on the game.** The game log then reports "Physical Core: 3, Logical Core: 6", and the game starts 33 rather than 37 trampoline threads.
+- **Heavy frames.** Frames of 20–34 ms that are not compiles fell from 37–80 per run to 10–28 in four of five runs.
+- **Not yet verified.** The console runs used a scratch loader that patches the import table at run time. The profile binding path is not yet regenerated, built by CI, or run on the console.
+
+**Gameplay windows including the first swing** (30 s from drive start +1 s, 1920×1080 internal and output, all shared GPU textures):
+
+| Run | Build | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- | --- |
+| v1 | `1.0.510.2` (view) | **59.93** | **59** | **16.69 / 18.28 / 21.0 ms** | **true** |
+| v2 | `1.0.510.5` (view) | 59.87 | 57 | 18.07 p95 / 52.9 ms | true, then crashed at +36 s |
+| b1 | `1.0.510.6` (control, no view) | 56.17 | 13 | 18.79 / 784 ms | false, crashed at +33 s |
+| v3 | `1.0.510.7` (view) | 57.97 | 46 | 18.95 / 234 ms | false |
+| h1 | `1.0.510.9` (view + hot-thread ideal processors) | 59.70 | 53 | 18.19 / 117 ms | false |
+| h2 | `1.0.510.11` (view + hot-thread ideal processors) | 59.90 | 58 | 18.25 / 31.6 ms | true |
+| r1 | `1.0.510.12` (view + hot + `fhd-refresh-5994.txt`) | 59.27 | 45 | 18.57 / 167 ms | false |
+
+**Other levers.**
+
+- **Adding the shared processors.** A process mask cannot do it, because the child's default affinity is already `0xFF` and the scheduler keeps it off processors 0–1.
+- **Ideal processors for the two busiest threads.** No measurable gain.
+- **The 59.94 Hz pacing marker.** One run, with no gain.
+
+**Remaining limits.**
+
+1. **Commit headroom (new risk).** Combined runs peak at 5,032–5,073 MiB of 5,120 MiB, with 60–96 MiB free after loading. Two runs, one with the view and one without, crashed at drive +33–36 s with 6–19 MB of commit available. The rendering-only configuration peaked at 4,543 MiB, so about 500 MiB came back with the loader that adds processor placement and pipeline replay. Pipeline objects (about 0.3 MiB each, with about 1,760 recorded) are the main suspect; this is not yet proven.
+2. **First-use compiles.** Pipelines not yet recorded still compile on first use: 0–5 per window at 37–152 ms each.
+3. **Occasional CPU-bound stretches.** Some stretches run at 48 FPS (v3).
+
+**Installed build.** The console holds play build `1.0.510.13`: the combined configuration plus the view, without autoplay.
+
+### Lighting tint and game-side memory budgets (November 27)
+
+**Green and magenta lighting is a per-launch tint of the environment probes.**
+
+- **What tints.** Specular and ambient light on glass, cars, the hero's suit, roads and box-shaped volumes of facades turns saturated green or magenta. The probe images keep their structure; only the colour is wrong.
+- **It varies by launch, not by build.** The same build can be green, magenta or clean on different launches. Older screenshots show it as far back as `1.0.477` builds, before pipeline replay existed.
+- **Metric.** `light/hue.py` reports the share of saturated green or magenta pixels per screenshot (0–20%).
+
+**The probe system.**
+
+- **Probe cache.** A BC6H 256×256 cube array with 384 slices (64 probes) and 6 mips, plus one BC6H cube.
+- **How it is filled.** The cache is filled by 1,464 `CopyTextureRegion` calls per run from R32G32B32A32_UINT intermediates (`exe+0x018DD59E`).
+- **Who writes the intermediates.** The "CompressBC6h" pass writes them. The recipe replaces that compute shader.
+
+**What was ruled out.**
+
+| Candidate | Evidence |
+| --- | --- |
+| Replaced compression shaders (variants 0–3) | DXIL and DXBC interpreters matched each replacement to its original with 0 mismatches. The originals still remove the device (`0x887A0020`). |
+| World shader replacement | Without it, a run was still green (up to 19.8%). |
+| Anti-aliasing setting | TAA and SMAA were each clean in one run and tinted in another. |
+| Heap zero-fill | New and reused heaps read back 0 non-zero dwords. |
+| Asset pool failures | Only soundbank failures appeared; nothing lighting-related. |
+| A global UAV barrier before each probe copy | Clean in one run and green in another. |
+
+**Not yet located.** The first failing operation sits between the "Runtime EnvProbe" face render and lighting reading the probe array.
+
+**Next steps.**
+
+- Read back probe slots and intermediates on the GPU after load.
+- Capture one EnvProbe face render target.
+- Compare at least three launches per arm, because single runs are about 50% noise.
+
+**The rainbow cloud has not been reproduced.**
+
+**Game-side budgets.**
+
+- **Settings store.** The game reads its graphics settings from `Software\Insomniac Games\Marvel's Spider-Man Remastered` (`RegCreateKeyExA`). On this console the effective values are the defaults at `exe+0x1CFAD1E`–`0x1CFAE94`, which the recipe patches.
+- **Settings are not a memory lever.** A hidden "Lowest" tier (value 0) for Shadow, Level of Detail, Vehicle, Crowd and Hair changed no heap or pool size. Peak commit was 5,080 MiB.
+
+**Owners at about 5.06 GB.**
+
+| Owner | Size |
+| --- | --- |
+| D3D12 heaps | 1,726 MiB (ManagedBuffer 512, buffers 254, grow-on-demand 128, textures 296, render targets 458) |
+| Write-combined GPU commit outside those heaps | About 550 MiB |
+| Engine pools | About 916 MiB (AssetHeap 455 used of 828) |
+| General-heap blocks | 866 MiB committed, 559 MiB resident |
+
+The loader's general demand-commit (LAZY_GENERAL) cuts the general-heap blocks from 866 to 9 MiB recorded and lowers menu commit by about 400 MiB.
+
+**Kept.** ManagedBuffer 448 MiB (`managed-buffer-448mib-overlay.json`) and the ModelSkinMatrixBuffer pool at 16 MiB (`model-skin-matrix-buffer-16mib-overlay.json`, which patches `call GetPoolSize` at RVA `0x1784C50`).
+
+| Measure | Result |
+| --- | --- |
+| Peak commit | 4,985 MiB, from 5,080, with 138 MiB free at the minimum over an 11-minute soak |
+| Crash | None |
+| Rendering | Hero, street and props intact |
+| 30 s window including the first swing | 59.93 FPS, lowest 1 s 59, p95 18.81 ms, worst 21.7 ms, `gpu_60fps` true |
+
+**Gaps.** The soak's drive script got stuck on a rooftop, so it never reached the opening cutscene or the reload where the earlier soak crashed.
+
+**Further cuts proposed, not tried.**
+
+| Buffer | Committed | Resident |
+| --- | --- | --- |
+| TextureStream I/O buffers | 4 × 16 MiB | 0 |
+| AnimSystem scratch | 43 MiB | 4 MiB |
+| NavHeap | 16 MiB | 0 |
+| VFX bitset | 24 MiB | 3 MiB |
+| Scaleform | 96 MiB, proposed 80 | 65 MiB |
+
+### Where the extra commit comes from (November 27)
+
+**The "+500 MiB from the loader" was a sampling artifact.**
+
+- **Why the earlier figures misled.** The `asset sampled-commit-kib` sampler stops after 215 samples, at the menu, before the world loads.
+- **Menu commit is the same across configurations.**
+
+| Configuration | Menu commit |
+| --- | --- |
+| Rendering-only (d11–d13) | 4,539–4,548 MiB |
+| Combined (`comb/run-c1`) | 4,536–4,549 MiB |
+
+- **The difference is the world load.** The combined run rises to 5,032 MiB after Continue.
+
+**Pipeline replay and processor placement are not the cause.** The game's own `[Render] Page file` figure, from runs before the world fix:
+
+| Runs | Replay | Placement | Page file |
+| --- | --- | --- | --- |
+| `fps/run-b`, `fps/run-c` | no | no | 4,664 / 4,669 MiB |
+| `fps/run-d` | no | yes | 4,683 MiB |
+| `pso/run-cold`, `pso/run-warm`, `pso/run-warm2`, `dip/run-p1` | yes | yes | 4,667–4,691 MiB |
+
+Replay plus placement add at most about 25 MiB.
+
+- **Replay precompiles few pipelines.** It builds 330–383 pipelines, and only 11–51 of them are never requested by the game. Its tables use 1–2 MiB, and the 21 MB database is a read-only mapping that does not count toward commit.
+
+**General-heap demand commit is the main lever.**
+
+- **Without it.** Engine commits were 887 MiB committed against 545 MiB resident, and one run crashed at 5,102 MiB.
+- **With it (LAZY_GENERAL).** Recorded commits fall to 9 MiB, peak commit falls to 4,724–4,832 MiB, and about 350–400 MiB is recovered.
+- **Shared version, not yet verified.** The shared form is `runtime/win32/demand-commit.h`, enabled by `XBOX_WIN32_DEMAND_COMMIT` through the marker `steam-win32-demand-commit-<app>.txt` (`ProbeNative.cpp`, `stage_profiles.py`). It is not yet built by CI or run on the console. Its selection policy is any commit of 1 MiB or more inside an existing reservation, which is broader than the console-verified policy, and the Spider-Man profile does not set the marker yet.
+- **Host process.** `SteamPrimary.exe` uses 135–144 MiB inside the same 5,120 MiB title budget.
+
+**Replay bug fixed.** When replay was disabled, `XboxPipelineReplayLookup` returned before initialising its ticket, and `XboxPipelineReplayFinish` then freed an uninitialised pointer. Both no-replay builds crashed at startup. The fixed build has not run yet.
+
+**The earlier soak crash is unexplained.**
+
+- **Where it happened.** Only that soak reached the tutorial reload (save control 36/37).
+- **What preceded it.** Video usage then rose from 2,422 to 2,550 MiB, followed by `DXGI_ERROR_DEVICE_HUNG`.
+- **Why commit is unproven.** About 110–134 MiB of commit was still available, and no allocation-failure lines were logged, so commit exhaustion is not proven.
+
+### Combined play build: gate runs and soaks (November 27)
+
+**Installed play build `1.0.60010.9`** (no autoplay). Recipe overlays:
+
+- `managed-buffer-448mib`
+- `model-skin-matrix-buffer-16mib`
+- `memory-cuts-loader`
+- the distant-light overlay, carried in `owned-mip-overlay` (toc `71e6fb76…`, dsar `499c845c…`)
+
+Recipe SHA-256: `da3d2173…`.
+
+**Loader.** `XboxWin32LoaderTrace.dll` (`c4266bb1…`) was built with `PLAY_BUILD LAZY_GENERAL MEM_CENSUS PROC_VIEW NO_PLACER HEAP_ADDR MC_NO_CENSUS` and includes the committed replay-ticket fix.
+
+**Gate runs.** Play loader; 30 s window from drive start +1 s; 1920×1080 internal and output; all shared GPU textures.
+
+| Build | Avg FPS | Lowest 1 s | p50 / p95 / worst | `gpu_60fps` |
+| --- | --- | --- | --- | --- |
+| `1.0.1990.2` | 59.93 | 59 | 16.69 / 18.20 / 21.7 ms | true |
+| `1.0.3010.2` | 59.83 | 57 | 16.70 / 18.09 / 34.4 ms | true |
+| `1.0.40010.2` | 59.80 | 56 | 16.69 / 18.39 / 36.4 ms | false (lowest second 56 is below 57) |
+| `1.0.50010.2` | 59.93 | 59 | 16.69 / 18.03 / 21.6 ms | true |
+
+Three of four pass. Peak commit in these runs was 4,658–4,715 MiB.
+
+`1.0.50010.2` averaged 53.95 FPS over its full 66 s drive. It ran at about 31–55 FPS from 35 to 58 s, after the measured window.
+
+**Soaks.** Census loader with screenshots about every 10 s. Many long frames follow a screenshot, so the stutter counts are inflated.
+
+| Build | Length | Peak commit | Frames over 33 ms per minute | Frames over 100 ms per minute | Average FPS | Crash |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1.0.1290.1` | 1,002 s | 4,741 MiB | 16.5 | 7.2 | 56.1 | none |
+| `1.0.50020.1` | 1,114 s | 4,765 MiB | 7.1 | 6.0 | 56.8 | none |
+| `1.0.50030.1` | 870 s | 4,867 MiB | 77.9 | 12.8 | 49.3 | none |
+
+- **The last soak degraded.** `1.0.50030.1` ran at 1–30 FPS for long stretches between 83 and 250 s.
+- **The crash sequence was only partly reached.** `1.0.50030.1` saved "control 36" but never reached "control 37" or the reload. The sequence that crashed before (control 36, reload, control 37, then `DXGI_ERROR_DEVICE_HUNG`) is still untested on this configuration.
+- **The installed play loader has not been soaked.** Only 66 s gate drives have used it.
+
+**Issues opened from hands-on play.**
+
+- Cutscene frame rate and delayed audio: clankur/GabeBox#92.
+- City traversal stutter: clankur/GabeBox#93.
+- Low texture and model detail: clankur/GabeBox#94.
+
+### Parallel pipeline compiles, sound-bank pool and stutter (November 27, evening)
+
+**Why compiles ran one at a time.**
+
+- Build `1.0.230.243` serialised pipeline compiles in the Spider-Man play loader after shader-compiler faults at `XBSC_XS.dll+0x9F5A0`, which occurred with only 6–24 MB of commit headroom.
+- The fault later recurred with one slot as well (`.305`, `.306`, `.308`).
+- The shared `runtime/win32` path never serialised compiles.
+- The slot count is now a build define, `PSO_SLOTS` (default 1), in `spider-man-diagnostic-loader/trace.c`. The earlier comment claimed `XBOX_SPIDER_PSO_SLOTS` overrode it, which was wrong.
+
+**Boot to menu ([#95](https://github.com/clankur/GabeBox/issues/95)).** All runs use the same save and the same pipeline-replay database. No run had a device removal, a failed commit or a crash.
+
+| Compile slots | Launch to menu | Total wait for a slot | Lowest available commit before the menu |
+| --- | --- | --- | --- |
+| 1 | 239–240 s | 953–966 s | 1,001–1,054 MiB |
+| 2 | 171 s | 538 s | 971 MiB |
+| 3 | 117 s | 248 s | 1,029 MiB |
+| 4 | 107 s | 144 s | 1,075 MiB |
+
+Each compile takes longer as slots are added, but overall throughput rises. The remaining time is mostly about 2,000 first-time compiles.
+
+**Traversal stutter ([#93](https://github.com/clankur/GabeBox/issues/93)).** 240 s of swinging with no screenshots, measured with `tools.measure --stutter --producer-log`.
+
+| Run | Average FPS | Lowest 1 s | Worst frame | Frames >33 ms per minute | Frames >100 ms per minute |
+| --- | --- | --- | --- | --- | --- |
+| a1: 1 slot, 128 MiB sound banks | 59.35 | 7 | 885 ms | 4.0 | 1.5 |
+| b1: 1 slot, 224 MiB | 58.70 | 8 | 868 ms | 11.25 | 2.0 |
+| c2: 2 slots, 224 MiB | 59.43 | 19 | 685 ms | 5.75 | 1.0 |
+| c3: 3 slots, 224 MiB | 59.93 | 58 | 35 ms | 0.75 | 0 |
+| c4: 4 slots, 224 MiB | 59.94 | 59 | 23.7 ms | 0 | 0 |
+
+- **c4 re-measured:** a 246 s window, 59.94 FPS, `gpu_60fps` true.
+- **Long frames:** every frame over 100 ms ended on a first-time pipeline compile.
+- **Not isolated:** the replay database grew from 2,518 to 2,631 pipelines over these runs, so the gain is not isolated to the slot count.
+
+**Sound-bank pool ([#92](https://github.com/clankur/GabeBox/issues/92)).**
+
+- **Rejected banks now load.** At 128 MiB the pool was full. At 224 MiB it grew to 176–192 MiB, so at least 48–64 MiB of previously rejected banks now load. Which banks they are is not yet logged.
+- **Memory cost.** The lowest available commit over a run fell from 364 MiB to 244–305 MiB. Peak commit was 4,814–4,875 MiB.
+
+**Still to measure.**
+
+- **Cutscene frame rate and delayed audio.** The Fisk Tower cutscene was not reached, so neither is re-measured.
+- **XAudio2 counters.** They showed 49–57 ms latency and no glitches, but they did not observe the game's mix.
+
+**Clean play build `1.0.63012.0`.** It has 4 compile slots, SoundBankAlloc 224 MiB, no autoplay and no per-second counters. Its loader SHA-256 begins `29c66e2a`. It was deployed but not launched. The play-loader source with these values is in the scratchpad (`play/perf/tb`), not in the repo.
+
+**Tooling.** `tools.measure` gains `--stutter` (frames over 33 ms and over 100 ms per minute), `--producer-log` attribution of stalls to traced pipeline compiles, and `--exclude-utc START/END` for screenshot windows.
+
+## Texture Quality default and restored textures (issue #94, November 27)
+
+**Cause.** The game's default Texture Quality is Low. This setting is stored at `[this+0x444]` and applied at exe+0x18911A9. At Low, the game drops three mip levels from every streamed texture, so most world textures reached the GPU at 32 px. Our own 256 px cap was not the limiting factor.
+
+**Profile change.** `texture-quality-medium-overlay.json` / `.bin` change the default at RVA 0x1CFAD1E to 1 (Medium), on top of the 242 restored textures. `tests/test_spider_profile_overlays.py` checks the overlay manifests and the patch bytes.
+
+**Memory**, from one traversal:
+
+| Setting | Peak commit | Lowest free commit |
+| --- | --- | --- |
+| Medium + restores | 4,834 MiB | 285 MiB |
+| High | — | about 111 MiB |
+
+High doesn't fit within the 250 MiB headroom. On the longer soak5 route, Low peaked at 4,867 MiB, and Medium adds about 90 MiB, which could leave about 170 MiB free. That route is unmeasured with Medium.
+
+**Gate (G1).** The window starting 31 s into the run passes. The window starting 1 s in fails on one 800 ms gap, caused by a first-use pipeline compile that wasn't in the replay database (`pso-slow n=2234 compile-ms=789 replay=1`). Both windows used only shared GPU textures. The A0–A4 windows can't be used for FPS because of the drive script's Device Portal screenshots.
+
+**Visible result.**
+- Roads and kerbs show asphalt detail instead of a smooth blur.
+- The hero's suit shows its web lines, which are flat at Low.
+
+The magenta roads seen in run A2 were the separate lighting-probe tint, not the restores.
+
+**Build.** Clean play build `1.0.63018.0` has Medium + restores with the original play loader. It doesn't yet include 4 compile slots or SoundBankAlloc 224.
+
+**Not yet tested:**
+- a 512/1024 px cap and model LOD changes, for which there is no memory headroom;
+- a multi-launch tint control;
+- an independent verifier run.
+
+## Freeze in the Fisk Tower approach: commit exhaustion (November 27, night)
+
+**Report.** During Big Picture play, the player saw the game freeze in "the rainbow cloud area". The build was diagnostic package `1.0.63021.0`, which is not a play build: it used the probe-readback loader `probe-diag11` and had the light-grid slot cap reverted. The game was Steam AppID 1817070, build 23986256 (game log `v4.630.0.0`), on an Xbox Series X with OS `26100.9673 xb_flt_2610ge`. All reproductions below continued from the player's own save (slot0 SHA-256 `a69b5749…`), and the saves were restored and verified after every run.
+
+**What the live hang showed** (stage 279; no lease was needed for the reads, and lease #149 covered the stop):
+
+- **Render thread.** It spins at `exe+0x188F248`, a loop over query records that calls `[0x147A41430]->vtbl+0xE8` with `(query, &out, 8, 1)`. The object is the engine's D3D11-style context, and slot 0xE8 is `GetData` (vtables at `0x144E58028` and `0x144E58418`, body at `exe+0x18E2620`). `GetData` returns `S_FALSE` until the `ID3D12Fence` at `query+0x40` reports `GetCompletedValue() >= query+0x48`. So the render thread is waiting on GPU work that never completes.
+- **GPU.** Engine 5 stayed at 100% for over 40 minutes.
+- **Main thread.** It waits on render sync.
+- **Memory.** Commit peaked at 5,021 MiB, leaving 99 MiB free, just before the hang. A burst of first-use pipeline compiles came about 35 s earlier.
+- **Logging.** Neither the game nor the loader logged an error.
+
+**A/B runs from the player's save.** Each run did two 240 s scripted traversals and then 30 cycles of following the objective marker into the Fisk Tower atrium.
+
+| Run | Package | Configuration | Result | Peak commit / lowest free |
+| --- | --- | --- | --- | --- |
+| A2 | `1.0.63022.0` (lease #151) | `1.0.63021.0` plus autoplay: diag11 loader, light-grid cap 8191, Texture Low, SoundBank 128, 1 compile slot | `Spider-Man.exe` disappeared 1–2 min into the first traversal. There was no exception record or dump, and the last sample showed 154 MiB free. | 4,980 / 141 MiB |
+| B1 | `1.0.63023.0` (lease #151) | Clean play loader `29c66e2a`, cap 1024, Medium + 242 restores, SoundBank 224, 4 slots | Ran 14 minutes, including the atrium. The tint was present (green). | **5,060 / 60 MiB** |
+| C1 | `1.0.63024.0` (lease #152) | B1 with the cap reverted to 8191 | Commit was about 135 MiB higher from the start. Free commit fell to 14 MiB. The presenter then logged `dxgi gpu-frame-error result=0x887A0005` (`DXGI_ERROR_DEVICE_REMOVED`), and the game exited 24 s into the traversal. | 5,109 / **14 MiB** |
+| D1 | `1.0.63025.0` (lease #154) | B1 plus a loader change that serialises compiles below 384 MiB free | Ran 18 minutes. It serialised 256+ compiles but did not move the peak. | 5,058 / 61 MiB |
+
+**First failing operation.** In C1 it is the GPU device removal at 14 MiB of free commit. In the player's session it is a D3D12 fence that never completes, with 99 MiB free at the previous 2 s sample.
+
+**Conclusion.** Every run with the light-grid cap reverted failed within minutes. Both runs with the cap kept survived the same route. The cap is worth about 135 MiB of commit. The hang therefore came from the diagnostic build's cap revert pushing commit into exhaustion. It was not caused by the diagnostic hooks alone, and it is not a shader loop that we could fix.
+
+**Where the peaks come from.** In D1 the peaks (+80 to +120 MiB over a steady 4,936–4,960 MiB) come during streaming while swinging, with no compiles in flight. That is why the compile throttle was dropped.
+
+**Fix.**
+
+- `light-grid-slots-1024-overlay.json` / `.bin` now declares the cap in the build-matched profile: `mov r14d, 0x400` at RVA `0x17233A6`, the `LightGridManager` slot count. The base recipe carried it before, so a diagnostic package could silently drop it.
+- The overlay replaces the identical existing entry. The staged recipe is byte-identical (`748e3130…`), so the change is idempotent.
+- `tests/test_spider_profile_overlays.py` pins the offset and the patch bytes.
+- The play loader snapshot (`analysis/spider-man-play-loader/`, mode `play`) builds the installed loader `29c66e2a…`.
+
+**Installed play build.** `1.0.63026.0`, appx SHA-256 `6788e5f3…`:
+
+- no autoplay, no per-second counters and no probe diagnostics;
+- play loader with 4 compile slots and SoundBankAlloc 224 MiB;
+- ManagedBuffer 448, skin 16 and loader cuts;
+- Texture Quality Medium plus the 242 restores;
+- light-grid cap 1024.
+
+It is the B1 content without autoplay.
+
+**Gate (B1, the same content).** Window 03:20:00Z, 30 s, during the second traversal, with no screenshots:
+
+| Measure | Value |
+| --- | --- |
+| Average FPS | 59.93 |
+| Lowest rolling 1 s | 59 |
+| p50 / p95 / worst | 16.68 / 17.93 / 20.3 ms |
+| Frames | All 1,798 used shared GPU textures |
+| Resolution | 1920×1080 internal and output |
+| `gpu_60fps` | true |
+| Stutter | 0 frames over 33 ms per minute |
+
+The window at 03:16:00Z fails on one 818 ms first-use pipeline compile.
+
+**Open.**
+
+- **Memory headroom.** It is 60 MiB in the Fisk Tower approach, below the 250 MiB target. Earlier measurements put Texture Medium at about +90 MiB and SoundBank 224 at about +60 MiB, so reverting both would still leave roughly 200–250 MiB. Further cuts are needed: the non-loader buffer cuts stopped world loading earlier.
+- **Lighting tint.** The green and magenta tint persists with the cap at 1024, so the cap is not the tint's cause.
+- **No verifier yet.** No independent verifier has run on `1.0.63026.0`.
+
+## Load time: Play to controllable gameplay (issue #95, November 28)
+
+**Goal.** Under 90 s from pressing Play in Big Picture to controllable gameplay.
+
+**Tool.** `python3 -m tools.load_phases RUN_DIR [--stage-inventory inventory.json] [--probe-report probe-report.txt]` builds the phases from files a run already collects:
+
+- `launch.utc` and `continue.utc`;
+- the loader trace (`qpc=` on `pso-slow`, `pso-replay-compile` and later records);
+- the game log;
+- `fhd-present-times.bin`, whose header ties QPC to UTC;
+- optionally, the TempState stage listing.
+
+The menu is the first `lobby-save-state=0x00000001` record. Gameplay is the first steady five seconds (at least 55 frames per second, no gap over 100 ms) after the world-load gaps that follow Continue. Neither needs a new trace record.
+
+**Play is not `launch.utc`.** Autoplay packages sign in to Steam and open Big Picture before they press Play. The host's `probe-report.txt` records both times:
+
+- sign-in start `run_id` is 04:33:23.3Z (activation was 04:33:23Z);
+- `steam_launch_run_id` is 04:33:50.8Z;
+- stage `SteamWin32Trial (285)` was created at 04:33:51.9Z (variants run r720, package `1.0.63028.0`).
+
+So about 27.5 s of each autoplay run comes before Play. For runs without a saved probe report, the tool takes Play as 1.05 s before the stage folder was created. That is a single measured sample, and the tool labels the result `estimated-from-stage`. Stage creation times come from the cleanup agent's inventory (`$S/cleanup/inventory-before.json`).
+
+**Phase breakdown from existing runs.** No dedicated console runs were used. Times are seconds from Play; "unattended" excludes the scripted menu inputs.
+
+| Run | Warm-up pipelines | Slots | Play→stage | Stage→game log | Game log→first frame | First frame→menu | **Play→menu** | Continue→gameplay | **Unattended** | Render-thread slot wait, Continue→gameplay |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `play/perf/run-a1` | 2,210 | 1 | 1.0* | 2.6 | 8.3 | 191.7 | 203.6 | 28.7 | 232.3 | 19.8 s |
+| `play/perf/run-c2` | 2,295 | 2 | 1.0* | 2.6 | 4.6 | 135.6 | 143.9 | 7.3 | 151.2 | 0.4 s |
+| `play/perf/run-c3` | 2,324 | 3 | 1.0* | 2.7 | 3.8 | 75.6 | 83.1 | 16.4 | 99.5 | 5.8 s |
+| `play/perf/run-c4` | 2,322 | 4 | 1.0* | 3.0 | 6.2 | 61.2 | 71.4 | 11.2 | 82.6 | 3.0 s |
+| `hang/run-b1` | 2,385 | 4 | 1.0* | 2.7 | 6.2 | 61.2 | 71.1 | 15.4 | 86.5 | 3.3 s |
+| `hang/run-c1` | 2,496 | 4 | 1.0* | 2.6 | 6.8 | 64.6 | 75.0 | 17.7 | 92.7 | 5.6 s |
+| `hang/run-d1` | 2,496 | 4 | 1.0* | 2.6 | 3.5 | 67.3 | 74.4 | 26.4 | 100.8 | 12.6 s |
+
+\* Estimated from the stage, as above.
+
+The five texture runs `tex/run-a0`–`g1` (1 slot) match a1: about 203 s from Play to the menu.
+
+**Against the 90 s budget** (4-slot runs; menu inputs come on top):
+
+| Phase | Measured | Share |
+| --- | --- | --- |
+| Play → stage | about 1 s | negligible |
+| Stage → game | 2.6–3.0 s | negligible |
+| Game → first frame | 3.5–7 s | small |
+| First frame → menu | 61–67 s | the budget |
+| Continue → gameplay | 11–26 s | varies |
+
+**Findings:**
+
+- **Staging is not the cost.** Copying and patching the game image (recipe, companions, hash checks), starting the process and initialising the loader together take under 4 s. Reusing stages would save at most that, so it was not done. The 283 leaked stages are not a timing problem. The stale-stage sweep is in source (`4807c4c`), but packages are assembled from a base APPX whose `ProbeNative.dll` is dated November 24, so the installed host predates it. It needs a CI build of the native host.
+- **Boot waits are not the cost.** All 72 `boot-wait-single` records fall within the loader's first 4 s (`run-c4`).
+- **Boot is the game's own pipeline warm-up, bound by CPU.** The game log reports `File \xbox0.pso contains N pipelines`. That is the game's own pipeline cache in the Documents folder, and the game compiles it at boot.
+  - Before the menu, `run-c4` made 1,491 title compiles (per-second `perf-sec` counters) and about 100 replay compiles over 30 ms. The slots were about 97% busy: 263 slot-seconds of 272.
+  - Process CPU scales with slots: 1.13, 2.35, 3.12 and 4.23 of 6 logical cores for 1–4 slots. The console reports 3 physical cores with SMT.
+  - The average compile rises from 110 ms to 148 ms at 4 slots, but throughput still rises: 7.6, 13.3, 18.2 and 21.6 compiles per second.
+- **The warm-up grows with play.** The game's cache went from 871 pipelines (November 25) to 2,521 (November 28). At 4 slots, first frame→menu went from 61 s at 2,322 pipelines to 64–67 s at 2,496. A player who explores more of the city will boot more slowly. This is open work.
+- **The replay database mostly overlaps the warm-up.** In `run-c4` the replay thread compiled 479 entries, and the game itself compiled about 2,150 recorded entries first (outcome 2, "claimed"). "2,214 misses" is that count, not 2,214 gameplay first-use compiles: gameplay had only 2 render-thread compiles over 100 ms in 12.7 minutes. Replay work done before the menu shares the same slots, so it neither helps nor delays the menu much.
+- **Continue→gameplay follows render-thread slot waits.** At Continue, six game worker threads compile about 450 world pipelines. The render thread's own compiles queue behind them: 3.0, 3.3, 5.6 and 12.6 s of waiting gave 11.2, 15.4, 17.7 and 26.4 s from Continue to gameplay. The run with 0.4 s of waiting took 7.3 s.
+- **Game options.** The executable has engine settings `DX12EnableAsyncPipelineCreation` and `DX12MaxPipelineCreateThreads`. No command-line option or setting to skip the warm-up was found. The intro does not gate the menu: the first frame appears 3.5–8 s after the game starts, and the warm-up decides the rest.
+
+**Change: the compile pool** (commit `bf1a381`, loader only):
+
+- **Policy.** `runtime/shared/compile-slots.h` holds the admission policy, tested by `tests/compile-slots.c`.
+- **Win32 pool.** `runtime/win32/d3d12-compile-slots.h` implements it with an SRW lock and a condition variable. Waiters re-check every 50 ms and after each release.
+- **Boost.** Two extra slots while available commit is at least `PSO_BOOST_MIN_AVAIL_MIB` (768 MiB). Boot has over 1 GiB, so it uses 6 slots. Gameplay has 60–400 MiB and stays at 4, so steady-state memory is unchanged.
+- **Priority.** With `PSO_PRIORITY=1`, render-thread compiles (found at `exe+0x07A2FD68`, as `RenderThreadState` does) and boot-thread compiles go ahead of every waiting request. Each may take one slot above the limit while at least 256 MiB is free; below that it gets only the next free slot. Replay compiles run only when no title compile is waiting.
+- **Replay hook.** `d3d12-pipeline-replay.h` gains an optional admission hook. With it, the replay thread claims an entry only after it holds a slot, so a game request never waits behind a replay compile that has not started. Without the hook, behaviour is unchanged.
+- **Build.** `build.sh play` and `measure` now pass `-DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1`. The play loader's SHA-256 begins `e6f1ff36` and the measure loader's `e3675ab5`. Appending `-DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0` restores the fixed 4-slot pool.
+- **Trace records.** The loader writes `asset pso-parallel slots=4 boost=2 boost-min-mib=768 priority=1` once. It writes `asset pso-slots n=… boosted=… urg=… urg-over=… urg-wait-ms=… urg-max-ms=… wait-ms=… bg=… bg-wait-ms=… peak=…` every 512 compiles. These are a few interlocked adds per compile, with no readbacks.
+
+**Expected result (not measured):**
+
+- First frame→menu: 61–67 s drops by about 8 s, assuming the 3→4-slot trend continues (+19% throughput) at about +15% for 4→6 on 3 SMT cores.
+- Continue→gameplay: about 7–9 s, as in the 0.4 s-wait run c2.
+- Unattended Play→gameplay: about 70–76 s, plus the player's menu inputs.
+
+**Still to verify on the console** (to be measured from the next play or variants build that carries the loader):
+
+- Play→menu and Continue→gameplay, with `probe-report.txt` saved for the exact Play time;
+- the `pso-slots` counters;
+- pre-menu and gameplay lowest available commit;
+- no `XBSC_XS.dll` compiler fault and no `0x887A0005` with 6 concurrent boot compiles;
+- render-thread compile stalls per minute in gameplay.
+
+### Notes: why the menu waits, and skipping the warm-up (November 28)
+
+No console time was used. The analysis is static, on the verified `Spider-Man.exe` (SHA-256 `e297d4d9…`), plus the runs already collected in the scratchpad (`play/perf/run-a1`–`c4`, `hang/run-b1`–`d1` and `var/run-*`). The run tables come from `tools.load_phases`.
+
+**Measured with the boost loader (4+2 slots, priority)** (`var/run-*`):
+
+| Run | Warm-up pipelines | First frame→menu | Play→menu | Continue→gameplay | Unattended | Render-thread stalls/min | Worst worker wait |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `run-low` | 2,538 | 61.3 s | 69.1 s | 11.6 s | 80.7 s | 0.0 | 4.2 s |
+| `run-sb128` | 2,531 | 59.3 s | 67.1 s | 16.1 s | 83.2 s | 0.0 | 4.2 s |
+| `run-fs720` | 2,542 | 59.7 s | 67.2 s | 16.4 s | 83.6 s | 0.0 | 4.5 s |
+| `run-host720` | 2,589 | 59.9 s | 67.2 s | 16.7 s | 83.9 s | 0.0 | 3.4 s |
+| `run-sb128low` | 2,616 | 60.1 s | 67.2 s | 17.9 s | 85.1 s | 0.0 | 3.8 s |
+| `run-h900sb128` | 2,618 | 62.0 s | 69.2 s | 16.0 s | 85.2 s | 0.0 | 4.0 s |
+| `run-sb128b` | 2,575 | 62.1 s | 69.3 s | 17.0 s | 86.3 s | 0.0 | 5.0 s |
+
+**The engine's own async creation is already on.**
+
+- `DX12EnableAsyncPipelineCreation` and `DX12MaxPipelineCreateThreads` are fields 4 and 5 of the reflected `DX12Settings` class. Its descriptor is at `exe+0x0626C190` and has 41 fields. The instance is at `exe+0x07A890C0`, and the async flag is at offset 4.
+- The defaults written at `exe+0x01B4D720` are: async creation 1, threads 6, `DX12ShowPipelineHitchMessage` 1 and `DX12RemoveDuplicateResourceBarriers` 1.
+- The pipeline cache starts min(`GetSystemInfo` processors, `DX12MaxPipelineCreateThreads`) creation threads (`exe+0x018CF31D`). That gives 6 on the console, which matches the six compiling thread IDs in every trace.
+- Nothing needs switching on. A cap above 6 only adds threads on 6 logical processors (3 physical). How the settings registry takes overrides was not traced.
+
+**The game's pipeline queue is FIFO.**
+
+- In async mode the request at `exe+0x018CF540` clears the pipeline's ready byte (`+0x280`) and appends `{5, pipeline}` to an array.
+- Each creation thread (`exe+0x018CD4E0`) pops the next item, compiles it through `exe+0x018CE400` and sets ready = 1. On failure that function logs the call text and calls the engine's device-error handler.
+- There is only one async caller: pipeline creation from a description at `exe+0x018F810E`.
+- Materials test readiness through `exe+0x01903890`. For example, `exe+0x0174C600` checks every pass of a material.
+- The warm-up list is `xbox0.pso`. It is read with `_wfopen "rb"` and logged at `exe+0x018D0666`. The write-disk thread appends new pipelines with `_wfopen "ab+"` (`exe+0x018CF9E0`). Nothing in the game ever rewrites or prunes the file.
+
+**What gates the menu: its pipelines wait behind most of the queue.** "Processed" below means title compiles (`perf-sec pso-n`) plus replay hits before `lobby-save-state=1`.
+
+| Run | Slots | Process CPU at boot | Processed before menu | Warm-up size | Compiles/s |
+| --- | --- | --- | --- | --- | --- |
+| `play/perf/run-a1` | 1 | ~0.9 of 6 | 1,843 | 2,210 | 9.6 |
+| `play/perf/run-c3` | 3 | | 1,700 | 2,324 | 23 |
+| `play/perf/run-c4` | 4 | 4.2 of 6 | 1,694 | 2,322 | 28 |
+| `var/run-low` | 4+2 | 5.9 of 6 | 1,810 | 2,538 | 29 |
+| `var/run-sb128` | 4+2 | 5.9 of 6 | 1,806 | 2,531 | 30 |
+
+- **Not CPU starvation.** With one slot the CPU was nearly idle, and the menu still came only after 1,843 entries had been processed.
+- **Not the whole warm-up.** Title compiles continue through the menu and Continue. In `run-low`, 357 slow compiles ran between the menu and Continue and 148 between Continue and gameplay. The last title compile was at 145 s, 7 s after gameplay began. With one slot (`run-a1`) the compiles ran on until 10 s after gameplay.
+- **The boost added CPU, not throughput.** It raised process CPU from 4.2 to 5.9 cores, but throughput stayed at about 29 compiles/s on 3 SMT cores. That is why the menu time did not move.
+- **The boot path follows the queue.** The boot slot moves 6→0 at 80 s and the lobby opens at 95 s (`run-low`). Both follow queue progress, not the intro.
+- **Continue→gameplay waits on the same queue.** After Continue, available commit falls below 768 MiB and the boost turns off. Game workers then waited 4–7 s per 2 s bucket from 126 to 136 s (`run-low`), behind the rest of the warm-up plus the world's own requests. The worst worker wait in gameplay was 3.4–5.0 s. All of these compiles are replay outcome 2 (recorded, claimed by the game). The phase is compile-bound; no streaming bottleneck shows in the records.
+
+**The warm-up list keeps growing.**
+
+- It was 871 pipelines on November 25. On November 28 it went from 2,521 (04:33) to 2,618 (07:07), about 12 per short run.
+- First frame→menu tracks it at roughly +1 s per 40 pipelines: 61 s at 2,322, and 64.6–67.3 s at 2,496 with 4 slots.
+- The file is append-only, so a player who explores more boots more slowly, without limit.
+- Pruning would cap it, but skipping the list removes the dependence altogether.
+
+**Options evaluated.**
+
+1. **An async proxy for the game's create calls.** Not built.
+   - It would need a COM proxy (refcount, `GetDevice`, private data) and an unwrap at every place a pipeline reaches the runtime: `SetPipelineState`, `Reset`, `ClearState`, `CreateCommandList` and bundles. A missed path hands a fake object to the Xbox runtime.
+   - Error behaviour could only be approximated: a failed deferred compile surfaces at a void call.
+   - It leaves the total compile work unchanged.
+   - Option 2 gets the same reordering from the game's own supported first-launch behaviour.
+2. **Skip the warm-up and precompile from the replay database.** Built as `PSO_SKIP_WARMUP`, below.
+3. **The engine keys.** Already on (see above).
+4. **Order by first use.** Deferred. Replay compiles in database (first-recorded) order. Title requests already go ahead of replay. First-use ordering only matters if skip-warmup shows late pipelines in gameplay.
+
+**The change.** Commits `75cd264`, `583f1cb` and `0807bde`. Every option is off by default.
+
+- **`-DPSO_SKIP_WARMUP=1`** (`analysis/spider-man-play-loader/pso-warmup.h`):
+  - A read-only `CreateFileW` or `GetFileAttributesW` of `xbox0.pso` returns `ERROR_FILE_NOT_FOUND`.
+  - Write opens go to `xbox0.pso.session`, truncated on the run's first open. The player's list is not touched, and removing the define restores the warm-up.
+  - Records: `asset pso-warmup hidden` and `asset pso-warmup session-open ok|error=`.
+- **`-DPSO_REPLAY_THREADS=N`.** Replay runs N below-normal threads. They claim entries under the existing lock, and the last one writes `pso-replay done … threads=N`.
+- **`-DPSO_BG_RESERVE=R`.** Background compiles leave R slots of the limit free, always allowing at least one. With 4+2 slots and R=2, replay uses up to 4 slots at boot and 2 in gameplay.
+- `asset pso-parallel` records `replay-threads`, `bg-reserve` and `skip-warmup`.
+- `load_phases` reports `replay_hits` and `perf_title_compiles` per phase. It gives `game_warmup_pipelines` 0 when the game found no list.
+- **Builds from HEAD** (`build.sh`, `/Brepro`):
+
+  | Build | SHA-256 begins |
+  | --- | --- |
+  | `play` | `25969cce` |
+  | `play -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2` | `afd65b01` |
+  | `measure` with the same flags | `4a8a5bb1` |
+
+  Base `ea4f057` reproduces `e6f1ff36`.
+
+**Console result: the skip moves the world's compiles onto the render thread.** Do not ship it.
+
+Two runs:
+
+- **`cand2skip`** (`1.0.63051.0`, lease #189, variants agent): the main menu was never left.
+- **`skip1`** (`1.0.63059.0`, lease #197, this pass): measure loader `d8033ff5` from `a247f3e` (720p, SB128, Medium textures, autoplay), built with `-DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2`.
+
+In both runs the trace has `pso-warmup hidden` and `session-open ok`, the game log says `File \xbox0.pso is missing, no pipelines read.`, and there was no crash, no `XBSC_XS.dll` fault and no `0x887A0005`.
+
+**`cand2skip` never left the main menu because of input timing, not the load.**
+- The lobby was ready 40 s after launch, before the intro logos ended. The menu screenshot taken 8 s later still shows the Nixxes logo.
+- The game logged the main menu's save-slot read at 23:43:17, about 67 s after launch. The script pressed A at about 60, 64 and 70 s.
+- The first press only connects the pad ("XInput controller connected"). The press 2 s after the menu appeared was ignored. There is no `[Save] Request save type 2`, which is the Continue.
+- The menu stayed responsive: the traversal inputs later moved through it to Quit.
+- `skip1` instead watched screenshots for the menu panel. The menu appeared at about +70 s. The first A connected the pad, the second (about 4 s after the menu appeared) was ignored, and the third was taken: `save type 2` at 00:28:43.7.
+
+**`skip1` measured** (`tools.load_phases`; the logos hold the visible menu until about Play+42 s):
+
+| Phase | `skip1` (warm-up hidden) | Warm-up kept (`var/run-*`) |
+| --- | --- | --- |
+| Play→lobby ready | 17.6 s | 65–69 s |
+| Play→menu on screen | about 42 s (intro logos) | the same as lobby ready |
+| Continue→gameplay | **195.8 s** | 11.6–17.9 s |
+| Render-thread compiles, Continue→gameplay | 682, 142 s of compile | 17, 7 s |
+| Render-thread compile stalls in gameplay | 4.7/min, up to 901 ms | 0 |
+| Present rate, 110–200 s | 0–12 fps | — |
+| Game "fps" lines | 37.5, 6.4, 15.3 | — |
+
+- **Why it is slow.** Without the list, the world's pipelines are not in the game's table, so the render thread creates each one itself, one at a time, when it first draws. The game's six creation threads are not used for them.
+- **Replay did not help.** It compiled in database order and covered few of them: `pso-replay done replayed=2514 hits=75 misses=1399`.
+- **Scale.** The boot screens, menu and world requested about 1,470 pipelines in all (362 before the lobby). That is far more than the menu alone, but still about 1,100 fewer than the warm-up list.
+- **Not measured on this build:** memory, and pop-in after the world settled. `skip1` dropped to 314–390 MiB of available commit in gameplay, but it ran on the 720p build, so it is not comparable with the 1080p runs above.
+
+**What this means.**
+- The warm-up is what keeps world pipelines off the render thread. Hiding it trades about 50 s at the menu for minutes at Continue.
+- `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off. The play build should carry none of them.
+- `a247f3e` stays: replay threads reserve an entry before waiting for a slot, and an entry with no root signature takes no slot. `cand2skip` made 14,336 slot entries for 461 replays.
+
+**Next step if load time needs more than today's 82–86 s unattended: order by demand.**
+- Record the order in which the title requests replay entries in a skip-warmup run, as a sidecar beside `d3d12-pipelines.xpr`.
+- On later runs, replay on six threads in that order, with no slot reserve. In skip mode the title's own requests come from the render thread, which already takes urgent slots.
+- About 1,470 entries at the measured 29 compiles/s take about 50 s, about the time the intro logos and menu take. The render thread would then mostly find replay hits, or wait on a compile already running, instead of compiling serially.
+- The first run without a sidecar would be as slow as `skip1`.
+- An alternative that keeps the warm-up is to serve the game a demand-first copy of `xbox0.pso`. That needs the file format reverse-engineered, and the file order must survive the game's load path. That has not been checked.
+
+**Warm-up from a recorded session list (`PSO_WARMUP_LIST`, November 28).**
+
+**Setup.**
+- **The list file format.** The game's write thread (`exe+0x018CF9E0`) writes an 8-byte `{1, 4}` header, then appends 0x588-byte records: an 8-byte hash and 0x580 bytes of description. The reader drops duplicate hashes.
+- **The recorded list.** Run `skip1` left `xbox0.pso.session` with 1,156 records: the pipelines that run created for boot, menu, Continue and 4 minutes of swinging. The player's list has 2,634.
+- **What the loader serves.** At the game's first read it writes `xbox0.pso.served` from whole, validated records:
+  - `=1` (prune): the session list alone.
+  - `=2` (merge): the session list, then the player's records.
+- **Writes.** The run's new pipelines are appended to the session list, and the player's file is only read.
+
+**The runs.**
+- **Shared setup:** measure loaders from `1d7f412`, 720p, SB128, Medium textures, autoplay.
+- **Route:** the menu was detected on screen, then Continue, a 240 s scripted traversal and 31 objective-marker cycles into the Fisk Tower atrium (marker cycles take a screenshot each).
+- **Saves:** restored and verified after each run.
+
+| | Baseline `var/run-final-a`/`-b` (2,627 listed) | `merge1` (`=2`, 1.0.63062.0, lease #202) | `prune1` (`=1`, 1.0.63065.0, lease #205) |
+| --- | --- | --- | --- |
+| Game log | `contains 2627` | `contains 3790 pipelines and 1155 duplicates` | `contains 1156 pipelines and 0 duplicates` |
+| Play→lobby ready | 66.5–67.1 s | 69.2 s | **39.1 s** |
+| Main menu on screen | at the lobby | launch +101 s | launch +69 s (intro logos end) |
+| Continue→gameplay | 15.4–15.5 s | 14.7 s | **8.1 s** |
+| Unattended Play→gameplay | 81.9–82.6 s | 83.9 s | **47.2 s** |
+| Traversal: average FPS / lowest 1 s / worst frame | 59.93 / 57 / 33 ms | 59.94 / 59 / 20.5 ms | 57.36 / 0 / 1,002 ms |
+| Traversal frames over 33 ms / over 100 ms, per minute | 0 / 0 | 0 / 0 | 14.6 / 6.6 (26 over 100 ms on traced compiles) |
+| Render-thread compiles ≥100 ms per minute: traversal / Fisk route | 0 / 0 | 0 / 0 | 5.9 (worst 892 ms) / 1.2 (worst 169 ms) |
+| Lowest available commit: pre-menu / gameplay | — | 1,249 / 382 MiB | 1,291 / 325 MiB |
+
+**Findings.**
+- **Reordering does nothing.** With the session records first, the menu came no earlier than baseline. The game does not queue its warm-up in file order, so the order of the file can't move the menu forward.
+- **Pruning works for load time, but costs hitches.**
+  - It cuts unattended Play→gameplay by about 35 s, to 47 s.
+  - Every render-thread compile in gameplay was a recorded but not yet replayed pipeline (77, all `replay=2`).
+  - The single replay thread needed 10 minutes for the 1,468 pipelines nobody had claimed. Swinging away from the start area therefore hitched, by up to about 1 s, until replay or the game caught up.
+  - The Fisk route, nearer the start, hitched far less.
+  - No `replay=3` misses occurred.
+- **Memory.** The game warms 1,156 pipelines instead of 2,627. Replay still precompiles the rest and holds them, so commit is about the same (325 against 382 MiB, on routes that are not identical).
+
+**Maintenance for a real player.**
+- **What happens today.** Every run appends the pipelines that were not served, so the session list becomes the union of what the player has used. That is effectively an LRU without eviction. Hitches on a new route turn into warm-up entries next time. Boot grows again, though from a smaller base.
+- **A cap needs per-record use.** It would mean marking which served records the game actually creates in a run, by matching the record hash at the game's create path. Then the list could be rewritten as the boot/menu head plus records used in the last N runs.
+- **Re-recording is not an option.** A fresh `PSO_SKIP_WARMUP` recording costs about 200 s at Continue.
+
+**Prune with three replay threads (`prune3`: 1.0.63068.0, same route, lease #208).**
+- **Build:** loader `807be1bf` (measure), with `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`.
+- **Served list:** 1,431 records, including prune1's appends.
+- **Replay order:** no new code. The replay database is append-only in first-creation order, as the player's list is, so replay already walks the remainder in roughly the player's order.
+
+| | Baseline | `prune1` (1 thread) | `prune3` (3 threads) |
+| --- | --- | --- | --- |
+| Play→lobby ready / Continue→gameplay | 66.5–67.1 / 15.4–15.5 s | 39.1 / 8.1 s | 39.1 / 8.7 s |
+| Unattended Play→gameplay | 81.9–82.6 s | 47.2 s | **47.8 s** |
+| Traversal frames over 100 ms per minute (worst frame) | 0 (33 ms) | 6.6 (1,002 ms) | 2.3 (885 ms) |
+| Render-thread compiles ≥100 ms per minute: traversal / Fisk route | 0 / 0 | 5.9 / 1.2 | 1.2 / 1.7 (worst 887 / 884 ms) |
+| Lowest available commit: pre-menu / gameplay | — | 1,291 / 325 MiB | 1,184 / 305 MiB |
+| Replay | — | 1,468 replayed, 187 hits | 1,254 replayed, **0 hits** |
+
+**Verdict: fails the acceptance criteria.** Those require 0 traversal frames over 100 ms and render-thread compiles at the baseline rate of about 0.
+- **Why the extra threads didn't help.** Running ahead, replay compiled against root-signature objects the game did not use. 19 of the 23 render-thread compiles were `replay=3` misses, and replay got no hits at all.
+- **The guard missed it.** The copy-blob dedup check in `ba00490` still read `same=1`. The guard (`title-object-differs`) never fired, because the game had created its roots before replay used them.
+- **What that suggests.** The game holds more than one root-signature object for some blobs, and replay picks the newest one with that blob. Fixing that needs replay to compile against the same object the game will use. That is not available from a blob hash, so replay cannot cover the pruned remainder.
+- **Saves.** `slot0` was autosaved during the run and restored from the backup. All three saves were verified unchanged afterwards.
+
+**Recommendation (superseded below).** Keep the play build at the baseline warm-up. Its 82–86 s unattended meets the goal. `PSO_WARMUP_LIST`, `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off.
+
+### Prune with three replay threads after the root-signature fix (November 28, evening)
+
+**Cause of prune3's misses.** Run `rootdiag` (1.0.63100.0) traced root-signature creation. Two replay threads created the same recorded root signature at the same time, and the Xbox runtime returned two different objects (`root-dup by=replay prior=replay`). The game's later creation got the first object, while replay had compiled against the second. `f3a5b30` makes replay create its root signatures one at a time and check again under the lock (`XPR_SERIAL_ROOTS`). The play loader sets it only when `PSO_REPLAY_THREADS > 1`.
+
+**Runs.** Same route as prune1 and prune3: menu detected on screen, Continue, a 240 s scripted traversal, then objective-marker cycles toward the Fisk Tower atrium. Saves were restored and verified after each run. Stutter comes from `tools.measure --stutter --producer-log`, with each marker screenshot excluded (−1.7 s to −0.2 s on the console clock). Load phases come from `tools.load_phases`, with Play taken from `steam_launch_run_id`.
+
+- **`prunefix`:** 1.0.63101.0, lease #233. Measure loader `f35e27ad` at `f3a5b30`.
+- **`pf939`:** 1.0.63103.0, lease #236. Measure loader `df504fee…` (`build.sh measure` at `939141e`). This is the 1.0.63102.0 package content with only the loader swapped and the autoplay marker added.
+
+Both use `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`.
+
+| | Baseline play build (1.0.63102.0) | `prunefix` | `pf939` |
+| --- | --- | --- | --- |
+| Warm-up pipelines | ~2,600 | 1,495 | 1,508 |
+| Play→lobby ready (trace) | 66.5–67.1 s | 41.7 s | 41.2 s |
+| Main menu on screen, from Play | — | about 47 s | 46.7 s |
+| Continue→gameplay | 15.4–15.5 s | 7.9 s | 8.4 s |
+| Unattended Play→gameplay | 81.9–82.6 s | 49.6 s | 49.6 s |
+| Observed Play→steady gameplay | about 104 s | about 70 s | **69.1 s** (the first A press was ignored, the second accepted) |
+| Traversal 240 s: FPS / lowest 1 s / worst frame | 59.89–59.93 | 59.89 / 53 / 117 ms | **59.91 / 57 / 50 ms** |
+| Traversal frames over 33 / 100 ms | 0–12 / 0 | 3 / 2 (one 117 ms compile, one 138 ms unattributed) | 4 / **0** (two compile-attributed, 84 ms in all) |
+| Frames over 100 ms per minute, traversal plus route | 0 | 0.36 | **0.15** (one unattributed, in 6.5 min) |
+| Render-thread compiles in gameplay | 0 over 100 ms | 1 (113 ms) | 2 (92 ms in all; no stall recorded) |
+| Replay in gameplay | — | 1,035 replayed, 24 hits | 1,028 replayed, 259 hits |
+| Lowest available commit in gameplay (perf-sec) | 343 MiB (verifier) | 311 MiB | 320 MiB |
+
+**Gate.** Settled traversal windows at 16:44:30 and 16:46:30 pass `--require-gpu-60`: 59.90 and 59.97 FPS, lowest second 58 and 59, every frame a shared GPU texture. The game renders internally at 1280×720; the output is 1920×1080.
+
+**Lighting.** 15 gameplay and menu captures were checked with the `light/hue.py` thresholds. All showed 0.00% green and 0.00% magenta. By eye, they show normal sky, glass and the atrium interior.
+
+**The Fisk Tower mission frame rate is a separate issue.** `pf939` went further than earlier routes: through the tower's mission-start cutscenes and into **The Main Event – Clear the atrium** combat.
+- **16:49:07–16:50:07.** The frame rate was 41–50 FPS, with 210 frames over 33 ms and a 99th percentile of 47–50 ms. Over the 152 s route window that is 71 frames over 33 ms per minute.
+- **None of it is pipeline compilation.** No compiles were traced in that window, the main thread averaged only 594–1,004 ms of CPU per second, and no frame took over 100 ms.
+- **Before and after, it was steady.** In the street on the same route, outside the screenshots, the frame rate held at 56.9–58.4 FPS.
+- **prunefix never reached it.** Its last three cycles stayed outside, at 56.9 FPS.
+- **So this is the tower frame limit.** It matches the open limit in [Fisk Tower frame rate](#fisk-tower-frame-rate-and-first-use-hitches-issue-93-november-28), not a load-time regression.
+
+**Play default.** `build.sh` now applies these defines in both play and measure (`load_flags`), and `play-build.json` lists them as `load_defines`.
+
+| Build at `939141e` | Loader SHA-256 |
+| --- | --- |
+| `build.sh play` (installed as 1.0.63104.0) | `c6b50df75f567a0ecd6471be9c8a10437c301174f58e3cb424d4e6b5e7ed57a5` |
+| `build.sh measure` | `df504fee3cc9f5dd90792b35868c5bb8d1bb778c91baffaa4ff75cd006fd7e1b` |
+| `build.sh play -UPSO_WARMUP_LIST -UPSO_REPLAY_THREADS -UPSO_BG_RESERVE` (the earlier full warm-up) | `49071d0a2ce950883a9c818ae969f45c4e36438e58cc4ab84946a8bb92dc4e96` |
+
+The earlier play loader, `68a5c545`, is the same full-warm-up build at `70e289a`. All of the difference from `49071d0a` comes from `939141e`. Applying that commit's files one at a time gives:
+
+- `demand-commit.h` alone: `35116dbd`.
+- Plus `d3d12-small-array-copy.h`: `e858d94e`.
+- Plus `d3d12-pipeline-replay.h` (the `rep stosb` clear): `49071d0a`.
+
+**Playtest package.** 1.0.63104.0, APPX SHA-256 `2f9aad15…`. It is the 1.0.63102.0 content (restored textures `af93da80`, recipe `748e3130`) with only `XboxWin32LoaderTrace.dll` and the manifest version changed, and no autoplay marker. It was installed without a launch under lease #237, and the saves were verified afterwards.
+
+**Not yet verified.**
+- A launch of 1.0.63104.0 itself. It is the play loader, which differs from the verified measure loader only by `-DNO_PERF_SEC`.
+- A physical controller's first Continue press.
+- Audio by ear.
+- Save and reload.
+- How the session list grows over many player runs. Every run appends pipelines that were not served, so the boot warm-up grows again from 1,508.
+
+## Memory headroom variants (issue #96, November 28)
+
+**Goal.** At least 250 MiB of free commit in the Fisk Tower atrium, where `1.0.63026.0` (B1 content) bottomed out at 60 MiB, with the best image and 60 FPS where possible. Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Every run continued from the player's save, and the saves were restored and verified after each run (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`).
+
+**Route.** One 240 s scripted traversal (the gate windows, no screenshots), then up to 45 cycles following the objective marker into the atrium. The scripted route is not deterministic: of 13 runs, 6 confirmed the atrium in screenshots. The atrium is the low point. Runs that missed it understate the worst case by about 70–120 MiB, so the table separates them.
+
+**Levers found in the executable.**
+
+- **Display settings struct** (`exe+0x1CFA9C0` sets the defaults; `exe+0x1CA87A0` logs them):
+
+  | Field | Meaning |
+  | --- | --- |
+  | `+0x38` | Half refresh rate |
+  | `+0x39` | VSync |
+  | `+0x4C` | Dynamic-resolution FPS target |
+  | `+0xBC` | Upscale method (None, IGTI, DLSS, FSR, XeSS) |
+  | `+0xC0` | Upscale quality |
+  | `+0xD8` | Resolution modifier |
+  | `+0x2C` / `+0x30` | Fullscreen width and height, picked from the display modes |
+
+- **The resolution modifier does not save memory.** Setting `+0xD8` to 2/3 at RVA `0x1CFADB1` made the game log "Resolution modifier 0.666667" and render visibly blockier. Render targets stay at full size: Video Usage stayed at 2,433 MB and the lowest free commit was unchanged.
+- **The fullscreen default alone does nothing.** Forcing it to 1280×720 at RVA `0x1CFAB64` had no effect: the only enumerated mode is 1920×1080, so the game picks it again.
+- **A smaller hosted monitor does work.** The play loader can set `XBOX_SDL_RENDER_WIDTH`/`HEIGHT` in the game process at boot, before the game queries displays (`-DHOSTED_RENDER_WIDTH/HEIGHT`). The shared window adapter (`runtime/win32/window-monitor.c`) then reports a 1280×720 monitor and mode, and the game renders 1280×720. The DXGI swap chain is still requested at 1920×1080 (`dxgi request-width 0x780`), so the game upscales into it and the presenter outputs 1920×1080 unchanged.
+- **The game's own 30 FPS cap works.** "Half refresh rate" with VSync on (`+0x38 = 0x0101` at RVA `0x1CFAC69`) makes the game present with SyncInterval 2 (`dxgi present-interval 0x2`), and the adapter paces to 30 Hz.
+- **Ray tracing is already off, and "BVH heaps" is not BVH memory.**
+  - On this console the game logs "RAY TRACING DISABLED … lack of Shader Model 6.6" and "No support for DXR 1.1". The DXR 1.1 gate is the device field `+0xD0`, filled by `exe+0x18F91C0` only when `RaytracingTier >= 1.1`. It is null here, so no BVH is built.
+  - The `[Render]` line's "BVH heaps: 80/100 MB" is entry 3 of the render allocator list (`exe+0x1418EC1C0`): the 20 MiB "Tex2D RTV" render-target heaps. The real BVH allocator ("Buf RT") sorts earlier, and 80/100 are multiples of 20 MiB.
+  - Hosted 720p lowered it to 60 MB. An RT-off setting therefore has nothing to free.
+
+**Results.** All runs use the 448 ManagedBuffer, skin 16, loader-cut and light-grid-1024 overlays and the 242 restored textures. Loaders were built from the play-loader snapshot. "Atrium" means the atrium was confirmed in screenshots.
+
+| Variant | Run, package, lease | Internal / output | Atrium | Lowest free commit (where) | Peak commit | Traversal gate windows passing | Traversal: FPS, worst frame, frames >33 ms per min |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Baseline: SB224, Medium, 60 FPS | B1, `1.0.63023.0`, #151 (previous pass) | 1920×1080 / 1920×1080 | yes | **60 MiB** (atrium) | 5,060 | 3/7 | 59.10, 818 ms, 9.96 |
+| Resolution modifier 2/3 | r720, `1.0.63028.0`, #158 | 1280×720 inside 1080p targets / 1920×1080 | yes | 69 (atrium) | 5,050 | 4/7 | 59.84, 118 ms, 2.81 |
+| SoundBankAlloc 128 MiB | sb128, `1.0.63034.0`, #165 | 1080p / 1080p | no | 249 (street) | 4,870 | 5/7 | 59.85, 169 ms, 0.77 |
+| SoundBankAlloc 128 MiB (rerun) | sb128b, `1.0.63040.0`, #176 | 1080p / 1080p | yes | **180** (atrium) | 4,939 | 4/7 | 59.39, 67 ms, 21.96 |
+| Texture Quality Low | low, `1.0.63036.0`, #168 | 1080p / 1080p | yes (traversal) | **74** (atrium) | 5,045 | 4/7 | 55.94, 167 ms, 80.3 (atrium in window) |
+| Fullscreen default 1280×720 (no effect) | fs720, `1.0.63038.0`, #172 | 1080p / 1080p | no | 84 (mission edge) | 5,035 | 2/7 | 59.12, 1,402 ms, 6.1 |
+| 30 FPS (game's half refresh) | fps30, `1.0.63042.0`, #179 | 1080p / 1080p | no | 115 (traversal) | 5,004 | 30 FPS: see below | 29.90, 785 ms |
+| Hosted 1280×720 render | host720, `1.0.63043.0`, #180 | 1280×720 / 1920×1080 | yes | **229** (mc-sample) / 238 (per-second) (atrium) | 4,890 | 5/7 | 59.24, 737 ms, 11.7 |
+| SB128 + Texture Low | sb128low, `1.0.63045.0`, #183 | 1080p / 1080p | no | 284 (street) | 4,835 | 6/7 | 59.92, 38.5 ms, 1.28 |
+| Hosted 1600×900 + SB128 | h900sb128, `1.0.63047.0`, #185 | 1600×900 / 1920×1080 | unconfirmed | 181 (near tower) | 4,938 | 4/7 | 59.37, 1,371 ms, 13.0 |
+| **Hosted 1280×720 + SB128 (chosen)** | cand720sb128, `1.0.63049.0`, #187 | 1280×720 / 1920×1080 | no | 291 (nav) | 4,828 | **7/7** | 59.82, 234 ms, 1.02 |
+| **Chosen, final loader** | final-a, `1.0.63053.0`, #191 | 1280×720 / 1920×1080 | no | 333 (traversal) | 4,786 | **7/7** | **59.93, 33.1 ms, 0** |
+| **Chosen, atrium route** | final-b, `1.0.63055.0`, #193 | 1280×720 / 1920×1080 | **yes** (Web Strike tutorial, FISK sign) | **312 MiB** (atrium) | 4,807 | (no traversal; nav screenshots) | — |
+| Chosen + warm-up skip (#95) | cand2skip, `1.0.63051.0`, #189 | 1280×720 / 1920×1080 | — | no gameplay (see below) | — | — | — |
+
+Every frame in every window used shared GPU textures (0 CPU uploads).
+
+**What each lever is worth in the atrium,** against the 60–69 MiB baseline:
+
+| Lever | Change in atrium free commit | Notes |
+| --- | --- | --- |
+| SoundBankAlloc 224 → 128 MiB | +111–120 MiB | The game's own "Page file" figure falls by 100–135 MB in every phase |
+| Hosted 1280×720 render | +160–170 MiB | Video Usage −138 MB; render-target heap 60 MB instead of 80–100 |
+| Texture Quality Medium → Low | about +5–15 MiB | Tex Usage −35 to −47 MB, inside run-to-run noise. Not worth its cost: the suit loses its web lines (`crop-low.png`) |
+| Hosted 1600×900 | about 0–20 MiB | The render-target heap stays at 80 MB in 20 MiB steps |
+| 30 FPS cap | none | Page file 4,781 MB, the same as at 60 FPS |
+
+No single variant reaches 250 MiB in the atrium. Hosted 720p comes closest at 229–238.
+
+**Chosen configuration: hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium with restores, 60 FPS.**
+
+- **Memory.** Lowest free commit is 312 MiB in the atrium (final-b, atrium confirmed) and 333 MiB over the traversal route (final-a). The peak is 4,807 MiB. This meets the 250 MiB target with about 60 MiB to spare.
+- **Gate.** 7/7 traversal windows pass in both chosen runs. Final loader, 235 s traversal: 59.93 FPS, lowest 1 s 57, p95 17.79 ms, worst 33.1 ms, no frame over 33 ms per minute, and no compile stall.
+
+**What it costs.**
+
+- **Resolution.** The image is rendered at 1280×720 and upscaled. Edges are visibly softer and stair-stepped (`crop-host720.png` against `crop-b1.png`). This misses the 1920×1080 native-resolution target. It is a limitation introduced by the compatibility layer and stays open.
+- **Audio.** SoundBankAlloc 128 MiB rejects the banks that previously needed 128–192 MiB. Which ones is not logged, and voice and audio presence could not be checked remotely: the game logs no bank errors, and the XAudio2 2.7 counters show 0 source voices in every run, including SB224. The earlier delayed-audio report (#92) may come back.
+
+**Native-1080p alternatives** for comparison:
+
+| Configuration | Atrium free commit | Measured or estimated |
+| --- | --- | --- |
+| SB128 + Medium | 180 MiB | Measured |
+| SB128 + Low | About 190–215 MiB | Estimated; this run missed the atrium |
+
+Both fall short of 250. Native 1080p would need about another 70 MiB from the engine pools or GPU heaps.
+
+**30 FPS lock (fps30).**
+
+- **Pacing.** p50 33.37 ms, with 95.6% of intervals between 30 and 37 ms. There were 36 missed 30 Hz slots per minute (about 50 ms frames, each followed by a short one) and one 785 ms first-use compile. It is not perfectly steady.
+- **Memory.** It does not lower commit.
+- **Availability.** It remains available as `half-refresh-vsync-overlay.json` but is not selected.
+
+**Frame-rate consistency.**
+
+- **Streets.** At 60 FPS the street windows pass.
+- **Remaining failures.**
+  - First-use pipeline compiles of 100–1,400 ms, in pipelines that are not yet in the replay database.
+  - The Fisk Tower area. Approaching and entering the atrium, the game drops to 45–48 FPS at both 1080p and 720p (`[Render] fps` 44.9–47.5), so it is not GPU-resolution bound.
+- **Not every settled window passes yet.**
+
+**Warm-up skip (#95) trial, cand2skip.**
+
+- **What the loader did.**
+  - It logged "pso-warmup hidden" and "session-open ok".
+  - `load_phases` reported `game_warmup_pipelines=0`.
+  - The menu appeared 49 s after launch, against 95–115 s.
+- **What happened next.**
+  - The scripted Continue logged a save-load request, but 70 s later the main menu was still on screen, with commit at about 4,900 MiB.
+  - The traversal inputs then selected Quit ("Quit requested from menu"). There was no crash, no `0x887A0005` and no `XBSC_XS` fault.
+- **Unmeasured.** Gameplay hitches, pop-in and lowest free commit could not be measured. It is left out of the play build until a run reaches gameplay.
+
+**Load phases.** Play → gameplay unattended was 82.4–86.3 s across these runs (`tools.load_phases`; boost loader `ea4f057` and later), within the 90 s budget. No 6-slot boot produced an `XBSC_XS` fault or `0x887A0005`.
+
+**Tint.** It appeared in most launches and varied by launch, independent of the variant:
+
+| Kind | Runs |
+| --- | --- |
+| Magenta or white sky glare at the start street | r720, sb128b, sb128low, cand720sb128 |
+| Cyan/magenta canopy glare | fs720 |
+| Green shopfronts and windows | fps30, sb128low, final-b |
+| Clean start street | sb128, low, fs720, host720, final-a |
+
+Each run folder has a `sky-sheet.png`.
+
+**Profile.** `play-build.json` declares the build's recipe overlays and loader budget. `build.sh play` and `measure` now pass `-DSOUNDBANK_MIB=128 -DHOSTED_RENDER_WIDTH=1280 -DHOSTED_RENDER_HEIGHT=720`; append `-USOUNDBANK_MIB -DSOUNDBANK_MIB=224 -UHOSTED_RENDER_WIDTH -UHOSTED_RENDER_HEIGHT` for the earlier budget. `tests/test_spider_profile_overlays.py` pins both, plus the optional 30 FPS overlay.
+
+**Installed play build.** `1.0.63057.0`, appx SHA-256 `ea8b6ee1f1ba5469…`, deployed under lease #195 without launching.
+
+- **Configuration.** It is the final-a/final-b content without autoplay:
+  - play loader `faed3258adfa51c0…` (`build.sh play` at `515cb3a` plus the hosted-render option; no per-second counters);
+  - recipe `748e3130…`, with the same overlays as `1.0.63026.0`;
+  - hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium plus 242 restores, light-grid cap 1024.
+- **Two versions listed.** Device Portal lists both `1.0.63056.0` (the tint agent's diagnostic) and `1.0.63057.0` in the same package family.
+- **Saves.** They read back as the player's `slot0 e3cfef672fa1`, `slot2 b5a997101896` and `userprefs 785ec4934744`.
+
+**Open.**
+
+- **Repeat the atrium.** The chosen content has one confirmed atrium run (312 MiB); repeat it for variance (run-to-run spread elsewhere was about 25 MiB).
+- **Shared marker.** Move the hosted render size from the title loader into a shared profile marker. `ProbeNative.cpp` currently hard-codes 1920×1080 for the SDL host.
+- **Native 1080p.** Find about 70 MiB more in engine pools or GPU heaps.
+- **Audio.** Confirm voice and audio by listening at SB128.
+- **Verifier.** Run an independent `xbox-game-verify` pass.
+- **Tint fix.** Fold in the sky agent's tint fix once it is committed. It is uncommitted in the shared worktree and is not in this build.
+
+## Fisk Tower frame rate and first-use hitches (issue #93, November 28)
+
+**Question.** The Fisk Tower approach and atrium run at 31–48 FPS at both 1280×720 and 1920×1080 internal resolution, while the street holds 60. Is the frame limited by the GPU, by the game's CPU threads, or by something the compatibility layer adds?
+
+**Setup.** Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Every console run used the installed play content (`1.0.63057.0`: hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium with the 242 restores, light-grid cap 1024, recipe `748e3130…`) with a measure loader built from the same play-loader source plus the diagnostics below. All runs continued from the player's save and followed the objective marker from the start street with no traversal script. The saves were restored and verified after every run (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`).
+
+| Run | Package, lease | Loader diagnostics | Reached the Fisk approach |
+| --- | --- | --- | --- |
+| fisk1 | `1.0.63061.0`, #199 | perf-sec + wait profiler | no (subway stairs) |
+| fisk2 | `1.0.63064.0`, #204 | + GPU profiler (queue and per-pipeline timing) | no (left the mission area) |
+| fisk3 | `1.0.63067.0`, #207 | + per-frame queue summary | **yes**, ending on the atrium's Web Strike tutorial |
+| fisk4 | `1.0.63070.0`, #210 | wait profiler with two call sites; Lowest LOD, shadow, vehicle, crowd and hair | no (deadline) |
+
+The objective-marker route is not deterministic: one run in four reached the tower.
+
+**New diagnostics** (play-loader snapshot, off by default; the play build is byte-identical, `68a5c545…`):
+
+- `-DWAIT_PROF` (`waitprof.h`): about 500 samples per second of the main and render threads (suspend, read RIP and stack, resume). Each second it writes the eight busiest places and the first two executable call sites on the stack.
+- `-DGPU_PROF` (`qtlframes.h`, `gpuprof.h`): the existing queue hooks in a play build. Every 5 s, per frame: `gap` (previous Present to the frame's first submission), `submit` (first to last game submission, the render thread's recording span), `busy` (GPU queue busy time) and `lag` (GPU work still running after Present). Every 10 s: GPU time per pipeline, with each shader container marked DXBC or DXIL. `-DNO_LISTPROF` drops the per-pipeline timing.
+- perf-sec gains `rd-n`, `rd-kib` and `rd-ms`: the game's `ReadFile` calls through the loader and their synchronous time.
+- The run script samples Device Portal `systemperf` twice a second (GPU engines, CPU load, disk read speed).
+
+**The street is GPU-paced and has slack** (fisk3, 10:23:30–10:24:05, 57.3 FPS including screenshot seconds):
+
+- Per frame: `gap` 10–16 ms, `submit` 0.7–8.5 ms, GPU `busy` 6–12 ms, never more than 16.7 ms. The game submits the whole frame right after Present returns from the 60 Hz pacer, and the GPU finishes 7–12 ms later.
+- The render thread spends its waits spinning on a GPU query (`GetData` loop at `exe+0x0188F248`, pause loop `exe+0x01BBF4C0`; 26% of samples). The main thread waits on the render thread's condition variable (`SleepConditionVariableCS` via `exe+0x01BBF3F0`; 28%).
+- The process used 4.23 of its 6 logical processors.
+
+**The Fisk approach is limited by a CPU dependency chain in the game, not by the GPU** (fisk3, 10:24:20–10:24:45, 38.3 FPS):
+
+| Measure | Street | Fisk approach |
+| --- | --- | --- |
+| Frame interval | 16.7 ms | 25.6–31.7 ms (5 s averages) |
+| `gap` (Present → first submission) | 10–16 ms | **1.0–2.4 ms** |
+| `submit` (render thread's submission span) | 0.7–8.5 ms | **24.2–30.5 ms** |
+| GPU `busy` per frame | 6–12 ms | 13.9–16.6 ms |
+| Process CPU (of 6 logical processors) | 4.23 | **3.31** (1.78–4.58) |
+| Render thread: WaitForSingleObject via `exe+0x01BBF2D0` | 0.5% | **21.5%** |
+| Render thread: work in `exe+0x017897C0` (called from `0x0178B519`) | — | 17.3% |
+| Render thread: GPU query spin | 26.2% | 13.8% |
+| Main thread: WaitForSingleObject via `exe+0x01BBF2D0` | 2.0% | **36.3%** |
+| Main thread: waiting for the render thread | 27.6% | 21.8% |
+| Pipeline compiles, demand-commit faults | 0, 18 | 0, 208 (≈14 ms of fault handling in 26 s) |
+| `ReadFile` calls / synchronous time | 705 / 259 ms | 5,002 / 1,080 ms over 26 s |
+| Disk read rate (Device Portal) | 0–85 MB/s | 0.4–2 MB/s, one 2 s burst at 311–537 MB/s |
+
+- The frame now has no pacing slack: the render thread starts the next frame within 1–2 ms of Present and takes 24–30 ms to submit it.
+- During that span both the main and render threads block in `WaitForSingleObject(…, INFINITE)` through the game's wrapper at `exe+0x01BBF2D0`. On the street, the second-level callers of that wrapper are the job system's waits at `exe+0x01700C4F` and `exe+0x01700D4D` and a render-side wait at `exe+0x018D5841` (fisk4). Process CPU falls rather than rises, so 2–4 logical processors sit idle while the frame waits: the frame follows a serial chain of job work, not total CPU throughput.
+- GPU busy per frame (14–16.6 ms) is below the 25–31 ms frame interval, so the GPU is not what holds the frame. It is close to the 16.7 ms budget, though, so removing the CPU chain alone would leave the GPU at its limit there.
+- Nothing from the compatibility layer is on the measured path: no pipeline compiles or replay work (replay finishes within 28 s of gameplay start), no commit pressure (237 MiB lowest free), few demand-commit faults, no slow I/O, and the Present path returns in under 0.2 ms.
+- Earlier runs agree: `run-low` (1080p) and `run-host720` show the same pattern in the same place: the main thread was 17–61% busy and the process used 2.1–5.2 of its 6 logical processors.
+
+**Device Portal's GPU engine 5 utilisation is not GPU busy time.** It read 97–100% throughout fisk1–fisk4, including 60 FPS street seconds where the timestamped queue was busy only 40–70% of the time. It cannot be used to tell whether a scene is GPU-bound.
+
+**GPU time by pipeline on the street** (fisk2, timestamped lists, 10 s windows after gameplay start): 85% of the timed GPU time is in pipelines built from DXBC shaders, which the Xbox runtime converts to DXIL; 4.5% is DXIL. The three largest are compute shaders of 62, 37 and 23 KB of DXBC (11%, 10% and 8%). Whether the DXBC conversion costs more than the original bytecode would on PC is not measured.
+
+**Levers tested or ruled out.**
+
+- **Lowest LOD, shadow, vehicle, crowd and hair** (hidden tier 0 at RVAs `0x1CFAD2C`–`0x1CFAD70`, a scratch overlay not added to the profile). fisk4 applied it ("Level of Detail: Lowest") but did not reach the tower, so its effect there is unmeasured. On the street it held 60 FPS, as the default settings do.
+- **Processor placement, SMT pairing and priorities.** The process is not starved: 2–4 logical processors are idle during the drop. The game's own `SetThreadAffinityMask` calls for the main and render threads pass a zero mask read from globals at `exe+0x07A9E780/784` and fail with error 87 (`run-low` trace). A zero mask fails the same way on Windows; that comparison is inferred, not observed. The earlier "hot-thread ideal processors" trial showed no gain.
+- **Background replay compiles during gameplay.** None: replay finishes within 28 s of gameplay start in every measure-loader run, and perf-sec shows no title or replay compiles in the Fisk seconds.
+
+**Result: the Fisk Tower area is a game-side CPU limit on this console.** The best verified result at the tower is 38–41 FPS averaged over 30 s at 1280×720 (fisk3 38.3 over 26 s; final-b gate below). On the street the chosen configuration holds 60.
+
+**Gate output** (`tools.measure --require-gpu-60 --stutter --producer-log`, 30 s, shared GPU textures only):
+
+Fisk approach, final-b (`1.0.63055.0`, 1280×720 in 1920×1080, three screenshot windows excluded):
+
+```json
+{"start_utc": "2026-11-28T08:10:47+00:00", "duration_s": 30.0, "presented": 1217, "fps": 40.567, "min_rolling_1s_fps": 14, "p50_ms": 18.087, "p95_ms": 33.716, "p99_ms": 49.861, "worst_ms": 550.818, "intervals_over_33_33ms": 163, "cpu_presented": 0, "shared_texture_presented": 1217, "hardware_adapter_verified": true, "internal_resolution": "1280x720", "output_resolution": "1920x1080", "gpu_60fps": false, "stutter": {"duration_s": 30.0, "over_33ms_per_minute": 278.0, "over_100ms_per_minute": 0.0, "by_cause": {"pipeline_compile": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "excluded": {"over_33ms": 24, "over_100ms": 3, "ms": 2353.474}, "unattributed": {"over_33ms": 139, "over_100ms": 0, "ms": 4979.022}}}}
+```
+
+Fisk approach at native 1080p, `run-low` (`1.0.63036.0`, no screenshots in the window): 40.77 FPS, lowest 1 s 25, p95 34.3 ms, `gpu_60fps` false.
+
+Street, final-a (`1.0.63053.0`, same content):
+
+```json
+{"start_utc": "2026-11-28T07:53:59+00:00", "duration_s": 30.0, "presented": 1797, "fps": 59.9, "min_rolling_1s_fps": 58, "p50_ms": 16.686, "p95_ms": 18.136, "p99_ms": 19.943, "worst_ms": 32.802, "intervals_over_33_33ms": 0, "cpu_presented": 0, "shared_texture_presented": 1797, "hardware_adapter_verified": true, "internal_resolution": "1280x720", "output_resolution": "1920x1080", "gpu_60fps": true, "stutter": {"duration_s": 30.0, "over_33ms_per_minute": 0.0, "over_100ms_per_minute": 0.0, "by_cause": {"pipeline_compile": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "excluded": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "unattributed": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}}}}
+```
+
+**Street stutter over 10 minutes** with the nav screenshots excluded (`tools.measure --stutter --exclude-utc` per screenshot; the console clock runs about 1.2 s behind the Mac's): fisk1, 56.8 FPS including the screenshot gaps, 0.3 frames over 33 ms per minute, none over 100 ms. fisk2 (with the per-pipeline profiler's overhead): 9.5 and 0.2 per minute.
+
+### First-use pipeline hitches in gameplay
+
+**Nearly every gameplay hitch of 100 ms or more is a pipeline the console has never compiled** (`pso-slow` records of at least 100 ms after gameplay began, over 14 runs from 04:36 to 10:26 UTC):
+
+- **34 of 36 are new pipelines on the render thread.** These compiles took 101–874 ms after gameplay began. Each had replay outcome 1 ("new": not in the database), was compiled synchronously by the render thread, and waited 0 ms for a slot.
+- **The other 2 are a worker-thread compile of a recorded entry.** They took 531 and 1,039 ms, 8–12 s into gameplay (final-b, fisk3), before replay reached the entry (outcome 2). Worker compiles go through the engine's asynchronous path.
+- **Replay order is not the problem.** Replay finished 14–28 s after gameplay began in the 11 measure-loader runs (before gameplay in fps30), and title compiles go ahead of replay. Prioritising by first-use order would only affect the two worker compiles above.
+- **Recording works.** Only one pipeline key compiled as new on the render thread in more than one run, and none repeated as new afterwards. The database grew from 2,828 to 2,936 pipelines over these runs. New render-thread pipelines per run varied between 0 and 14 with no convergence trend, because each run takes a different route.
+- **Two lever classes remain, both open.** (1) Seed the database with more of the city on a fresh install, so a player's first visit does not compile. (2) Make the render thread's first-use compile asynchronous. That needs the engine's material readiness path; a pipeline proxy was evaluated and rejected in the load-time notes.
+
+### Locked 30 FPS
+
+**The 30 FPS misses came from the pacing clock, not from the game.** The game's own half-refresh mode (`half-refresh-vsync-overlay.json`, SyncInterval 2) is paced by the DXGI adapter on a 60.000 Hz grid, but the host display refreshes at 59.94 Hz (median 16.682 ms from the presenter's timestamps). The producer's frame phase therefore drifts across the host's vsync edge once per 1/(60 − 59.94) ≈ 16.7 s. While it is near the edge, frames alternate between 50 and 17 ms.
+
+- **The bursts match that period.** In `run-fps30` the 142 missed 30 Hz slots of the 236 s traversal fall into 14 bursts whose starts are 11.8–20.2 s apart, 16.5 s on average.
+- **Pacing at 60000/1001 Hz removes most of them.** The adapter already has that pacing behind the `fhd-refresh-5994.txt` marker; it is active only together with `fhd-measure.txt`. Run fps30b (`1.0.63072.0`, lease #212) used the play content with the half-refresh overlay, that marker, and a measure loader built from the play-loader source. The trace shows `dxgi pacing-rate-millihz 59940` and `present-interval 2`. Measured over the same 236 s traversal script (missed slot = an interval over 45 ms):
+
+| Run | Pacing clock | Content | FPS | Missed 30 Hz slots per min | Over 100 ms per min | Intervals within 30–37 ms | Worst |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fps30 (`1.0.63042.0`) | 60.000 Hz | 1080p, SB224 | 29.90 | 36.1 | 0.51 | 95.6% | 785 ms |
+| fps30b (`1.0.63072.0`) | 59.940 Hz | 720p, SB128 | 29.95 | **9.2** | 0.25 | **99.0%** | 166 ms |
+
+- **The 16.7 s period is gone.** The remaining 36 misses fall in 10 small clusters, the largest two 12–41 s into the traversal. One 30 s window had none.
+- **Not yet perfectly steady.** 60000/1001 Hz still differs from the measured host rate by a few millihertz, so the phase can still cross the edge over minutes. Lowest free commit was 353 MiB.
+- **The proper fix belongs in the presenter.** Hard-coding 59.94 Hz in the shared adapter would bind it to this display mode. The host should publish its refresh period and last vsync time in the GPU mailbox, and the adapter should pace interval-2 presents to that phase. That is a presenter and adapter change that needs a CI build. It is open.
+- **What 30 FPS does not change.** Commit is the same as at 60 FPS. At the tower, where the game manages 31–48, a 30 FPS lock would be steady only if the frame stays under 33 ms; fisk3's 5 s averages of 25.6–31.7 ms say it mostly would. Not measured there.
+
+### Notes
+
+- **Bottleneck evidence** comes from fisk3, the only run that reached the tower with the frame diagnostics. The fisk4 second-level call sites are from the street, where the waits are rare; the Fisk waits share the same wrapper but their callers there are not sampled.
+- **Worker threads:** sampled in the follow-up below (fisk5).
+- **Not measured at the tower:** native 1080p with the frame diagnostics, the Lowest tier, and a second confirming run.
+- **Diagnostic perturbation:** the wait profiler suspends two threads about 500 times a second; the per-pipeline profiler adds work to every command list (fisk2 shows more street stutter than fisk1).
+- **The gate windows at the tower include nav screenshots;** their gaps are excluded by UTC window.
+
+### Follow-up: the job chain at the tower and a host-paced 30 FPS lock (November 28, afternoon)
+
+Every run restored and verified the player's saves (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`). Tower A/B runs started from a throwaway save captured at the Fisk plaza (slot0 `e6c847dd01ae`), kept apart from the player's saves, and drove a scripted combat with no screenshots.
+
+**The job chain** (fisk5, `1.0.63074.0`, lease #214; `WAIT_PROF` now also samples every game thread):
+
+- **Two worker pools.** The game runs 8 job workers (start `exe+0x01BBF8B0`): 4 at priority +2 and 4 at 0. The +2 pool is sized as logical processors − 2: 4 with our 6-processor view, 6 with the system's 8 (trace `cpu/run-b1`).
+- **What the +2 workers do at the tower.** They are 52–55% busy each (32–36% on the street), mostly in the game's `exe+0x017897C0`, and idle about 45% of the time on the job queue (`exe+0x016FF5AE`). The priority-0 workers are 2–7% busy.
+- **Render thread.** 18% of its samples are in `exe+0x017897C0` and 14% are waits for jobs (`exe+0x01700C4F`).
+- **Main thread.** It waits for the render thread and for jobs (`exe+0x01700D4D`).
+- **The GPU is not the limit.** It is busy only 11–12.5 ms per frame at the tower.
+- **Nothing from the layer is on the path.** Our modules account for under 1% of samples, and no wait sits in any of them.
+
+**Worker count makes no difference** (tower combat, first 241 s, 1280×720):
+
+| Run | Processor view | +2 workers | FPS | p50 / p95 / p99 | Frames > 33.4 ms | Lowest 1 s | Lowest free commit | Each +2 worker busy |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| B, `1.0.63082.0`, #221 | ours (6) | 4 | 57.14 | 16.7 / 21.2 / 33.4 ms | 0.8% | 24 | 478 MiB | 50–54% |
+| C, `1.0.63083.0`, #222 | system (8) | 6 | 56.90 | 16.7 / 30.3 / 33.4 ms | 1.0% | 31 | 456 MiB | 29–35% |
+
+- Total worker CPU is the same (2.80 vs 2.63 processors): six workers only spread the same work thinner.
+- The processor view stays as it is, and the tower limit is recorded as the game's own job chain.
+- The scripted combat dips to 44–53 FPS in some 30 s windows. The approach swing in fisk3 went to 31–48.
+
+**Host-paced 30 FPS** (shared DXGI adapter; commits 6af1d25, 643c9a4, 4653b0a, 7b0f9d5, 1607d69):
+
+- **How it works.** The adapter times each committed frame's release from its done fence; the host signals it right after its draw. A phase-locked estimate (`runtime/shared/host-vsync-clock.h`, unit test `tests/host-vsync-clock.c`) gives the host's period and phase. Presents with SyncInterval 2 or more are committed a fixed fraction of a period after the estimated release.
+- **What a raw log showed** (#228; measurement packages log 8,192 releases and commits):
+  - releases follow the host's Present within about 0.5 ms;
+  - the host's draw callback is within ±2.5 ms of the refresh on 98% of refreshes and reaches ±8 ms on the rest;
+  - the period estimate converges to 16.684 ms.
+
+| Run | Commit point | Street, 235 s traversal | Fisk plaza combat (first 240 s / 486 s) |
+| --- | --- | --- | --- |
+| fps30, 60 Hz grid | — | 36.1 per min | — |
+| fps30b, 59.94 Hz marker | — | 9.2 per min | — |
+| A, #217 | 0.3, first loop | **0 per min**, 99.9% in 30–37 ms, worst 37.9 ms | — |
+| A′, #223 | 0.3, first loop | — | **12.0 / 8.5 per min** |
+| #226 | 0.7, envelope loop | — | 22.8 / 19.1 (period locked at the +1% bound) |
+| #227 | 0.7, envelope, near-envelope period | — | 14.2 / 14.5 |
+| #229 | 0.45, first loop | — | 28.3 / 29.3 |
+| fps30d, #230 | 0.3, final (`1607d69`) | **0 per min**, 99.6% in 30–37 ms, worst 38.3 ms | — |
+
+- **Late game frames dominate at the tower.** The tower's remaining misses are mostly game frames that finish after their target: the game's own frame there is 25–33 ms. An early commit point leaves the most room for them, so the shipped point is 0.3. With that point the unit model clears host callbacks up to about 5 ms late.
+- **Zero at the tower is out of reach by pacing.** Pacing cannot remove a frame that takes longer than 33 ms.
+- **The 30 FPS overlay stays optional.**
+- **The adapter must still be built by CI.** The packages carried a local mingw build of HEAD (`XboxWin32Dxgi.dll`; final `524190df…`). It also includes the adapter commits made after November 23 that the base APPX's adapter predates.
+
+**Installed play build: `1.0.63097.0`.** It was deployed without launching (lease #231). APPX SHA-256 `18b5909158f733b7…`.
+
+- Play loader `68a5c545…`. HEAD now builds `7ea05023…` after commit 1f4be52.
+- Recipe `748e3130…`.
+- The 242 restores (`tex/ov-restore-all`, toc `af93da80…`).
+- 60 FPS default, no autoplay, no counters.
+
+## Rainbow sky and lighting tint: small texture-array copies (issue #94, November 28)
+
+**Result.** The rainbow sky grid, the green/magenta lighting and the green reflections have one cause: an Xbox D3D12 fault in `CopyTextureRegion` into small subresources of 2D texture arrays. `runtime/win32/d3d12-small-array-copy.h` works around it in the shared layer, and the Spider-Man play loader installs it (commit `c79ef9f`). Every verification launch since then was clean at the start street and on the Fisk Tower route.
+
+**What the artefact is.**
+
+- **Rainbow sky.** The sky, fog and probe faces sample a 64×64×6 R11G11B10 fog-colour cube (4 mips). `CS_BlendFogColorMaps` (DXBC checksum word `0x39BBAB53`) writes it: 4 dispatches of (size/8, size/8, 6), blending the weather keyframe cubes `g_TexCubeMisc0..3` (t5–t8). Each keyframe cube is a 32×32×6 BC6H texture with 3 mips, placed in a 16 MiB asset heap and uploaded on the **copy queue** by the asset uploader (`exe+0x18FDDBB`, footprints from `GetCopyableFootprints`).
+- **Where the faces go wrong.** On the console, faces 2–5 of those keyframe cubes read zero in shaders. Later they read the neighbouring asset's bytes, which is the deterministic garbage. A `CopyTextureRegion` readback of the same texture shows all six faces filled.
+- **How it shows.** Faces 2–5 of the first blend were empty in every launch before the fix (mean 0.008–0.014 against 0.98/1.93 for faces 0–1). In 4 of 10 launches (d1, d5, g1, h1), later blends filled them with 8×8 tiles of garbage (mean up to 1,338, 21–26% of texels above 64). The bad result persists because the blend reruns only when its input hash changes (`0x141632c40`).
+- **Lighting tint.** The probe cache is a placed 256×256×384 BC6H array with 6 mips in a texture-only heap. Its mips 3–5 (8×8 blocks or fewer) are small subresources of the same kind. They are filled on the direct queue from R32G32B32A32_UINT intermediates, and they are the per-launch green and magenta.
+- **Ray tracing is not involved.** RT is off on this console: no SM 6.6 and no DXR 1.1.
+
+**First wrong operation.** `CopyTextureRegion` into an array subresource of about 1 KiB or less. Slices 0–1 survive. Later slices are invisible to shader views, while copy readback returns the data. Console controls, run in-process on the game's own device (scratchpad `sky/run-h2`–`run-h8`, leases #182–#194):
+
+| Control | Result |
+| --- | --- |
+| h2/h3: 32×32×6 BC6H cube, upload on the copy or direct queue, committed or placed, 4 KiB or 64 KiB alignment, texture-to-texture copy | slices 2–5 read 0 in an SRV |
+| h2/h3: 64×64 BC6H mip 0, or 256×12 slices at mips 0–2 | correct |
+| h5: R32G32B32A32_UINT array, direct queue, explicit NON_PIXEL transitions | correct |
+| h6: float formats, direct queue, explicit transitions | correct; BC6H wrong in every direct-queue variant |
+| h7 v0 / h8 v1, v2, v6: BC6H bytes written through a placed R32G32B32A32_UINT alias at the same heap offset, direct queue (footprint copy or UINT twin, explicit or implicit state) | correct (faces 2–5 = 26/0/77187, 394/1/9429, 5808/3/1151, 84937/7/140, matching the reference) |
+| h7 v1, h8 v0/v3/v4/v5: any format on the copy queue, with or without explicit COMMON↔COPY_DEST barriers or the alias | wrong (0, or RGBA16F mip 2 faces 4–5 = 0) |
+
+**Hypotheses ruled out.**
+
+- **DXIL replacement of `CS_BlendDefaultEnvProbeTextures`.** Wrong shader.
+- **Lowering DXBC `switch` to if-chains.** A switch-to-if rewriter, byte-identical in C and Python, was applied to 8 game shaders in run g1; the sky was still bad. The code was not kept.
+- **Upload race.** In e1 the upload fence had completed before the blend.
+- **Overlapping placed resources.** e1 and d6 logged every placement and found no overlap.
+- **Face-ID shader.** In h1, writes to all six output faces worked; only the inputs were wrong.
+
+**Fix.** `runtime/win32/d3d12-small-array-copy.h`:
+
+- **Scope.** It covers copies into 2D texture arrays (ArraySize ≥ 2, no render-target or depth flags, single-sample) whose subresource is 2 KiB or less.
+- **Copy-queue lists.** The title's copy still runs and is also recorded. When the title submits the list, the copies are replayed on a private direct queue:
+  - copy queue `Signal(copyDone)`;
+  - direct queue `Wait`, then replay, then `Signal(replayDone)`;
+  - copy queue `Wait(replayDone)`.
+
+  This happens inside `ExecuteCommandLists`, before the title's own signal, so the title's upload fence completes only after the corrected data is in place.
+- **Direct-queue lists.** A copy into a small block-compressed subresource is rewritten in place to go through the alias.
+- **Block-compressed formats.** They go through a placed UINT alias (R32G32B32A32_UINT for 16-byte blocks, R32G32_UINT for 8-byte), at block resolution and the same heap offset, bracketed by aliasing barriers. The alias is created in the `CreatePlacedResource` hook and owned by the texture through `SetPrivateDataInterface`.
+- **Command lists and queues.** Originals are kept per implementation: copy lists on Xbox have their own vtable (`sac-list-vtable n=1 value=3`). Hooks cover `CreateCommandList`, `CreateCommandList1` and `CreateCommandQueue`.
+- **Trace lines.** `asset sac-install`, `sac-alias`, `sac-replay` and `sac-inline` (sampled at powers of two).
+
+**Verification.**
+
+| Run | Package, lease | Loader | Fog cube faces 2–5, first blend | Street (6 shots) green / magenta | Fisk route (5 shots) green / magenta | Gate windows (30 s, `--require-gpu-60`) | Peak commit / lowest free |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| s1 | `1.0.63058.0`, #196 | diagnostic readback (`PROBE_DIAG`), Low textures | **filled**: mean 1.29 / 1.18 / 1.28 / 1.33, garbage 0 (before the fix: 0.008–0.014, or garbage) | 0.00 / 0.00 | — | — | — |
+| m1 | `1.0.63060.0`, #198 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 | 7/8 (one 184 ms hitch) | 4,811 / 308 MiB |
+| m2 | `1.0.63063.0`, #203 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 (off-route alley) | 6/8 (852 ms gap, attributed to a pipeline compile) | 4,819 / 300 MiB |
+| m3 | `1.0.63066.0`, #206 | measure `a0dafc85…` | — | 0.00 / 0.00 | 0.00 / 0.00 | 8/8 | 4,789 / 330 MiB |
+| m4 (45 nav cycles) | `1.0.63069.0`, #209 | measure `a0dafc85…` | — | 0.00 / 0.00 (one shot 0.01 magenta) | 0.00 / 0.00 | 7/8 | 4,793 / 326 MiB |
+| p2 | `1.0.63073.0`, #213 | play `68a5c545…` (HEAD `c6a75f9`) | — | 0.00 / 0.00 | 0.00 / 0.00 (glass curtain walls, neutral) | 8/8; 235 s: 59.94 FPS, lowest 1 s 59, worst 20.6 ms, 0 frames over 33 ms | (play loader has no counters) |
+
+- **Saves.** Every run ended with saves restored and checked: `slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`.
+- **Frames.** All frames were shared GPU textures (0 CPU uploads). Internal 1280×720, output 1920×1080.
+- **Memory.** Peak commit was 4,789–4,819 MiB and lowest free 300–330 MiB, against 4,786–4,807 / 312–333 MiB for final-a/final-b without the fix. The extra objects are 8 direct command lists and allocators, one queue and two fences; the aliases are placed and use no memory.
+- **Counters per launch.** The trace logs at least 128 aliases, at least 64 copy-queue replay batches, and at least 1,024 inline BC rewrites (s1) or 16,384 (m1–m3). The counters are sampled at powers of two, so these are lower bounds.
+- **Screenshot sheets.** `run-*/sheet.png` (street) and `run-*/fisk-sheet.png` in the scratchpad `sky/` run folders. The metric is `light/hue.py`: the share of saturated green or magenta pixels.
+
+**Before the fix**, for comparison:
+
+- d1, d5, g1 and h1: magenta 2–12% and green up to 3.7% at the street, with the rainbow cloud grid.
+- d2, d3, d6, d7 and e1: under 0.03%, but with dark faces 2–5 on the first blend.
+
+**Fallback.** No graphics setting was needed. Ray tracing was already off.
+
+**Not covered or not verified.**
+
+- **Fisk Tower atrium.** None of the six launches reached the atrium: the automated route ends on facades near the tower. The atrium glass that the variants agent saw green and yellow is unchecked with the fix.
+- **Committed block-compressed arrays.** They get no alias, so their small copies are only counted as `unsupported`. Spider-Man's affected textures are all placed.
+- **Block-compressed sources.** BC-to-BC texture copies and BC mips below 4×4 texels are not rewritten.
+- **Other titles.** No second title was tested. The fault is in the console driver, so other titles that upload small array slices on a copy queue should need the same header.
+
+**Installed play build.** `1.0.63075.0`, appx SHA-256 `cb7937e514a22cc6…`, deployed under lease #215 without launching. It is the only SteamCore package listed.
+
+- **Loader.** `build.sh play` at `c6a75f9` (with `c79ef9f`), `68a5c5450be7d32b…`: SB128, hosted 1280×720, no per-second counters, no probe diagnostics, no warm-up skip.
+- **Content.** Recipe `748e3130…`, the `play-build.json` overlays (including light-grid cap 1024 and Texture Medium) plus the 242 restores. No autoplay.
+- **What was launched.** This exact content with autoplay was launched as p2. An earlier no-autoplay deploy (`1.0.63071.0`, #211) waited at Big Picture for **Play** and was stopped without starting the game.
+
+## Independent verification of the installed play build (November 28)
+
+**Build.** Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Installed package `1.0.63075.0` (the only SteamCore package listed). The local signed APPX has SHA-256 `cb7937e5…02272`, as claimed. Inside it, the loader is `68a5c5450be7d32b…`, the recipe is `748e3130…`, and `fhd-measure.txt` is present, so the play build does write `fhd-present-times.bin`. Lease #216, run folder `$S/verify/run1`. Play was pressed in Big Picture with remote keyboard input: Installed tab, Spider-Man, Enter on **Play**. Big Picture screenshots return HTTP 500, so the screens came from the package's `big-picture-surface.request` capture. The run continued the player's save, then walked the street (40 s), ran the 240 s traversal script and followed the objective marker for 7 minutes. It ended with Quit → Quit to Desktop.
+
+| Criterion | Verdict | Evidence |
+| --- | --- | --- |
+| Play → gameplay under 90 s | **fail as observed** (unattended metric passes) | Play `steam_launch_run_id` 12:01:05.437Z. The process ran within 5.4 s and the first present came at 7.7 s. The menu was ready at 69.0 s (trace) and on screen by 77.4 s. Two Continue presses, at +78.6 s and +84.0 s, were ignored; the third, at +89.0 s, was accepted. Steady gameplay began at **106.3 s** (presents); `tools.load_phases` gives 81.7 s unattended (`within_budget: true`), or about 86 s when measured from the accepted press. |
+| Consistent frame rate | **pass on street and traversal; Fisk not measured** | 8 of 9 settled 30 s windows pass `--require-gpu-60` (59.93–59.97 FPS, lowest second 59, worst ≤21.8 ms). The 12:06:00 window fails: 59.53 FPS, lowest second 50, with 12 frames of 33.5–34.1 ms within 1.5 s, unattributed. The 240 s traversal ran at 59.888 FPS with 12 frames over 33 ms. All frames were shared GPU textures at 1280×720 → 1920×1080. |
+| No lighting artefacts | **pass where seen; atrium unchecked** | 31 gameplay captures, including the street, sky, rooftop, mid-air and building faces. `hue.py`: green 0.00%, magenta ≤0.01%. By eye, the clouds are normal, with no grid and no tint. `sac-install` is in the trace. |
+| Controller input | **pass** | `inspect-input`: `host-activity`, serial 18 acknowledged with LS held and serial 22 with RS held. The character moved from the crosswalk to the police car. Pause and quit menus responded. |
+| Audio | **unobserved** | XAudio2.7 loaded, `xaudio27-initialize` and `create-mastering-voice` succeeded, and the 128 MiB `SoundBankAlloc` pool was taken. The game log says `[Audio] Device (re)initialized 0x0`. No sound-bank errors. No audible signal can be measured remotely. |
+| Stability, ~15 min | **pass** | 15.1 min of gameplay (12:02:52–12:18:00). No crash or hang, and no `0x887A0005`. Spider-Man commit was 4.70–4.78 GiB; the lowest loader-recorded available commit was 343 MiB. |
+| Return to library | **pass** | Pause → Quit → main menu → Quit Game → Quit to Desktop. The process exited 3.3 s after confirming, and the Big Picture library returned and responded to input (Installed tab). |
+| Save and reload | **gap** | Not tested, to protect the player's run. The existing save did load through Continue, and the game autosaved (`slot0` became `412768f4…`). The saves were restored and checked: `slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`. |
+
+**Frame-rate notes.**
+
+- Every gameplay gap over 100 ms lines up with a Device Portal screenshot. The console clock runs 1.29 s behind the Mac's, and each stall lasts 0.52–0.55 s. In the objective-following windows, which had one screenshot every 10 s, the average was 56.7–56.9 FPS. With the screenshot intervals excluded, 13 of 14 windows had no frames over 33 ms. The 12:10:30 window had 5 frames over 33 ms (180 ms in total), unattributed.
+- No pipeline-compile stalls on the render thread occurred in gameplay. Worker-thread compiles counted 73, the worst 4,927 ms, and none showed up as a hitch.
+- The game log's per-minute counter reads 58.95–60.0 on the street and 55.9–56.9 while screenshots were taken.
+
+**Differences from the p2 claim.** p2 reported "8/8; 235 s: 59.94 FPS, lowest 1 s 59, worst 20.6 ms, 0 frames over 33 ms". This run's 240 s traversal on the same content measured 59.888 FPS, lowest second 50, worst 34.1 ms and 12 frames over 33 ms, with one window failing.
+
+**Open.**
+
+- The objective route did not reach Fisk Tower: the player looped on a ledge outside the mission area. The 38–41 FPS tower limit is neither confirmed nor refuted, and the atrium glass is still unchecked.
+- The menu ignores early Continue presses. Whether a physical controller's first press is accepted earlier is unverified.
+- `[Save] Request type 3 failed with code 0x00000002` appears 8 times at boot.
+- Audio and save/reload need a person at the console.
+
+The title cannot be counted yet.

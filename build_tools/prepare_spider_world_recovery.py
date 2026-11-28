@@ -11,14 +11,16 @@ from zipfile import ZipFile
 
 from build_tools.paths import ROOT
 from build_tools.prepare_big_picture_library import release_layout
+from build_tools.redirect_pe_imports import merge_recipe_overlays, read_overlays
 
 
 BASE_PIN = "ce8d0bfd526dc2c25dfa7aa5bfaf68ab7d316f7d9de959f14c7d4840d803d60f"
 WORLD_PIN = "32f61750d4ac4049f49d7ae91598050caa166b706482f62df13472fd2d6a4dc7"
 PRESENTER_PIN = "899cd8d1687df6dc7f21f37f4941dd9fedde483934f8246f868deed8d56042ae"
 RELEASE_MARKER = "steam-win32-release-renderer-1817070.txt"
+SHADOW_RECIPE = "steam-win32-shadow-1817070.xwp"
 WORLD_MEMBERS = (
-    "steam-win32-shadow-1817070.xwp", "steam-startup-snapshot-1817070.txt",
+    SHADOW_RECIPE, "steam-startup-snapshot-1817070.txt",
     "steam-startup-host-exit-trace.txt", "world-vs.dxil", "world-ps.dxil",
     "owned-compression-0.dxil", "owned-compression-1.dxil", "owned-compression-2.dxil", "owned-compression-3.dxil",
     "owned-mip-overlay/toc", "owned-mip-overlay/local_model1356_lod3_20260916.dsar",
@@ -46,7 +48,19 @@ def copy_members(package, layout, names):
             shutil.copyfileobj(source, output)
 
 
-def prepare(base, world, presenter, layout, version, autoplay):
+def apply_recipe_overlays(layout, source_image, manifests):
+    """Merge verified executable overlays (profile JSON manifests) into the staged shadow recipe."""
+    if not manifests:
+        return
+    if source_image is None:
+        raise ValueError("Recipe overlays need --source-image, the verified Spider-Man.exe for build 23986256.")
+    source = source_image.read_bytes()
+    overlays = [entry for manifest in manifests for entry in read_overlays(manifest, source)]
+    recipe = layout / SHADOW_RECIPE
+    recipe.write_bytes(merge_recipe_overlays(recipe.read_bytes(), source, overlays))
+
+
+def prepare(base, world, presenter, layout, version, autoplay, source_image=None, recipe_overlays=()):
     if (not re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}", version)
             or tuple(map(int, version.split("."))) <= (1, 0, 232, 13)):
         raise ValueError("Use a four-part package version greater than 1.0.232.13 and the installed version.")
@@ -65,6 +79,7 @@ def prepare(base, world, presenter, layout, version, autoplay):
             copy_members(package, staged, ("Fhd.Native.dll", "Fhd.Native.winmd"))
         shutil.copyfile(ROOT / "profiles/1817070/23986256" / RELEASE_MARKER, staged / RELEASE_MARKER)
         shutil.copyfile(ROOT / "ui/big-picture-webview/big-picture-webview.js", staged / "big-picture-webview.js")
+        apply_recipe_overlays(staged, source_image, recipe_overlays)
         if layout.exists():
             raise FileExistsError(f"Use a new output layout: {layout}")
         staged.rename(layout)
@@ -78,8 +93,13 @@ def main():
     parser.add_argument("layout", type=Path, help="new output directory")
     parser.add_argument("--version", required=True, help="package version above the installed version")
     parser.add_argument("--autoplay", action="store_true", help="request one Big Picture Play trial after sign-in")
+    parser.add_argument("--recipe-overlay", type=Path, action="append", default=[],
+                        help="profile overlay manifest to merge into the executable recipe (repeatable)")
+    parser.add_argument("--source-image", type=Path,
+                        help="verified owned Spider-Man.exe the recipe and overlay hashes refer to")
     args = parser.parse_args()
-    prepare(args.base, args.world, args.presenter, args.layout, args.version, args.autoplay)
+    prepare(args.base, args.world, args.presenter, args.layout, args.version, args.autoplay,
+            args.source_image, args.recipe_overlay)
 
 
 if __name__ == "__main__":

@@ -24,3 +24,8 @@ EXPORTS
     GetFileType=XboxGetFileType @22
     CoCreateInstance=XboxCoCreateInstance @23
     XboxD3D12PipelineCacheFlush @24
+    GetLogicalProcessorInformationEx=XboxGetLogicalProcessorInformationEx @25
+    GetLogicalProcessorInformation=XboxGetLogicalProcessorInformation @26
+    GetSystemInfo=XboxGetSystemInfo @27
+    GetNativeSystemInfo=XboxGetNativeSystemInfo @28
+    GetActiveProcessorCount=XboxGetActiveProcessorCount @29
