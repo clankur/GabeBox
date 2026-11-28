@@ -13,7 +13,7 @@
      asset pso-slots n=<compiles> base=<B> boost=<X> min-mib=<M> boosted=<started above base>
        urg=<urgent compiles> urg-over=<urgent compiles above the limit> urg-wait-ms=<sum>
        urg-max-ms=<longest urgent wait> wait-ms=<normal wait sum> bg=<background compiles>
-       bg-wait-ms=<sum> peak=<most at once>
+       bg-wait-ms=<sum> [bg-reserve=<R>] peak=<most at once>
    The counters are a few interlocked adds per compile; there are no readbacks. */
 #include <windows.h>
 #include "../shared/compile-slots.h"
@@ -35,7 +35,7 @@ static struct {
     volatile LONG count, boosted, urgent, urgentOver, background, peak;
     volatile LONG64 waitMicros[3];
     volatile LONG64 urgentWaitMax;
-} xcs = {SRWLOCK_INIT, CONDITION_VARIABLE_INIT, {1, 0, 0, 0, 0, {0, 0, 0}}};
+} xcs = {SRWLOCK_INIT, CONDITION_VARIABLE_INIT, {1, 0, 0, 0, 0, {0, 0, 0}, 0}};
 
 static void XboxCompileSlotsConfigure(unsigned base, unsigned boost, unsigned boostMinMiB, unsigned urgentMinMiB,
         XboxCompileSlotsTraceFn trace) {
@@ -48,6 +48,14 @@ static void XboxCompileSlotsConfigure(unsigned base, unsigned boost, unsigned bo
     xcs.slots.urgentMinMiB = urgentMinMiB;
     xcs.trace = trace;
     xcs.frequency = frequency.QuadPart;
+    ReleaseSRWLockExclusive(&xcs.lock);
+}
+
+/* Background work leaves this many slots of the limit free (default 0). Call before the first
+   compile, after XboxCompileSlotsConfigure. */
+static void XboxCompileSlotsReserveBackground(unsigned reserve) {
+    AcquireSRWLockExclusive(&xcs.lock);
+    xcs.slots.backgroundReserve = reserve;
     ReleaseSRWLockExclusive(&xcs.lock);
 }
 
@@ -86,6 +94,7 @@ static void XboxCompileSlotsSummary(void) {
     out = XcsDec(XcsText(out, " wait-ms="), (unsigned long long)xcs.waitMicros[XboxCompileNormal] / 1000);
     out = XcsDec(XcsText(out, " bg="), (unsigned long long)xcs.background);
     out = XcsDec(XcsText(out, " bg-wait-ms="), (unsigned long long)xcs.waitMicros[XboxCompileBackground] / 1000);
+    if (xcs.slots.backgroundReserve) out = XcsDec(XcsText(out, " bg-reserve="), xcs.slots.backgroundReserve);
     out = XcsDec(XcsText(out, " peak="), (unsigned long long)xcs.peak);
     *out++ = '\r';
     *out++ = '\n';

@@ -35,7 +35,13 @@
 
    The host supplies the compile callback, so it keeps its own limits, such as a bound on
    concurrent compiles, and the trace sink. Every failure disables replay and leaves pipeline
-   creation untouched. */
+   creation untouched.
+
+   By default one thread replays the database. XboxPipelineReplaySetThreads starts more; they walk
+   the entries in the same order and claim each one under the lock, so no entry compiles twice and
+   the database order is kept within the number of threads. A host that runs several should also
+   bound them with the admission hook, which is called on each replay thread with that thread's
+   own enter and leave. */
 #include <windows.h>
 #include <d3d12.h>
 
@@ -137,6 +143,11 @@ typedef struct XprState {
     CRITICAL_SECTION writer;
     volatile LONG hits, waitedHits, misses, recorded, uncached, rootMisses;
     volatile LONG replayed, replayFailed;
+    UINT32 threadCount;           /* replay threads to start, 1 unless the host sets more */
+    volatile LONG threadsLive;    /* the last thread to finish writes the summary */
+    volatile LONG64 compileTicks; /* summed over the replay threads */
+    volatile LONG64 startedQpc;
+    UINT64 commitBeforeKib;
     PVOID createRootOriginal;
     PVOID createGraphicsOriginal;
     PVOID createComputeOriginal;
@@ -983,13 +994,9 @@ static void XprEnsureRoot(UINT64 hash) {
 static DWORD WINAPI XprReplayThread(void *unused) {
     (void)unused;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    LARGE_INTEGER frequency, started, now;
+    LARGE_INTEGER frequency, now;
     QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&started);
     MEMORYSTATUSEX memory = {.dwLength = sizeof(memory)};
-    GlobalMemoryStatusEx(&memory);
-    const unsigned long long commitBefore = memory.ullAvailPageFile >> 10;
-    unsigned long long compileTicks = 0;
     UINT32 deferred = 0;
     for (UINT32 pass = 0; pass < 4800; ++pass) {
         deferred = 0;
@@ -1032,7 +1039,7 @@ static DWORD WINAPI XprReplayThread(void *unused) {
                 (void **)&object);
             QueryPerformanceCounter(&after);
             if (xprState.slot) xprState.slot(FALSE);
-            compileTicks += (unsigned long long)(after.QuadPart - before.QuadPart);
+            InterlockedAdd64(&xprState.compileTicks, after.QuadPart - before.QuadPart);
             AcquireSRWLockExclusive(&xprState.lock);
             if (SUCCEEDED(result) && object) {
                 entry->object = object;
@@ -1062,9 +1069,11 @@ static DWORD WINAPI XprReplayThread(void *unused) {
         if (!deferred) break;
         Sleep(250);
     }
+    if (InterlockedDecrement(&xprState.threadsLive) > 0) return 0;
     QueryPerformanceCounter(&now);
     GlobalMemoryStatusEx(&memory);
-    char line[320], *out = XprText(line, "asset pso-replay done replayed=");
+    const unsigned long long compileTicks = (unsigned long long)xprState.compileTicks;
+    char line[340], *out = XprText(line, "asset pso-replay done replayed=");
     out = XprDec(out, (unsigned long long)xprState.replayed);
     out = XprDec(XprText(out, " failed="), (unsigned long long)xprState.replayFailed);
     out = XprDec(XprText(out, " deferred="), deferred);
@@ -1073,8 +1082,9 @@ static DWORD WINAPI XprReplayThread(void *unused) {
     out = XprDec(XprText(out, " misses="), (unsigned long long)xprState.misses);
     out = XprDec(XprText(out, " compile-ms="), frequency.QuadPart ? compileTicks * 1000 / (unsigned long long)frequency.QuadPart : 0);
     out = XprDec(XprText(out, " wall-ms="), frequency.QuadPart ?
-        (unsigned long long)(now.QuadPart - started.QuadPart) * 1000 / (unsigned long long)frequency.QuadPart : 0);
-    out = XprDec(XprText(out, " commit-avail-kib-before="), commitBefore);
+        (unsigned long long)(now.QuadPart - xprState.startedQpc) * 1000 / (unsigned long long)frequency.QuadPart : 0);
+    out = XprDec(XprText(out, " threads="), xprState.threadCount);
+    out = XprDec(XprText(out, " commit-avail-kib-before="), xprState.commitBeforeKib);
     out = XprDec(XprText(out, " after="), (unsigned long long)(memory.ullAvailPageFile >> 10));
     out = XprDec(XprText(out, " qpc="), (unsigned long long)now.QuadPart);
     XprEmit(line, out);
@@ -1144,8 +1154,20 @@ static BOOL XboxPipelineReplayInstall(ID3D12Device *device, const WCHAR *path, X
     out = XprDec(XprText(out, " error="), GetLastError());
     XprEmit(line, out);
     if (ok && xprState.entryCount) {
-        HANDLE thread = CreateThread(NULL, 0, XprReplayThread, NULL, 0, NULL);
-        if (thread) CloseHandle(thread);
+        LARGE_INTEGER started;
+        QueryPerformanceCounter(&started);
+        xprState.startedQpc = started.QuadPart;
+        MEMORYSTATUSEX memory = {.dwLength = sizeof(memory)};
+        GlobalMemoryStatusEx(&memory);
+        xprState.commitBeforeKib = memory.ullAvailPageFile >> 10;
+        const UINT32 threads = xprState.threadCount ? xprState.threadCount : 1;
+        xprState.threadCount = threads;
+        xprState.threadsLive = (LONG)threads;
+        for (UINT32 i = 0; i < threads; ++i) {
+            HANDLE thread = CreateThread(NULL, 0, XprReplayThread, NULL, 0, NULL);
+            if (thread) CloseHandle(thread);
+            else if (InterlockedDecrement(&xprState.threadsLive) == 0) xprState.threadCount = 0;
+        }
     }
     return ok;
 }
@@ -1153,6 +1175,11 @@ static BOOL XboxPipelineReplayInstall(ID3D12Device *device, const WCHAR *path, X
 /* Sets the replay thread's admission hook. Call before XboxPipelineReplayInstall. */
 static inline void XboxPipelineReplaySetSlot(XboxPipelineSlotFn slot) {
     xprState.slot = slot;
+}
+
+/* Number of replay threads (1-16, default 1). Call before XboxPipelineReplayInstall. */
+static inline void XboxPipelineReplaySetThreads(UINT32 threads) {
+    xprState.threadCount = threads < 1 ? 1 : threads > 16 ? 16 : threads;
 }
 
 /* Default location: beside the hosted title's Documents folder, which the host scopes to the
