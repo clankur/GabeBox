@@ -200,7 +200,8 @@ class HostedSwapChain final : public IDXGISwapChain4 {
     ProducerCadenceTrace cadence_;
     XboxSdlSwapClock clock_{};
     UINT64 counterFrequency_ = 0;
-    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false;
+    UINT64 hostDeadline_ = 0;
+    bool paceBeforePublish_ = false, use5994_ = false, tracedPublishTiming_ = false, tracedHostPacing_ = false;
     bool tracedFrame_ = false, tracedPresent_ = false, tracedError_ = false, tracedRejection_ = false;
 
     UINT NativeInterval(UINT interval, UINT flags) {
@@ -228,12 +229,36 @@ class HostedSwapChain final : public IDXGISwapChain4 {
         // The host owns display vsync. Keep the game's requested cadence
         // without waiting for a second flip queue on the virtual window.
         auto now = static_cast<UINT64>(counter.QuadPart);
-        const auto deadline = XboxSdlNextSwap(&clock_, now, static_cast<int>(interval));
-        while (now < deadline) {
-            SleepEx(static_cast<DWORD>(((deadline - now) * 1000 + counterFrequency_ - 1) / counterFrequency_), FALSE);
-            if (!QueryPerformanceCounter(&counter)) return interval;
-            now = static_cast<UINT64>(counter.QuadPart);
+        auto waitUntil = [&](UINT64 deadline) {
+            while (now < deadline) {
+                SleepEx(static_cast<DWORD>(((deadline - now) * 1000 + counterFrequency_ - 1) / counterFrequency_), FALSE);
+                if (!QueryPerformanceCounter(&counter)) return false;
+                now = static_cast<UINT64>(counter.QuadPart);
+            }
+            return true;
+        };
+        // Multi-refresh intervals (a game's 30 FPS lock) follow the host's measured refresh and phase: each frame is
+        // committed 0.3 of a host period after an estimated host release, so it is shown on the host's next refresh
+        // and never on the one before. A nominal 60 Hz grid drifts across the host's refresh edge and alternates 50
+        // and 17 ms frames while it is near it.
+        XboxHostVsync host;
+        if (interval >= 2 && DxgiFramePublisher::HostVsync(now, host)) {
+            const UINT64 period = static_cast<UINT64>(host.period16 >> 16);
+            UINT64 earliest = hostDeadline_ ? hostDeadline_ + interval * period - period / 2 : now;
+            if (earliest + period < now) earliest = now;
+            const UINT64 deadline = XboxHostVsyncNext(&host, earliest, 19661 /* 0.3 of a period */);
+            hostDeadline_ = deadline;
+            clock_.interval = 0;
+            if (!tracedHostPacing_) {
+                tracedHostPacing_ = true;
+                Trace("host-vsync-pacing-period-ns", static_cast<HRESULT>(period * 1000000000ull / counterFrequency_));
+            }
+            if (!waitUntil(deadline)) return interval;
+            return 0;
         }
+        hostDeadline_ = 0;
+        const auto deadline = XboxSdlNextSwap(&clock_, now, static_cast<int>(interval));
+        if (!waitUntil(deadline)) return interval;
         return 0;
     }
 
