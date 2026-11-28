@@ -1206,3 +1206,88 @@ The window at 03:16:00Z fails on one 818 ms first-use pipeline compile.
 - **Memory headroom.** It is 60 MiB in the Fisk Tower approach, below the 250 MiB target. Earlier measurements put Texture Medium at about +90 MiB and SoundBank 224 at about +60 MiB, so reverting both would still leave roughly 200–250 MiB. Further cuts are needed: the non-loader buffer cuts stopped world loading earlier.
 - **Lighting tint.** The green and magenta tint persists with the cap at 1024, so the cap is not the tint's cause.
 - **No verifier yet.** No independent verifier has run on `1.0.63026.0`.
+
+## Load time: Play to controllable gameplay (issue #95, November 28)
+
+**Goal.** Under 90 s from pressing Play in Big Picture to controllable gameplay.
+
+**Tool.** `python3 -m tools.load_phases RUN_DIR [--stage-inventory inventory.json] [--probe-report probe-report.txt]` builds the phases from files a run already collects:
+
+- `launch.utc` and `continue.utc`;
+- the loader trace (`qpc=` on `pso-slow`, `pso-replay-compile` and later records);
+- the game log;
+- `fhd-present-times.bin`, whose header ties QPC to UTC;
+- optionally, the TempState stage listing.
+
+The menu is the first `lobby-save-state=0x00000001` record. Gameplay is the first steady five seconds (at least 55 frames per second, no gap over 100 ms) after the world-load gaps that follow Continue. Neither needs a new trace record.
+
+**Play is not `launch.utc`.** Autoplay packages sign in to Steam and open Big Picture before they press Play. The host's `probe-report.txt` records both times:
+
+- sign-in start `run_id` is 04:33:23.3Z (activation was 04:33:23Z);
+- `steam_launch_run_id` is 04:33:50.8Z;
+- stage `SteamWin32Trial (285)` was created at 04:33:51.9Z (variants run r720, package `1.0.63028.0`).
+
+So about 27.5 s of each autoplay run comes before Play. For runs without a saved probe report, the tool takes Play as 1.05 s before the stage folder was created. That is a single measured sample, and the tool labels the result `estimated-from-stage`. Stage creation times come from the cleanup agent's inventory (`$S/cleanup/inventory-before.json`).
+
+**Phase breakdown from existing runs.** No dedicated console runs were used. Times are seconds from Play; "unattended" excludes the scripted menu inputs.
+
+| Run | Warm-up pipelines | Slots | Play→stage | Stage→game log | Game log→first frame | First frame→menu | **Play→menu** | Continue→gameplay | **Unattended** | Render-thread slot wait, Continue→gameplay |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `play/perf/run-a1` | 2,210 | 1 | 1.0* | 2.6 | 8.3 | 191.7 | 203.6 | 28.7 | 232.3 | 19.8 s |
+| `play/perf/run-c2` | 2,295 | 2 | 1.0* | 2.6 | 4.6 | 135.6 | 143.9 | 7.3 | 151.2 | 0.4 s |
+| `play/perf/run-c3` | 2,324 | 3 | 1.0* | 2.7 | 3.8 | 75.6 | 83.1 | 16.4 | 99.5 | 5.8 s |
+| `play/perf/run-c4` | 2,322 | 4 | 1.0* | 3.0 | 6.2 | 61.2 | 71.4 | 11.2 | 82.6 | 3.0 s |
+| `hang/run-b1` | 2,385 | 4 | 1.0* | 2.7 | 6.2 | 61.2 | 71.1 | 15.4 | 86.5 | 3.3 s |
+| `hang/run-c1` | 2,496 | 4 | 1.0* | 2.6 | 6.8 | 64.6 | 75.0 | 17.7 | 92.7 | 5.6 s |
+| `hang/run-d1` | 2,496 | 4 | 1.0* | 2.6 | 3.5 | 67.3 | 74.4 | 26.4 | 100.8 | 12.6 s |
+
+\* Estimated from the stage, as above.
+
+The five texture runs `tex/run-a0`–`g1` (1 slot) match a1: about 203 s from Play to the menu.
+
+**Against the 90 s budget** (4-slot runs; menu inputs come on top):
+
+| Phase | Measured | Share |
+| --- | --- | --- |
+| Play → stage | about 1 s | negligible |
+| Stage → game | 2.6–3.0 s | negligible |
+| Game → first frame | 3.5–7 s | small |
+| First frame → menu | 61–67 s | the budget |
+| Continue → gameplay | 11–26 s | varies |
+
+**Findings:**
+
+- **Staging is not the cost.** Copying and patching the game image (recipe, companions, hash checks), starting the process and initialising the loader together take under 4 s. Reusing stages would save at most that, so it was not done. The 283 leaked stages are not a timing problem. The stale-stage sweep is in source (`4807c4c`), but packages are assembled from a base APPX whose `ProbeNative.dll` is dated November 24, so the installed host predates it. It needs a CI build of the native host.
+- **Boot waits are not the cost.** All 72 `boot-wait-single` records fall within the loader's first 4 s (`run-c4`).
+- **Boot is the game's own pipeline warm-up, bound by CPU.** The game log reports `File \xbox0.pso contains N pipelines`. That is the game's own pipeline cache in the Documents folder, and the game compiles it at boot.
+  - Before the menu, `run-c4` made 1,491 title compiles (per-second `perf-sec` counters) and about 100 replay compiles over 30 ms. The slots were about 97% busy: 263 slot-seconds of 272.
+  - Process CPU scales with slots: 1.13, 2.35, 3.12 and 4.23 of 6 logical cores for 1–4 slots. The console reports 3 physical cores with SMT.
+  - The average compile rises from 110 ms to 148 ms at 4 slots, but throughput still rises: 7.6, 13.3, 18.2 and 21.6 compiles per second.
+- **The warm-up grows with play.** The game's cache went from 871 pipelines (November 25) to 2,521 (November 28). At 4 slots, first frame→menu went from 61 s at 2,322 pipelines to 64–67 s at 2,496. A player who explores more of the city will boot more slowly. This is open work.
+- **The replay database mostly overlaps the warm-up.** In `run-c4` the replay thread compiled 479 entries, and the game itself compiled about 2,150 recorded entries first (outcome 2, "claimed"). "2,214 misses" is that count, not 2,214 gameplay first-use compiles: gameplay had only 2 render-thread compiles over 100 ms in 12.7 minutes. Replay work done before the menu shares the same slots, so it neither helps nor delays the menu much.
+- **Continue→gameplay follows render-thread slot waits.** At Continue, six game worker threads compile about 450 world pipelines. The render thread's own compiles queue behind them: 3.0, 3.3, 5.6 and 12.6 s of waiting gave 11.2, 15.4, 17.7 and 26.4 s from Continue to gameplay. The run with 0.4 s of waiting took 7.3 s.
+- **Game options.** The executable has engine settings `DX12EnableAsyncPipelineCreation` and `DX12MaxPipelineCreateThreads`. No command-line option or setting to skip the warm-up was found. The intro does not gate the menu: the first frame appears 3.5–8 s after the game starts, and the warm-up decides the rest.
+
+**Change: the compile pool** (commit `bf1a381`, loader only):
+
+- **Policy.** `runtime/shared/compile-slots.h` holds the admission policy, tested by `tests/compile-slots.c`.
+- **Win32 pool.** `runtime/win32/d3d12-compile-slots.h` implements it with an SRW lock and a condition variable. Waiters re-check every 50 ms and after each release.
+- **Boost.** Two extra slots while available commit is at least `PSO_BOOST_MIN_AVAIL_MIB` (768 MiB). Boot has over 1 GiB, so it uses 6 slots. Gameplay has 60–400 MiB and stays at 4, so steady-state memory is unchanged.
+- **Priority.** With `PSO_PRIORITY=1`, render-thread compiles (found at `exe+0x07A2FD68`, as `RenderThreadState` does) and boot-thread compiles go ahead of every waiting request. Each may take one slot above the limit while at least 256 MiB is free; below that it gets only the next free slot. Replay compiles run only when no title compile is waiting.
+- **Replay hook.** `d3d12-pipeline-replay.h` gains an optional admission hook. With it, the replay thread claims an entry only after it holds a slot, so a game request never waits behind a replay compile that has not started. Without the hook, behaviour is unchanged.
+- **Build.** `build.sh play` and `measure` now pass `-DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1`. The play loader's SHA-256 begins `e6f1ff36` and the measure loader's `e3675ab5`. Appending `-DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0` restores the fixed 4-slot pool.
+- **Trace records.** The loader writes `asset pso-parallel slots=4 boost=2 boost-min-mib=768 priority=1` once. It writes `asset pso-slots n=… boosted=… urg=… urg-over=… urg-wait-ms=… urg-max-ms=… wait-ms=… bg=… bg-wait-ms=… peak=…` every 512 compiles. These are a few interlocked adds per compile, with no readbacks.
+
+**Expected result (not measured):**
+
+- First frame→menu: 61–67 s drops by about 8 s, assuming the 3→4-slot trend continues (+19% throughput) at about +15% for 4→6 on 3 SMT cores.
+- Continue→gameplay: about 7–9 s, as in the 0.4 s-wait run c2.
+- Unattended Play→gameplay: about 70–76 s, plus the player's menu inputs.
+
+**Still to verify on the console** (to be measured from the next play or variants build that carries the loader):
+
+- Play→menu and Continue→gameplay, with `probe-report.txt` saved for the exact Play time;
+- the `pso-slots` counters;
+- pre-menu and gameplay lowest available commit;
+- no `XBSC_XS.dll` compiler fault and no `0x887A0005` with 6 concurrent boot compiles;
+- render-thread compile stalls per minute in gameplay.
