@@ -918,7 +918,7 @@ static UINT64 XprIndex(BOOL index) {
             if (index && xprState.entryCount < XPR_MAX_ENTRIES && XprHash(words, (SIZE_T)length * 4) == first &&
                     XprSetAdd(xprState.storedKeys, xprState.storedKeyMask, &xprState.storedKeyCount, first)) {
                 xprState.entries[xprState.entryCount++] = (XprEntry){first, words, length,
-                    head.tag == XPR_TAG_GRAPHICS, XprPending, NULL, NULL};
+                    head.tag == XPR_TAG_GRAPHICS, XprPending, NULL, NULL, 0};
             }
         } else {
             break;
