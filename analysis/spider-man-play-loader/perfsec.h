@@ -8,6 +8,9 @@
    XAudio2 2.7 GetPerformanceData is documented callable from any thread. */
 volatile LONG perfFaults;          /* incremented by the demand-commit fault handler */
 static volatile LONG perfPsoCount;
+static volatile LONG perfReads;
+static LARGE_INTEGER perfQpcFrequency = {.QuadPart = 1};
+static volatile LONG64 perfReadBytes, perfReadTicks;
 static volatile LONG64 perfPsoMicros;
 static void *volatile perfXAudio;  /* IXAudio2 (2.7), referenced */
 static volatile LONG perfXAudioRate;
@@ -68,7 +71,9 @@ static DWORD WINAPI PerfSecond(void *mainThread) {
     DWORD renderId = 0;
     UINT64 lastCpu = 0, lastMain = 0, lastRender = 0, lastAudio = 0, lastTotal = 0;
     LONG lastFaults = 0, lastPso = 0;
-    LONG64 lastPsoMicros = 0;
+    LONG64 lastPsoMicros = 0, lastReadBytes = 0, lastReadTicks = 0;
+    LONG lastReads = 0;
+    QueryPerformanceFrequency(&perfQpcFrequency);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     for (unsigned long long second = 0; second < 6 * 3600; ++second) {
         Sleep(1000);
@@ -87,6 +92,15 @@ static DWORD WINAPI PerfSecond(void *mainThread) {
         if (cycles && main) cycles(main, &mainCycles);
         if (cycles && render) cycles(render, &renderCycles);
         const LONG faults = perfFaults, pso = perfPsoCount;
+        const LONG reads = perfReads;
+        const LONG64 readBytes = perfReadBytes, readTicks = perfReadTicks;
+#ifdef GPU_PROF
+        if (second && second % 10 == 0) GpuReport((unsigned)(second + 1));
+        if (second && second % 5 == 0) QtlFrames((unsigned)(second + 1));
+#endif
+#ifdef WAIT_PROF
+        if (renderId) WpStart((DWORD)(ULONG_PTR)mainThread, renderId);
+#endif
         const LONG64 psoMicros = perfPsoMicros;
         MEMORYSTATUSEX memory = {.dwLength = sizeof(memory)};
         GlobalMemoryStatusEx(&memory);
@@ -108,6 +122,9 @@ static DWORD WINAPI PerfSecond(void *mainThread) {
         out = PerfDec(Text(out, " pso-ms="), (unsigned long long)((psoMicros - lastPsoMicros) / 1000));
         out = PerfDec(Text(out, " commit-mib="), (memory.ullTotalPageFile - memory.ullAvailPageFile) >> 20);
         out = PerfDec(Text(out, " avail-mib="), memory.ullAvailPageFile >> 20);
+        out = PerfDec(Text(out, " rd-n="), (unsigned long long)(reads - lastReads));
+        out = PerfDec(Text(out, " rd-kib="), (unsigned long long)((readBytes - lastReadBytes) >> 10));
+        out = PerfDec(Text(out, " rd-ms="), (unsigned long long)((readTicks - lastReadTicks) * 1000 / perfQpcFrequency.QuadPart));
         if (xaudio) {
             out = PerfDec(Text(out, " xa-lat="), xa.latency);
             out = PerfDec(Text(out, " xa-rate="), (unsigned long long)perfXAudioRate);
@@ -120,6 +137,7 @@ static DWORD WINAPI PerfSecond(void *mainThread) {
         AppendTrace(line, (DWORD)(out - line));
         lastCpu = cpu; lastMain = mainCycles; lastRender = renderCycles;
         lastFaults = faults; lastPso = pso; lastPsoMicros = psoMicros;
+        lastReads = reads; lastReadBytes = readBytes; lastReadTicks = readTicks;
         (void)lastAudio; (void)lastTotal;
     }
     return 0;

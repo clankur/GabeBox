@@ -1624,3 +1624,120 @@ Each run folder has a `sky-sheet.png`.
 - **Audio.** Confirm voice and audio by listening at SB128.
 - **Verifier.** Run an independent `xbox-game-verify` pass.
 - **Tint fix.** Fold in the sky agent's tint fix once it is committed. It is uncommitted in the shared worktree and is not in this build.
+
+## Fisk Tower frame rate and first-use hitches (issue #93, November 28)
+
+**Question.** The Fisk Tower approach and atrium run at 31–48 FPS at both 1280×720 and 1920×1080 internal resolution, while the street holds 60. Is the frame limited by the GPU, by the game's CPU threads, or by something the compatibility layer adds?
+
+**Setup.** Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Every console run used the installed play content (`1.0.63057.0`: hosted 1280×720 render, SoundBankAlloc 128 MiB, Texture Medium with the 242 restores, light-grid cap 1024, recipe `748e3130…`) with a measure loader built from the same play-loader source plus the diagnostics below. All runs continued from the player's save and followed the objective marker from the start street with no traversal script. The saves were restored and verified after every run (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`).
+
+| Run | Package, lease | Loader diagnostics | Reached the Fisk approach |
+| --- | --- | --- | --- |
+| fisk1 | `1.0.63061.0`, #199 | perf-sec + wait profiler | no (subway stairs) |
+| fisk2 | `1.0.63064.0`, #204 | + GPU profiler (queue and per-pipeline timing) | no (left the mission area) |
+| fisk3 | `1.0.63067.0`, #207 | + per-frame queue summary | **yes**, ending on the atrium's Web Strike tutorial |
+| fisk4 | `1.0.63070.0`, #210 | wait profiler with two call sites; Lowest LOD, shadow, vehicle, crowd and hair | no (deadline) |
+
+The objective-marker route is not deterministic: one run in four reached the tower.
+
+**New diagnostics** (play-loader snapshot, off by default; the play build is byte-identical, `68a5c545…`):
+
+- `-DWAIT_PROF` (`waitprof.h`): about 500 samples per second of the main and render threads (suspend, read RIP and stack, resume). Each second it writes the eight busiest places and the first two executable call sites on the stack.
+- `-DGPU_PROF` (`qtlframes.h`, `gpuprof.h`): the existing queue hooks in a play build. Every 5 s, per frame: `gap` (previous Present to the frame's first submission), `submit` (first to last game submission, the render thread's recording span), `busy` (GPU queue busy time) and `lag` (GPU work still running after Present). Every 10 s: GPU time per pipeline, with each shader container marked DXBC or DXIL. `-DNO_LISTPROF` drops the per-pipeline timing.
+- perf-sec gains `rd-n`, `rd-kib` and `rd-ms`: the game's `ReadFile` calls through the loader and their synchronous time.
+- The run script samples Device Portal `systemperf` twice a second (GPU engines, CPU load, disk read speed).
+
+**The street is GPU-paced and has slack** (fisk3, 10:23:30–10:24:05, 57.3 FPS including screenshot seconds):
+
+- Per frame: `gap` 10–16 ms, `submit` 0.7–8.5 ms, GPU `busy` 6–12 ms, never more than 16.7 ms. The game submits the whole frame right after Present returns from the 60 Hz pacer, and the GPU finishes 7–12 ms later.
+- The render thread spends its waits spinning on a GPU query (`GetData` loop at `exe+0x0188F248`, pause loop `exe+0x01BBF4C0`; 26% of samples). The main thread waits on the render thread's condition variable (`SleepConditionVariableCS` via `exe+0x01BBF3F0`; 28%).
+- The process used 4.23 of its 6 logical processors.
+
+**The Fisk approach is limited by a CPU dependency chain in the game, not by the GPU** (fisk3, 10:24:20–10:24:45, 38.3 FPS):
+
+| Measure | Street | Fisk approach |
+| --- | --- | --- |
+| Frame interval | 16.7 ms | 25.6–31.7 ms (5 s averages) |
+| `gap` (Present → first submission) | 10–16 ms | **1.0–2.4 ms** |
+| `submit` (render thread's submission span) | 0.7–8.5 ms | **24.2–30.5 ms** |
+| GPU `busy` per frame | 6–12 ms | 13.9–16.6 ms |
+| Process CPU (of 6 logical processors) | 4.23 | **3.31** (1.78–4.58) |
+| Render thread: WaitForSingleObject via `exe+0x01BBF2D0` | 0.5% | **21.5%** |
+| Render thread: work in `exe+0x017897C0` (called from `0x0178B519`) | — | 17.3% |
+| Render thread: GPU query spin | 26.2% | 13.8% |
+| Main thread: WaitForSingleObject via `exe+0x01BBF2D0` | 2.0% | **36.3%** |
+| Main thread: waiting for the render thread | 27.6% | 21.8% |
+| Pipeline compiles, demand-commit faults | 0, 18 | 0, 208 (≈14 ms of fault handling in 26 s) |
+| `ReadFile` calls / synchronous time | 705 / 259 ms | 5,002 / 1,080 ms over 26 s |
+| Disk read rate (Device Portal) | 0–85 MB/s | 0.4–2 MB/s, one 2 s burst at 311–537 MB/s |
+
+- The frame now has no pacing slack: the render thread starts the next frame within 1–2 ms of Present and takes 24–30 ms to submit it.
+- During that span both the main and render threads block in `WaitForSingleObject(…, INFINITE)` through the game's wrapper at `exe+0x01BBF2D0`. On the street, the second-level callers of that wrapper are the job system's waits at `exe+0x01700C4F` and `exe+0x01700D4D` and a render-side wait at `exe+0x018D5841` (fisk4). Process CPU falls rather than rises, so 2–4 logical processors sit idle while the frame waits: the frame follows a serial chain of job work, not total CPU throughput.
+- GPU busy per frame (14–16.6 ms) is below the 25–31 ms frame interval, so the GPU is not what holds the frame. It is close to the 16.7 ms budget, though, so removing the CPU chain alone would leave the GPU at its limit there.
+- Nothing from the compatibility layer is on the measured path: no pipeline compiles or replay work (replay finishes within 28 s of gameplay start), no commit pressure (237 MiB lowest free), few demand-commit faults, no slow I/O, and the Present path returns in under 0.2 ms.
+- Earlier runs agree: `run-low` (1080p) and `run-host720` show the same pattern in the same place: the main thread was 17–61% busy and the process used 2.1–5.2 of its 6 logical processors.
+
+**Device Portal's GPU engine 5 utilisation is not GPU busy time.** It read 97–100% throughout fisk1–fisk4, including 60 FPS street seconds where the timestamped queue was busy only 40–70% of the time. It cannot be used to tell whether a scene is GPU-bound.
+
+**GPU time by pipeline on the street** (fisk2, timestamped lists, 10 s windows after gameplay start): 85% of the timed GPU time is in pipelines built from DXBC shaders, which the Xbox runtime converts to DXIL; 4.5% is DXIL. The three largest are compute shaders of 62, 37 and 23 KB of DXBC (11%, 10% and 8%). Whether the DXBC conversion costs more than the original bytecode would on PC is not measured.
+
+**Levers tested or ruled out.**
+
+- **Lowest LOD, shadow, vehicle, crowd and hair** (hidden tier 0 at RVAs `0x1CFAD2C`–`0x1CFAD70`, a scratch overlay not added to the profile). fisk4 applied it ("Level of Detail: Lowest") but did not reach the tower, so its effect there is unmeasured. On the street it held 60 FPS, as the default settings do.
+- **Processor placement, SMT pairing and priorities.** The process is not starved: 2–4 logical processors are idle during the drop. The game's own `SetThreadAffinityMask` calls for the main and render threads pass a zero mask read from globals at `exe+0x07A9E780/784` and fail with error 87 (`run-low` trace). A zero mask fails the same way on Windows; that comparison is inferred, not observed. The earlier "hot-thread ideal processors" trial showed no gain.
+- **Background replay compiles during gameplay.** None: replay finishes within 28 s of gameplay start in every measure-loader run, and perf-sec shows no title or replay compiles in the Fisk seconds.
+
+**Result: the Fisk Tower area is a game-side CPU limit on this console.** The best verified result at the tower is 38–41 FPS averaged over 30 s at 1280×720 (fisk3 38.3 over 26 s; final-b gate below). On the street the chosen configuration holds 60.
+
+**Gate output** (`tools.measure --require-gpu-60 --stutter --producer-log`, 30 s, shared GPU textures only):
+
+Fisk approach, final-b (`1.0.63055.0`, 1280×720 in 1920×1080, three screenshot windows excluded):
+
+```json
+{"start_utc": "2026-11-28T08:10:47+00:00", "duration_s": 30.0, "presented": 1217, "fps": 40.567, "min_rolling_1s_fps": 14, "p50_ms": 18.087, "p95_ms": 33.716, "p99_ms": 49.861, "worst_ms": 550.818, "intervals_over_33_33ms": 163, "cpu_presented": 0, "shared_texture_presented": 1217, "hardware_adapter_verified": true, "internal_resolution": "1280x720", "output_resolution": "1920x1080", "gpu_60fps": false, "stutter": {"duration_s": 30.0, "over_33ms_per_minute": 278.0, "over_100ms_per_minute": 0.0, "by_cause": {"pipeline_compile": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "excluded": {"over_33ms": 24, "over_100ms": 3, "ms": 2353.474}, "unattributed": {"over_33ms": 139, "over_100ms": 0, "ms": 4979.022}}}}
+```
+
+Fisk approach at native 1080p, `run-low` (`1.0.63036.0`, no screenshots in the window): 40.77 FPS, lowest 1 s 25, p95 34.3 ms, `gpu_60fps` false.
+
+Street, final-a (`1.0.63053.0`, same content):
+
+```json
+{"start_utc": "2026-11-28T07:53:59+00:00", "duration_s": 30.0, "presented": 1797, "fps": 59.9, "min_rolling_1s_fps": 58, "p50_ms": 16.686, "p95_ms": 18.136, "p99_ms": 19.943, "worst_ms": 32.802, "intervals_over_33_33ms": 0, "cpu_presented": 0, "shared_texture_presented": 1797, "hardware_adapter_verified": true, "internal_resolution": "1280x720", "output_resolution": "1920x1080", "gpu_60fps": true, "stutter": {"duration_s": 30.0, "over_33ms_per_minute": 0.0, "over_100ms_per_minute": 0.0, "by_cause": {"pipeline_compile": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "excluded": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}, "unattributed": {"over_33ms": 0, "over_100ms": 0, "ms": 0.0}}}}
+```
+
+**Street stutter over 10 minutes** with the nav screenshots excluded (`tools.measure --stutter --exclude-utc` per screenshot; the console clock runs about 1.2 s behind the Mac's): fisk1, 56.8 FPS including the screenshot gaps, 0.3 frames over 33 ms per minute, none over 100 ms. fisk2 (with the per-pipeline profiler's overhead): 9.5 and 0.2 per minute.
+
+### First-use pipeline hitches in gameplay
+
+**Nearly every gameplay hitch of 100 ms or more is a pipeline the console has never compiled** (`pso-slow` records of at least 100 ms after gameplay began, over 14 runs from 04:36 to 10:26 UTC):
+
+- **34 of 36 are new pipelines on the render thread.** These compiles took 101–874 ms after gameplay began. Each had replay outcome 1 ("new": not in the database), was compiled synchronously by the render thread, and waited 0 ms for a slot.
+- **The other 2 are a worker-thread compile of a recorded entry.** They took 531 and 1,039 ms, 8–12 s into gameplay (final-b, fisk3), before replay reached the entry (outcome 2). Worker compiles go through the engine's asynchronous path.
+- **Replay order is not the problem.** Replay finished 14–28 s after gameplay began in the 11 measure-loader runs (before gameplay in fps30), and title compiles go ahead of replay. Prioritising by first-use order would only affect the two worker compiles above.
+- **Recording works.** Only one pipeline key compiled as new on the render thread in more than one run, and none repeated as new afterwards. The database grew from 2,828 to 2,936 pipelines over these runs. New render-thread pipelines per run varied between 0 and 14 with no convergence trend, because each run takes a different route.
+- **Two lever classes remain, both open.** (1) Seed the database with more of the city on a fresh install, so a player's first visit does not compile. (2) Make the render thread's first-use compile asynchronous. That needs the engine's material readiness path; a pipeline proxy was evaluated and rejected in the load-time notes.
+
+### Locked 30 FPS
+
+**The 30 FPS misses came from the pacing clock, not from the game.** The game's own half-refresh mode (`half-refresh-vsync-overlay.json`, SyncInterval 2) is paced by the DXGI adapter on a 60.000 Hz grid, but the host display refreshes at 59.94 Hz (median 16.682 ms from the presenter's timestamps). The producer's frame phase therefore drifts across the host's vsync edge once per 1/(60 − 59.94) ≈ 16.7 s. While it is near the edge, frames alternate between 50 and 17 ms.
+
+- **The bursts match that period.** In `run-fps30` the 142 missed 30 Hz slots of the 236 s traversal fall into 14 bursts whose starts are 11.8–20.2 s apart, 16.5 s on average.
+- **Pacing at 60000/1001 Hz removes most of them.** The adapter already has that pacing behind the `fhd-refresh-5994.txt` marker; it is active only together with `fhd-measure.txt`. Run fps30b (`1.0.63072.0`, lease #212) used the play content with the half-refresh overlay, that marker, and a measure loader built from the play-loader source. The trace shows `dxgi pacing-rate-millihz 59940` and `present-interval 2`. Measured over the same 236 s traversal script (missed slot = an interval over 45 ms):
+
+| Run | Pacing clock | Content | FPS | Missed 30 Hz slots per min | Over 100 ms per min | Intervals within 30–37 ms | Worst |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fps30 (`1.0.63042.0`) | 60.000 Hz | 1080p, SB224 | 29.90 | 36.1 | 0.51 | 95.6% | 785 ms |
+| fps30b (`1.0.63072.0`) | 59.940 Hz | 720p, SB128 | 29.95 | **9.2** | 0.25 | **99.0%** | 166 ms |
+
+- **The 16.7 s period is gone.** The remaining 36 misses fall in 10 small clusters, the largest two 12–41 s into the traversal. One 30 s window had none.
+- **Not yet perfectly steady.** 60000/1001 Hz still differs from the measured host rate by a few millihertz, so the phase can still cross the edge over minutes. Lowest free commit was 353 MiB.
+- **The proper fix belongs in the presenter.** Hard-coding 59.94 Hz in the shared adapter would bind it to this display mode. The host should publish its refresh period and last vsync time in the GPU mailbox, and the adapter should pace interval-2 presents to that phase. That is a presenter and adapter change that needs a CI build. It is open.
+- **What 30 FPS does not change.** Commit is the same as at 60 FPS. At the tower, where the game manages 31–48, a 30 FPS lock would be steady only if the frame stays under 33 ms; fisk3's 5 s averages of 25.6–31.7 ms say it mostly would. Not measured there.
+
+### Notes
+
+- **Bottleneck evidence** comes from fisk3, the only run that reached the tower with the frame diagnostics. The fisk4 second-level call sites are from the street, where the waits are rare; the Fisk waits share the same wrapper but their callers there are not sampled.
+- **Worker threads are not sampled.** Which job holds the chain at the tower is the next instrument: sample the job workers as well, or record the job system's per-job timing at `exe+0x01700C4F`.
+- **Not measured at the tower:** native 1080p with the frame diagnostics, the Lowest tier, and a second confirming run.
+- **Diagnostic perturbation:** the wait profiler suspends two threads about 500 times a second; the per-pipeline profiler adds work to every command list (fisk2 shows more street stutter than fisk1).
+- **The gate windows at the tower include nav screenshots;** their gaps are excluded by UTC window.

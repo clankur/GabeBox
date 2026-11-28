@@ -1777,6 +1777,14 @@ HINSTANCE WINAPI XboxTraceShellExecuteW(HWND window, LPCWSTR verb, LPCWSTR file,
 #include "d3d12-pipeline-replay.h"
 #include "hooks.h"
 #include "placer.h"
+#ifdef WAIT_PROF
+static char *PerfDec(char *out, unsigned long long value);
+#include "waitprof.h"
+#endif
+#ifdef GPU_PROF
+static char *PerfDec(char *out, unsigned long long value);
+#include "qtlframes.h"
+#endif
 #include "perfsec.h"
 
 #include "d3d12-compile-slots.h"
@@ -2588,8 +2596,18 @@ BOOL WINAPI XboxTracePreparedRead(HANDLE file, LPVOID buffer, DWORD length, LPDW
         }
     }
     LazyPrepareWrite(buffer, length);
+#ifndef NO_PERF_SEC
+    LARGE_INTEGER readStart, readEnd;
+    QueryPerformanceCounter(&readStart);
+#endif
     const BOOL success = ReadFile(file, buffer, length, count, operation);
     const DWORD error = GetLastError();
+#ifndef NO_PERF_SEC
+    QueryPerformanceCounter(&readEnd);
+    InterlockedIncrement(&perfReads);
+    InterlockedAdd64(&perfReadTicks, readEnd.QuadPart - readStart.QuadPart);
+    if (success && count) InterlockedAdd64(&perfReadBytes, *count);
+#endif
     static volatile LONG zoneReads;
     ULARGE_INTEGER requestOffset;
     const BOOL hasOffset = slot < ARRAYSIZE(preparedArchiveHandles) && operation &&

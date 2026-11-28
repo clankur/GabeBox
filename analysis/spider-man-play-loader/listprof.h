@@ -30,7 +30,11 @@ static volatile UINT64 *ptStamps;
 static volatile LONG ptReady, ptOverflow, ptNoSlot, ptStarted, ptFinished, ptBad;
 #define PT_PSOS 8192u
 typedef struct PtPso { volatile ULONG_PTR pso; DWORD ordinal; LONG graphics; UINT64 vs, ps; DWORD vsBytes, psBytes;
-    volatile LONG64 ticks, spans, work; volatile ULONG_PTR caller; } PtPso;
+    volatile LONG64 ticks, spans, work; volatile ULONG_PTR caller;
+#ifdef GPU_PROF
+    LONG forms;
+#endif
+} PtPso;
 static PtPso ptPsos[PT_PSOS];
 static PtPso *PtPsoSlot(ULONG_PTR key) {
     const unsigned start = (unsigned)((key >> 4) * 2654435761u) % PT_PSOS;
@@ -41,6 +45,22 @@ static PtPso *PtPsoSlot(ULONG_PTR key) {
     }
     return NULL;
 }
+#ifdef GPU_PROF
+/* 1 when the container holds DXBC bytecode (SHEX/SHDR), 2 when it holds DXIL, 0 otherwise. */
+static LONG PtForm(const D3D12_SHADER_BYTECODE *code) {
+    if (!code || !code->pShaderBytecode || code->BytecodeLength < 32) return 0;
+    const BYTE *b = (const BYTE *)code->pShaderBytecode; UINT32 parts;
+    __builtin_memcpy(&parts, b + 28, 4);
+    for (UINT32 i = 0; i < parts && i < 32 && 32 + 4 * i + 4 <= code->BytecodeLength; ++i) {
+        UINT32 off; __builtin_memcpy(&off, b + 32 + 4 * i, 4);
+        if (off + 4 > code->BytecodeLength) continue;
+        UINT32 tag; __builtin_memcpy(&tag, b + off, 4);
+        if (tag == 0x58454853u || tag == 0x52444853u) return 1;   /* SHEX, SHDR */
+        if (tag == 0x4C495844u) return 2;                          /* DXIL */
+    }
+    return 0;
+}
+#endif
 static UINT64 PtDigest(const D3D12_SHADER_BYTECODE *code) {
     if (!code || !code->pShaderBytecode || code->BytecodeLength < 20) return 0;
     UINT64 v; __builtin_memcpy(&v, (const char *)code->pShaderBytecode + 4, sizeof(v)); return v;
@@ -52,6 +72,9 @@ static void PtRegister(void *pso, DWORD ordinal, BOOL graphics, const D3D12_SHAD
     e->ordinal = ordinal; e->graphics = graphics;
     e->vs = PtDigest(first); e->vsBytes = first ? (DWORD)first->BytecodeLength : 0;
     e->ps = PtDigest(second); e->psBytes = second ? (DWORD)second->BytecodeLength : 0;
+#ifdef GPU_PROF
+    e->forms = PtForm(first) | (PtForm(second) << 2);
+#endif
 }
 typedef void (STDMETHODCALLTYPE *LpEndQueryFn)(ID3D12GraphicsCommandList *, ID3D12QueryHeap *, D3D12_QUERY_TYPE, UINT);
 typedef void (STDMETHODCALLTYPE *LpResolveFn)(ID3D12GraphicsCommandList *, ID3D12QueryHeap *, D3D12_QUERY_TYPE, UINT, UINT, ID3D12Resource *, UINT64);

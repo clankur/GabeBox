@@ -241,8 +241,12 @@ static DWORD WINAPI GpuCopyWatch(void *unused) {
             }
             seen[q] = completed;
         }
+#ifdef GPU_PROF
+        Sleep(1);   /* play-build profiling: do not spin one of the game's six processors */
+#else
         YieldProcessor();
         Sleep(0);
+#endif
     }
 }
 
@@ -325,7 +329,11 @@ static void STDMETHODCALLTYPE GpuExecute(ID3D12CommandQueue *queue, UINT count, 
             QueryPerformanceCounter(&now);
             gpuQSubmit[q][value % GPUQ_RING] = now.QuadPart;
             gpuQCaller[q][value % GPUQ_RING] = caller;
+#ifndef NO_LISTPROF
             ListBatch(count, lists, &gpuQBatch[q][value % GPUQ_RING]);
+#else
+            gpuQBatch[q][value % GPUQ_RING].tcount = 0; gpuQBatch[q][value % GPUQ_RING].lists = (LONG)count;
+#endif
             QtlLog('E', (signed char)q, NULL, value, (const void *)caller);
             InterlockedAdd64(&gpuCopyLists, count);
             ID3D12CommandQueue_Signal(queue, gpuQFence[q], value);
@@ -480,7 +488,11 @@ static void GpuReport(unsigned sample) {
             CensusEmit(copyLine, c);
             gpuCopyMaxLatency = 0;
             /* Two consecutive in-world windows (over 8000 batches each) arm and then fire the timeline dump. */
+            #ifdef GPU_PROF
+            (void)batches;   /* keep the ring running for qtlframes */
+#else
             if (batches > 8000) { if (qtlArmed >= 1) QtlDump(); else ++qtlArmed; } else if (!qtlDumped) qtlArmed = 0;
+#endif
             for (unsigned emitted = 0; emitted < 24; ++emitted) {
                 unsigned best = GPUFENCE_SITES; LONG64 bestBusy = 0;
                 for (unsigned i = 0; i < GPUFENCE_SITES && gpuFenceSites[i].caller; ++i)
@@ -538,6 +550,10 @@ static void GpuReport(unsigned sample) {
                 o = CensusDec(Text(o, " s0b="), (unsigned long long)e->vsBytes);
                 o = Hex(Hex(Text(o, " s1=0x"), (unsigned long)(e->ps >> 32), 8), (unsigned long)(e->ps & 0xFFFFFFFFu), 8);
                 o = CensusDec(Text(o, " s1b="), (unsigned long long)e->psBytes);
+#ifdef GPU_PROF
+                o = Text(o, (e->forms & 1) ? " f0=dxbc" : (e->forms & 2) ? " f0=dxil" : " f0=-");
+                o = Text(o, (e->forms & 4) ? " f1=dxbc" : (e->forms & 8) ? " f1=dxil" : " f1=-");
+#endif
                 o = RecordImageAddress(o, (const void *)e->caller);
                 CensusEmit(line, o);
             }

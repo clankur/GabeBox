@@ -6,7 +6,14 @@
 # play     (default) 4 pipeline-compile slots plus 2 while at least 768 MiB of commit is available (boot),
 #          render/main-thread compiles first and replay compiles only when no title compile waits,
 #          SoundBankAlloc 128 MiB, a 1280x720 hosted render size, no per-second counters.
-# measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio).
+# measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio, ReadFile
+#          calls and time).
+# Frame-limit diagnostics for measure builds (off by default; analysis note "Fisk Tower frame rate"):
+#   -DWAIT_PROF       samples the main and render threads about every 2 ms and writes their six busiest places and
+#                     two call sites per second ("asset waitprof", waitprof.h).
+#   -DGPU_PROF        hooks the device's queues: per-frame GPU busy, submission span and pacing gap every 5 s
+#                     ("asset qtlframes", qtlframes.h) and per-pipeline GPU time every 10 s ("asset psotime").
+#   -DNO_LISTPROF     with GPU_PROF, leaves the command lists unhooked (no per-pipeline timing, less overhead).
 # Memory budget (Fisk Tower headroom, analysis note "Memory headroom variants"): SoundBankAlloc 128 MiB and a
 # hosted monitor of 1280x720 (the game renders 1280x720 and upscales into the 1920x1080 swap chain) keep at
 # least 250 MiB of commit free. Append -USOUNDBANK_MIB -DSOUNDBANK_MIB=224 -UHOSTED_RENDER_WIDTH
