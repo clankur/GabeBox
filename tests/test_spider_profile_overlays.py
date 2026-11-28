@@ -69,6 +69,11 @@ class SpiderProfileOverlayTests(unittest.TestCase):
                  f'-DHOSTED_RENDER_WIDTH={width} -DHOSTED_RENDER_HEIGHT={height}"')
         self.assertIn(flags, script)
         self.assertRegex(script, r'play\) mode_flags="[^"]*\$budget_flags[^"]*-DNO_PERF_SEC"')
+        # The pruned warm-up with three replay threads is the play (and measure) default; trace.c keeps it off.
+        load = ' '.join(f'-D{define}' for define in loader['load_defines'])
+        self.assertIn(f'load_flags="{load}"', script)
+        self.assertRegex(script, r'play\) mode_flags="[^"]*\$load_flags[^"]*"')
+        self.assertRegex(script, r'measure\) mode_flags="[^"]*\$load_flags[^"]*"')
         source = (ROOT / 'analysis/spider-man-play-loader/trace.c').read_text(encoding='utf-8')
         # The loader reports the smaller hosted monitor before the game queries displays.
         self.assertIn('#if defined(HOSTED_RENDER_WIDTH) && defined(HOSTED_RENDER_HEIGHT)', source)

@@ -5,7 +5,9 @@
 #
 # play     (default) 4 pipeline-compile slots plus 2 while at least 768 MiB of commit is available (boot),
 #          render/main-thread compiles first and replay compiles only when no title compile waits,
-#          SoundBankAlloc 128 MiB, a 1280x720 hosted render size, no per-second counters.
+#          SoundBankAlloc 128 MiB, a 1280x720 hosted render size, no per-second counters, and the pruned
+#          warm-up: the game warms from the recorded session list while three below-normal replay threads
+#          precompile the rest with one compile slot left for the game (load_flags below).
 # measure  the same plus one "asset perf-sec" line per second (commit, available commit, compiles, audio, ReadFile
 #          calls and time).
 # Frame-limit diagnostics for measure builds (off by default; analysis note "Fisk Tower frame rate"):
@@ -20,9 +22,12 @@
 # -UHOSTED_RENDER_HEIGHT for the earlier native-1080p, 224 MiB sound-bank budget.
 # The installed 1.0.63026.0 loader (29c66e2a) is play mode with -DPSO_BOOST_SLOTS=0 -DPSO_PRIORITY=0 before
 # the compile pool moved to d3d12-compile-slots.h; append those flags to drop the boost and priority.
-# Load-time trial (issue #95, off by default): -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2
-# hides the game's xbox0.pso warm-up list (pso-warmup.h) and precompiles the replay database on six
-# below-normal threads that leave two compile slots free for the game.
+# Load time (issue #95): play and measure set -DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1, which
+# serves the game the recorded session list in place of xbox0.pso (pso-warmup.h) and replays the rest on three
+# threads; unattended Play->gameplay went from about 82 s to 50 s (analysis note "Prune with three replay
+# threads after the root-signature fix"). Append -UPSO_WARMUP_LIST -UPSO_REPLAY_THREADS -UPSO_BG_RESERVE for the
+# earlier full warm-up (play 49071d0a at 939141e). -DPSO_SKIP_WARMUP=1 -DPSO_REPLAY_THREADS=6 -DPSO_BG_RESERVE=2
+# instead hides the warm-up list entirely (trial only, off by default).
 #
 # Needs Apple/Homebrew clang, Homebrew mingw-w64 headers and import libraries, an lld-link (zig's
 # `zig lld-link` works) and llvm-dlltool (`zig dlltool`), and the UWP WindowsApp.lib from the Windows SDK.
@@ -38,9 +43,10 @@ MINGW=${MINGW:-/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32}
 LLD_LINK=${LLD_LINK:-lld-link}; DLLTOOL=${DLLTOOL:-llvm-dlltool}
 : "${WINDOWSAPP_LIB:?set WINDOWSAPP_LIB to the UWP WindowsApp.lib}"
 budget_flags="-DSOUNDBANK_MIB=128 -DHOSTED_RENDER_WIDTH=1280 -DHOSTED_RENDER_HEIGHT=720"
+load_flags="-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1"
 case $mode in
-    play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags -DNO_PERF_SEC" ;;
-    measure) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags" ;;
+    play) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags $load_flags -DNO_PERF_SEC" ;;
+    measure) mode_flags="-DPSO_SLOTS=4 -DPSO_BOOST_SLOTS=2 -DPSO_PRIORITY=1 $budget_flags $load_flags" ;;
     *) echo "mode must be play or measure" >&2; exit 2 ;;
 esac
 mkdir -p "$out"

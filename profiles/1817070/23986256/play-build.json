@@ -1,5 +1,5 @@
 {
-  "description": "Spider-Man play build for Steam build 23986256: recipe overlays applied in this order, the owned texture restores, and the play loader built from analysis/spider-man-play-loader with build.sh play. The memory budget (SoundBankAlloc 128 MiB, 1280x720 hosted render) keeps at least 250 MiB of commit free in the Fisk Tower atrium; see analysis/spider-man-compatibility.md, Memory headroom variants.",
+  "description": "Spider-Man play build for Steam build 23986256: recipe overlays applied in this order, the owned texture restores, and the play loader built from analysis/spider-man-play-loader with build.sh play. The memory budget (SoundBankAlloc 128 MiB, 1280x720 hosted render) keeps at least 250 MiB of commit free in the Fisk Tower atrium; see analysis/spider-man-compatibility.md, Memory headroom variants. The load-time defines serve the game its recorded session warm-up list and replay the rest on three threads, for about 50 s unattended Play to gameplay; see Prune with three replay threads after the root-signature fix.",
   "recipe_overlays": [
     "managed-buffer-448mib-overlay.json",
     "model-skin-matrix-buffer-16mib-overlay.json",
@@ -14,6 +14,7 @@
     "build": "analysis/spider-man-play-loader/build.sh",
     "mode": "play",
     "soundbank_mib": 128,
-    "hosted_render": [1280, 720]
+    "hosted_render": [1280, 720],
+    "load_defines": ["PSO_WARMUP_LIST=1", "PSO_REPLAY_THREADS=3", "PSO_BG_RESERVE=1"]
   }
 }

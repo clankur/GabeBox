@@ -1484,7 +1484,67 @@ In both runs the trace has `pso-warmup hidden` and `session-open ok`, the game l
 - **What that suggests.** The game holds more than one root-signature object for some blobs, and replay picks the newest one with that blob. Fixing that needs replay to compile against the same object the game will use. That is not available from a blob hash, so replay cannot cover the pruned remainder.
 - **Saves.** `slot0` was autosaved during the run and restored from the backup. All three saves were verified unchanged afterwards.
 
-**Recommendation.** Keep the play build at the baseline warm-up. Its 82–86 s unattended meets the goal. `PSO_WARMUP_LIST`, `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off.
+**Recommendation (superseded below).** Keep the play build at the baseline warm-up. Its 82–86 s unattended meets the goal. `PSO_WARMUP_LIST`, `PSO_SKIP_WARMUP`, `PSO_REPLAY_THREADS` and `PSO_BG_RESERVE` stay off.
+
+### Prune with three replay threads after the root-signature fix (November 28, evening)
+
+**Cause of prune3's misses.** Run `rootdiag` (1.0.63100.0) traced root-signature creation. Two replay threads created the same recorded root signature at the same time, and the Xbox runtime returned two different objects (`root-dup by=replay prior=replay`). The game's later creation got the first object, while replay had compiled against the second. `f3a5b30` makes replay create its root signatures one at a time and check again under the lock (`XPR_SERIAL_ROOTS`). The play loader sets it only when `PSO_REPLAY_THREADS > 1`.
+
+**Runs.** Same route as prune1 and prune3: menu detected on screen, Continue, a 240 s scripted traversal, then objective-marker cycles toward the Fisk Tower atrium. Saves were restored and verified after each run. Stutter comes from `tools.measure --stutter --producer-log`, with each marker screenshot excluded (−1.7 s to −0.2 s on the console clock). Load phases come from `tools.load_phases`, with Play taken from `steam_launch_run_id`.
+
+- **`prunefix`:** 1.0.63101.0, lease #233. Measure loader `f35e27ad` at `f3a5b30`.
+- **`pf939`:** 1.0.63103.0, lease #236. Measure loader `df504fee…` (`build.sh measure` at `939141e`). This is the 1.0.63102.0 package content with only the loader swapped and the autoplay marker added.
+
+Both use `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`.
+
+| | Baseline play build (1.0.63102.0) | `prunefix` | `pf939` |
+| --- | --- | --- | --- |
+| Warm-up pipelines | ~2,600 | 1,495 | 1,508 |
+| Play→lobby ready (trace) | 66.5–67.1 s | 41.7 s | 41.2 s |
+| Main menu on screen, from Play | — | about 47 s | 46.7 s |
+| Continue→gameplay | 15.4–15.5 s | 7.9 s | 8.4 s |
+| Unattended Play→gameplay | 81.9–82.6 s | 49.6 s | 49.6 s |
+| Observed Play→steady gameplay | about 104 s | about 70 s | **69.1 s** (the first A press was ignored, the second accepted) |
+| Traversal 240 s: FPS / lowest 1 s / worst frame | 59.89–59.93 | 59.89 / 53 / 117 ms | **59.91 / 57 / 50 ms** |
+| Traversal frames over 33 / 100 ms | 0–12 / 0 | 3 / 2 (one 117 ms compile, one 138 ms unattributed) | 4 / **0** (two compile-attributed, 84 ms in all) |
+| Frames over 100 ms per minute, traversal plus route | 0 | 0.36 | **0.15** (one unattributed, in 6.5 min) |
+| Render-thread compiles in gameplay | 0 over 100 ms | 1 (113 ms) | 2 (92 ms in all; no stall recorded) |
+| Replay in gameplay | — | 1,035 replayed, 24 hits | 1,028 replayed, 259 hits |
+| Lowest available commit in gameplay (perf-sec) | 343 MiB (verifier) | 311 MiB | 320 MiB |
+
+**Gate.** Settled traversal windows at 16:44:30 and 16:46:30 pass `--require-gpu-60`: 59.90 and 59.97 FPS, lowest second 58 and 59, every frame a shared GPU texture. The game renders internally at 1280×720; the output is 1920×1080.
+
+**Lighting.** 15 gameplay and menu captures were checked with the `light/hue.py` thresholds. All showed 0.00% green and 0.00% magenta. By eye, they show normal sky, glass and the atrium interior.
+
+**The Fisk Tower mission frame rate is a separate issue.** `pf939` went further than earlier routes: through the tower's mission-start cutscenes and into **The Main Event – Clear the atrium** combat.
+- **16:49:07–16:50:07.** The frame rate was 41–50 FPS, with 210 frames over 33 ms and a 99th percentile of 47–50 ms. Over the 152 s route window that is 71 frames over 33 ms per minute.
+- **None of it is pipeline compilation.** No compiles were traced in that window, the main thread averaged only 594–1,004 ms of CPU per second, and no frame took over 100 ms.
+- **Before and after, it was steady.** In the street on the same route, outside the screenshots, the frame rate held at 56.9–58.4 FPS.
+- **prunefix never reached it.** Its last three cycles stayed outside, at 56.9 FPS.
+- **So this is the tower frame limit.** It matches the open limit in [Fisk Tower frame rate](#fisk-tower-frame-rate-and-first-use-hitches-issue-93-november-28), not a load-time regression.
+
+**Play default.** `build.sh` now applies these defines in both play and measure (`load_flags`), and `play-build.json` lists them as `load_defines`.
+
+| Build at `939141e` | Loader SHA-256 |
+| --- | --- |
+| `build.sh play` (installed as 1.0.63104.0) | `c6b50df75f567a0ecd6471be9c8a10437c301174f58e3cb424d4e6b5e7ed57a5` |
+| `build.sh measure` | `df504fee3cc9f5dd90792b35868c5bb8d1bb778c91baffaa4ff75cd006fd7e1b` |
+| `build.sh play -UPSO_WARMUP_LIST -UPSO_REPLAY_THREADS -UPSO_BG_RESERVE` (the earlier full warm-up) | `49071d0a2ce950883a9c818ae969f45c4e36438e58cc4ab84946a8bb92dc4e96` |
+
+The earlier play loader, `68a5c545`, is the same full-warm-up build at `70e289a`. All of the difference from `49071d0a` comes from `939141e`. Applying that commit's files one at a time gives:
+
+- `demand-commit.h` alone: `35116dbd`.
+- Plus `d3d12-small-array-copy.h`: `e858d94e`.
+- Plus `d3d12-pipeline-replay.h` (the `rep stosb` clear): `49071d0a`.
+
+**Playtest package.** 1.0.63104.0, APPX SHA-256 `2f9aad15…`. It is the 1.0.63102.0 content (restored textures `af93da80`, recipe `748e3130`) with only `XboxWin32LoaderTrace.dll` and the manifest version changed, and no autoplay marker. It was installed without a launch under lease #237, and the saves were verified afterwards.
+
+**Not yet verified.**
+- A launch of 1.0.63104.0 itself. It is the play loader, which differs from the verified measure loader only by `-DNO_PERF_SEC`.
+- A physical controller's first Continue press.
+- Audio by ear.
+- Save and reload.
+- How the session list grows over many player runs. Every run appends pipelines that were not served, so the boot warm-up grows again from 1,508.
 
 ## Memory headroom variants (issue #96, November 28)
 
