@@ -96,6 +96,7 @@ typedef struct XprRoot {
     UINT64 hash;
     BYTE *blob;
     UINT32 size;
+    BOOL replayMade;              /* created by replay before the title asked for it */
 } XprRoot;
 
 typedef struct XprEntry {
@@ -758,32 +759,60 @@ static HRESULT XboxPipelineReplayCreate(ID3D12Device *device, BOOL graphics, con
     return result;
 }
 
+typedef HRESULT (STDMETHODCALLTYPE *XprCreateRootFn)(ID3D12Device *, UINT, const void *, SIZE_T, REFIID, void **);
+
+/* Keeps one reference to a root signature and remembers its blob. Returns FALSE when the title
+   received a different object for a blob replay had already created, which means the runtime does
+   not share root signatures by content here; replay then stops creating them. */
+static BOOL XprRegisterRoot(ID3D12RootSignature *root, const void *blob, SIZE_T size, BOOL replayMade) {
+    const UINT64 hash = XprHash(blob, size);
+    BOOL shared = TRUE;
+    AcquireSRWLockExclusive(&xprState.lock);
+    XprRoot *known = XprRootByObject(root);
+    if (!known && !replayMade) {
+        const XprRoot *made = XprRootByHash(hash);
+        if (made && made->replayMade) shared = FALSE;
+    }
+    if (!known && xprState.rootCount < XPR_MAX_ROOTS) {
+        BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
+        if (copy) {
+            XprCopy(copy, blob, size);
+            ID3D12RootSignature_AddRef(root);
+            xprState.roots[xprState.rootCount++] = (XprRoot){root, hash, copy, (UINT32)size, replayMade};
+        }
+    }
+    WakeAllConditionVariable(&xprState.changed);
+    ReleaseSRWLockExclusive(&xprState.lock);
+    return shared;
+}
+
 static HRESULT STDMETHODCALLTYPE XprCreateRootSignature(ID3D12Device *device, UINT node, const void *blob,
         SIZE_T size, REFIID iid, void **object) {
-    typedef HRESULT (STDMETHODCALLTYPE *CreateRoot)(ID3D12Device *, UINT, const void *, SIZE_T, REFIID, void **);
+    typedef XprCreateRootFn CreateRoot;
     const HRESULT result = ((CreateRoot)xprState.createRootOriginal)(device, node, blob, size, iid, object);
     const DWORD error = GetLastError();
     if (SUCCEEDED(result) && object && *object && blob && size && size <= (1u << 20) && iid &&
             XprEqual(iid, &xprRootSignatureIid, sizeof(IID))) {
-        const UINT64 hash = XprHash(blob, size);
-        ID3D12RootSignature *root = (ID3D12RootSignature *)*object;
-        AcquireSRWLockExclusive(&xprState.lock);
-        XprRoot *known = XprRootByObject(root);
-        if (!known && xprState.rootCount < XPR_MAX_ROOTS) {
-            BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
-            if (copy) {
-                XprCopy(copy, blob, size);
-                ID3D12RootSignature_AddRef(root);
-                xprState.roots[xprState.rootCount++] = (XprRoot){root, hash, copy, (UINT32)size};
-            }
+        if (!XprRegisterRoot((ID3D12RootSignature *)*object, blob, size, FALSE) &&
+                InterlockedExchange(&xprState.rootDedup, 2) != 2) {
+            char line[80], *out = XprText(line, "asset pso-replay root-dedup same=0 reason=title-object-differs");
+            XprEmit(line, out);
         }
-        WakeAllConditionVariable(&xprState.changed);
-        ReleaseSRWLockExclusive(&xprState.lock);
         /* Once: does the runtime return the same object for an identical blob? Replay may then
            create a recorded root signature itself and still match the title's later requests. */
         if (!xprState.rootDedup && !InterlockedCompareExchange(&xprState.rootDedup, 3, 0)) {
+            /* Ask with a copy of the blob at another address, as replay's own requests (from the
+               mapped database) are. With the title's own pointer the Xbox runtime returned the same
+               object, but replay-created roots still differed from the title's: 631 replay=3
+               misses in run skip1. */
             void *again = NULL;
-            const HRESULT second = ((CreateRoot)xprState.createRootOriginal)(device, node, blob, size, iid, &again);
+            BYTE *copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
+            HRESULT second = E_OUTOFMEMORY;
+            if (copy) {
+                XprCopy(copy, blob, size);
+                second = ((CreateRoot)xprState.createRootOriginal)(device, node, copy, size, iid, &again);
+                HeapFree(GetProcessHeap(), 0, copy);
+            }
             const LONG dedup = SUCCEEDED(second) && again == *object ? 1 : 2;
             if (again) ((IUnknown *)again)->lpVtbl->Release((IUnknown *)again);
             InterlockedExchange(&xprState.rootDedup, dedup);
@@ -984,10 +1013,13 @@ static void XprEnsureRoot(UINT64 hash) {
     for (UINT32 i = 0; i < xprState.storedRootCount; ++i) {
         if (xprState.storedRoots[i].hash != hash) continue;
         void *created = NULL;
-        /* through the hook, which registers the object and keeps a reference */
-        const HRESULT result = ID3D12Device_CreateRootSignature(xprState.device, 0, xprState.storedRoots[i].bytes,
-            xprState.storedRoots[i].length, &xprRootSignatureIid, &created);
-        if (SUCCEEDED(result) && created) ((IUnknown *)created)->lpVtbl->Release((IUnknown *)created);
+        const HRESULT result = ((XprCreateRootFn)xprState.createRootOriginal)(xprState.device, 0,
+            xprState.storedRoots[i].bytes, xprState.storedRoots[i].length, &xprRootSignatureIid, &created);
+        if (SUCCEEDED(result) && created) {
+            XprRegisterRoot((ID3D12RootSignature *)created, xprState.storedRoots[i].bytes,
+                xprState.storedRoots[i].length, TRUE);
+            ((IUnknown *)created)->lpVtbl->Release((IUnknown *)created);
+        }
         return;
     }
 }
