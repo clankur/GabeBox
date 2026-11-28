@@ -238,15 +238,15 @@ class HostedSwapChain final : public IDXGISwapChain4 {
             return true;
         };
         // Multi-refresh intervals (a game's 30 FPS lock) follow the host's measured refresh and phase: each frame is
-        // committed 0.3 of a host period after an estimated host release, so it is shown on the host's next refresh
-        // and never on the one before. A nominal 60 Hz grid drifts across the host's refresh edge and alternates 50
-        // and 17 ms frames while it is near it.
+        // committed late in a host refresh (XBOX_HOST_VSYNC_COMMIT16 after the earliest release), so it is shown on
+        // the host's next refresh even when the host's draw callback runs late, and never on the one before. A
+        // nominal 60 Hz grid drifts across the host's refresh edge and alternates 50 and 17 ms frames near it.
         XboxHostVsync host;
         if (interval >= 2 && DxgiFramePublisher::HostVsync(now, host)) {
             const UINT64 period = static_cast<UINT64>(host.period16 >> 16);
             UINT64 earliest = hostDeadline_ ? hostDeadline_ + interval * period - period / 2 : now;
             if (earliest + period < now) earliest = now;
-            const UINT64 deadline = XboxHostVsyncNext(&host, earliest, 19661 /* 0.3 of a period */);
+            const UINT64 deadline = XboxHostVsyncNext(&host, earliest, XBOX_HOST_VSYNC_COMMIT16);
             hostDeadline_ = deadline;
             clock_.interval = 0;
             if (!tracedHostPacing_) {

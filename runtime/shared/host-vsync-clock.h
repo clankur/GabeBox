@@ -5,8 +5,8 @@
    pace multi-refresh presents (SyncInterval 2) to the host's real refresh and phase instead of a nominal 60 Hz.
 
    The host draws on its display's composition callback and signals each slot's done fence right after that draw,
-   so done-fence completion times sit at a constant offset from the host's vsync, with some jitter. Observe() feeds
-   them to a phase-locked loop on the QPC clock. Period and anchor use 16 fractional bits; all integer math. */
+   so done-fence completion times follow the host's vsync, late by a varying amount when the host's draw waits behind
+   the game's GPU work. Observe() tracks their earliest envelope on the QPC clock. Period and anchor use 16 fractional bits; all integer math. */
 typedef struct XboxHostVsync {
     uint64_t anchor;   /* QPC of an estimated host tick (done-release time) */
     int64_t period16;  /* estimated host period, QPC ticks << 16 */
@@ -15,10 +15,13 @@ typedef struct XboxHostVsync {
     uint64_t base;     /* QPC of the first observation since the last re-anchor */
     int64_t baseTicks; /* host ticks counted from base to last */
     unsigned samples;  /* accepted observations since the last re-anchor */
-    unsigned outliers; /* consecutive observations more than a quarter period off the estimate */
 } XboxHostVsync;
 
 #define XBOX_HOST_VSYNC_LOCK_SAMPLES 16u
+/* Where in the host's refresh a paced frame is committed, as a fraction of a period after the earliest release.
+   Late: the host's draw callback can itself run late under load and must not catch a frame meant for the next
+   refresh, while the earliest release still leaves time before that refresh. */
+#define XBOX_HOST_VSYNC_COMMIT16 45875u /* 0.7 */
 
 /* Starts from 60000/1001 Hz, the console's usual output rate; the loop corrects the period from observations. */
 static inline void XboxHostVsyncInit(XboxHostVsync *clock, uint64_t frequency)
@@ -28,7 +31,6 @@ static inline void XboxHostVsyncInit(XboxHostVsync *clock, uint64_t frequency)
     clock->last = clock->base = 0;
     clock->baseTicks = 0;
     clock->samples = 0;
-    clock->outliers = 0;
 }
 
 static inline int64_t XboxHostVsyncDiv(int64_t value, int64_t divisor) /* rounds to nearest, divisor > 0 */
@@ -43,32 +45,32 @@ static inline int64_t XboxHostVsyncFloor16(int64_t value16) /* floor(value16 / 6
 
 static inline void XboxHostVsyncObserve(XboxHostVsync *clock, uint64_t now)
 {
-    if (!clock->anchor) {
+    if (!clock->anchor || now <= clock->anchor) {
+        if (!clock->anchor) {
+            clock->anchor = clock->last = clock->base = now;
+            clock->baseTicks = 0;
+            clock->samples = 1;
+        }
+        return;
+    }
+    const int64_t elapsed16 = (int64_t)(now - clock->anchor) * 65536;
+    /* A release is never early, only late: the host's draw callback and its GPU work can run late under load. So a
+       release belongs to the tick at or before it, up to seven eighths of a period late, and the anchor follows
+       the earliest releases (the lower envelope): half of an early error at once, a late one only slowly. */
+    const int64_t ticks = (elapsed16 + clock->period16 / 8) / clock->period16;
+    if (ticks > 600) { /* a pause or a stall: start again */
         clock->anchor = clock->last = clock->base = now;
         clock->baseTicks = 0;
         clock->samples = 1;
         return;
     }
-    if (now <= clock->anchor) return;
-    const int64_t elapsed16 = (int64_t)(now - clock->anchor) * 65536;
-    const int64_t ticks = XboxHostVsyncDiv(elapsed16, clock->period16);
-    if (ticks < 1) return; /* another slot released in the same host draw */
-    const int64_t error16 = elapsed16 - ticks * clock->period16;
-    if (error16 > clock->period16 / 4 || error16 < -clock->period16 / 4 || ticks > 600) {
-        /* A late draw (host GPU busy) or a pause. Re-anchor only when the cadence itself has moved. */
-        if (++clock->outliers >= 4 || ticks > 600) {
-            clock->anchor = clock->last = clock->base = now;
-            clock->baseTicks = 0;
-            clock->samples = 1;
-            clock->outliers = 0;
-        }
-        return;
-    }
-    clock->outliers = 0;
-    /* Follow a quarter of the phase error. The period is the mean over every tick counted since the anchor was
-       set, so release jitter averages out as the count grows; it stays within 1% of the nominal period. */
-    clock->anchor += (uint64_t)((ticks * clock->period16 + error16 / 4) / 65536);
-    clock->baseTicks += XboxHostVsyncDiv((int64_t)(now - clock->last) * 65536, clock->period16);
+    const int64_t error16 = elapsed16 - ticks * clock->period16; /* [-P/8, 7P/8) */
+    if (ticks < 1 && error16 >= 0) return; /* another slot released in the same host draw */
+    clock->anchor += (uint64_t)XboxHostVsyncFloor16(ticks * clock->period16 + (error16 < 0 ? error16 / 2 : error16 / 64));
+    clock->baseTicks += ticks;
+    /* The period is the mean over every tick counted since the base, from the raw release time, so release
+       lateness averages out as the count grows instead of feeding back through the anchor; it stays within 1% of
+       the nominal period. */
     if (clock->baseTicks >= 8) {
         int64_t period16 = (int64_t)(now - clock->base) * 65536 / clock->baseTicks;
         const int64_t limit = clock->nominal16 / 100;
@@ -77,7 +79,7 @@ static inline void XboxHostVsyncObserve(XboxHostVsync *clock, uint64_t now)
         clock->period16 = period16;
     }
     if (clock->baseTicks > 1000000) { /* about 4.6 hours: restart the average before the products can overflow */
-        clock->base = now;
+        clock->base = clock->anchor;
         clock->baseTicks = 0;
     }
     clock->last = now;
