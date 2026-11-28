@@ -85,6 +85,27 @@ class LoadPhaseTests(unittest.TestCase):
         self.assertEqual((stalls['worker_count'], stalls['worker_worst_ms']), (1, 220))
         self.assertEqual(stalls['traced_minutes'], 1.0)
 
+    def test_hidden_warmup_and_replay_hits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = self.run_folder(directory)
+            (folder / 'game.log').write_text(
+                '20:33:54:200 (00005004) > [Startup] Marvel\'s Spider-Man Remastered\n'
+                '20:33:54:300 (00005004) > [Render] File xbox0.pso is missing, no pipelines read.\n'
+                '20:33:54:310 (00005004) > [Render] File \\xbox0.pso is missing, no pipelines read.\n')
+            with (folder / 'trace.txt').open('a') as trace:
+                trace.write('asset pso-parallel slots=4 boost=2 boost-min-mib=768 priority=1 replay-threads=6 '
+                            'bg-reserve=2 skip-warmup=1\r\n')
+                trace.write(f'asset pso-replay hit kind=graphics n=7 waited=0 ms=0 tid=0x05E0 qpc={tick(50)}\r\n')
+                trace.write(f'asset pso-replay hit kind=graphics n=8 waited=1 ms=3 tid=0x05E0 qpc={tick(102)}\r\n')
+                trace.write(f'asset perf-sec s=4 qpc={tick(45)} cpu-ms=900 pso-n=12 pso-ms=800\r\n')
+            report = phases['analyze'](folder)
+        self.assertEqual(report['game_warmup_pipelines'], 0)
+        self.assertEqual(report['pso_config']['skip-warmup'], 1)
+        self.assertEqual(report['pso_config']['replay-threads'], 6)
+        self.assertEqual(report['compiles']['boot']['replay_hits'], 1)
+        self.assertEqual(report['compiles']['boot']['perf_title_compiles'], 12)
+        self.assertEqual(report['compiles']['menu_to_gameplay']['replay_hits'], 1)
+
     def test_estimates_play_from_the_stage_without_a_probe_report(self):
         with tempfile.TemporaryDirectory() as directory:
             inventory = {'SteamWin32Trial (10)': {'created': round((LAUNCH + 28.6) * 1e7) + phases['FILETIME_EPOCH']}}

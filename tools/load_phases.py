@@ -29,6 +29,10 @@ Phases, in seconds from `launch.utc`:
 
 Compile summaries count the `pso-slow` (a title compile of at least 30 ms, with its wait for a
 compile slot) and `pso-replay-compile` records in each phase, and the render thread's waits.
+`replay_hits` counts title requests that a replay precompile satisfied (`pso-replay hit`, the
+first 4,000 are written), and `perf_title_compiles` every title compile from the per-second
+`perf-sec pso-n` counters of measure builds. `game_warmup_pipelines` is 0 when the game found no
+warm-up list (the loader's PSO_SKIP_WARMUP, or a first launch).
 Gameplay compile stalls are title compiles of at least 100 ms (wait plus compile) after
 `gameplay`, split into the render thread's (each one holds a frame) and worker threads' (which
 stall a frame only when the frame waits for that pipeline).
@@ -54,6 +58,7 @@ QPC = re.compile(r' qpc=([0-9]{1,20})')
 FIELD = re.compile(r'([a-z][a-z-]*)=([0-9A-Fa-fx]+)')
 GAME_LINE = re.compile(r'^([0-9]{2}):([0-9]{2}):([0-9]{2}):([0-9]{3}) ')
 WARMUP = re.compile(r'File \S+ contains ([0-9]+) pipelines')
+NO_WARMUP = re.compile(r'File \S+ is missing, no pipelines read')
 
 
 def read_utc(path):
@@ -235,6 +240,10 @@ def analyze(folder, inventory=None, probe_report=None):
             phase = compiles[bucket(qpc)]
             phase['replay_compiles'] += 1
             phase['replay_compile_ms'] += int(fields(line).get('ms', 0))
+        elif line.startswith('asset pso-replay hit '):
+            compiles[bucket(qpc)]['replay_hits'] += 1
+        elif line.startswith('asset perf-sec ') and int(fields(line).get('pso-n', '0')):
+            compiles[bucket(qpc)]['perf_title_compiles'] += int(fields(line)['pso-n'])
     intervals = {}
     ordered = [('launch', 0.0)] + [(name, value) for name, value in phases.items() if value is not None]
     for (a, x), (b, y) in zip(ordered, ordered[1:]):
@@ -243,7 +252,7 @@ def analyze(folder, inventory=None, probe_report=None):
     result.update({
         'phases_s': phases,
         'intervals_s': intervals,
-        'game_warmup_pipelines': int(warmup[-1]) if warmup else None,
+        'game_warmup_pipelines': int(warmup[-1]) if warmup else 0 if NO_WARMUP.search(log) else None,
         'pso_config': config or None,
         'pso_slots_summary': slot_summary,
         'render_thread': render_thread,
