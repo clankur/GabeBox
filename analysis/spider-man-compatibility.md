@@ -1422,6 +1422,52 @@ In both runs the trace has `pso-warmup hidden` and `session-open ok`, the game l
 - The first run without a sidecar would be as slow as `skip1`.
 - An alternative that keeps the warm-up is to serve the game a demand-first copy of `xbox0.pso`. That needs the file format reverse-engineered, and the file order must survive the game's load path. That has not been checked.
 
+**Warm-up from a recorded session list (`PSO_WARMUP_LIST`, November 28).**
+
+**Setup.**
+- **The list file format.** The game's write thread (`exe+0x018CF9E0`) writes an 8-byte `{1, 4}` header, then appends 0x588-byte records: an 8-byte hash and 0x580 bytes of description. The reader drops duplicate hashes.
+- **The recorded list.** Run `skip1` left `xbox0.pso.session` with 1,156 records: the pipelines that run created for boot, menu, Continue and 4 minutes of swinging. The player's list has 2,634.
+- **What the loader serves.** At the game's first read it writes `xbox0.pso.served` from whole, validated records:
+  - `=1` (prune): the session list alone.
+  - `=2` (merge): the session list, then the player's records.
+- **Writes.** The run's new pipelines are appended to the session list, and the player's file is only read.
+
+**The runs.**
+- **Shared setup:** measure loaders from `1d7f412`, 720p, SB128, Medium textures, autoplay.
+- **Route:** the menu was detected on screen, then Continue, a 240 s scripted traversal and 31 objective-marker cycles into the Fisk Tower atrium (marker cycles take a screenshot each).
+- **Saves:** restored and verified after each run.
+
+| | Baseline `var/run-final-a`/`-b` (2,627 listed) | `merge1` (`=2`, 1.0.63062.0, lease #202) | `prune1` (`=1`, 1.0.63065.0, lease #205) |
+| --- | --- | --- | --- |
+| Game log | `contains 2627` | `contains 3790 pipelines and 1155 duplicates` | `contains 1156 pipelines and 0 duplicates` |
+| Play→lobby ready | 66.5–67.1 s | 69.2 s | **39.1 s** |
+| Main menu on screen | at the lobby | launch +101 s | launch +69 s (intro logos end) |
+| Continue→gameplay | 15.4–15.5 s | 14.7 s | **8.1 s** |
+| Unattended Play→gameplay | 81.9–82.6 s | 83.9 s | **47.2 s** |
+| Traversal: average FPS / lowest 1 s / worst frame | 59.93 / 57 / 33 ms | 59.94 / 59 / 20.5 ms | 57.36 / 0 / 1,002 ms |
+| Traversal frames over 33 ms / over 100 ms, per minute | 0 / 0 | 0 / 0 | 14.6 / 6.6 (26 over 100 ms on traced compiles) |
+| Render-thread compiles ≥100 ms per minute: traversal / Fisk route | 0 / 0 | 0 / 0 | 5.9 (worst 892 ms) / 1.2 (worst 169 ms) |
+| Lowest available commit: pre-menu / gameplay | — | 1,249 / 382 MiB | 1,291 / 325 MiB |
+
+**Findings.**
+- **Reordering does nothing.** With the session records first, the menu came no earlier than baseline. The game does not queue its warm-up in file order, so the order of the file can't move the menu forward.
+- **Pruning works for load time, but costs hitches.**
+  - It cuts unattended Play→gameplay by about 35 s, to 47 s.
+  - Every render-thread compile in gameplay was a recorded but not yet replayed pipeline (77, all `replay=2`).
+  - The single replay thread needed 10 minutes for the 1,468 pipelines nobody had claimed. Swinging away from the start area therefore hitched, by up to about 1 s, until replay or the game caught up.
+  - The Fisk route, nearer the start, hitched far less.
+  - No `replay=3` misses occurred.
+- **Memory.** The game warms 1,156 pipelines instead of 2,627. Replay still precompiles the rest and holds them, so commit is about the same (325 against 382 MiB, on routes that are not identical).
+
+**Maintenance for a real player.**
+- **What happens today.** Every run appends the pipelines that were not served, so the session list becomes the union of what the player has used. That is effectively an LRU without eviction. Hitches on a new route turn into warm-up entries next time. Boot grows again, though from a smaller base.
+- **A cap needs per-record use.** It would mean marking which served records the game actually creates in a run, by matching the record hash at the game's create path. Then the list could be rewritten as the boot/menu head plus records used in the last N runs.
+- **Re-recording is not an option.** A fresh `PSO_SKIP_WARMUP` recording costs about 200 s at Continue.
+
+**Recommendation.**
+- Keep the play build without these flags until gameplay is hitch-free.
+- The next trial is prune with faster background replay of the remainder: `-DPSO_WARMUP_LIST=1 -DPSO_REPLAY_THREADS=3 -DPSO_BG_RESERVE=1`, which puts two replay compiles in gameplay instead of one. It is untested. Replay order would also matter: compile in the order of the player's list first.
+
 ## Memory headroom variants (issue #96, November 28)
 
 **Goal.** At least 250 MiB of free commit in the Fisk Tower atrium, where `1.0.63026.0` (B1 content) bottomed out at 60 MiB, with the best image and 60 FPS where possible. Steam AppID 1817070, build 23986256, Xbox Series X OS `26100.9673`. Every run continued from the player's save, and the saves were restored and verified after each run (`slot0 e3cfef672fa1`, `slot2 b5a997101896`, `userprefs 785ec4934744`).
